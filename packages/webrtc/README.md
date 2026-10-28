@@ -116,4 +116,4 @@ and receive queue, a bounded non-trickle gathering wait (default 3 s, returns th
 candidates gathered so far), remote mDNS `.local` candidate resolution
 (`MdnsMode::QueryOnly`, also the voice default) and a prompt channel-close signal
 on `close()`. The receive queue closes the channel on overflow
-(`receive_overflowed()`); the pinned driver cannot back-pressure receives.
+(`receive_overflowed()`); the upstream driver also applies SCTP receive backpressure.

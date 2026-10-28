@@ -59,6 +59,14 @@ pub struct RootIdentity {
     file: u64,
 }
 
+impl RootIdentity {
+    /// Filesystem or volume containing this opened object.
+    #[must_use]
+    pub fn volume(&self) -> u64 {
+        self.volume
+    }
+}
+
 /// Identity of this opened file, without following its current pathname.
 pub fn opened_file_identity(file: &std::fs::File) -> Result<RootIdentity, FsError> {
     #[cfg(unix)]
@@ -366,6 +374,15 @@ mod imp {
             security_descriptor: *mut *mut c_void,
             security_descriptor_size: *mut u32,
         ) -> i32;
+        fn ConvertSidToStringSidW(sid: Handle, text: *mut *mut u16) -> i32;
+        fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
+        fn GetTokenInformation(
+            token: Handle,
+            class: u32,
+            data: Handle,
+            size: u32,
+            needed: *mut u32,
+        ) -> i32;
     }
 
     #[link(name = "kernel32")]
@@ -375,6 +392,8 @@ mod imp {
             information: *mut ByHandleFileInformation,
         ) -> i32;
         fn LocalFree(memory: *mut c_void) -> *mut c_void;
+        fn GetCurrentProcess() -> Handle;
+        fn CloseHandle(handle: Handle) -> i32;
     }
 
     const DELETE: u32 = 0x0001_0000;
@@ -408,21 +427,91 @@ mod imp {
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    struct LocalSecurityDescriptor(*mut c_void);
+    struct LocalSecurityAllocation(*mut c_void);
 
-    impl Drop for LocalSecurityDescriptor {
+    impl Drop for LocalSecurityAllocation {
         fn drop(&mut self) {
-            // SAFETY: the descriptor is allocated by LocalAlloc inside the
-            // conversion API and remains uniquely owned by this guard.
+            // SAFETY: the conversion API allocated this uniquely owned buffer.
             unsafe {
                 LocalFree(self.0);
             }
         }
     }
 
-    fn private_security_descriptor() -> Result<LocalSecurityDescriptor, FsError> {
-        // Protected DACL: full access for the object owner and LocalSystem.
-        let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)\0".encode_utf16().collect();
+    struct Token(Handle);
+    impl Drop for Token {
+        fn drop(&mut self) {
+            // SAFETY: OpenProcessToken returned a uniquely owned handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    #[repr(C)]
+    struct SidAndAttributes {
+        sid: Handle,
+        attributes: u32,
+    }
+    #[repr(C)]
+    struct TokenUserInformation {
+        user: SidAndAttributes,
+    }
+
+    fn process_user_sid_string() -> std::io::Result<Vec<u16>> {
+        let mut token = std::ptr::null_mut();
+        // SAFETY: the current-process pseudo handle is valid and token is an output pointer.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), 8, &mut token) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let token = Token(token);
+        let mut needed = 0;
+        // SAFETY: querying the required buffer size with a null buffer is supported.
+        if unsafe { GetTokenInformation(token.0, 1, std::ptr::null_mut(), 0, &mut needed) } != 0 {
+            return Err(std::io::Error::other("unexpected empty token user"));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(122) {
+            return Err(error);
+        }
+        if (needed as usize) < std::mem::size_of::<TokenUserInformation>() {
+            return Err(std::io::Error::other("invalid token user size"));
+        }
+        // usize storage aligns TOKEN_USER and keeps its SID pointer alive.
+        let mut data = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+        // SAFETY: data has at least the requested capacity and is suitably aligned.
+        if unsafe { GetTokenInformation(token.0, 1, data.as_mut_ptr().cast(), needed, &mut needed) }
+            == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: GetTokenInformation filled this buffer with TOKEN_USER.
+        let sid = unsafe { (*data.as_ptr().cast::<TokenUserInformation>()).user.sid };
+        if sid.is_null() {
+            return Err(std::io::Error::other("token user SID is missing"));
+        }
+        let mut text = std::ptr::null_mut();
+        // SAFETY: the token information buffer owns the SID for this call.
+        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _allocation = LocalSecurityAllocation(text.cast());
+        let mut length = 0;
+        // SAFETY: ConvertSidToStringSidW returns a null-terminated UTF-16 string.
+        while unsafe { *text.add(length) } != 0 {
+            length += 1;
+        }
+        // SAFETY: the allocation is live and length excludes the terminator.
+        Ok(unsafe { std::slice::from_raw_parts(text, length) }.to_vec())
+    }
+
+    fn private_security_descriptor() -> Result<LocalSecurityAllocation, FsError> {
+        // An elevated token's default owner may be an administrators group.
+        // Bind OW to the process user, then protect the DACL from inheritance.
+        let user_sid = process_user_sid_string().map_err(|error| {
+            FsError::Io(format!("could not identify Windows process user: {error}"))
+        })?;
+        let mut sddl: Vec<u16> = "O:".encode_utf16().collect();
+        sddl.extend(user_sid);
+        sddl.extend("D:P(A;;GA;;;OW)(A;;GA;;;SY)\0".encode_utf16());
         let mut descriptor = std::ptr::null_mut();
         // SAFETY: the NUL-terminated SDDL and output pointer remain valid for
         // this synchronous call.
@@ -440,7 +529,7 @@ mod imp {
                 std::io::Error::last_os_error()
             )))
         } else {
-            Ok(LocalSecurityDescriptor(descriptor))
+            Ok(LocalSecurityAllocation(descriptor))
         }
     }
 
@@ -738,7 +827,9 @@ mod imp {
             parent,
             file_name,
             relative,
-            desired_access,
+            // Every regular-file handle is checked below using metadata(),
+            // which needs this right even for write-only/append-only opens.
+            desired_access | FILE_READ_ATTRIBUTES,
             share_access,
             disposition,
             FILE_NON_DIRECTORY_FILE,

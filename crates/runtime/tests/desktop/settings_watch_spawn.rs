@@ -1,7 +1,7 @@
 //! Deterministic end-to-end test of the settings watcher's `spawn` lifecycle.
 //!
 //! Drives [`harness_runtime::desktop::settings_watch::SettingsWatcher::spawn`] with a
-//! FAKE `FileSystem` whose `watch` returns a pre-seeded synthetic event stream
+//! FAKE `FileSystem` whose `watch` returns pre-seeded synthetic event streams
 //! — so the test never depends on real `FSEvents` / `inotify` timing (the
 //! documented `fs_watch` flake). It asserts:
 //!   - the watcher fires `ConfigChange` for the user + project + local settings
@@ -15,21 +15,51 @@ use hooks::events::ConfigChangeSource;
 use lingxi_core::host::filesystem::{
     FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError,
 };
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::sync::oneshot;
 
-/// Fake `FileSystem` whose `watch` hands back a synthetic stream seeded at
-/// construction. Every other method is unused by the watcher.
+/// Fake `FileSystem` whose `watch` hands back a seeded stream for each watched
+/// directory. Every other method is unused by the watcher.
 struct FakeFs {
-    events: Mutex<Option<Vec<FileEvent>>>,
+    events: Mutex<HashMap<PathBuf, (Vec<FileEvent>, oneshot::Sender<()>)>>,
 }
 
 impl FakeFs {
-    fn new(events: Vec<FileEvent>) -> Self {
+    fn new(events: Vec<(PathBuf, Vec<FileEvent>, oneshot::Sender<()>)>) -> Self {
         Self {
-            events: Mutex::new(Some(events)),
+            events: Mutex::new(
+                events
+                    .into_iter()
+                    .map(|(dir, events, completed)| (dir, (events, completed)))
+                    .collect(),
+            ),
         }
+    }
+}
+
+/// Signal EOF only when the loop asks for another event after handling the
+/// previous one. Dropping the stream early cancels the sender instead.
+struct EventStream {
+    events: std::vec::IntoIter<FileEvent>,
+    completed: Option<oneshot::Sender<()>>,
+}
+
+impl futures_core::Stream for EventStream {
+    type Item = FileEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.events.next() {
+            return Poll::Ready(Some(event));
+        }
+        if let Some(completed) = self.completed.take() {
+            let _ = completed.send(());
+        }
+        Poll::Ready(None)
     }
 }
 
@@ -51,12 +81,17 @@ impl FileSystem for FakeFs {
     }
     async fn watch(
         &self,
-        _dir: &str,
+        dir: &str,
     ) -> Result<Pin<Box<dyn futures_core::Stream<Item = FileEvent> + Send>>, FsError> {
-        // Hand the seeded events to the FIRST watched directory; later dirs get
-        // an empty stream so the test asserts a single deterministic burst.
-        let events = self.events.lock().unwrap().take().unwrap_or_default();
-        Ok(Box::pin(tokio_stream::iter(events)))
+        let seeded = self.events.lock().unwrap().remove(Path::new(dir));
+        let stream: Pin<Box<dyn futures_core::Stream<Item = FileEvent> + Send>> = match seeded {
+            Some((events, completed)) => Box::pin(EventStream {
+                events: events.into_iter(),
+                completed: Some(completed),
+            }),
+            None => Box::pin(tokio_stream::empty()),
+        };
+        Ok(stream)
     }
     async fn append_file(&self, _: &str, _: &str) -> Result<(), FsError> {
         unreachable!()
@@ -111,7 +146,7 @@ async fn spawn_fires_config_change_for_observed_settings_paths() {
     let proj = tempfile::tempdir().unwrap();
     let lingxi_home = home.path().to_path_buf();
     let cwd = proj.path().to_path_buf();
-    // The watcher only watches dirs that exist; create the project `.claude`.
+    // The watcher only watches dirs that exist; create the project config dir.
     std::fs::create_dir_all(cwd.join(".lingxi")).unwrap();
 
     let user_settings = lingxi_home.join("settings.json");
@@ -119,33 +154,44 @@ async fn spawn_fires_config_change_for_observed_settings_paths() {
     let local_settings = cwd.join(".lingxi").join("settings.local.json");
     let ignored = cwd.join(".lingxi").join("agents.json");
 
-    // The seeded burst is delivered to whichever directory is watched first
-    // (`watch_dirs()` orders user dir first, then project `.claude`). Put events
-    // for paths under BOTH so we can assert source mapping regardless: the
-    // synthetic stream carries absolute paths the watcher classifies by value,
-    // independent of which dir's stream delivered them.
+    // Deliver each event on the stream for its actual parent directory.
+    let (user_completed, user_done) = oneshot::channel();
+    let (project_completed, project_done) = oneshot::channel();
     let firer: Arc<RecordingFirer> = Arc::new(RecordingFirer::default());
     let fs = Arc::new(FakeFs::new(vec![
-        ev(user_settings.clone()),
-        ev(project_settings.clone()),
-        ev(local_settings.clone()),
-        ev(ignored.clone()),
+        (
+            lingxi_home.clone(),
+            vec![ev(user_settings.clone())],
+            user_completed,
+        ),
+        (
+            cwd.join(".lingxi"),
+            vec![
+                ev(project_settings.clone()),
+                ev(local_settings.clone()),
+                ev(ignored),
+            ],
+            project_completed,
+        ),
     ])) as Arc<dyn FileSystem>;
 
     let watcher = SettingsWatcher::new(&lingxi_home, &cwd, firer.clone());
     let handle = watcher.spawn(fs).await;
-    assert!(handle.task_count() >= 1, "at least one dir is watched");
+    assert!(handle.task_count() >= 2, "both settings dirs are watched");
 
-    // Drive the spawned task to completion: the synthetic stream is finite, so
-    // the loop exits on its own. Poll the recorded fires deterministically
-    // (yield to the runtime until all three settings fires land) rather than
-    // sleeping on a wall clock.
-    for _ in 0..1000 {
-        if firer.fired.lock().unwrap().len() >= 3 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    // A fixed number of yields does not wait for the async managed-policy
+    // reads performed between events. EOF confirms all handlers finished,
+    // including the ignored event, before we inspect the recorded calls.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        user_done
+            .await
+            .expect("user watch stream dropped before EOF");
+        project_done
+            .await
+            .expect("project watch stream dropped before EOF");
+    })
+    .await
+    .expect("settings watch streams did not finish processing their events");
 
     let recorded = firer.fired.lock().unwrap().clone();
     assert_eq!(
@@ -166,9 +212,7 @@ async fn spawn_with_no_existing_dirs_watches_nothing() {
     // Point at non-existent roots: `spawn` skips every dir (the `is_dir()`
     // gate), so no task is spawned and nothing fires.
     let firer: Arc<RecordingFirer> = Arc::new(RecordingFirer::default());
-    let fs = Arc::new(FakeFs::new(vec![ev(PathBuf::from(
-        "/no/such/.lingxi/settings.json",
-    ))])) as Arc<dyn FileSystem>;
+    let fs = Arc::new(FakeFs::new(Vec::new())) as Arc<dyn FileSystem>;
 
     let watcher = SettingsWatcher::new(
         std::path::Path::new("/no/such/home/.lingxi"),

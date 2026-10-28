@@ -4130,6 +4130,7 @@ mod outer_err_arm_realized_tokens_tests {
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -4281,6 +4282,7 @@ were genuinely dispatched before cancellation, not None or a subset — got \
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },

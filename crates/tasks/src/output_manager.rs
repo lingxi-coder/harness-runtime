@@ -1348,6 +1348,24 @@ impl TaskOutputSink {
         }
         Ok(())
     }
+
+    async fn finish_with_trailer(&self, task_id: &str, trailer: &str) {
+        if self.validate(task_id).is_err() {
+            return;
+        }
+        let mut terminal = self.terminal.lock().await;
+        if *terminal {
+            return;
+        }
+        if let Err(error) = self.manager.append(&self.path, trailer).await {
+            tracing::error!(%error, "supervisor terminal output append failed");
+        }
+        if let Err(error) = self.manager.flush_writer(&self.path).await {
+            tracing::error!(%error, "supervisor terminal output flush failed");
+        }
+        self.manager.evict_writer(&self.path).await;
+        *terminal = true;
+    }
 }
 
 #[async_trait::async_trait]
@@ -1389,13 +1407,6 @@ impl lingxi_core::host::BackgroundExitSink for TaskOutputSink {
         self.on_exit_with_status(task_id, exit_code, false).await;
     }
     async fn on_exit_with_status(&self, task_id: &str, exit_code: Option<i32>, killed: bool) {
-        if self.validate(task_id).is_err() {
-            return;
-        }
-        let mut terminal = self.terminal.lock().await;
-        if *terminal {
-            return;
-        }
         let trailer = if killed {
             "\n[killed]\n".to_string()
         } else {
@@ -1404,14 +1415,11 @@ impl lingxi_core::host::BackgroundExitSink for TaskOutputSink {
                 exit_code.map_or_else(|| "unknown".into(), |code| code.to_string())
             )
         };
-        if let Err(error) = self.manager.append(&self.path, &trailer).await {
-            tracing::error!(%error, "supervisor terminal output append failed");
-        }
-        if let Err(error) = self.manager.flush_writer(&self.path).await {
-            tracing::error!(%error, "supervisor terminal output flush failed");
-        }
-        self.manager.evict_writer(&self.path).await;
-        *terminal = true;
+        self.finish_with_trailer(task_id, &trailer).await;
+    }
+    async fn on_exit_outcome_unknown(&self, task_id: &str, _code: Option<i32>) {
+        self.finish_with_trailer(task_id, "\n[exited; outcome unknown]\n")
+            .await;
     }
 }
 
@@ -2544,6 +2552,50 @@ mod tests {
             !manager
                 .physical_output_is_authoritative(&terminal_path)
                 .await
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_sink_wait_failure_keeps_writer_live_without_a_terminal_trailer() {
+        use lingxi_core::host::BackgroundExitSink;
+        let root = tempfile::tempdir().unwrap();
+        let manager = Arc::new(TaskOutputManager::new(
+            root.path().into(),
+            ExclusiveFs::new(),
+        ));
+        let id = "bsuper003";
+        let path = manager.allocate(id).await.unwrap();
+        let sink = TaskOutputSink::new(manager.clone(), path.clone());
+        sink.append_output(id, "before").await.unwrap();
+        let writer = manager.writer_for(&path).await;
+
+        sink.on_wait_failure(id, "injected wait failure").await;
+        assert!(!*sink.terminal.lock().await);
+        assert!(Arc::ptr_eq(&writer, &manager.writer_for(&path).await));
+        sink.append_output(id, " after").await.unwrap();
+        sink.flush_output(id).await.unwrap();
+        assert_eq!(
+            manager
+                .read(&path, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "before after"
+        );
+
+        // After cleanup is verified the supervisor records a neutral outcome,
+        // retaining the original error separately in its receipt.
+        sink.on_exit_outcome_unknown(id, None).await;
+        sink.on_exit_outcome_unknown(id, None).await;
+        assert!(*sink.terminal.lock().await);
+        assert!(!manager.has_writer_for_test(&path).await);
+        assert_eq!(
+            manager
+                .read(&path, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "before after\n[exited; outcome unknown]\n"
         );
     }
 

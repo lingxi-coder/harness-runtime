@@ -130,7 +130,9 @@ const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool us
 /// A concurrency-SAFE tool whose `interrupt_behavior()==Cancel`. It blocks on its
 /// `ctx.cancel` token (the per-tool child of the turn's user-interrupt token), so
 /// it stays in-flight until the user interrupts; on cancel it returns `Aborted`.
-struct CancelBlockingTool;
+struct CancelBlockingTool {
+    started: Arc<tokio::sync::Notify>,
+}
 
 #[async_trait]
 impl Tool for CancelBlockingTool {
@@ -213,6 +215,7 @@ impl Tool for CancelBlockingTool {
         ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        self.started.notify_one();
         let token = ctx.cancel.clone();
         match token {
             Some(t) => {
@@ -236,11 +239,14 @@ impl Tool for CancelBlockingTool {
     }
 }
 
-fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Arc<ConversationOrchestrator> {
+fn build_orch_with_cancel_tool(
+    api: Arc<MockStreamingApiClient>,
+    started: Arc<tokio::sync::Notify>,
+) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let mut registry = ToolRegistry::new();
-    registry.register_builtin(Arc::new(CancelBlockingTool) as Arc<dyn Tool>);
+    registry.register_builtin(Arc::new(CancelBlockingTool { started }) as Arc<dyn Tool>);
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
@@ -284,15 +290,20 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
         message_stop(),
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1]));
-    let orch = build_orch_with_cancel_tool(api.clone());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let orch = build_orch_with_cancel_tool(api.clone(), started.clone());
     let cancel = CancellationToken::new();
 
-    // Fire the user-cancel shortly after the turn starts, so the blocking
-    // CancelTool is in flight (awaiting its ctx.cancel) when it fires.
+    // Fire only after the blocking tool's call starts. A wall-clock delay can
+    // expire while a loaded runner is still preparing the streaming request.
     let cancel_clone = cancel.clone();
     let firer = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let entered =
+            tokio::time::timeout(std::time::Duration::from_secs(10), started.notified()).await;
+        // Also cancel on timeout so a failing startup cannot leave the turn
+        // blocked forever before the assertion below reports the failure.
         cancel_clone.cancel();
+        entered.expect("CancelTool must start before the user interrupt");
     });
 
     let outcome = orch
@@ -324,8 +335,11 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
         {
             match &content[0] {
                 ContentBlock::ToolResult {
-                    content, is_error, ..
-                } => Some((content.clone(), is_error.unwrap_or(false))),
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } if tool_use_id == &id => Some((content.clone(), is_error.unwrap_or(false))),
                 _ => None,
             }
         }

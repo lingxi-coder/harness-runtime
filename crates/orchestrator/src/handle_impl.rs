@@ -1168,16 +1168,50 @@ impl ConversationOrchestrator {
             .claim()
             .map_err(HandleError::ActionFailed)?;
         let turn_guard = self.turn_gate.clone().lock_owned().await;
+        // Real Mod session calls hold the read side. Never wait for them here:
+        // a Mod call may itself need the turn gate. Cold deferred replay does
+        // not change the selected session and may dispatch Mod work itself.
+        let mod_session_guard = if matches!(&request, OwnedSessionSwitch::CompleteColdResume { .. })
+        {
+            None
+        } else {
+            let guard = self
+                .mod_session_work_gate
+                .clone()
+                .try_write_owned()
+                .map_err(|_| {
+                    HandleError::ActionFailed(
+                        "session is busy with a background Mod operation; retry after it finishes"
+                            .into(),
+                    )
+                })?;
+            // Advance before any fallible switch work. A switch may partially
+            // modify state even when it eventually reports an error.
+            self.mod_session_generation
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |generation| generation.checked_add(1),
+                )
+                .map_err(|_| {
+                    HandleError::ActionFailed("Mod session generation exhausted".into())
+                })?;
+            Some(Arc::new(guard))
+        };
         let owner = self
             .lifecycle_runtime
             .session_switch_owner
             .get()
             .and_then(std::sync::Weak::upgrade);
         let Some(owner) = owner else {
-            let result = crate::turn_loop::boxed_turn_future(|| {
+            let execution = crate::turn_loop::boxed_turn_future(|| {
                 self.execute_owned_session_switch(turn_guard, request)
-            })
-            .await;
+            });
+            let result = if let Some(writer) = mod_session_guard {
+                self.with_mod_session_switch_writer(writer, execution).await
+            } else {
+                execution.await
+            };
             claim.complete(None);
             return result;
         };
@@ -1188,10 +1222,19 @@ impl ConversationOrchestrator {
             // outer owner keeps the lifecycle claim until all borrowed state
             // and the turn gate have been released.
             let execution = tokio::spawn(async move {
-                crate::turn_loop::boxed_turn_future(|| {
+                let execution = crate::turn_loop::boxed_turn_future(|| {
                     owner.execute_owned_session_switch(turn_guard, request)
-                })
-                .await
+                });
+                // Scope the writer inside the actual spawned task. Its weak
+                // descendants can retain only real in-flight work, while an
+                // idle timer cannot keep the session locked indefinitely.
+                if let Some(writer) = mod_session_guard {
+                    owner
+                        .with_mod_session_switch_writer(writer, execution)
+                        .await
+                } else {
+                    execution.await
+                }
             })
             .await;
             let result = match execution {
@@ -1874,6 +1917,16 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
+    async fn capture_session_origin(
+        &self,
+    ) -> Result<
+        Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+        HandleError,
+    > {
+        self.capture_session_origin_capability()
+            .await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))
+    }
     async fn record_prompt_suggestion_submission(&self, text: &str) -> Result<(), HandleError> {
         self.record_prompt_suggestion_submission_inner(text).await;
         Ok(())
@@ -2238,6 +2291,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: invoker,
             budget,
+            session_origin: self
+                .capture_session_origin_capability()
+                .await
+                .map_err(|error| HandleError::ActionFailed(error.to_string()))?,
         };
 
         let launch = spawner
@@ -4429,6 +4486,87 @@ mod tests {
     use std::sync::Arc;
 
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[tokio::test]
+    async fn session_switch_rejects_live_mod_access_and_generation_overflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            temp.path().to_path_buf(),
+        );
+        let access = orch.mod_session_work_gate.clone().read_owned().await;
+        let error = lingxi_core::host::OrchestratorHandle::clear_session(&orch)
+            .await
+            .expect_err("an in-flight Mod session call must exclude a switch");
+        assert!(error.to_string().contains("background Mod operation"));
+        assert_eq!(
+            orch.mod_session_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        drop(access);
+        lingxi_core::host::OrchestratorHandle::clear_session(&orch)
+            .await
+            .expect("switch succeeds after the real access finishes");
+        assert_eq!(
+            orch.mod_session_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        let session_id = orch.session.lock().await.session_id;
+        orch.mod_session_generation
+            .store(u64::MAX, std::sync::atomic::Ordering::Release);
+        let error = lingxi_core::host::OrchestratorHandle::clear_session(&orch)
+            .await
+            .expect_err("generation exhaustion must fail closed");
+        assert!(error.to_string().contains("generation exhausted"));
+        assert_eq!(orch.session.lock().await.session_id, session_id);
+    }
+
+    #[tokio::test]
+    async fn session_switch_writer_scope_does_not_leak_to_spawned_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let orch = Arc::new(crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            temp.path().to_path_buf(),
+        ));
+        let writer = Arc::new(
+            orch.mod_session_work_gate
+                .clone()
+                .try_write_owned()
+                .unwrap(),
+        );
+        let weak = Arc::downgrade(&writer);
+        let child_orch = orch.clone();
+        orch.with_mod_session_switch_writer(writer.clone(), async {
+            let scoped = orch.current_mod_session_switch_writer().unwrap();
+            assert!(Arc::ptr_eq(&writer, &scoped));
+            tokio::spawn(async move {
+                assert!(child_orch.current_mod_session_switch_writer().is_none());
+            })
+            .await
+            .unwrap();
+        })
+        .await;
+        assert!(orch.current_mod_session_switch_writer().is_none());
+        drop(writer);
+        assert!(
+            weak.upgrade().is_none(),
+            "idle scope must not retain the writer"
+        );
+    }
 
     struct ResumePostTargetRecorder(Arc<std::sync::Mutex<Vec<Utf16JsonProjection>>>);
 

@@ -63,8 +63,8 @@ use client::protocol::controls::{
 };
 use client::protocol::error::ClientError;
 use client::protocol::events::{
-    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, RefusalContinuationJoinDto,
-    RefusalContinuationPhaseDto, ServerFallbackProviderMessageDto,
+    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, QueuedTurnStatusDto,
+    RefusalContinuationJoinDto, RefusalContinuationPhaseDto, ServerFallbackProviderMessageDto,
     ServerFallbackTombstoneMessageDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
     TurnRecoveryStateDto,
 };
@@ -77,6 +77,7 @@ use client::protocol::listings::{
 };
 use client::protocol::media::*;
 use client::protocol::message::{MessageBlockDto, MessageDto};
+use client::protocol::mod_session_event::ModSessionEventPayload;
 use client::protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResolutionDto, PermissionResolved,
     PermissionResponseDto, WorkerInfoDto,
@@ -166,6 +167,26 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        ("event/mod_session_event_notice.json", ClientEvent::ModSessionEvent {
+            session_id: "session-1".into(), mod_turn_id: Some("mod-turn-1".into()),
+            payload: ModSessionEventPayload::Notice { message: "summary".into(), is_error: false },
+        }),
+        ("event/mod_session_event_log.json", ClientEvent::ModSessionEvent {
+            session_id: "session-1".into(), mod_turn_id: Some("mod-turn-1".into()),
+            payload: ModSessionEventPayload::Log { plugin: "review".into(), text: "Found a mismatch".into() },
+        }),
+        ("event/mod_session_event_toast.json", ClientEvent::ModSessionEvent {
+            session_id: "session-1".into(), mod_turn_id: Some("mod-turn-1".into()),
+            payload: ModSessionEventPayload::Toast { plugin: "review".into(), text: "Found a mismatch".into(), timeout_ms: 4000 },
+        }),
+        ("event/mod_session_event_status.json", ClientEvent::ModSessionEvent {
+            session_id: "session-1".into(), mod_turn_id: None,
+            payload: ModSessionEventPayload::Status { plugin: "review".into(), text: None },
+        }),
+        ("event/mod_session_event_notify.json", ClientEvent::ModSessionEvent {
+            session_id: "session-1".into(), mod_turn_id: Some("mod-turn-1".into()),
+            payload: ModSessionEventPayload::Notify { plugin: "review".into(), text: "Found a mismatch".into() },
+        }),
         ("event/prompt_suggestion.json", ClientEvent::PromptSuggestion { suggestion: "Continue reviewing the implementation".into(), uuid: "suggestion-1".into(), session_id: "session-1".into() }),
         ("event/prompt_suggestion_state.json", ClientEvent::PromptSuggestionState { enabled: true, notice: None }),
         ("event/fusion_catalog.json", ClientEvent::FusionCatalog { catalog_json: r#"{"scopes":[],"effective_globals":{},"default_strategy":null,"diagnostics":[]}"#.into() }),
@@ -468,10 +489,12 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 snapshot: TurnRecoverySnapshotDto {
                     session_id: "11111111-1111-4111-8111-111111111111".to_string(),
                     turn_id: 1,
+                    revision: 3,
                     state: TurnRecoveryStateDto::PausedRecoverable,
                     first_sequence: 1,
                     last_sequence: 7,
-                    safe_to_resume: true,
+                    safe_to_resume: false,
+                    projection_uncertain: true,
                     reason: Some("background lease expired".to_string()),
                 },
             },
@@ -485,6 +508,66 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 event_json: r#"{"type":"text_delta","text":"done"}"#.to_string(),
             },
         ),
+        (
+            "event/turn_event_live_unretained.json",
+            ClientEvent::TurnEventLiveUnretained {
+                session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: 1,
+                event_json: r#"{"type":"text_delta","text":"done"}"#.to_string(),
+            },
+        ),
+        (
+            "event/turn_attach_started.json",
+            ClientEvent::TurnAttachStarted {
+                request_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                snapshot: TurnRecoverySnapshotDto {
+                    session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                    turn_id: 1,
+                    revision: 3,
+                    state: TurnRecoveryStateDto::PausedRecoverable,
+                    first_sequence: 1,
+                    last_sequence: 7,
+                    safe_to_resume: false,
+                    projection_uncertain: true,
+                    reason: Some("background lease expired".to_string()),
+                },
+            },
+        ),
+        (
+            "event/turn_attach_finished.json",
+            ClientEvent::TurnAttachFinished {
+                request_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: 1,
+            },
+        ),
+        ("event/queued_turn_status_pending.json", ClientEvent::QueuedTurnStatus {
+            session_id: "session-1".into(), turn_id: 11, request_id: "request-1".into(),
+            status: QueuedTurnStatusDto::Pending,
+        }),
+        ("event/queued_turn_status_claimed_uncertain.json", ClientEvent::QueuedTurnStatus {
+            session_id: "session-1".into(), turn_id: 11, request_id: "request-1".into(),
+            status: QueuedTurnStatusDto::ClaimedUncertain,
+        }),
+        ("event/queued_turn_status_delivered.json", ClientEvent::QueuedTurnStatus {
+            session_id: "session-1".into(), turn_id: 11, request_id: "request-1".into(),
+            status: QueuedTurnStatusDto::Delivered {
+                batch_owner_turn_id: 11, member_turn_ids: vec![11, 12],
+                transcript_uuid: "33333333-3333-4333-8333-333333333333".into(),
+            },
+        }),
+        ("event/queued_turn_status_cancelled.json", ClientEvent::QueuedTurnStatus {
+            session_id: "session-1".into(), turn_id: 11, request_id: "request-1".into(),
+            status: QueuedTurnStatusDto::Cancelled,
+        }),
+        ("event/queued_turn_status_running.json", ClientEvent::QueuedTurnStatus {
+            session_id: "session-1".into(), turn_id: 11, request_id: "request-1".into(),
+            status: QueuedTurnStatusDto::Running,
+        }),
+        ("event/queued_turn_status_terminal.json", ClientEvent::QueuedTurnStatus {
+            session_id: "session-1".into(), turn_id: 11, request_id: "request-1".into(),
+            status: QueuedTurnStatusDto::Terminal { state: TurnRecoveryStateDto::Completed },
+        }),
         (
             "event/cost_update.json",
             ClientEvent::CostUpdate {
@@ -1407,6 +1490,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/send_prompt.json",
             ClientCommand::SendPrompt {
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
                 text: "summarize the diff".into(),
                 prompt_mode: Some(PromptModeDto::Normal),
                 images: vec![ImageRefDto {
@@ -1419,22 +1503,39 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ),
         (
             "command/cancel.json",
-            ClientCommand::Cancel { turn_id: Some(1) },
+            ClientCommand::Cancel {
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+                turn_id: Some(1),
+            },
         ),
         (
             "command/attach_turn.json",
             ClientCommand::AttachTurn {
+                session_id: "11111111-1111-4111-8111-111111111111".to_string(),
                 turn_id: 1,
                 after_sequence: Some(4),
+                request_id: "22222222-2222-4222-8222-222222222222".to_string(),
+            },
+        ),
+        (
+            "command/query_queued_turn.json",
+            ClientCommand::QueryQueuedTurn {
+                session_id: "session-1".into(),
+                turn_id: 11,
+                request_id: "request-1".into(),
             },
         ),
         (
             "command/resume_turn.json",
-            ClientCommand::ResumeTurn { turn_id: 1 },
+            ClientCommand::ResumeTurn {
+                session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: 1,
+            },
         ),
         (
             "command/pause_turn.json",
             ClientCommand::PauseTurn {
+                session_id: "11111111-1111-4111-8111-111111111111".to_string(),
                 turn_id: 1,
                 reason: "background_time_expired".to_string(),
             },
@@ -1549,6 +1650,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/run_slash_command.json",
             ClientCommand::RunSlashCommand {
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
                 raw: "/model opus".into(),
                 images: vec![client::protocol::commands::ImageRefDto {
                     media_type: "image/png".into(),
@@ -2292,6 +2394,12 @@ fn error_goldens() -> Vec<(&'static str, ClientError)> {
             "error/internal.json",
             ClientError::Internal {
                 message: "unexpected state".to_string(),
+            },
+        ),
+        (
+            "error/submission_not_admitted.json",
+            ClientError::SubmissionNotAdmitted {
+                message: "prompt request belongs to a different session".to_string(),
             },
         ),
     ]

@@ -1,0 +1,15 @@
+{
+  "type": "queued_turn_status",
+  "session_id": "session-1",
+  "turn_id": 11,
+  "request_id": "request-1",
+  "status": {
+    "type": "delivered",
+    "batch_owner_turn_id": 11,
+    "member_turn_ids": [
+      11,
+      12
+    ],
+    "transcript_uuid": "33333333-3333-4333-8333-333333333333"
+  }
+}

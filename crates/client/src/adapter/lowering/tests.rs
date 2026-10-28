@@ -104,6 +104,14 @@ mod regressions {
         assert_eq!(lower_task_status("failed"), TaskStatusDto::Failed);
         // The engine's terminal "killed" maps to the DTO's user-stop variant.
         assert_eq!(lower_task_status("killed"), TaskStatusDto::Cancelled);
+        assert_eq!(
+            lower_task_status("exited_unknown"),
+            TaskStatusDto::ExitedUnknown
+        );
+        assert_eq!(
+            serde_json::to_value(TaskStatusDto::ExitedUnknown).unwrap(),
+            serde_json::json!({"type": "exited_unknown"})
+        );
         // Unknown / future status falls back to the safe non-terminal default.
         assert_eq!(lower_task_status("nope"), TaskStatusDto::Pending);
     }

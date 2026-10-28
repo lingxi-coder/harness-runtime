@@ -1177,6 +1177,7 @@ async fn missing_session_recorder_fails_before_allocating_a_task_artifact() {
     let error = match handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1215,6 +1216,7 @@ async fn handler_waits_for_activation_before_running_executor() {
     let mut handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1259,6 +1261,7 @@ async fn handler_uses_prepared_timeout_without_a_legacy_caller_override() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1306,6 +1309,7 @@ async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
     handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1359,6 +1363,7 @@ async fn terminal_recorder_receipt_lands_before_task_completion() {
     handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1405,6 +1410,7 @@ async fn kill_preserves_terminalizing_fusion_window() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1454,6 +1460,7 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1504,6 +1511,7 @@ async fn kill_request_cancel_loses_to_an_atomic_finalizing_claim() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1558,6 +1566,7 @@ async fn drain_pending_kill_request_cancel_loses_to_an_atomic_finalizing_claim()
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1621,6 +1630,7 @@ async fn kill_landing_during_the_progress_forwarder_await_does_not_discard_a_suc
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1682,6 +1692,7 @@ async fn kill_while_running_lets_executor_observe_cancellation_and_status_killed
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1750,6 +1761,7 @@ async fn kill_discloses_realized_usage_the_progress_channel_already_reported() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1828,6 +1840,7 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1900,6 +1913,7 @@ async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_befo
     handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -1976,6 +1990,7 @@ async fn failing_executor_that_already_egressed_discloses_nonempty_egress_profil
     handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -2027,6 +2042,7 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
     handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -2103,6 +2119,7 @@ async fn kill_while_running_ends_status_killed_exactly_once() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -2186,6 +2203,7 @@ async fn terminal_recording_failure_does_not_revert_a_completed_run_to_failed() 
     handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },
@@ -2286,6 +2304,7 @@ async fn completed_fusion_reports_subagent_tokens_as_local_agents_four_bucket_to
     handler
         .spawn(
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request: dummy_request(),
                 conversation_id: TEST_CONVERSATION_ID.into(),
             },

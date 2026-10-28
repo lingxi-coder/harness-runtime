@@ -188,10 +188,13 @@ pub struct SandboxedCommand {
     inner: ProcessCommand,
     tag: SandboxedTag,
     plan: Option<BackendPlanHandle>,
+    lifetime_guard: Option<BackendPlanHandle>,
     background: Option<crate::host::process::BackgroundTaskBinding>,
     auto_background_on_timeout: bool,
     background_timeout: Option<std::time::Duration>,
     process_owner: Option<String>,
+    require_group_cleanup_on_exit: bool,
+    supervisor_request: bool,
 }
 
 /// Provenance of a [`SandboxedCommand`].
@@ -223,6 +226,33 @@ impl SandboxedCommand {
         self.process_owner.as_deref()
     }
 
+    /// Require a verified group/Job cleanup even when the leader exits
+    /// naturally. Ordinary commands may deliberately leave descendants alive.
+    #[must_use]
+    pub fn with_require_group_cleanup_on_exit(mut self, required: bool) -> Self {
+        self.require_group_cleanup_on_exit = required;
+        self
+    }
+
+    /// The trusted caller's natural-completion cleanup policy.
+    #[must_use]
+    pub fn requires_group_cleanup_on_exit(&self) -> bool {
+        self.require_group_cleanup_on_exit
+    }
+
+    /// Whether the core supervisor created this command after validating the
+    /// incoming Start and its pinned resources. External callers cannot set it.
+    #[must_use]
+    pub fn is_supervisor_request(&self) -> bool {
+        self.supervisor_request
+    }
+
+    #[must_use]
+    pub(crate) fn mark_supervisor_request(mut self) -> Self {
+        self.supervisor_request = true;
+        self
+    }
+
     /// INTERNAL constructor for [`Sandbox`] implementations.
     ///
     /// Only [`Sandbox::prepare`] and [`Sandbox::bypass_with_audit`] impls
@@ -236,10 +266,13 @@ impl SandboxedCommand {
             inner,
             tag,
             plan: None,
+            lifetime_guard: None,
             background: None,
             auto_background_on_timeout: true,
             background_timeout: None,
             process_owner: None,
+            require_group_cleanup_on_exit: false,
+            supervisor_request: false,
         }
     }
 
@@ -257,11 +290,28 @@ impl SandboxedCommand {
             inner,
             tag,
             plan: Some(plan),
+            lifetime_guard: None,
             background: None,
             auto_background_on_timeout: true,
             background_timeout: None,
             process_owner: None,
+            require_group_cleanup_on_exit: false,
+            supervisor_request: false,
         }
+    }
+
+    /// Keep a per-command resource alive while the runner owns the process.
+    /// Background-capable runners must clone this guard into their reaper.
+    #[must_use]
+    pub fn with_lifetime_guard<T: Any + Send + Sync>(mut self, guard: T) -> Self {
+        self.lifetime_guard = Some(BackendPlanHandle::new(guard));
+        self
+    }
+
+    /// Borrow the resource guard for cloning into a process-owning task.
+    #[must_use]
+    pub fn lifetime_guard(&self) -> Option<&BackendPlanHandle> {
+        self.lifetime_guard.as_ref()
     }
 
     /// Bind a caller-owned task identity to this command, so that backgrounding

@@ -10,6 +10,7 @@ use permission::PermissionResult;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::context::ToolUseContext;
@@ -658,6 +659,11 @@ pub struct PromptOptions {
     /// definition. `None` is used for child-agent requests that do not own the
     /// host conversation session.
     pub session_id: Option<lingxi_core::types::SessionId>,
+    /// Runtime-only immutable session generation for Mod-backed prompts.
+    pub session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+    /// The caller has a session owner; absence of a capability must not bind
+    /// its Mod prompt to some other currently selected session.
+    pub require_session_origin: bool,
     /// Whether this definition is for a host-scheduled turn. Interactive-only
     /// capabilities use this to avoid advertising unsupported continuations.
     pub is_scheduled_turn: bool,

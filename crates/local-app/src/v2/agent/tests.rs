@@ -606,11 +606,9 @@ fn native_interaction_phases_are_durable_sequenced_and_cleared_on_terminal() {
         store.get(&owner(), &run.run_id).unwrap().sequence,
         pending.sequence
     );
-    assert!(
-        store
-            .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
-            .is_err()
-    );
+    assert!(store
+        .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
+        .is_err());
     let finished = store
         .update(&owner(), &run.run_id, State::Cancelled, None, None, None)
         .unwrap();
@@ -683,18 +681,16 @@ fn protocol_events_are_schema_valid_durable_ordered_and_owner_scoped() {
             serde_json::json!({"type":"RUN_FINISHED","threadId":"thread-1","runId":"request-1"}),
         )
         .is_err());
-    assert!(
-        store
-            .protocol_events(
-                &Owner {
-                    app_id: format!("a{}", "3".repeat(32)),
-                    ..owner()
-                },
-                "request-1",
-                0,
-            )
-            .is_err()
-    );
+    assert!(store
+        .protocol_events(
+            &Owner {
+                app_id: format!("a{}", "3".repeat(32)),
+                ..owner()
+            },
+            "request-1",
+            0,
+        )
+        .is_err());
 }
 
 #[test]

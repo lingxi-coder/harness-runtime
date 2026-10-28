@@ -111,9 +111,15 @@ where
     validate_private_spool_dir(directory)?;
     // The host chooses a per-App directory inside its private library. This
     // avoids Android's `/data/local/tmp` default and never accepts a page path.
-    // tempfile_in creates an owner-private anonymous file (0600 on Unix); the
-    // entry is unlinked on close, including timeout/cancellation/error paths.
+    // The file is anonymous/unlinked, including timeout/cancellation/error
+    // paths. Linux O_TMPFILE mode depends on the implementation and umask, so
+    // explicitly restrict the descriptor before writing any request bytes.
     let file = tempfile::tempfile_in(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
     let mut writer = tokio::fs::File::from_std(file);
     writer.write_all(prefix).await?;
     let mut written = prefix.len();
@@ -985,7 +991,10 @@ where
             let path = relative.split('?').next().unwrap_or(relative);
             let target = if matches!(
                 path,
-                "__local_app_sdk.js" | "__host/sdk.js" | "__host/recovery-sw.js" | WEBMCP_SCRIPT_ROUTE
+                "__local_app_sdk.js"
+                    | "__host/sdk.js"
+                    | "__host/recovery-sw.js"
+                    | WEBMCP_SCRIPT_ROUTE
             ) {
                 relative.to_owned()
             } else if relative.is_empty() || relative.starts_with('?') {
@@ -1056,7 +1065,8 @@ where
         let Some(_host) = &route.host else {
             return error(&mut socket, 503, "application host unavailable").await;
         };
-        let script = include_str!("../../../../../packages/local-app-webmcp/dist/webmcp-polyfill.iife.js");
+        let script =
+            include_str!("../../../../../packages/local-app-webmcp/dist/webmcp-polyfill.iife.js");
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
         if method == "GET" {
             socket.write_all(script.as_bytes()).await?;
@@ -1616,10 +1626,8 @@ mod tests {
         let response = String::from_utf8(
             exchange(
                 port,
-                format!(
-                    "GET /__run/current-run/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
-                )
-                .into_bytes(),
+                format!("GET /__run/current-run/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+                    .into_bytes(),
             )
             .await,
         )
@@ -1628,7 +1636,8 @@ mod tests {
         assert!(response.contains("Content-Security-Policy:"));
         assert!(response.contains("script-src 'self'"));
         let body = response.split_once("\r\n\r\n").unwrap().1;
-        let script = "<script src=\"/__run/current-run/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let script =
+            "<script src=\"/__run/current-run/__host/webmcp.js\" data-lingxi-webmcp></script>";
         assert_eq!(body.matches("data-lingxi-webmcp").count(), 1);
         assert!(body.find(script).unwrap() < body.find("id=\"app-start\"").unwrap());
         assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
@@ -1666,8 +1675,10 @@ mod tests {
 
         let stale = exchange(
             port,
-            format!("GET /__run/old-run/__host/webmcp.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
-                .into_bytes(),
+            format!(
+                "GET /__run/old-run/__host/webmcp.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+            )
+            .into_bytes(),
         )
         .await;
         assert!(String::from_utf8_lossy(&stale).starts_with("HTTP/1.1 410"));
@@ -2006,14 +2017,17 @@ mod webmcp_injection_tests {
 
         let no_head = "<!doctype html><script id=\"app-start\"></script>";
         let injected = inject_webmcp_script(no_head, "run-2").unwrap();
-        assert!(injected.starts_with("<!doctype html><script src=\"/__run/run-2/__host/webmcp.js\""));
+        assert!(
+            injected.starts_with("<!doctype html><script src=\"/__run/run-2/__host/webmcp.js\"")
+        );
         assert!(injected.find("webmcp.js").unwrap() < injected.find("id=\"app-start\"").unwrap());
 
         let no_document_tags = "<script id=\"app-start\"></script>";
         let injected = inject_webmcp_script(no_document_tags, "run-3").unwrap();
         assert!(injected.starts_with("<script src=\"/__run/run-3/__host/webmcp.js\""));
 
-        let already_loaded = "<html><head><script src=\"/__host/webmcp.js?cache=1\"></script></head></html>";
+        let already_loaded =
+            "<html><head><script src=\"/__host/webmcp.js?cache=1\"></script></head></html>";
         assert!(inject_webmcp_script(already_loaded, "run-4").is_none());
 
         let current_run_loaded = "<script src=\"/__run/run-5/__host/webmcp.js\"></script>";
@@ -2139,18 +2153,20 @@ mod webmcp_injection_tests {
             "<base href=\"http[\"><script src=\"/__host/webmcp.js\"></script>",
         ] {
             let html = format!("<!doctype html>{ignored_base}<script id=\"app-start\"></script>");
-            assert!(inject_webmcp_script(&html, "run-14").is_none(), "{ignored_base}");
+            assert!(
+                inject_webmcp_script(&html, "run-14").is_none(),
+                "{ignored_base}"
+            );
         }
 
-        for first_base in [
-            "data:text/html,",
-            "javascript:alert(1)",
-            "http://[",
-        ] {
+        for first_base in ["data:text/html,", "javascript:alert(1)", "http://["] {
             let html = format!(
                 "<!doctype html><base href=\"{first_base}\"><base href=\"https://example.invalid/assets/\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
             );
-            assert!(inject_webmcp_script(&html, "run-15").is_none(), "{first_base}");
+            assert!(
+                inject_webmcp_script(&html, "run-15").is_none(),
+                "{first_base}"
+            );
         }
 
         for valid_override in [
@@ -2162,7 +2178,10 @@ mod webmcp_injection_tests {
             let html = format!(
                 "<!doctype html><base href=\"{valid_override}\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
             );
-            assert!(inject_webmcp_script(&html, "run-16").is_some(), "{valid_override}");
+            assert!(
+                inject_webmcp_script(&html, "run-16").is_some(),
+                "{valid_override}"
+            );
         }
     }
 }

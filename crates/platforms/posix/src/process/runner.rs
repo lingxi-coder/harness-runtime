@@ -47,6 +47,20 @@ use tokio::process::Command;
 /// keeps the full Bash-spawn contract unchanged.
 const HOOK_COMMAND_AUDIT_REASON: &str = "hook_command";
 
+// Hook commands are allowed to ignore their event input. If the child closes
+// stdin early, EPIPE says only that the remaining input cannot be delivered;
+// the hook's stdout, stderr and exit status still determine its result. Other
+// write errors remain failures, and the caller must still wait for the child.
+async fn write_hook_stdin<W: tokio::io::AsyncWrite + Unpin>(
+    stdin: &mut W,
+    input: &[u8],
+) -> std::io::Result<()> {
+    match stdin.write_all(input).await {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
+}
+
 /// SH-07 — drain `r` to EOF into `buf`, pushing every chunk to `observer` as it
 /// is read.
 ///
@@ -196,6 +210,19 @@ struct ChildRegistration(u32);
 impl Drop for ChildRegistration {
     fn drop(&mut self) {
         active_children::unregister(self.0);
+    }
+}
+
+#[derive(Default)]
+struct ProcessRegistrations {
+    child: Option<ChildRegistration>,
+    owner: Option<lingxi_core::host::agent_processes::Registration>,
+}
+
+impl ProcessRegistrations {
+    fn release_before_reap(&mut self) {
+        drop(self.child.take());
+        drop(self.owner.take());
     }
 }
 
@@ -382,6 +409,484 @@ async fn publish_background_output(
     }
 }
 
+/// Signal an owned host process group without treating EPERM as proof that it
+/// has disappeared. ESRCH is safe to accept only with the subsequent child wait.
+fn signal_host_process_group(pid: u32) -> Result<(), ProcessError> {
+    if pid == 0 {
+        return Err(ProcessError::Io("process group id must be positive".into()));
+    }
+    let pid = i32::try_from(pid)
+        .map_err(|_| ProcessError::Io(format!("process group id {pid} does not fit in i32")))?;
+    match nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGKILL,
+    ) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(error) => Err(ProcessError::Io(format!("killpg SIGKILL: {error}"))),
+    }
+}
+
+fn observe_host_child_exit(pid: u32) -> Result<bool, ProcessError> {
+    super::spawn_unsafe::child_exited_without_reaping(pid)
+        .map_err(|error| ProcessError::Io(format!("owned child exit observation failed: {error}")))
+}
+
+#[cfg(test)]
+static REJECT_REPEAT_GROUP_STOP: OnceLock<Mutex<std::collections::HashMap<u32, usize>>> =
+    OnceLock::new();
+
+fn stop_host_process_group(pid: u32) -> Result<(), ProcessError> {
+    #[cfg(test)]
+    if let Some(count) = REJECT_REPEAT_GROUP_STOP
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get_mut(&pid)
+    {
+        if *count != 0 {
+            return Err(ProcessError::Io("injected repeated group stop".into()));
+        }
+        *count += 1;
+    }
+    // macOS returns EPERM when the only group member is already a zombie.
+    // Prove that case without signaling; otherwise propagate every signal
+    // failure rather than interpreting EPERM as successful termination.
+    #[cfg(target_os = "macos")]
+    if observe_host_child_exit(pid)?
+        && super::spawn_unsafe::macos_process_group_has_only_leader(pid).map_err(|error| {
+            ProcessError::Io(format!("owned process group query failed: {error}"))
+        })?
+    {
+        return Ok(());
+    }
+    signal_host_process_group(pid)
+}
+
+/// Wait for a previously signaled group to disappear. The caller bounds this
+/// future and holds the direct child until it is safe to remove registrations.
+async fn reap_host_process_group(
+    child: &mut tokio::process::Child,
+    pid: u32,
+    registrations: &mut ProcessRegistrations,
+    identity_released: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<std::process::ExitStatus, ProcessError> {
+    #[cfg(target_os = "macos")]
+    loop {
+        if observe_host_child_exit(pid)?
+            && super::spawn_unsafe::macos_process_group_has_only_leader(pid).map_err(|error| {
+                ProcessError::Io(format!("owned process group query failed: {error}"))
+            })?
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return Err(ProcessError::Io(
+        "owned process group verification is unavailable on this platform".into(),
+    ));
+
+    // No registered raw PGID can outlive this point. On macOS the group was
+    // proved to contain only the held, exited leader; on Linux SIGKILL has
+    // already been delivered and we only probe (never signal) after reaping.
+    if let Some(released) = identity_released {
+        released.store(true, Ordering::SeqCst);
+    }
+    registrations.release_before_reap();
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| ProcessError::Io(format!("owned child wait failed: {error}")))?;
+    #[cfg(target_os = "linux")]
+    loop {
+        let group = nix::unistd::Pid::from_raw(
+            i32::try_from(pid)
+                .map_err(|_| ProcessError::Io("invalid owned process group id".into()))?,
+        );
+        match nix::sys::signal::killpg(group, None) {
+            Err(nix::errno::Errno::ESRCH) => break,
+            Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            Err(error) => {
+                return Err(ProcessError::Io(format!(
+                    "owned process group query failed: {error}"
+                )))
+            }
+        }
+    }
+    Ok(status)
+}
+
+static UNKNOWN_RECOVERY_HOOKS: OnceLock<Mutex<Vec<lingxi_core::host::sandbox::BackendPlanHandle>>> =
+    OnceLock::new();
+
+struct RecoveryHookOwnerGuard(Option<lingxi_core::host::sandbox::BackendPlanHandle>);
+
+impl Drop for RecoveryHookOwnerGuard {
+    fn drop(&mut self) {
+        if let Some(guard) = self.0.take() {
+            UNKNOWN_RECOVERY_HOOKS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(guard);
+        }
+    }
+}
+
+/// A recovery-managed hook owns its process group even after its caller drops
+/// the output receiver. Never release its lifetime guard based on a signal or
+/// receiver completion; retain it if cleanup cannot be verified.
+async fn run_recovery_hook_owner(
+    cmd: SandboxedCommand,
+    default_async_timeout: std::time::Duration,
+    observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+    ready: tokio::sync::oneshot::Sender<Result<HookRunOutcome, ProcessError>>,
+) {
+    let mut lifetime_guard = RecoveryHookOwnerGuard(cmd.lifetime_guard().cloned());
+    let leases = cmd.lifetime_guard().and_then(|guard| {
+        guard
+            .downcast::<std::sync::Arc<lingxi_core::host::process::RecoveryHookProcessLeases>>()
+            .map(|leases| std::sync::Arc::clone(leases.as_ref()))
+    });
+    let mut ready = Some(ready);
+    let mut tcmd = PosixProcess::build_command(&cmd);
+    tcmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    attach_setsid(&mut tcmd);
+    let mut child = match tcmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            lifetime_guard.0.take();
+            let _ = ready
+                .take()
+                .unwrap()
+                .send(Err(ProcessError::Io(error.to_string())));
+            return;
+        }
+    };
+    let Some(pid) = child.id() else {
+        let _ = ready.take().unwrap().send(Err(ProcessError::Io(
+            "recovery hook child identity is unavailable; cleanup is unverified".into(),
+        )));
+        std::future::pending::<()>().await;
+        return;
+    };
+    let mut group_guard = StreamingProcessGroupGuard(Some(pid));
+    let mut registrations = ProcessRegistrations {
+        child: None,
+        owner: super::agent_processes::register_with_capability_requirement(
+            cmd.process_owner(),
+            Some(pid),
+            true,
+        ),
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let deadline = tokio::time::Instant::now() + cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT);
+    let mut reader = stdout.map(BufReader::new);
+    let mut first_line = Vec::new();
+    let initial = async {
+        if let Some(text) = cmd.inner().stdin.as_ref() {
+            if let Some(mut stdin) = child.stdin.take() {
+                write_hook_stdin(&mut stdin, text.as_bytes())
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+            }
+        }
+        let reader = reader
+            .as_mut()
+            .ok_or_else(|| ProcessError::Io("hook child has no stdout pipe".into()))?;
+        reader
+            .read_until(b'\n', &mut first_line)
+            .await
+            .map_err(|e| ProcessError::Io(e.to_string()))?;
+        Ok::<(), ProcessError>(())
+    };
+    let initial = tokio::select! {
+        biased;
+        () = async {
+            if let Some(cancel) = cancellation.as_ref() { cancel.cancelled().await; }
+            else { std::future::pending::<()>().await; }
+        } => Err(ProcessError::Io("hook execution cancelled".into())),
+        result = tokio::time::timeout_at(deadline, initial) => result.unwrap_or(Err(ProcessError::Timeout)),
+    };
+    let mut output_sender = None;
+    let mut marker = None;
+    if initial.is_ok() {
+        if let (Some(obs), false) = (observer.as_ref(), first_line.is_empty()) {
+            obs.on_chunk(&first_line, &[]).await;
+        }
+        marker = parse_async_first_line(&first_line, default_async_timeout);
+        if let Some(async_timeout) = marker {
+            if let Some(leases) = leases.as_ref() {
+                leases
+                    .execution
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            output_sender = Some(tx);
+            let _ = ready.take().unwrap().send(Ok(HookRunOutcome::Backgrounded {
+                async_timeout,
+                output: Some(rx),
+            }));
+        }
+    }
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    let mut stderr = stderr;
+    let run_result = {
+        let finish = async {
+            let stdout_read = async {
+                if let Some(reader) = reader.as_mut() {
+                    drain_observed(reader, &mut stdout_buf, observer.as_ref(), false).await
+                } else {
+                    Ok(())
+                }
+            };
+            let stderr_read = async {
+                if let Some(stderr) = stderr.as_mut() {
+                    drain_observed(stderr, &mut stderr_buf, observer.as_ref(), true).await
+                } else {
+                    Ok(())
+                }
+            };
+            let (out, err) = tokio::join!(stdout_read, stderr_read);
+            out.map_err(|e| ProcessError::Io(e.to_string()))?;
+            err.map_err(|e| ProcessError::Io(e.to_string()))?;
+            while !observe_host_child_exit(pid)? {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Ok::<(), ProcessError>(())
+        };
+        if let Err(error) = initial {
+            Err(error)
+        } else {
+            let finish_deadline =
+                marker.map_or(deadline, |timeout| tokio::time::Instant::now() + timeout);
+            tokio::select! {
+                biased;
+                () = async {
+                    if let Some(cancel) = cancellation.as_ref() { cancel.cancelled().await; }
+                    else { std::future::pending::<()>().await; }
+                } => Err(ProcessError::Io("hook execution cancelled".into())),
+                result = tokio::time::timeout_at(finish_deadline, finish) => result.unwrap_or(Err(ProcessError::Timeout)),
+            }
+        }
+    };
+
+    let cleanup = async {
+        stop_host_process_group(pid)?;
+        // The signal must never be repeated after the leader is reaped and
+        // its numeric group identity can be recycled.
+        group_guard.0 = None;
+        reap_host_process_group(&mut child, pid, &mut registrations, None).await
+    };
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(10), cleanup).await {
+        Ok(Ok(status)) => status,
+        failure => {
+            let message = format!("recovery hook process-group cleanup is unverified: {failure:?}");
+            tracing::error!(%message);
+            if let Some(sender) = ready.take() {
+                let _ = sender.send(Err(ProcessError::Io(message.clone())));
+            }
+            if let Some(sender) = output_sender.take() {
+                let _ = sender.send(ProcessOutput {
+                    stdout: String::new(),
+                    stderr: message,
+                    exit_code: -1,
+                    timed_out: true,
+                });
+            }
+            // Keep the original turn work lease and any held group identity.
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    lifetime_guard.0.take();
+    let timed_out = matches!(&run_result, Err(ProcessError::Timeout));
+    let output = ProcessOutput {
+        stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+        stderr: match &run_result {
+            Ok(()) => String::from_utf8_lossy(&stderr_buf).into_owned(),
+            Err(error) => format!("hook did not complete: {error}"),
+        },
+        exit_code: status.code().unwrap_or(-1),
+        timed_out,
+    };
+    if let Some(sender) = output_sender {
+        let _ = sender.send(output);
+    } else if let Some(sender) = ready {
+        match run_result {
+            Ok(()) => {
+                let mut output = output;
+                output
+                    .stdout
+                    .insert_str(0, &String::from_utf8_lossy(&first_line));
+                let _ = sender.send(Ok(HookRunOutcome::Completed(output)));
+            }
+            Err(error) => {
+                let _ = sender.send(Err(error));
+            }
+        }
+    }
+}
+
+fn require_native_supervisor_for_strict(cmd: &SandboxedCommand) -> Result<(), ProcessError> {
+    if cmd.requires_group_cleanup_on_exit()
+        && (!cmd.is_supervisor_request()
+            || !cmd
+                .background_task()
+                .and_then(|binding| binding.on_exit.as_ref())
+                .is_some_and(|sink| sink.requires_verified_supervised_stop()))
+    {
+        return Err(ProcessError::Unsupported);
+    }
+    Ok(())
+}
+
+fn owned_streaming_error(reason: impl std::fmt::Display) -> ProcessError {
+    ProcessError::Io(format!(
+        "{} {reason}",
+        lingxi_core::host::process::OWNED_STREAMING_CLEANUP_UNVERIFIED
+    ))
+}
+
+async fn owned_streaming_failure(
+    child: &mut tokio::process::Child,
+    pid: u32,
+    group_guard: &mut StreamingProcessGroupGuard,
+    registrations: &mut ProcessRegistrations,
+    reason: impl std::fmt::Display,
+) -> ProcessError {
+    let signal = if child.id().is_some() {
+        signal_host_process_group(pid)
+    } else {
+        Err(ProcessError::Io(
+            "child process identity is unavailable".into(),
+        ))
+    };
+    // Do not signal the same numeric group after the leader has been reaped.
+    group_guard.0 = None;
+    registrations.release_before_reap();
+    let wait = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await;
+    owned_streaming_error(format!("{reason}; signal={signal:?}; wait={wait:?}"))
+}
+
+struct BackgroundDrainResult {
+    output: std::io::Result<()>,
+    deadline_expired: bool,
+    requested_stop: bool,
+    status: std::io::Result<std::process::ExitStatus>,
+    failure_reported: bool,
+    group_cleanup_verified: bool,
+}
+
+struct BackgroundDrainPolicy {
+    deadline: Option<tokio::time::Instant>,
+    verify_host_cleanup: bool,
+}
+
+// Test-only, task-scoped injection exercises the actual reaper and its retry
+// callback without affecting other concurrently running process fixtures.
+#[cfg(test)]
+static FAIL_NEXT_BACKGROUND_STOP: OnceLock<Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
+#[cfg(test)]
+static SKIP_NEXT_BACKGROUND_STOP: OnceLock<Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
+
+fn request_background_group_stop(
+    pid: u32,
+    binding: Option<&lingxi_core::host::BackgroundTaskBinding>,
+) -> Result<(), ProcessError> {
+    #[cfg(test)]
+    if binding.is_some_and(|bound| {
+        FAIL_NEXT_BACKGROUND_STOP
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&bound.task_id)
+    }) {
+        return Err(ProcessError::Io("injected background stop failure".into()));
+    }
+    #[cfg(test)]
+    if binding.is_some_and(|bound| {
+        SKIP_NEXT_BACKGROUND_STOP
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&bound.task_id)
+    }) {
+        // Simulate a signal API reporting success while a member remains.
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    let _ = binding;
+    stop_host_process_group(pid)
+}
+
+async fn report_stop_failure(
+    binding: Option<&lingxi_core::host::BackgroundTaskBinding>,
+    reason: &str,
+    already_reported: &mut bool,
+) {
+    if *already_reported {
+        return;
+    }
+    *already_reported = true;
+    if let Some((binding, sink)) =
+        binding.and_then(|binding| binding.on_exit.as_ref().map(|sink| (binding, sink)))
+    {
+        sink.on_wait_failure(&binding.task_id, reason).await;
+    } else {
+        tracing::warn!(reason, "background process termination is unverified");
+    }
+}
+
+async fn report_background_completion(
+    sink: &dyn lingxi_core::host::BackgroundExitSink,
+    task_id: &str,
+    result: std::io::Result<std::process::ExitStatus>,
+    deadline_expired: bool,
+    requested_stop: bool,
+    failure_reported: bool,
+    group_cleanup_verified: bool,
+) {
+    if failure_reported {
+        return;
+    }
+    match result {
+        Ok(status) if deadline_expired && !sink.requires_verified_supervised_stop() => {
+            sink.on_background_deadline_exit(task_id, status.code())
+                .await;
+        }
+        // A stop or deadline can race with an independent exit or signal. Neither
+        // killpg success nor a signal status identifies the cause of exit.
+        Ok(status)
+            if (deadline_expired || requested_stop) && sink.requires_verified_supervised_stop() =>
+        {
+            sink.on_exit_with_proof(task_id, status.code(), None, group_cleanup_verified)
+                .await
+        }
+        Ok(status) if deadline_expired || requested_stop => {
+            sink.on_exit(task_id, status.code()).await
+        }
+        Ok(status) => {
+            sink.on_exit_with_proof(task_id, status.code(), Some(false), group_cleanup_verified)
+                .await
+        }
+        Err(error) => {
+            sink.on_wait_failure(task_id, &format!("background child wait failed: {error}"))
+                .await;
+        }
+    }
+}
+
 async fn drain_framed_output<SO, SE>(
     stdout: &mut SO,
     stderr: &mut SE,
@@ -389,13 +894,21 @@ async fn drain_framed_output<SO, SE>(
     mut output: BackgroundOutput,
     health: Option<(&lingxi_core::host::BackgroundTaskBinding, u32)>,
     child: &mut tokio::process::Child,
-    deadline: Option<tokio::time::Instant>,
-) -> (std::io::Result<()>, bool)
+    policy: BackgroundDrainPolicy,
+    registrations: &mut ProcessRegistrations,
+) -> BackgroundDrainResult
 where
     SO: AsyncRead + Unpin,
     SE: AsyncRead + Unpin,
 {
+    let BackgroundDrainPolicy {
+        deadline,
+        mut verify_host_cleanup,
+    } = policy;
     let binding = health.map(|(binding, _)| binding);
+    let verify_supervised_stop = binding
+        .and_then(|bound| bound.on_exit.as_ref())
+        .is_some_and(|sink| sink.requires_verified_supervised_stop());
     let mut deadline_expired = false;
     let mut deadline_handled = false;
     let managed = binding
@@ -405,6 +918,9 @@ where
         .and_then(|b| b.on_exit.as_ref())
         .and_then(|s| s.stop_notify());
     let mut stop_handled = false;
+    let mut retry_stop = false;
+    let mut group_stop_sent = false;
+    let mut stop_verification_deadline = None;
     let mut watchdog = super::watchdog::ShellWatchdog::new(tokio::time::Instant::now());
     watchdog.observe(&output.initial);
     let mut health_tick = tokio::time::interval_at(
@@ -419,11 +935,101 @@ where
             .err();
     let mut stdout_done = false;
     let mut stderr_done = false;
+    let mut failure_reported = false;
     let mut stdout_chunk = vec![0u8; 8192];
     let mut stderr_chunk = vec![0u8; 8192];
-    loop {
-        if stdout_done && stderr_done && !matches!(child.try_wait(), Ok(None)) {
-            break;
+    let status = loop {
+        if stdout_done && stderr_done {
+            if verify_host_cleanup {
+                let Some(pid) = child.id() else {
+                    report_stop_failure(
+                        binding,
+                        "background child identity is unavailable",
+                        &mut failure_reported,
+                    )
+                    .await;
+                    std::future::pending::<()>().await;
+                    unreachable!();
+                };
+                match observe_host_child_exit(pid) {
+                    Ok(true) => {
+                        if !group_stop_sent {
+                            if let Err(error) = stop_host_process_group(pid) {
+                                report_stop_failure(
+                                    binding,
+                                    &format!("background group stop failed: {error}"),
+                                    &mut failure_reported,
+                                )
+                                .await;
+                                // The leader remains unreaped, so retrying cannot
+                                // accidentally signal a recycled process group.
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                continue;
+                            }
+                        }
+                        let identity_released = std::sync::atomic::AtomicBool::new(false);
+                        let settled = reap_host_process_group(
+                            child,
+                            pid,
+                            registrations,
+                            Some(&identity_released),
+                        );
+                        tokio::pin!(settled);
+                        let result = loop {
+                            tokio::select! {
+                                result = &mut settled => break result,
+                                () = tokio::time::sleep(std::time::Duration::from_secs(10)), if !failure_reported => {
+                                    report_stop_failure(binding, "background group cleanup timed out; termination is unverified", &mut failure_reported).await;
+                                }
+                                _ = async { if let Some(stop) = &stop_notify { stop.notified().await; } else { std::future::pending::<()>().await; } },
+                                    if failure_reported && !identity_released.load(Ordering::SeqCst) => {
+                                    // A retry is safe only while the original
+                                    // unreaped leader still reserves its PGID.
+                                    // A failed repeat remains unverified; the
+                                    // original diagnostic is never overwritten.
+                                    if !identity_released.load(Ordering::SeqCst) {
+                                        if let Err(error) = stop_host_process_group(pid) {
+                                            tracing::warn!(%error, "background group retry remains unverified");
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        match result {
+                            Ok(status) => break Ok(status),
+                            Err(error) => {
+                                report_stop_failure(
+                                    binding,
+                                    &format!("background group cleanup failed: {error}"),
+                                    &mut failure_reported,
+                                )
+                                .await;
+                                // Identity or verification is lost. Retain the
+                                // reaper and lease rather than claim cleanup.
+                                std::future::pending::<()>().await;
+                                unreachable!();
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        report_stop_failure(
+                            binding,
+                            &format!("background child observation failed: {error}"),
+                            &mut failure_reported,
+                        )
+                        .await;
+                        std::future::pending::<()>().await;
+                        unreachable!();
+                    }
+                }
+            } else {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) => {}
+                    Err(_) => break child.wait().await,
+                }
+            }
         }
         let framed = tokio::select! {
             _ = async {
@@ -431,25 +1037,85 @@ where
                 else { std::future::pending::<()>().await; }
             }, if !deadline_handled => {
                 deadline_handled = true;
+                // A supervisor deadline has the same cleanup and causal
+                // uncertainty as an explicit supervisor stop.
+                verify_host_cleanup |= verify_supervised_stop;
+                if verify_host_cleanup {
+                    stop_verification_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                }
                 // Do not reap the leader here: it may have exited while a
                 // descendant still owns a pipe. The held, unreaped leader
                 // reserves this process-group identity until the final wait.
                 if let Some(pid) = child.id() {
                     deadline_expired = true;
-                    let _ = kill_tree_force(pid);
+                    let result = if verify_host_cleanup {
+                        stop_host_process_group(pid)
+                    } else {
+                        kill_tree_force(pid)
+                    };
+                    match (verify_host_cleanup, result) {
+                        (true, Ok(())) => group_stop_sent = true,
+                        (true, Err(error)) => report_stop_failure(binding, &format!("deadline stop failed: {error}"), &mut failure_reported).await,
+                        _ => {}
+                    }
+                } else if verify_host_cleanup {
+                    report_stop_failure(binding, "deadline stop failed: child has no process id", &mut failure_reported).await;
                 }
                 continue;
             }
-            _ = async { if let Some(stop) = &stop_notify { stop.notified().await; } else { std::future::pending::<()>().await; } }, if !stop_handled => {
+            _ = async { if let Some(stop) = &stop_notify { stop.notified().await; } else { std::future::pending::<()>().await; } }, if !stop_handled || retry_stop => {
                 stop_handled = true;
+                retry_stop = false;
+                // A supervisor owns the held session from spawn. Once its stop
+                // wins, retain the unreaped leader until the group is verified
+                // empty. Other sinks keep their existing leader-wait behavior.
+                verify_host_cleanup |= verify_supervised_stop;
+                if verify_host_cleanup {
+                    stop_verification_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                }
                 // Keep an exited leader unreaped while its descendants hold
                 // pipes, just as the deadline path does. A user stop owns the
                 // outcome even if output draining crosses the later deadline.
                 deadline_handled = true;
-                if let Some(pid) = child.id() { let _ = kill_tree_force(pid); }
+                if let Some(pid) = child.id() {
+                    let result = if verify_host_cleanup {
+                        request_background_group_stop(pid, binding)
+                    } else {
+                        kill_tree_force(pid)
+                    };
+                    match (verify_host_cleanup, result) {
+                        (true, Ok(())) => group_stop_sent = true,
+                        (true, Err(error)) => {
+                            // The unreaped leader still reserves this PGID. A
+                            // later stop may safely retry without erasing the
+                            // original unverified diagnostic.
+                            retry_stop = true;
+                            report_stop_failure(binding, &format!("requested stop failed: {error}"), &mut failure_reported).await;
+                        }
+                        _ => {}
+                    }
+                } else if verify_host_cleanup {
+                    report_stop_failure(binding, "requested stop failed: child has no process id", &mut failure_reported).await;
+                }
                 continue;
             }
-            _ = child.wait(), if stdout_done && stderr_done => break,
+            result = child.wait(), if stdout_done && stderr_done && !verify_host_cleanup => {
+                if result.is_ok() {
+                    break result;
+                }
+                break child.wait().await;
+            },
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)), if stdout_done && stderr_done && verify_host_cleanup => continue,
+            () = async {
+                if let Some(deadline) = stop_verification_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if !failure_reported => {
+                report_stop_failure(binding, "background stop did not finish draining and verifying within 10 seconds", &mut failure_reported).await;
+                continue;
+            }
             _ = health_tick.tick(), if health.is_some() && !pressure_stopped => {
                 if let Some((binding, pid)) = health {
                     if let Some(sink) = binding.on_exit.as_ref() {
@@ -459,7 +1125,25 @@ where
                         if super::watchdog::memory_pressure().await
                             && sink.on_memory_pressure(&binding.task_id).await {
                             pressure_stopped = true;
-                            let _ = kill_tree_force(pid);
+                            stop_handled = true;
+                            deadline_handled = true;
+                            verify_host_cleanup |= verify_supervised_stop;
+                            if verify_host_cleanup {
+                                stop_verification_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                            }
+                            let result = if verify_host_cleanup {
+                                stop_host_process_group(pid)
+                            } else {
+                                kill_tree_force(pid)
+                            };
+                            match (verify_host_cleanup, result) {
+                                (true, Ok(())) => group_stop_sent = true,
+                                (true, Err(error)) => {
+                                    retry_stop = true;
+                                    report_stop_failure(Some(binding), &format!("memory-pressure stop failed: {error}"), &mut failure_reported).await;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -487,7 +1171,7 @@ where
                 first_write_error.get_or_insert(error);
             }
         }
-    }
+    };
     let flushed = if managed {
         match binding.and_then(|bound| bound.on_exit.as_ref().map(|sink| (bound, sink))) {
             Some((bound, sink)) => sink
@@ -504,7 +1188,15 @@ where
     if let Err(error) = flushed {
         first_write_error.get_or_insert(error);
     }
-    (first_write_error.map_or(Ok(()), Err), deadline_expired)
+    let group_cleanup_verified = verify_host_cleanup && status.is_ok();
+    BackgroundDrainResult {
+        output: first_write_error.map_or(Ok(()), Err),
+        deadline_expired,
+        requested_stop: stop_handled,
+        status,
+        failure_reported,
+        group_cleanup_verified,
+    }
 }
 
 /// Production [`ProcessRunner`] using `tokio::process`.
@@ -832,223 +1524,12 @@ impl PosixProcess {
     }
 }
 
-#[async_trait]
-impl ProcessRunner for PosixProcess {
-    fn supports_foreground_backgrounding(&self) -> bool {
-        true
-    }
-
-    async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
-        let owned = lingxi_core::host::agent_processes::snapshot_entries(owner);
-        for &entry in &owned {
-            if lingxi_core::host::shell_supervisor::kill_owned_registration(owner, entry)
-                .await
-                .is_none()
-                && lingxi_core::host::agent_processes::is_current(owner, entry)
-            {
-                let _ = kill_tree_force(entry.pid);
-            }
-        }
-        owned.into_iter().map(|entry| entry.pid).collect()
-    }
-
-    async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
-        let inner = cmd.inner();
-        let mut tcmd = Self::build_command(cmd);
-        tcmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // On the timeout path below we `return Err(..)` and drop the
-            // `Child`. Tokio's default drop does NOT kill the OS process, so a
-            // timed-out `bash -c` would otherwise be orphaned and keep running
-            // (the handler reports `Killed` while the process is still alive).
-            // `kill_on_drop` makes the drop send SIGKILL, so the timeout
-            // actually terminates the child. (Descendants escaping the direct
-            // child are the `spawn_background` setsid path's concern, not the
-            // foreground capture path.)
-            .kill_on_drop(true);
-
-        // PARITY 2.1.212 (print/SDK SIGTERM cleanup): in print/SDK mode, spawn the
-        // foreground child in its OWN process group (`setsid`, like claude-code's
-        // `detached: true`) and register its pgid so a process-level
-        // SIGTERM/SIGHUP/SIGINT handler can `killpg` the whole subtree before exit
-        // — `kill_on_drop` alone never fires on an abrupt signal. Interactive mode
-        // leaves this off, so its spawn path is byte-identical to before.
-        let print_mode_cleanup = active_children::print_mode_child_cleanup_enabled();
-        if print_mode_cleanup || cmd.process_owner().is_some() {
-            attach_setsid(&mut tcmd);
-        }
-
-        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
-        let _agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
-        // Register the setsid child's pgid (== pid) for the duration of this run;
-        // the guard unregisters it on completion OR on future-drop (cancel).
-        let _child_registration = if print_mode_cleanup {
-            child.id().map(|pid| {
-                active_children::register(pid);
-                ChildRegistration(pid)
-            })
-        } else {
-            None
-        };
-        if let Some(stdin_text) = &inner.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
-                    .await
-                    .map_err(|e| ProcessError::Io(e.to_string()))?;
-            }
-        }
-
-        let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(r) => r.map_err(|e| ProcessError::Io(e.to_string()))?,
-            Err(_) => return Err(ProcessError::Timeout),
-        };
-
-        Ok(ProcessOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code().unwrap_or(-1),
-            timed_out: false,
-        })
-    }
-
-    async fn run_streaming(
-        &self,
-        cmd: &SandboxedCommand,
-        sink: std::sync::Arc<dyn ProcessStreamSink>,
-    ) -> Result<ProcessOutput, ProcessError> {
-        let inner = cmd.inner();
-        let mut tcmd = Self::build_command(cmd);
-        tcmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        // A Monitor/streaming worker can be cancelled at any await point. Give
-        // it an independent process group so the drop guard removes descendants
-        // as well as the direct shell.
-        attach_setsid(&mut tcmd);
-
-        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
-        let _agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
-        let pid = child
-            .id()
-            .ok_or_else(|| ProcessError::Io("streaming child has no pid".into()))?;
-        let mut group_guard = StreamingProcessGroupGuard(Some(pid));
-
-        if let Some(stdin_text) = &inner.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
-                    .await
-                    .map_err(|e| ProcessError::Io(e.to_string()))?;
-            }
-        }
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ProcessError::Io("streaming child has no stdout pipe".into()))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ProcessError::Io("streaming child has no stderr pipe".into()))?;
-        let stdout_sink = sink.clone();
-        let stderr_sink = sink;
-
-        let stdout_task = async move {
-            let mut reader = BufReader::new(stdout);
-            let mut captured = Vec::new();
-            loop {
-                let mut line = Vec::new();
-                let read = reader
-                    .read_until(b'\n', &mut line)
-                    .await
-                    .map_err(|e| ProcessError::Io(e.to_string()))?;
-                if read == 0 {
-                    break;
-                }
-                captured.extend_from_slice(&line);
-                while matches!(line.last(), Some(b'\n' | b'\r')) {
-                    line.pop();
-                }
-                stdout_sink
-                    .stdout_line(String::from_utf8_lossy(&line).into_owned())
-                    .await?;
-            }
-            Ok::<Vec<u8>, ProcessError>(captured)
-        };
-        let stderr_task = async move {
-            let mut captured = Vec::new();
-            let mut chunk = vec![0_u8; 8 * 1024];
-            loop {
-                let read = stderr
-                    .read(&mut chunk)
-                    .await
-                    .map_err(|e| ProcessError::Io(e.to_string()))?;
-                if read == 0 {
-                    break;
-                }
-                let bytes = chunk[..read].to_vec();
-                captured.extend_from_slice(&bytes);
-                stderr_sink.stderr_chunk(bytes).await?;
-            }
-            Ok::<Vec<u8>, ProcessError>(captured)
-        };
-        let execution = async {
-            let (stdout, stderr, status) = tokio::try_join!(stdout_task, stderr_task, async {
-                child
-                    .wait()
-                    .await
-                    .map_err(|e| ProcessError::Io(e.to_string()))
-            })?;
-            Ok::<_, ProcessError>((stdout, stderr, status))
-        };
-
-        let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
-        let result = tokio::time::timeout(timeout, execution).await;
-        match result {
-            Ok(Ok((stdout, stderr, status))) => {
-                group_guard.0 = None;
-                Ok(ProcessOutput {
-                    stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                    exit_code: status.code().unwrap_or(-1),
-                    timed_out: false,
-                })
-            }
-            Ok(Err(error)) => {
-                let _ = kill_tree_force(pid);
-                group_guard.0 = None;
-                let _ = child.wait().await;
-                Err(error)
-            }
-            Err(_) => {
-                let _ = kill_tree_force(pid);
-                group_guard.0 = None;
-                let _ = child.wait().await;
-                Err(ProcessError::Timeout)
-            }
-        }
-    }
-
-    // PARITY 2.1.210 (timeout → move-to-background): a foreground Bash command
-    // that exceeds its timeout is NOT killed — the still-running child is handed
-    // off to a detached reaper that keeps draining its output into a per-task
-    // file, and `MovedToBackground` is returned so the tool layer surfaces the
-    // "…did not complete within its Ns timeout and was moved to the background"
-    // note. The spawn preamble mirrors `run` exactly (identical env, the same
-    // print/SDK-mode setsid + active-children registration) so the
-    // finished-in-time path is byte-identical to `run`.
-    async fn run_foreground_with_output_limit(
+impl PosixProcess {
+    async fn run_foreground_native(
         &self,
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
     ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
-        if super::supervisor::enabled(cmd) {
-            return super::supervisor::execute(cmd, max_output_bytes, false).await;
-        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -1069,7 +1550,11 @@ impl ProcessRunner for PosixProcess {
 
         let mut child =
             super::spawn_unsafe::spawn_with_capability(tcmd, cmd.background_task()).await?;
-        let agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
+        let agent_registration = super::agent_processes::register_with_capability_requirement(
+            cmd.process_owner(),
+            child.id(),
+            cmd.requires_group_cleanup_on_exit(),
+        );
         // Capture this before polling `wait()`: Tokio clears `Child::id()` once
         // the direct child has been reaped. A busy executor can observe the
         // timeout and the already-completed child in the same poll, so looking
@@ -1083,6 +1568,10 @@ impl ProcessRunner for PosixProcess {
         } else {
             None
         };
+        let mut registrations = ProcessRegistrations {
+            child: child_registration,
+            owner: agent_registration,
+        };
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -1093,6 +1582,7 @@ impl ProcessRunner for PosixProcess {
         }
 
         let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let verify_host_cleanup = cmd.requires_group_cleanup_on_exit();
         let mut sout = child
             .stdout
             .take()
@@ -1137,13 +1627,33 @@ impl ProcessRunner for PosixProcess {
             if out_done && err_done && exit_status.is_some() {
                 break ForegroundBreak::Finished;
             }
+            if verify_host_cleanup && out_done && err_done && observe_host_child_exit(spawned_pid)?
+            {
+                stop_host_process_group(spawned_pid)?;
+                exit_status = Some(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        reap_host_process_group(&mut child, spawned_pid, &mut registrations, None),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ProcessError::Io(
+                            "owned foreground group cleanup timed out; termination is unverified"
+                                .into(),
+                        )
+                    })??,
+                );
+                break ForegroundBreak::Finished;
+            }
             tokio::select! {
                 biased;
                 () = &mut sleep => break ForegroundBreak::Deadline,
                 () = &mut background_requested => break ForegroundBreak::Requested,
                 r = sout.read_buf(&mut out_buf), if !out_done => {
                     match r {
-                        Ok(0) | Err(_) => out_done = true,
+                        Ok(0) => out_done = true,
+                        Err(error) if verify_host_cleanup => return Err(ProcessError::Io(format!("foreground stdout drain failed: {error}"))),
+                        Err(_) => out_done = true,
                         Ok(_) => {
                             if let Some(capture) = framed_output.as_mut() {
                                 capture.observe_stdout(&out_buf[framed_stdout_observed..]);
@@ -1154,7 +1664,9 @@ impl ProcessRunner for PosixProcess {
                 }
                 r = serr.read_buf(&mut err_buf), if !err_done => {
                     match r {
-                        Ok(0) | Err(_) => err_done = true,
+                        Ok(0) => err_done = true,
+                        Err(error) if verify_host_cleanup => return Err(ProcessError::Io(format!("foreground stderr drain failed: {error}"))),
+                        Err(_) => err_done = true,
                         Ok(_) => {
                             if let Some(capture) = framed_output.as_mut() {
                                 capture.observe_stderr(&err_buf[framed_stderr_observed..]);
@@ -1163,9 +1675,13 @@ impl ProcessRunner for PosixProcess {
                         }
                     }
                 }
-                s = child.wait(), if exit_status.is_none() => {
+                // Ordinary commands keep their historic wait/background rules.
+                // Managed commands observe exit without reaping and stop the
+                // whole still-pinned group before reporting completion.
+                s = child.wait(), if exit_status.is_none() && !verify_host_cleanup => {
                     exit_status = Some(s.map_err(|e| ProcessError::Io(e.to_string()))?);
                 }
+                () = tokio::time::sleep(std::time::Duration::from_millis(20)), if verify_host_cleanup && out_done && err_done => {}
             }
         };
 
@@ -1183,14 +1699,35 @@ impl ProcessRunner for PosixProcess {
         // workspace work, after the OS process has already exited. Because the
         // select is deliberately timer-biased, that used to enter the
         // background branch and then fail (`Child::id()` is `None` after
-        // `wait()`). An exited process cannot be moved to the background. Drain
-        // any immediately available tail from its pipes, with a small bounded
-        // grace period, and report the real completion instead.
-        let completed_status = match exit_status.take() {
-            Some(status) => Some(status),
-            None => child
-                .try_wait()
-                .map_err(|e| ProcessError::Io(e.to_string()))?,
+        // `wait()`). Report an ordinary already-exited child as completed after
+        // a bounded tail drain. For a managed host, keep the leader unreaped
+        // while inherited pipes remain open so its group can still be stopped.
+        let completed_status = if verify_host_cleanup {
+            if out_done && err_done && observe_host_child_exit(spawned_pid)? {
+                stop_host_process_group(spawned_pid)?;
+                Some(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        reap_host_process_group(&mut child, spawned_pid, &mut registrations, None),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ProcessError::Io(
+                            "owned foreground group cleanup timed out; termination is unverified"
+                                .into(),
+                        )
+                    })??,
+                )
+            } else {
+                None
+            }
+        } else {
+            match exit_status.take() {
+                Some(status) => Some(status),
+                None => child
+                    .try_wait()
+                    .map_err(|e| ProcessError::Io(e.to_string()))?,
+            }
         };
         if let Some(status) = completed_status {
             const MAX_POST_EXIT_READS: usize = 256;
@@ -1246,8 +1783,38 @@ impl ProcessRunner for PosixProcess {
         // An EXPLICIT request always backgrounds: the caller has already decided,
         // and `shouldAutoBackground` only ever governed what the DEADLINE does.
         if matches!(backgrounding, ForegroundBreak::Deadline) && !cmd.auto_background_on_timeout() {
-            let _ = kill_tree_force(spawned_pid);
-            let _ = child.wait().await;
+            if verify_host_cleanup {
+                stop_host_process_group(spawned_pid)?;
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    // Preserve the leader's process-group identity until the
+                    // inherited pipes close, then reap it inside the same bound.
+                    while !(out_done && err_done) {
+                        tokio::select! {
+                            result = sout.read_buf(&mut out_buf), if !out_done => {
+                                out_done = result.map_err(|error| {
+                                    ProcessError::Io(format!("foreground stdout drain failed: {error}"))
+                                })? == 0;
+                            }
+                            result = serr.read_buf(&mut err_buf), if !err_done => {
+                                err_done = result.map_err(|error| {
+                                    ProcessError::Io(format!("foreground stderr drain failed: {error}"))
+                                })? == 0;
+                            }
+                        }
+                    }
+                    reap_host_process_group(&mut child, spawned_pid, &mut registrations, None).await?;
+                    Ok::<(), ProcessError>(())
+                })
+                .await
+                .map_err(|_| {
+                        ProcessError::Io(
+                            "foreground child drain and reap timed out; termination is unverified".into(),
+                        )
+                })??;
+            } else {
+                let _ = kill_tree_force(spawned_pid);
+                let _ = child.wait().await;
+            }
             return Ok(lingxi_core::host::ForegroundRunResult {
                 outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
                     stdout: String::from_utf8_lossy(&out_buf).into_owned(),
@@ -1297,34 +1864,67 @@ impl ProcessRunner for PosixProcess {
         let background_deadline = cmd
             .background_timeout()
             .map(|timeout| tokio::time::Instant::now() + timeout);
+        let lifetime_guard = cmd.lifetime_guard().cloned();
 
         tokio::spawn(async move {
             // Hold the print-mode registration for the child's remaining life so
             // an abrupt process SIGTERM can still `killpg` the backgrounded tree.
-            let _child_registration = child_registration;
-            let _agent_registration = agent_registration;
+            let mut registrations = registrations;
+            let _lifetime_guard = lifetime_guard;
             let mut child = child;
             let mut file = std_file.map(tokio::fs::File::from_std);
-            let (_, deadline_expired) = drain_framed_output(
+            let drained = drain_framed_output(
                 &mut sout,
                 &mut serr,
                 &mut file,
                 initial_output,
                 binding.as_ref().map(|binding| (binding, pid)),
                 &mut child,
-                background_deadline,
+                BackgroundDrainPolicy {
+                    deadline: background_deadline,
+                    verify_host_cleanup,
+                },
+                &mut registrations,
             )
             .await;
-            let status = child.wait().await;
+            let mut failure_reported = drained.failure_reported;
+            if let Err(error) = drained.output {
+                tracing::warn!(%error, task_id = %exit_task_id, "background output drain failed");
+                if (drained.requested_stop || drained.deadline_expired)
+                    && binding
+                        .as_ref()
+                        .and_then(|bound| bound.on_exit.as_ref())
+                        .is_some_and(|sink| sink.requires_verified_supervised_stop())
+                {
+                    report_stop_failure(
+                        binding.as_ref(),
+                        &format!("background output drain failed: {error}"),
+                        &mut failure_reported,
+                    )
+                    .await;
+                }
+            }
+            if failure_reported && drained.status.is_ok() {
+                if let Some((bound, sink)) = binding
+                    .as_ref()
+                    .and_then(|bound| bound.on_exit.as_ref().map(|sink| (bound, sink)))
+                {
+                    sink.on_cleanup_verified(&bound.task_id).await;
+                }
+            }
             // Same one-shot exit report as the explicit-background path, so an
             // auto-backgrounded (timed-out) command settles its task record.
             if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
-                let code = status.ok().and_then(|status| status.code());
-                if deadline_expired {
-                    sink.on_background_deadline_exit(&exit_task_id, code).await;
-                } else {
-                    sink.on_exit(&exit_task_id, code).await;
-                }
+                report_background_completion(
+                    sink.as_ref(),
+                    &exit_task_id,
+                    drained.status,
+                    drained.deadline_expired,
+                    drained.requested_stop,
+                    failure_reported,
+                    drained.group_cleanup_verified,
+                )
+                .await;
             }
         });
 
@@ -1335,6 +1935,476 @@ impl ProcessRunner for PosixProcess {
             }),
             output_file: None,
         })
+    }
+
+    async fn spawn_background_native(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<ProcessHandle, ProcessError> {
+        // When the caller bound a task identity (the Bash tool does, so the
+        // model-facing id, the registry record and this file are one identity —
+        // claude-code `vV`/`Xne`), write into the caller's already-created file
+        // and report the caller's id. Otherwise fall back to a runner-owned
+        // identity.
+        //
+        // Root and leaf are both opened without following symlinks. The
+        // runner pins the root identity on first use, so a later rename/swap
+        // fails closed instead of redirecting command output.
+        let binding = cmd.background_task().cloned();
+        let (task_id, file) = match binding.as_ref() {
+            Some(bound) => (
+                bound.task_id.clone(),
+                if bound
+                    .on_exit
+                    .as_ref()
+                    .is_some_and(|sink| sink.manages_output())
+                {
+                    None
+                } else {
+                    Some(self.open_bound_output_file(bound)?)
+                },
+            ),
+            None => {
+                let (task_id, _out_path, file) = self.create_task_output_file()?;
+                (task_id, Some(file))
+            }
+        };
+
+        let mut tcmd = Self::build_command(cmd);
+        tcmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        attach_setsid(&mut tcmd);
+        if binding
+            .as_ref()
+            .and_then(|b| b.on_exit.as_ref())
+            .and_then(|s| s.stop_notify())
+            .is_some()
+        {
+            tcmd.kill_on_drop(true);
+        }
+
+        let mut child = super::spawn_unsafe::spawn_with_capability(tcmd, binding.as_ref()).await?;
+        let pid = child
+            .id()
+            .ok_or_else(|| ProcessError::Io("spawn_background: child has no pid".into()))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProcessError::Io("spawn_background: child has no stdout".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ProcessError::Io("spawn_background: child has no stderr".into()))?;
+
+        // Drain both pipes in one task so stderr chunks receive the oracle's
+        // marker and the file reflects the order in which reads become ready.
+        // The task also reaps the child to avoid zombies.
+        let agent_registration = super::agent_processes::register_with_capability_requirement(
+            cmd.process_owner(),
+            Some(pid),
+            cmd.requires_group_cleanup_on_exit(),
+        );
+        let exit_task_id = task_id.clone();
+        let background_deadline = cmd
+            .background_timeout()
+            .map(|timeout| tokio::time::Instant::now() + timeout);
+        let verify_host_cleanup = cmd.requires_group_cleanup_on_exit();
+        let lifetime_guard = cmd.lifetime_guard().cloned();
+        tokio::spawn(async move {
+            let mut registrations = ProcessRegistrations {
+                child: None,
+                owner: agent_registration,
+            };
+            let _lifetime_guard = lifetime_guard;
+            let mut file = file.map(tokio::fs::File::from_std);
+            let drained = drain_framed_output(
+                &mut stdout,
+                &mut stderr,
+                &mut file,
+                BackgroundOutput::default(),
+                binding.as_ref().map(|binding| (binding, pid)),
+                &mut child,
+                BackgroundDrainPolicy {
+                    deadline: background_deadline,
+                    verify_host_cleanup,
+                },
+                &mut registrations,
+            )
+            .await;
+            let mut failure_reported = drained.failure_reported;
+            if let Err(error) = drained.output {
+                tracing::warn!(%error, task_id = %exit_task_id, "background output drain failed");
+                if (drained.requested_stop || drained.deadline_expired)
+                    && binding
+                        .as_ref()
+                        .and_then(|bound| bound.on_exit.as_ref())
+                        .is_some_and(|sink| sink.requires_verified_supervised_stop())
+                {
+                    report_stop_failure(
+                        binding.as_ref(),
+                        &format!("background output drain failed: {error}"),
+                        &mut failure_reported,
+                    )
+                    .await;
+                }
+            }
+            if failure_reported && drained.status.is_ok() {
+                if let Some((bound, sink)) = binding
+                    .as_ref()
+                    .and_then(|bound| bound.on_exit.as_ref().map(|sink| (bound, sink)))
+                {
+                    sink.on_cleanup_verified(&bound.task_id).await;
+                }
+            }
+            // One-shot exit report so the caller can settle the task record
+            // (claude-code `Ger`: terminal status from the child's result, then
+            // the completion notification).
+            if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
+                report_background_completion(
+                    sink.as_ref(),
+                    &exit_task_id,
+                    drained.status,
+                    drained.deadline_expired,
+                    drained.requested_stop,
+                    failure_reported,
+                    drained.group_cleanup_verified,
+                )
+                .await;
+            }
+        });
+
+        Ok(ProcessHandle { task_id, pid })
+    }
+}
+
+#[async_trait]
+impl ProcessRunner for PosixProcess {
+    fn supports_owned_streaming_cleanup(&self) -> bool {
+        true
+    }
+
+    fn supports_recovery_hook_group_cleanup(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    }
+
+    fn supports_background_lifetime_guard(&self) -> bool {
+        true
+    }
+
+    fn supports_verified_background_stop(&self, command: &SandboxedCommand) -> bool {
+        super::supervisor::enabled(command)
+    }
+
+    async fn terminate_and_wait_owned_background(
+        &self,
+        handle: &ProcessHandle,
+        owner: &str,
+    ) -> Result<(), ProcessError> {
+        lingxi_core::host::shell_supervisor::terminate_and_wait(handle, owner)
+            .await
+            .unwrap_or(Err(ProcessError::Unsupported))
+    }
+
+    fn supports_foreground_backgrounding(&self) -> bool {
+        true
+    }
+
+    async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+        let owned = lingxi_core::host::agent_processes::snapshot_entries(owner);
+        for &entry in &owned {
+            if lingxi_core::host::shell_supervisor::kill_owned_registration(owner, entry)
+                .await
+                .is_none()
+                // A host capability may have been retired while its numeric
+                // registration is still visible.  Never turn that gap into a
+                // signal to a recycled PID/PGID.
+                && !entry.requires_capability()
+                && !owner.starts_with("host-tool:")
+            {
+                if owner.starts_with(lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX) {
+                    let _ = lingxi_core::host::agent_processes::with_current(owner, entry, || {
+                        kill_tree_force(entry.pid)
+                    });
+                } else if lingxi_core::host::agent_processes::is_current(owner, entry) {
+                    let _ = kill_tree_force(entry.pid);
+                }
+            }
+        }
+        owned.into_iter().map(|entry| entry.pid).collect()
+    }
+
+    async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        if cmd.requires_group_cleanup_on_exit() {
+            return Err(ProcessError::Unsupported);
+        }
+        let inner = cmd.inner();
+        let mut tcmd = Self::build_command(cmd);
+        tcmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // On the timeout path below we `return Err(..)` and drop the
+            // `Child`. Tokio's default drop does NOT kill the OS process, so a
+            // timed-out `bash -c` would otherwise be orphaned and keep running
+            // (the handler reports `Killed` while the process is still alive).
+            // `kill_on_drop` makes the drop send SIGKILL, so the timeout
+            // actually terminates the child. (Descendants escaping the direct
+            // child are the `spawn_background` setsid path's concern, not the
+            // foreground capture path.)
+            .kill_on_drop(true);
+
+        // PARITY 2.1.212 (print/SDK SIGTERM cleanup): in print/SDK mode, spawn the
+        // foreground child in its OWN process group (`setsid`, like claude-code's
+        // `detached: true`) and register its pgid so a process-level
+        // SIGTERM/SIGHUP/SIGINT handler can `killpg` the whole subtree before exit
+        // — `kill_on_drop` alone never fires on an abrupt signal. Interactive mode
+        // leaves this off, so its spawn path is byte-identical to before.
+        let print_mode_cleanup = active_children::print_mode_child_cleanup_enabled();
+        if print_mode_cleanup || cmd.process_owner().is_some() {
+            attach_setsid(&mut tcmd);
+        }
+
+        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let _agent_registration = super::agent_processes::register_with_capability_requirement(
+            cmd.process_owner(),
+            child.id(),
+            cmd.requires_group_cleanup_on_exit(),
+        );
+        // Register the setsid child's pgid (== pid) for the duration of this run;
+        // the guard unregisters it on completion OR on future-drop (cancel).
+        let _child_registration = if print_mode_cleanup {
+            child.id().map(|pid| {
+                active_children::register(pid);
+                ChildRegistration(pid)
+            })
+        } else {
+            None
+        };
+        if let Some(stdin_text) = &inner.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(stdin_text.as_bytes())
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+            }
+        }
+
+        let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(r) => r.map_err(|e| ProcessError::Io(e.to_string()))?,
+            Err(_) => return Err(ProcessError::Timeout),
+        };
+
+        Ok(ProcessOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.status.code().unwrap_or(-1),
+            timed_out: false,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        cmd: &SandboxedCommand,
+        sink: std::sync::Arc<dyn ProcessStreamSink>,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if cmd.requires_group_cleanup_on_exit() {
+            return Err(ProcessError::Unsupported);
+        }
+        let inner = cmd.inner();
+        let owned_streaming = cmd.process_owner().is_some_and(|owner| {
+            owner.starts_with(lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX)
+        });
+        let mut tcmd = Self::build_command(cmd);
+        tcmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // A Monitor/streaming worker can be cancelled at any await point. Give
+        // it an independent process group so the drop guard removes descendants
+        // as well as the direct shell.
+        attach_setsid(&mut tcmd);
+
+        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let agent_registration = super::agent_processes::register_with_capability_requirement(
+            cmd.process_owner(),
+            child.id(),
+            cmd.requires_group_cleanup_on_exit(),
+        );
+        let mut registrations = ProcessRegistrations {
+            child: None,
+            owner: agent_registration,
+        };
+        let pid = child.id().ok_or_else(|| {
+            if owned_streaming {
+                owned_streaming_error("spawned streaming child has no pid")
+            } else {
+                ProcessError::Io("streaming child has no pid".into())
+            }
+        })?;
+        let mut group_guard = StreamingProcessGroupGuard(Some(pid));
+
+        if let Some(stdin_text) = &inner.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(stdin_text.as_bytes())
+                    .await
+                    .map_err(|error| {
+                        if owned_streaming {
+                            owned_streaming_error(format!("stdin write failed: {error}"))
+                        } else {
+                            ProcessError::Io(error.to_string())
+                        }
+                    })?;
+            }
+        }
+
+        let stdout = child.stdout.take().ok_or_else(|| {
+            if owned_streaming {
+                owned_streaming_error("streaming child has no stdout pipe")
+            } else {
+                ProcessError::Io("streaming child has no stdout pipe".into())
+            }
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            if owned_streaming {
+                owned_streaming_error("streaming child has no stderr pipe")
+            } else {
+                ProcessError::Io("streaming child has no stderr pipe".into())
+            }
+        })?;
+        let stdout_sink = sink.clone();
+        let stderr_sink = sink;
+
+        let stdout_task = async move {
+            let mut reader = BufReader::new(stdout);
+            let mut captured = Vec::new();
+            loop {
+                let mut line = Vec::new();
+                let read = reader
+                    .read_until(b'\n', &mut line)
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                captured.extend_from_slice(&line);
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                stdout_sink
+                    .stdout_line(String::from_utf8_lossy(&line).into_owned())
+                    .await?;
+            }
+            Ok::<Vec<u8>, ProcessError>(captured)
+        };
+        let stderr_task = async move {
+            let mut captured = Vec::new();
+            let mut chunk = vec![0_u8; 8 * 1024];
+            loop {
+                let read = stderr
+                    .read(&mut chunk)
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                let bytes = chunk[..read].to_vec();
+                captured.extend_from_slice(&bytes);
+                stderr_sink.stderr_chunk(bytes).await?;
+            }
+            Ok::<Vec<u8>, ProcessError>(captured)
+        };
+        let execution = async {
+            let (stdout, stderr, status) = if owned_streaming {
+                // Hold the leader and group identity through pipe draining and
+                // its natural exit, then stop and verify redirected same-group
+                // children before releasing sandbox resources.
+                let (stdout, stderr) = tokio::try_join!(stdout_task, stderr_task)?;
+                while !observe_host_child_exit(pid)? {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                stop_host_process_group(pid)?;
+                group_guard.0 = None;
+                let status =
+                    reap_host_process_group(&mut child, pid, &mut registrations, None).await?;
+                (stdout, stderr, status)
+            } else {
+                tokio::try_join!(stdout_task, stderr_task, async {
+                    child
+                        .wait()
+                        .await
+                        .map_err(|e| ProcessError::Io(e.to_string()))
+                })?
+            };
+            Ok::<_, ProcessError>((stdout, stderr, status))
+        };
+
+        let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let result = if owned_streaming && inner.timeout.is_none() {
+            Ok(execution.await)
+        } else {
+            tokio::time::timeout(timeout, execution).await
+        };
+        match result {
+            Ok(Ok((stdout, stderr, status))) => {
+                group_guard.0 = None;
+                Ok(ProcessOutput {
+                    stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                    exit_code: status.code().unwrap_or(-1),
+                    timed_out: false,
+                })
+            }
+            Ok(Err(error)) if owned_streaming => Err(owned_streaming_failure(
+                &mut child,
+                pid,
+                &mut group_guard,
+                &mut registrations,
+                error,
+            )
+            .await),
+            Ok(Err(error)) => {
+                let _ = kill_tree_force(pid);
+                group_guard.0 = None;
+                let _ = child.wait().await;
+                Err(error)
+            }
+            Err(_) if owned_streaming => Err(owned_streaming_failure(
+                &mut child,
+                pid,
+                &mut group_guard,
+                &mut registrations,
+                "streaming deadline elapsed",
+            )
+            .await),
+            Err(_) => {
+                let _ = kill_tree_force(pid);
+                group_guard.0 = None;
+                let _ = child.wait().await;
+                Err(ProcessError::Timeout)
+            }
+        }
+    }
+
+    // PARITY 2.1.210 (timeout → move-to-background): a foreground Bash command
+    // that exceeds its timeout is NOT killed — the still-running child is handed
+    // off to a detached reaper that keeps draining its output into a per-task
+    // file, and `MovedToBackground` is returned so the tool layer surfaces the
+    // "…did not complete within its Ns timeout and was moved to the background"
+    // note. The spawn preamble mirrors `run` exactly (identical env, the same
+    // print/SDK-mode setsid + active-children registration) so the
+    // finished-in-time path is byte-identical to `run`.
+    async fn run_foreground_with_output_limit(
+        &self,
+        cmd: &SandboxedCommand,
+        max_output_bytes: Option<usize>,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        if super::supervisor::enabled(cmd) {
+            return super::supervisor::execute(cmd, max_output_bytes, false).await;
+        }
+        require_native_supervisor_for_strict(cmd)?;
+        self.run_foreground_native(cmd, max_output_bytes).await
     }
 
     async fn run_foreground(
@@ -1387,6 +2457,28 @@ impl ProcessRunner for PosixProcess {
         observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<HookRunOutcome, ProcessError> {
+        if cmd.requires_group_cleanup_on_exit() {
+            if !self.supports_recovery_hook_group_cleanup() || cmd.lifetime_guard().is_none() {
+                return Err(ProcessError::Unsupported);
+            }
+            if cancellation
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
+                return Err(ProcessError::Io("hook execution cancelled".into()));
+            }
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(run_recovery_hook_owner(
+                cmd.clone(),
+                default_async_timeout,
+                observer,
+                cancellation,
+                ready_tx,
+            ));
+            return ready_rx.await.map_err(|_| {
+                ProcessError::Io("recovery hook process owner exited unexpectedly".into())
+            })?;
+        }
         if cancellation
             .as_ref()
             .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
@@ -1407,11 +2499,14 @@ impl ProcessRunner for PosixProcess {
         }
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
-        let agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
+        let agent_registration = super::agent_processes::register_with_capability_requirement(
+            cmd.process_owner(),
+            child.id(),
+            cmd.requires_group_cleanup_on_exit(),
+        );
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
+                write_hook_stdin(&mut stdin, stdin_text.as_bytes())
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -1632,98 +2727,8 @@ impl ProcessRunner for PosixProcess {
                 )),
             };
         }
-        // When the caller bound a task identity (the Bash tool does, so the
-        // model-facing id, the registry record and this file are one identity —
-        // claude-code `vV`/`Xne`), write into the caller's already-created file
-        // and report the caller's id. Otherwise fall back to a runner-owned
-        // identity.
-        //
-        // Root and leaf are both opened without following symlinks. The
-        // runner pins the root identity on first use, so a later rename/swap
-        // fails closed instead of redirecting command output.
-        let binding = cmd.background_task().cloned();
-        let (task_id, file) = match binding.as_ref() {
-            Some(bound) => (
-                bound.task_id.clone(),
-                if bound
-                    .on_exit
-                    .as_ref()
-                    .is_some_and(|sink| sink.manages_output())
-                {
-                    None
-                } else {
-                    Some(self.open_bound_output_file(bound)?)
-                },
-            ),
-            None => {
-                let (task_id, _out_path, file) = self.create_task_output_file()?;
-                (task_id, Some(file))
-            }
-        };
-
-        let mut tcmd = Self::build_command(cmd);
-        tcmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        attach_setsid(&mut tcmd);
-        if binding
-            .as_ref()
-            .and_then(|b| b.on_exit.as_ref())
-            .and_then(|s| s.stop_notify())
-            .is_some()
-        {
-            tcmd.kill_on_drop(true);
-        }
-
-        let mut child = super::spawn_unsafe::spawn_with_capability(tcmd, binding.as_ref()).await?;
-        let pid = child
-            .id()
-            .ok_or_else(|| ProcessError::Io("spawn_background: child has no pid".into()))?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ProcessError::Io("spawn_background: child has no stdout".into()))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ProcessError::Io("spawn_background: child has no stderr".into()))?;
-
-        // Drain both pipes in one task so stderr chunks receive the oracle's
-        // marker and the file reflects the order in which reads become ready.
-        // The task also reaps the child to avoid zombies.
-        let agent_registration = super::agent_processes::register(cmd.process_owner(), Some(pid));
-        let exit_task_id = task_id.clone();
-        let background_deadline = cmd
-            .background_timeout()
-            .map(|timeout| tokio::time::Instant::now() + timeout);
-        tokio::spawn(async move {
-            let _agent_registration = agent_registration;
-            let mut file = file.map(tokio::fs::File::from_std);
-            let (_, deadline_expired) = drain_framed_output(
-                &mut stdout,
-                &mut stderr,
-                &mut file,
-                BackgroundOutput::default(),
-                binding.as_ref().map(|binding| (binding, pid)),
-                &mut child,
-                background_deadline,
-            )
-            .await;
-            let status = child.wait().await;
-            // One-shot exit report so the caller can settle the task record
-            // (claude-code `Ger`: terminal status from the child's result, then
-            // the completion notification).
-            if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
-                let code = status.ok().and_then(|status| status.code());
-                if deadline_expired {
-                    sink.on_background_deadline_exit(&exit_task_id, code).await;
-                } else {
-                    sink.on_exit(&exit_task_id, code).await;
-                }
-            }
-        });
-
-        Ok(ProcessHandle { task_id, pid })
+        require_native_supervisor_for_strict(cmd)?;
+        self.spawn_background_native(cmd).await
     }
 
     async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
@@ -1935,6 +2940,1139 @@ mod async_hook_tests {
             !path.exists(),
             "managed output must not also be written directly"
         );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ExitObservation {
+        Reaped(Option<i32>),
+        Known(Option<i32>, bool),
+        Proof(Option<i32>, Option<bool>, bool),
+        Deadline(Option<i32>),
+        Unverified(String),
+    }
+
+    #[derive(Default)]
+    struct ExitObserver {
+        events: std::sync::Mutex<Vec<ExitObservation>>,
+        done: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl lingxi_core::host::BackgroundExitSink for ExitObserver {
+        async fn on_exit(&self, _: &str, code: Option<i32>) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(ExitObservation::Reaped(code));
+            self.done.notify_one();
+        }
+
+        async fn on_exit_with_status(&self, _: &str, code: Option<i32>, killed: bool) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(ExitObservation::Known(code, killed));
+            self.done.notify_one();
+        }
+
+        async fn on_wait_failure(&self, _: &str, error: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(ExitObservation::Unverified(error.into()));
+            self.done.notify_one();
+        }
+
+        async fn on_background_deadline_exit(&self, _: &str, code: Option<i32>) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(ExitObservation::Deadline(code));
+            self.done.notify_one();
+        }
+    }
+
+    #[test]
+    fn host_stop_rejects_invalid_process_group_ids() {
+        assert!(signal_host_process_group(0).is_err());
+        assert!(signal_host_process_group(u32::MAX).is_err());
+    }
+
+    #[tokio::test]
+    async fn host_owner_never_signals_an_unmatched_numeric_registration() {
+        let owner = "host-tool:registration-without-capability";
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]).kill_on_drop(true);
+        attach_setsid(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let registration = lingxi_core::host::agent_processes::register(Some(owner), Some(pid));
+
+        PosixProcess::new().kill_owner_processes(owner).await;
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "no capability must mean no raw signal"
+        );
+        drop(registration);
+        signal_host_process_group(pid).unwrap();
+        child.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_unmanaged_entrypoints_reject_before_spawning() {
+        struct ClaimingSink;
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for ClaimingSink {
+            fn requires_verified_supervised_stop(&self) -> bool {
+                true
+            }
+            async fn on_exit(&self, _: &str, _: Option<i32>) {}
+        }
+        struct Stream;
+        #[async_trait]
+        impl ProcessStreamSink for Stream {
+            async fn stdout_line(&self, _: String) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            async fn stderr_chunk(&self, _: Vec<u8>) -> Result<(), ProcessError> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("executed");
+        let script = format!(
+            "printf executed > '{}'",
+            marker.to_string_lossy().replace('\'', "'\\''")
+        );
+        let strict = sh(&script)
+            .with_require_group_cleanup_on_exit(true)
+            .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                task_id: "unmanaged-strict-marker".into(),
+                output_path: dir.path().join("output"),
+                on_exit: Some(Arc::new(ClaimingSink)),
+                on_demand: None,
+            });
+        let process = PosixProcess::new();
+        assert!(matches!(
+            process.run(&strict).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process.run_streaming(&strict, Arc::new(Stream)).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process.run_foreground(&strict).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process.spawn_background(&strict).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process
+                .run_hook_with_async_detection(&strict, Duration::from_secs(1))
+                .await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(
+            !marker.exists(),
+            "no unsupported strict entrypoint may execute the payload"
+        );
+        let ordinary = sh(&script);
+        assert!(process.run(&ordinary).await.unwrap().exit_code == 0);
+        assert!(
+            marker.exists(),
+            "ordinary direct execution must remain available"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_owner_never_signals_capability_only_reused_pid() {
+        fn spawn() -> tokio::process::Child {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exec sleep 60"]).kill_on_drop(true);
+            attach_setsid(&mut command);
+            command.spawn().unwrap()
+        }
+        let mut unrelated = spawn();
+        let mut ordinary = spawn();
+        let unrelated_pid = unrelated.id().unwrap();
+        let ordinary_pid = ordinary.id().unwrap();
+        let owner = format!("mixed-capability-owner-{unrelated_pid}");
+        // Model a retired supervisor capability whose retained numeric PID now
+        // aliases a live unrelated process. No supervisor capability exists.
+        let stale = lingxi_core::host::agent_processes::register_with_capability_requirement(
+            Some(&owner),
+            Some(unrelated_pid),
+            true,
+        )
+        .unwrap();
+        let replacement = lingxi_core::host::agent_processes::register_with_capability_requirement(
+            Some(&owner),
+            Some(unrelated_pid),
+            false,
+        )
+        .unwrap();
+        assert!(
+            replacement.entry().requires_capability(),
+            "overlap cannot downgrade strict identity"
+        );
+        drop(stale);
+        let direct =
+            lingxi_core::host::agent_processes::register(Some(&owner), Some(ordinary_pid)).unwrap();
+        let mut seen = PosixProcess::new().kill_owner_processes(&owner).await;
+        seen.sort_unstable();
+        let mut expected = vec![unrelated_pid, ordinary_pid];
+        expected.sort_unstable();
+        let untouched = unrelated.try_wait().unwrap().is_none();
+        let normal_exit = tokio::time::timeout(Duration::from_secs(10), ordinary.wait()).await;
+        if normal_exit.is_err() {
+            let _ = ordinary.kill().await;
+        }
+        let _ = unrelated.kill().await;
+        let _ = unrelated.wait().await;
+        drop(replacement);
+        drop(direct);
+        assert_eq!(seen, expected);
+        assert!(
+            untouched,
+            "a capability-only numeric alias must not be signalled"
+        );
+        assert!(!normal_exit
+            .expect("ordinary entry must remain stoppable")
+            .unwrap()
+            .success());
+    }
+
+    #[tokio::test]
+    async fn host_foreground_and_background_completion_reap_redirected_group_children() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+
+        // The release file forces the child to exist before its leader exits.
+        // No descendant holds a runner pipe, reproducing the original race.
+        for mode in ["foreground", "explicit-background", "auto-background"] {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("child-pid");
+            let release = dir.path().join("release");
+            let pid_path = pid_file.display().to_string().replace('\'', "'\\''");
+            let release_path = release.display().to_string().replace('\'', "'\\''");
+            let script = format!(
+                "sleep 60 </dev/null >/dev/null 2>&1 & printf '%s' \"$!\" > '{pid_path}'; while [ ! -f '{release_path}' ]; do sleep 0.02; done; exit 0"
+            );
+            let sink = Arc::new(ExitObserver::default());
+            let owner = format!("host-tool:redirected-{mode}");
+            let command = sh_with_timeout(
+                &script,
+                if mode == "auto-background" {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(8)
+                },
+            )
+            .with_process_owner(Some(owner.clone()))
+            .with_require_group_cleanup_on_exit(true)
+            .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                task_id: format!("redirected-{mode}"),
+                output_path: dir.path().join("output"),
+                on_exit: Some(sink.clone()),
+                on_demand: None,
+            });
+            std::fs::write(dir.path().join("output"), "").unwrap();
+            let mut task = tokio::spawn(async move {
+                let process = PosixProcess::new();
+                if mode == "explicit-background" {
+                    process
+                        .spawn_background_native(&command)
+                        .await
+                        .map(lingxi_core::host::ForegroundOutcome::MovedToBackground)
+                } else {
+                    process
+                        .run_foreground_native(&command, None)
+                        .await
+                        .map(|result| result.outcome)
+                }
+            });
+            let pid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        if let Ok(pid) = text.parse() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("background descendant must start before leader release");
+            assert!(
+                kill(Pid::from_raw(pid), None).is_ok(),
+                "descendant must initially be alive: {mode}"
+            );
+            let early_result = if mode != "foreground" {
+                Some(
+                    tokio::time::timeout(Duration::from_secs(5), &mut task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            std::fs::write(&release, "go").unwrap();
+            let outcome = if let Some(outcome) = early_result {
+                outcome
+            } else {
+                tokio::time::timeout(Duration::from_secs(10), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            };
+            if mode == "foreground" {
+                assert!(matches!(
+                    outcome,
+                    lingxi_core::host::ForegroundOutcome::Completed(_)
+                ));
+                // Model cancellation arriving after completion but before the
+                // response is delivered. There must be no surviving group.
+                PosixProcess::new().kill_owner_processes(&owner).await;
+            } else {
+                assert!(matches!(
+                    outcome,
+                    lingxi_core::host::ForegroundOutcome::MovedToBackground(_)
+                ));
+                tokio::time::timeout(Duration::from_secs(10), sink.done.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    *sink.events.lock().unwrap(),
+                    [ExitObservation::Known(Some(0), false)]
+                );
+            }
+            let alive = kill(Pid::from_raw(pid), None).is_ok();
+            if alive {
+                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+            }
+            assert!(
+                !alive,
+                "verified completion left a live group child: {mode}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_foreground_keeps_redirected_background_child() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+
+        let command = sh("sleep 60 </dev/null >/dev/null 2>&1 & printf '%s' \"$!\"");
+        let output = match PosixProcess::new().run_foreground(&command).await.unwrap() {
+            lingxi_core::host::ForegroundOutcome::Completed(output) => output,
+            other => panic!("expected ordinary completion: {other:?}"),
+        };
+        let pid = Pid::from_raw(output.stdout.parse().unwrap());
+        let alive = kill(pid, None).is_ok();
+        if alive {
+            let _ = kill(pid, Signal::SIGKILL);
+        }
+        assert!(
+            alive,
+            "ordinary agent background behavior must remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_background_reapers_distinguish_signal_exit_from_wait_failure() {
+        struct DropObserver(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropObserver {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for explicit in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("release");
+            let marker_quoted = marker.display().to_string().replace('\'', "'\\''");
+            let script =
+                format!("while [ ! -f '{marker_quoted}' ]; do sleep 0.02; done; kill -TERM $$");
+            let output = dir.path().join("output");
+            std::fs::write(&output, "").unwrap();
+            let sink = Arc::new(ExitObserver::default());
+            let guard_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let command = sh_with_timeout(&script, Duration::from_millis(100))
+                .with_process_owner(Some("host-tool:signal-test".into()))
+                .with_require_group_cleanup_on_exit(true)
+                .with_lifetime_guard(DropObserver(guard_dropped.clone()))
+                .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                    task_id: "host-signal".into(),
+                    output_path: output,
+                    on_exit: Some(sink.clone()),
+                    on_demand: None,
+                });
+            let process = PosixProcess::new();
+            let handle = if explicit {
+                process.spawn_background_native(&command).await.unwrap()
+            } else {
+                match process
+                    .run_foreground_native(&command, None)
+                    .await
+                    .map(|result| result.outcome)
+                    .unwrap()
+                {
+                    lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => handle,
+                    other => panic!("expected foreground handoff: {other:?}"),
+                }
+            };
+            drop(command);
+            assert!(
+                !guard_dropped.load(Ordering::SeqCst),
+                "background reaper must retain the guard: explicit={explicit}"
+            );
+            std::fs::write(marker, "go").unwrap();
+            let done = tokio::time::timeout(Duration::from_secs(10), sink.done.notified()).await;
+            if done.is_err() {
+                let _ = process.kill(&handle).await;
+            }
+            done.expect("signal-terminated child should be reaped");
+            assert_eq!(
+                *sink.events.lock().unwrap(),
+                [ExitObservation::Known(None, false)],
+                "explicit={explicit}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !guard_dropped.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("reaped process must release its lifetime guard");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_stop_and_natural_completion_have_distinct_outcomes() {
+        #[derive(Default)]
+        struct Sink {
+            stop: Arc<tokio::sync::Notify>,
+            ready: tokio::sync::Notify,
+            done: tokio::sync::Notify,
+            cleanup: tokio::sync::Notify,
+            reject_flush: std::sync::atomic::AtomicBool,
+            output: std::sync::Mutex<String>,
+            events: std::sync::Mutex<Vec<ExitObservation>>,
+        }
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for Sink {
+            fn manages_output(&self) -> bool {
+                true
+            }
+            fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+                Some(self.stop.clone())
+            }
+            fn requires_verified_supervised_stop(&self) -> bool {
+                true
+            }
+            async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+                let mut output = self.output.lock().unwrap();
+                output.push_str(text);
+                if output.contains("ready") {
+                    self.ready.notify_one();
+                }
+                Ok(())
+            }
+            async fn flush_output(&self, _: &str) -> Result<(), ProcessError> {
+                if self.reject_flush.load(Ordering::SeqCst) {
+                    Err(ProcessError::Io("injected output flush failure".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            async fn on_cleanup_verified(&self, _: &str) {
+                self.cleanup.notify_one();
+            }
+            async fn on_exit(&self, _: &str, code: Option<i32>) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(ExitObservation::Reaped(code));
+                self.done.notify_one();
+            }
+            async fn on_exit_with_status(&self, _: &str, code: Option<i32>, killed: bool) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(ExitObservation::Known(code, killed));
+                self.done.notify_one();
+            }
+            async fn on_exit_with_proof(
+                &self,
+                _: &str,
+                code: Option<i32>,
+                killed: Option<bool>,
+                group: bool,
+            ) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(ExitObservation::Proof(code, killed, group));
+                self.done.notify_one();
+            }
+            async fn on_wait_failure(&self, _: &str, error: &str) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(ExitObservation::Unverified(error.into()));
+                self.done.notify_one();
+            }
+        }
+
+        for (explicit, supervisor_only, deadline) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (false, true, false),
+            (true, true, true),
+            (false, true, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = Arc::new(Sink::default());
+            let pid_path = dir.path().join("descendant.pid");
+            let script = format!(
+                "sleep 60 & printf '%s\\n' \"$!\" > '{}'; printf ready; wait",
+                pid_path.to_string_lossy().replace('\'', "'\\''")
+            );
+            let command = sh_with_timeout(
+                &script,
+                if explicit {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_millis(100)
+                },
+            )
+            .with_process_owner(
+                (!supervisor_only).then(|| "host-tool:verified-stop-outcome".into()),
+            )
+            .with_require_group_cleanup_on_exit(!supervisor_only)
+            .with_background_timeout(deadline.then_some(Duration::from_secs(2)))
+            .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                task_id: "host-stop-outcome".into(),
+                output_path: dir.path().join("output"),
+                on_exit: Some(sink.clone()),
+                on_demand: None,
+            });
+            let process = PosixProcess::new();
+            let handle = if explicit {
+                process.spawn_background_native(&command).await.unwrap()
+            } else {
+                match process
+                    .run_foreground_native(&command, None)
+                    .await
+                    .map(|result| result.outcome)
+                    .unwrap()
+                {
+                    lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => handle,
+                    other => panic!("expected background handoff: {other:?}"),
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), sink.ready.notified())
+                .await
+                .expect("child output confirms the live command started");
+            let descendant: u32 = std::fs::read_to_string(&pid_path)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(lingxi_core::host::live_sessions::process_start_identity(descendant).is_some());
+            assert!(!observe_host_child_exit(handle.pid).unwrap());
+            REJECT_REPEAT_GROUP_STOP
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .insert(handle.pid, 0);
+            if !deadline {
+                sink.stop.notify_one();
+            }
+            let done = tokio::time::timeout(Duration::from_secs(20), sink.done.notified()).await;
+            if done.is_err() {
+                let _ = process.kill(&handle).await;
+            }
+            done.expect("stopped process group must finish");
+            assert_eq!(
+                REJECT_REPEAT_GROUP_STOP
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .remove(&handle.pid),
+                Some(1),
+                "a verified stop must not send a redundant second signal"
+            );
+            assert_eq!(
+                *sink.events.lock().unwrap(),
+                [ExitObservation::Proof(None, None, true)],
+                "a stop or deadline does not prove causation: explicit={explicit}, supervisor_only={supervisor_only}, deadline={deadline}"
+            );
+            let ps = tokio::process::Command::new("/bin/ps")
+                .args(["-o", "stat=", "-p", &descendant.to_string()])
+                .output()
+                .await
+                .unwrap();
+            let state = String::from_utf8_lossy(&ps.stdout);
+            assert!(
+                !ps.status.success() || state.trim().is_empty() || state.contains('Z'),
+                "descendant must be stopped before outcome: {state}"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let command = sh("printf ready; exit 0")
+            .with_process_owner(Some("host-tool:natural-outcome".into()))
+            .with_require_group_cleanup_on_exit(true)
+            .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                task_id: "host-natural-outcome".into(),
+                output_path: dir.path().join("output"),
+                on_exit: Some(sink.clone()),
+                on_demand: None,
+            });
+        let handle = PosixProcess::new()
+            .spawn_background_native(&command)
+            .await
+            .unwrap();
+        let done = tokio::time::timeout(Duration::from_secs(20), sink.done.notified()).await;
+        if done.is_err() {
+            let _ = PosixProcess::new().kill(&handle).await;
+        }
+        done.expect("natural completion must be reaped");
+        sink.stop.notify_one();
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            [ExitObservation::Proof(Some(0), Some(false), true)],
+            "a later stop notification must not rewrite a completed result"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        sink.reject_flush.store(true, Ordering::SeqCst);
+        let command = sh("printf ready; exec sleep 60").with_background_task(
+            lingxi_core::host::BackgroundTaskBinding {
+                task_id: "supervised-stop-flush-failure".into(),
+                output_path: dir.path().join("output"),
+                on_exit: Some(sink.clone()),
+                on_demand: None,
+            },
+        );
+        let process = PosixProcess::new();
+        let handle = process.spawn_background_native(&command).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), sink.ready.notified())
+            .await
+            .unwrap();
+        sink.stop.notify_one();
+        let done = tokio::time::timeout(Duration::from_secs(20), sink.done.notified()).await;
+        if done.is_err() {
+            let _ = process.kill(&handle).await;
+        }
+        done.expect("output failure must be reported");
+        tokio::time::timeout(Duration::from_secs(5), sink.cleanup.notified())
+            .await
+            .expect("verified process cleanup must be reported separately");
+        let events = sink.events.lock().unwrap();
+        assert!(
+            matches!(&events[..], [ExitObservation::Unverified(error)] if error.contains("injected output flush failure"))
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_leader_and_group_proofs_follow_actual_cleanup() {
+        #[derive(Default)]
+        struct Sink {
+            stop: Arc<tokio::sync::Notify>,
+            ready: tokio::sync::Notify,
+            done: tokio::sync::Notify,
+            output: std::sync::Mutex<String>,
+            events: std::sync::Mutex<Vec<ExitObservation>>,
+        }
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for Sink {
+            fn manages_output(&self) -> bool {
+                true
+            }
+            fn requires_verified_supervised_stop(&self) -> bool {
+                true
+            }
+            fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+                Some(self.stop.clone())
+            }
+            async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+                let mut output = self.output.lock().unwrap();
+                output.push_str(text);
+                if output.contains("ready") {
+                    self.ready.notify_one();
+                }
+                Ok(())
+            }
+            async fn on_exit_with_proof(
+                &self,
+                _: &str,
+                code: Option<i32>,
+                killed: Option<bool>,
+                group: bool,
+            ) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(ExitObservation::Proof(code, killed, group));
+                self.done.notify_one();
+            }
+            async fn on_exit(&self, _: &str, code: Option<i32>) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(ExitObservation::Reaped(code));
+                self.done.notify_one();
+            }
+            async fn on_wait_failure(&self, _: &str, error: &str) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(ExitObservation::Unverified(error.into()));
+                self.done.notify_one();
+            }
+        }
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, "release");
+            }
+        }
+
+        // With no strict policy, the leader may complete while a deliberately
+        // detached descendant is still live. Strict mode must first stop and
+        // verify the same group, even though the leader itself exited normally.
+        for strict in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let sink = Arc::new(Sink::default());
+            let release = dir.path().join("release");
+            let _release_guard = ReleaseOnDrop(release.clone());
+            let quote = |path: &Path| path.to_string_lossy().replace('\'', "'\\''");
+            let child_ready = dir.path().join("child-ready");
+            let child_pid = dir.path().join("child.pid");
+            let script = format!(
+                "(printf yes > '{}'; i=0; while [ \"$i\" -lt 600 ]; do [ -e '{}' ] && exit 0; i=$((i+1)); sleep 0.1; done) </dev/null >/dev/null 2>&1 & printf '%s' \"$!\" > '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; printf ready; exit 0",
+                quote(&child_ready), quote(&release), quote(&child_pid), quote(&child_ready),
+            );
+            let command = sh(&script)
+                .with_require_group_cleanup_on_exit(strict)
+                .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+                    task_id: format!("leader-proof-{strict}"),
+                    output_path: dir.path().join("output"),
+                    on_exit: Some(sink.clone()),
+                    on_demand: None,
+                });
+            let process = PosixProcess::new();
+            let handle = process.spawn_background_native(&command).await.unwrap();
+            let done = tokio::time::timeout(Duration::from_secs(20), sink.done.notified()).await;
+            if done.is_err() {
+                let _ = process.kill(&handle).await;
+            }
+            done.expect("leader completion was not reported");
+            assert_eq!(
+                *sink.events.lock().unwrap(),
+                [ExitObservation::Proof(Some(0), Some(false), strict)]
+            );
+            let pid: u32 = std::fs::read_to_string(child_pid).unwrap().parse().unwrap();
+            if !strict {
+                assert!(
+                    lingxi_core::host::live_sessions::process_start_identity(pid).is_some(),
+                    "ordinary natural completion must leave the descendant alive"
+                );
+                std::fs::write(&release, "release").unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let ps = Command::new("/bin/ps")
+                        .args(["-o", "stat=", "-p", &pid.to_string()])
+                        .output()
+                        .await
+                        .unwrap();
+                    let state = String::from_utf8_lossy(&ps.stdout);
+                    if !ps.status.success() || state.trim().is_empty() || state.contains('Z') {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("descendant must be gone after strict cleanup or test release");
+        }
+
+        // The leader exits but a live descendant still holds the pipes. Stop
+        // wins before leader publication while the original group ID is held.
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let pid_file = dir.path().join("child.pid");
+        let script = format!(
+            "sleep 60 & printf '%s' \"$!\" > '{}'; printf ready; exit 0",
+            pid_file.to_string_lossy().replace('\'', "'\\''")
+        );
+        let command = sh(&script).with_background_task(lingxi_core::host::BackgroundTaskBinding {
+            task_id: "leader-then-stop-proof".into(),
+            output_path: dir.path().join("output"),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        });
+        let process = PosixProcess::new();
+        let handle = process.spawn_background_native(&command).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), sink.ready.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !observe_host_child_exit(handle.pid).unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader did not exit before stop");
+        let descendant: u32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        assert!(lingxi_core::host::live_sessions::process_start_identity(descendant).is_some());
+        assert!(sink.events.lock().unwrap().is_empty());
+        sink.stop.notify_one();
+        let done = tokio::time::timeout(Duration::from_secs(20), sink.done.notified()).await;
+        if done.is_err() {
+            let _ = process.kill(&handle).await;
+        }
+        done.expect("stop after leader exit must verify its group");
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            [ExitObservation::Proof(Some(0), None, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_stop_retries_after_signal_failure_without_losing_diagnostic() {
+        #[derive(Default)]
+        struct Sink {
+            stop: Arc<tokio::sync::Notify>,
+            ready: tokio::sync::Notify,
+            failed: tokio::sync::Notify,
+            cleaned: tokio::sync::Notify,
+            output: std::sync::Mutex<String>,
+            events: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for Sink {
+            fn manages_output(&self) -> bool {
+                true
+            }
+            fn requires_verified_supervised_stop(&self) -> bool {
+                true
+            }
+            fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+                Some(self.stop.clone())
+            }
+            async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+                let mut output = self.output.lock().unwrap();
+                output.push_str(text);
+                if output.contains("ready") {
+                    self.ready.notify_one();
+                }
+                Ok(())
+            }
+            async fn on_wait_failure(&self, _: &str, error: &str) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("failure: {error}"));
+                self.failed.notify_one();
+            }
+            async fn on_cleanup_verified(&self, _: &str) {
+                self.events.lock().unwrap().push("cleanup verified".into());
+                self.cleaned.notify_one();
+            }
+            async fn on_exit(&self, _: &str, _: Option<i32>) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push("unexpected terminal".into());
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = format!("stop-retry-{}", dir.path().display());
+        FAIL_NEXT_BACKGROUND_STOP
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(task_id.clone());
+        let sink = Arc::new(Sink::default());
+        let command = sh("printf ready; exec sleep 60").with_background_task(
+            lingxi_core::host::BackgroundTaskBinding {
+                task_id,
+                output_path: dir.path().join("output"),
+                on_exit: Some(sink.clone()),
+                on_demand: None,
+            },
+        );
+        let process = PosixProcess::new();
+        let handle = process.spawn_background(&command).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), sink.ready.notified())
+            .await
+            .unwrap();
+        sink.stop.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), sink.failed.notified())
+            .await
+            .expect("first injected signal failure was not reported");
+        assert!(
+            !observe_host_child_exit(handle.pid).unwrap(),
+            "first stop must leave real child live"
+        );
+        sink.stop.notify_one();
+        let cleaned = tokio::time::timeout(Duration::from_secs(20), sink.cleaned.notified()).await;
+        if cleaned.is_err() {
+            let _ = process.kill(&handle).await;
+        }
+        cleaned.expect("second stop must verify cleanup");
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].contains("injected background stop failure"));
+        assert_eq!(events[1], "cleanup verified");
+        assert!(lingxi_core::host::live_sessions::process_start_identity(handle.pid).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_reaper_accepts_retry_before_releasing_group_identity() {
+        #[derive(Default)]
+        struct Sink {
+            stop: Arc<tokio::sync::Notify>,
+            ready: tokio::sync::Notify,
+            failed: tokio::sync::Notify,
+            cleaned: tokio::sync::Notify,
+            output: std::sync::Mutex<String>,
+            events: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for Sink {
+            fn manages_output(&self) -> bool {
+                true
+            }
+            fn requires_verified_supervised_stop(&self) -> bool {
+                true
+            }
+            fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+                Some(self.stop.clone())
+            }
+            async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+                let mut output = self.output.lock().unwrap();
+                output.push_str(text);
+                if output.contains("ready") {
+                    self.ready.notify_one();
+                }
+                Ok(())
+            }
+            async fn on_wait_failure(&self, _: &str, error: &str) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("failure: {error}"));
+                self.failed.notify_one();
+            }
+            async fn on_cleanup_verified(&self, _: &str) {
+                self.events.lock().unwrap().push("cleanup verified".into());
+                self.cleaned.notify_one();
+            }
+            async fn on_exit(&self, _: &str, _: Option<i32>) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push("unexpected terminal".into());
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = format!("reaper-retry-{}", dir.path().display());
+        FAIL_NEXT_BACKGROUND_STOP
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(task_id.clone());
+        SKIP_NEXT_BACKGROUND_STOP
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(task_id.clone());
+        let pid_file = dir.path().join("child.pid");
+        let release = dir.path().join("release");
+        let quote = |path: &Path| path.to_string_lossy().replace('\'', "'\\''");
+        let script = format!("sleep 60 </dev/null >/dev/null 2>&1 & printf '%s' \"$!\" > '{}'; printf ready; exec 1>&- 2>&-; i=0; while [ ! -e '{}' ] && [ \"$i\" -lt 600 ]; do i=$((i+1)); sleep 0.1; done; exit 0", quote(&pid_file), quote(&release));
+        let sink = Arc::new(Sink::default());
+        let command = sh(&script).with_background_task(lingxi_core::host::BackgroundTaskBinding {
+            task_id: task_id.clone(),
+            output_path: dir.path().join("output"),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        });
+        let process = PosixProcess::new();
+        let handle = process.spawn_background(&command).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), sink.ready.notified())
+            .await
+            .unwrap();
+        let descendant: u32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        sink.stop.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), sink.failed.notified())
+            .await
+            .unwrap();
+        sink.stop.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let pending = SKIP_NEXT_BACKGROUND_STOP
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .contains(&task_id);
+                if !pending {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("simulated incomplete stop was not processed");
+        std::fs::write(&release, "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !observe_host_child_exit(handle.pid).unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader did not exit before the retry");
+        assert!(lingxi_core::host::live_sessions::process_start_identity(descendant).is_some());
+        sink.stop.notify_one();
+        let cleaned = tokio::time::timeout(Duration::from_secs(20), sink.cleaned.notified()).await;
+        if cleaned.is_err() {
+            let _ = process.kill(&handle).await;
+        }
+        cleaned.expect("retry must stop the live group before reporting cleanup");
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].contains("injected background stop failure"));
+        assert_eq!(events[1], "cleanup verified");
+        assert!(lingxi_core::host::live_sessions::process_start_identity(handle.pid).is_none());
+    }
+
+    #[tokio::test]
+    async fn host_background_wait_failures_are_unverified_and_reported_once() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let sink = Arc::new(ExitObserver::default());
+        report_background_completion(
+            sink.as_ref(),
+            "host-wait",
+            Err(std::io::Error::other("wait failed")),
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            [ExitObservation::Unverified(
+                "background child wait failed: wait failed".into()
+            )]
+        );
+
+        sink.events.lock().unwrap().clear();
+        report_background_completion(
+            sink.as_ref(),
+            "ordinary-deadline",
+            Err(std::io::Error::other("wait failed")),
+            true,
+            false,
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            [ExitObservation::Unverified(
+                "background child wait failed: wait failed".into()
+            )]
+        );
+
+        sink.events.lock().unwrap().clear();
+        let binding = lingxi_core::host::BackgroundTaskBinding {
+            task_id: "host-stop".into(),
+            output_path: PathBuf::new(),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        };
+        let mut reported = false;
+        report_stop_failure(Some(&binding), "stop failed", &mut reported).await;
+        report_stop_failure(Some(&binding), "second failure", &mut reported).await;
+        report_background_completion(
+            sink.as_ref(),
+            "host-stop",
+            Ok(std::process::ExitStatus::from_raw(0)),
+            false,
+            true,
+            reported,
+            true,
+        )
+        .await;
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            [ExitObservation::Unverified("stop failed".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn host_foreground_deadline_kills_descendants_after_leader_exit() {
+        let command = sh_with_timeout(
+            "sleep 15 & printf '%s\\n' \"$!\"; exit 0",
+            Duration::from_secs(1),
+        )
+        .with_process_owner(Some("host-tool:foreground-deadline".into()))
+        .with_require_group_cleanup_on_exit(true)
+        .with_auto_background_on_timeout(false);
+        let process = PosixProcess::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            process.run_foreground_native(&command, None),
+        )
+        .await
+        .expect("foreground deadline must settle")
+        .unwrap();
+        let output = match result.outcome {
+            lingxi_core::host::ForegroundOutcome::Completed(output) => output,
+            other => panic!("expected timed-out foreground result: {other:?}"),
+        };
+        let pid: u32 = output.stdout.trim().parse().expect("descendant pid");
+        assert!(
+            output.timed_out,
+            "leader exit must not hide a live descendant"
+        );
+        assert_eq!(output.exit_code, TIMEOUT_KILL_EXIT_CODE);
+
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = tokio::process::Command::new("/bin/ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .await
+                    .unwrap();
+                let state = String::from_utf8_lossy(&status.stdout);
+                if !status.status.success() || state.trim().is_empty() || state.contains('Z') {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        stopped.expect("descendant must be stopped by its original process group");
     }
 
     #[tokio::test]
@@ -2374,6 +4512,77 @@ mod async_hook_tests {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn hook_closing_stdin_early_preserves_output_and_exit_status() {
+        for owned in [false, true] {
+            for exit_code in [0, 7] {
+                let base = sh(&format!(
+                    "exec 0<&-; printf 'hook-output\\n'; printf 'hook-error\\n' >&2; exit {exit_code}"
+                ));
+                let mut input = base.inner().clone();
+                // Larger than a pipe buffer: write_all must observe the closed
+                // read end even when it runs before the child closes stdin.
+                input.stdin = Some("x".repeat(8 * 1024 * 1024));
+                let mut command = SandboxedCommand::__new_sandboxed(input, base.tag().clone());
+                if owned {
+                    command = command
+                        .with_lifetime_guard(Arc::new(()))
+                        .with_require_group_cleanup_on_exit(true);
+                }
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    PosixProcess::new()
+                        .run_hook_with_async_detection(&command, Duration::from_secs(5)),
+                )
+                .await
+                .expect("hook completes and owned group cleanup is verified")
+                .expect("closed stdin does not replace the hook result");
+                let HookRunOutcome::Completed(output) = outcome else {
+                    panic!("hook must return its actual process result");
+                };
+                assert_eq!(output.stdout, "hook-output\n", "owned={owned}");
+                assert_eq!(output.stderr, "hook-error\n", "owned={owned}");
+                assert_eq!(output.exit_code, exit_code, "owned={owned}");
+                assert!(!output.timed_out, "owned={owned}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_stdin_other_write_errors_are_not_ignored() {
+        struct DeniedWriter;
+        impl tokio::io::AsyncWrite for DeniedWriter {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture write failure",
+                )))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let error = write_hook_stdin(&mut DeniedWriter, b"event")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "fixture write failure");
+    }
+
     #[tokio::test]
     async fn async_marker_backgrounds_without_blocking() {
         // Prints the marker, then sleeps far longer than the async timeout. The
@@ -2435,6 +4644,121 @@ mod async_hook_tests {
         assert_eq!(out.stderr, "err\n", "eventual stderr: {out:?}");
         assert_eq!(out.exit_code, 0);
         assert!(!out.timed_out);
+    }
+
+    #[tokio::test]
+    async fn recovery_marker_retains_work_without_output_receiver_until_group_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("descendant.pid");
+        let lease = Arc::new(());
+        let weak = Arc::downgrade(&lease);
+        let command = sh(&format!(
+            "echo '{{\"async\":true,\"asyncTimeout\":5000}}'; sleep 30 & echo $! > '{}'; wait",
+            pid_path.display()
+        ))
+        .with_lifetime_guard(lease.clone())
+        .with_require_group_cleanup_on_exit(true);
+        let outcome = PosixProcess::new()
+            .run_hook_with_async_detection(&command, Duration::from_secs(3))
+            .await
+            .expect("owned marker hook starts");
+        let HookRunOutcome::Backgrounded {
+            output: Some(receiver),
+            ..
+        } = outcome
+        else {
+            panic!("hook backgrounds");
+        };
+        drop(receiver); // no registry or a failed registration
+        drop(command);
+        drop(lease);
+        let descendant = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_path) {
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        if pid > 0 {
+                            break pid.to_string();
+                        }
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("descendant writes a valid positive PID");
+        let initially_alive = std::process::Command::new("/bin/kill")
+            .args(["-0", &descendant])
+            .stderr(Stdio::null())
+            .status()
+            .expect("query running descendant")
+            .success();
+        assert!(
+            initially_alive,
+            "fixture descendant must start before cleanup"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "physical owner must retain work without a receiver"
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while weak.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("lease released only after timeout and group verification");
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", &descendant])
+            .stderr(Stdio::null())
+            .status()
+            .expect("query descendant")
+            .success();
+        assert!(
+            !alive,
+            "same-group descendant must exit before lease release"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_marker_cancellation_waits_for_owned_group_before_completion() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let lease = Arc::new(());
+        let weak = Arc::downgrade(&lease);
+        let command = sh("echo '{\"async\":true}'; sleep 30 & wait")
+            .with_lifetime_guard(lease.clone())
+            .with_require_group_cleanup_on_exit(true);
+        let outcome = PosixProcess::new()
+            .run_hook_with_async_detection_observed_cancellable(
+                &command,
+                Duration::from_secs(30),
+                None,
+                Some(cancellation.clone()),
+            )
+            .await
+            .expect("owned marker hook starts");
+        let HookRunOutcome::Backgrounded {
+            output: Some(receiver),
+            ..
+        } = outcome
+        else {
+            panic!("hook backgrounds");
+        };
+        drop(command);
+        drop(lease);
+        assert!(weak.upgrade().is_some());
+        cancellation.cancel();
+        let output = tokio::time::timeout(Duration::from_secs(15), receiver)
+            .await
+            .expect("verified cancellation")
+            .expect("completion delivered");
+        assert!(output.stderr.contains("cancelled"));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("work released after physical cleanup");
     }
     #[tokio::test]
     async fn cancelling_idle_hook_reaps_its_owned_process_group() {
@@ -2621,6 +4945,196 @@ mod streaming_tests {
                 reason: "monitor_task_test".to_string(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn owned_streaming_holds_leader_until_descendant_is_stopped() {
+        let sink = Arc::new(RecordingSink::default());
+        let owner = format!(
+            "{}{}",
+            lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX,
+            generate_task_id().unwrap()
+        );
+        let command = stream_sh(
+            "sleep 30 & printf '%s\\n' \"$!\"; exit 0",
+            Duration::from_secs(60),
+        )
+        .with_process_owner(Some(owner.clone()));
+        let process = Arc::new(PosixProcess::new());
+        let runner = process.clone();
+        let observer = sink.clone();
+        let task = tokio::spawn(async move { runner.run_streaming(&command, observer).await });
+        tokio::time::timeout(Duration::from_secs(10), sink.line_ready.notified())
+            .await
+            .expect("descendant pid is streamed");
+        let leader = lingxi_core::host::agent_processes::snapshot_entries(&owner)
+            .first()
+            .expect("owner registration")
+            .pid;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = tokio::process::Command::new("/bin/ps")
+                    .args(["-o", "stat=", "-p", &leader.to_string()])
+                    .output()
+                    .await
+                    .unwrap();
+                if String::from_utf8_lossy(&status.stdout).contains('Z') {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("exited leader must remain unreaped while descendant holds pipes");
+        assert!(!task.is_finished());
+        process.kill_owner_processes(&owner).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("owner stop must finish")
+            .unwrap()
+            .expect("held leader is waited after pipe EOF");
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            lingxi_core::host::live_sessions::process_start_identity(leader).is_none(),
+            "leader must be reaped before completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_streaming_sink_failure_is_not_reported_as_verified() {
+        struct FailedSink;
+        #[async_trait]
+        impl ProcessStreamSink for FailedSink {
+            async fn stdout_line(&self, _: String) -> Result<(), ProcessError> {
+                Err(ProcessError::Io("output consumer failed".into()))
+            }
+
+            async fn stderr_chunk(&self, _: Vec<u8>) -> Result<(), ProcessError> {
+                Ok(())
+            }
+        }
+        let owner = format!(
+            "{}{}",
+            lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX,
+            generate_task_id().unwrap()
+        );
+        let command = stream_sh("printf 'ready\\n'; sleep 30", Duration::from_secs(60))
+            .with_process_owner(Some(owner.clone()));
+        let error = tokio::time::timeout(
+            Duration::from_secs(15),
+            PosixProcess::new().run_streaming(&command, Arc::new(FailedSink)),
+        )
+        .await
+        .expect("failure cleanup must be bounded")
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProcessError::Io(message)
+                if message.starts_with(lingxi_core::host::process::OWNED_STREAMING_CLEANUP_UNVERIFIED)
+        ));
+        assert!(
+            lingxi_core::host::agent_processes::snapshot_entries(&owner).is_empty(),
+            "the failed operation must release its owner registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_streaming_cleans_up_redirected_group_children_before_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("child");
+        let release = dir.path().join("release");
+        let pid_path = pid_file.display().to_string().replace('\'', "'\\''");
+        let release_path = release.display().to_string().replace('\'', "'\\''");
+        let script = format!("sleep 60 </dev/null >/dev/null 2>&1 & printf '%s' \"$!\" > '{pid_path}'; while [ ! -f '{release_path}' ]; do sleep 0.02; done; exit 0");
+        let owner = format!(
+            "{}{}",
+            lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX,
+            generate_task_id().unwrap()
+        );
+        let command = stream_sh(&script, Duration::from_secs(20)).with_process_owner(Some(owner));
+        let task = tokio::spawn(async move {
+            PosixProcess::new()
+                .run_streaming(&command, Arc::new(RecordingSink::default()))
+                .await
+        });
+        let pid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = text.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok());
+        let process_id = u32::try_from(pid).expect("child PID must be positive");
+        let start = lingxi_core::host::live_sessions::process_start_identity(process_id)
+            .expect("child start identity must be observable");
+        std::fs::write(release, "go").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+            Err(nix::errno::Errno::ESRCH) => {}
+            Ok(()) | Err(nix::errno::Errno::EPERM) => {
+                let current = lingxi_core::host::live_sessions::process_start_identity(process_id)
+                    .expect("a live PID must have an observable start identity");
+                assert_ne!(
+                    current, start,
+                    "the original redirected descendant survived verified completion"
+                );
+            }
+            Err(error) => panic!("could not inspect descendant PID: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_streaming_drop_signals_redirected_group_children() {
+        let sink = Arc::new(RecordingSink::default());
+        let owner = format!(
+            "{}{}",
+            lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX,
+            generate_task_id().unwrap()
+        );
+        let command = stream_sh(
+            "sleep 60 </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\"; wait",
+            Duration::from_secs(90),
+        )
+        .with_process_owner(Some(owner));
+        let observer = sink.clone();
+        let task =
+            tokio::spawn(
+                async move { PosixProcess::new().run_streaming(&command, observer).await },
+            );
+        tokio::time::timeout(Duration::from_secs(10), sink.line_ready.notified())
+            .await
+            .expect("child PID must be streamed");
+        let pid: i32 = sink.lines.lock().unwrap()[0].parse().unwrap();
+        assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = tokio::process::Command::new("/bin/ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .await
+                    .unwrap();
+                let state = String::from_utf8_lossy(&status.stdout);
+                if !status.status.success() || state.trim().is_empty() || state.contains('Z') {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("dropping the worker must signal the redirected child");
     }
 
     #[tokio::test]

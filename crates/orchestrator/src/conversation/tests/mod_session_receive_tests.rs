@@ -125,7 +125,7 @@ impl crate::prompt::mid_turn_input::MidTurnInputSource for FailingAfterToolsSour
     async fn input_consumed(
         &self,
         _inputs: &[crate::prompt::mid_turn_input::MidTurnInput],
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::prompt::mid_turn_input::MidTurnConsumptionError> {
         self.consumed_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())

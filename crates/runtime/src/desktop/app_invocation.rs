@@ -597,13 +597,11 @@ mod tests {
         assert!(!lease.allows_builtin("Bash"));
         lease.revoke();
         enforce_app_config(&mut config).unwrap();
-        assert!(
-            config
-                .session_tool_grant_lease
-                .as_ref()
-                .unwrap()
-                .is_revoked()
-        );
+        assert!(config
+            .session_tool_grant_lease
+            .as_ref()
+            .unwrap()
+            .is_revoked());
     }
 
     #[test]
@@ -763,24 +761,20 @@ mod tests {
             runtime.orchestrator.tool_names(),
             vec!["StructuredOutput".to_string()]
         );
-        assert!(
-            runtime
-                .structured_output_slot
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .is_none()
-        );
+        assert!(runtime
+            .structured_output_slot
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_none());
         assert!(runtime.plugin_runtime.is_none());
         assert!(!runtime.coordinator_mode.is_enabled());
-        assert!(
-            runtime
-                .orchestrator
-                .conversation_transcript()
-                .await
-                .is_empty()
-        );
+        assert!(runtime
+            .orchestrator
+            .conversation_transcript()
+            .await
+            .is_empty());
         assert_eq!(runtime.orchestrator.snapshot_cost().await.api_calls, 0);
         let context = runtime
             .orchestrator

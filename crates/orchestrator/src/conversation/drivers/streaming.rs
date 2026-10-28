@@ -30,6 +30,17 @@ use crate::turn_loop::{
 };
 use hooks::attachment::HookPublicationGuard;
 
+#[cfg(test)]
+#[path = "streaming_recovery_tests.rs"]
+mod recovery_tests;
+
+pub(super) fn ensure_mod_recovery_accepted() -> Result<(), OrchestratorError> {
+    hooks::mods::check_mod_turn_recovery_failure().map_err(|error| match error {
+        hooks::RecoveryAdmissionError::Interrupted => OrchestratorError::RecoveryInterrupted,
+        hooks::RecoveryAdmissionError::Failure(error) => OrchestratorError::Internal(error),
+    })
+}
+
 // Cancel request opening before the first response stream exists. This is safe
 // for the foreground turn: no stream event has dispatched tools or produced a
 // partial assistant row yet. Once the stream is open, the pump owns the more
@@ -282,6 +293,8 @@ async fn send_mod_step_output(
 #[allow(clippy::too_many_arguments)]
 fn mod_turn_step_stream(
     host: Arc<hooks::mods::ModHost>,
+    session: Option<Arc<dyn hooks::mods::ModSessionContext>>,
+    recovery_leases: Option<crate::conversation::ToolDispatchRecoveryLeases>,
     api: Arc<dyn crate::conversation::StreamingApiClient>,
     output: Arc<dyn lingxi_core::host::OutputStream>,
     main_api: Arc<dyn crate::conversation::OrchestratorApiClient>,
@@ -337,6 +350,13 @@ fn mod_turn_step_stream(
     let worker_error = physical_error.clone();
     tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
         telemetry::otel::bind_current_trace_context(async move {
+            // This worker is independent of the consumer and Tokio does not
+            // inherit task-local recovery scopes. Retain the originating turn
+            // until the actual Mod dispatch and its stream work have finished.
+            let detached_mod_leases = recovery_leases
+                .as_ref()
+                .map(|leases| (Arc::clone(&leases.execution), Arc::clone(&leases.turn_work)));
+            let _recovery_leases = recovery_leases;
             let finish_wire = worker_wire.clone();
             let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let source_requested = requested_model.clone();
@@ -655,9 +675,24 @@ fn mod_turn_step_stream(
                     send_mod_step_output(&sender, &output, ready).await
                 }
             };
-            let outcome = host
-                .dispatch_turn_step_stream(input_projection, source, on_chunk)
-                .await;
+            let dispatch = host.dispatch_turn_step_stream_with_session(
+                input_projection,
+                session,
+                source,
+                on_chunk,
+            );
+            let dispatch = async move {
+                if let Some(leases) = detached_mod_leases {
+                    hooks::mods::with_detached_mod_recovery_leases(leases, dispatch).await
+                } else {
+                    dispatch.await
+                }
+            };
+            let outcome = tokio::select! {
+                biased;
+                () = sender.closed() => return,
+                result = dispatch => result,
+            };
             match outcome {
                 Ok(_) => {
                     let tail = {
@@ -690,8 +725,8 @@ fn mod_turn_step_stream(
                                 &fallback_snapshot,
                                 &fallback_guards,
                             );
-                        let stream = fallback_retry_scope
-                            .run(fallback_request_capture.scope(
+                        let fallback_request =
+                            fallback_retry_scope.run(fallback_request_capture.scope(
                                 fallback_api.stream_with_effort_override(
                                     &fallback_model,
                                     fallback_profile.as_deref(),
@@ -713,8 +748,12 @@ fn mod_turn_step_stream(
                                     fallback_task_deliveries,
                                     fallback_model_source,
                                 ),
-                            ))
-                            .await;
+                            ));
+                        let stream = tokio::select! {
+                            biased;
+                            () = sender.closed() => return,
+                            result = fallback_request => result,
+                        };
                         match stream {
                             Ok(stream) => {
                                 let observation = fallback_observation
@@ -724,7 +763,13 @@ fn mod_turn_step_stream(
                                     .map(output_accounting_impl::MainOutputObservation::fork);
                                 let mut stream =
                                     output_accounting_impl::account_stream(stream, observation);
-                                while let Some(item) = stream.next().await {
+                                loop {
+                                    let item = tokio::select! {
+                                        biased;
+                                        () = sender.closed() => return,
+                                        item = stream.next() => item,
+                                    };
+                                    let Some(item) = item else { break };
                                     let terminal = matches!(
                                         item,
                                         Ok(HistoryEvent::MessageStop
@@ -900,6 +945,7 @@ impl StreamingTurnDriver<'_> {
             )
             .await?
         };
+        ensure_mod_recovery_accepted()?;
         // A cancelled preparation has not been admitted. Keep request-context
         // and shared context attachments staged for the next accepted turn.
         if !token_aborted(user_cancel) {
@@ -1204,6 +1250,10 @@ impl StreamingTurnDriver<'_> {
                 &mut native_anthropic_request_context,
             );
         }
+        // Best-effort Mod callers can swallow their local error. Check the
+        // scoped admission result synchronously before any physical model
+        // request or spawned turn.step worker is admitted.
+        ensure_mod_recovery_accepted()?;
         let mut mod_model_state = None;
         let stream_result = if let Some(host) = mod_host {
             let mut input = serde_json::json!({
@@ -1221,8 +1271,31 @@ impl StreamingTurnDriver<'_> {
             {
                 input["effort"] = serde_json::json!(effort);
             }
+            // `turn.step` runs in a spawned task via a separate stream-dispatch
+            // path, so admit its side effects before spawning. An admission
+            // failure is a turn failure, not a Mod error eligible for provider
+            // fallback.
+            let recovery_leases = orch
+                .capture_tool_dispatch_recovery_guard()
+                .map(|admission| admission())
+                .transpose()
+                .map_err(|error| match error {
+                    hooks::RecoveryAdmissionError::Interrupted => {
+                        OrchestratorError::RecoveryInterrupted
+                    }
+                    hooks::RecoveryAdmissionError::Failure(error) => {
+                        OrchestratorError::Internal(error)
+                    }
+                })?
+                .flatten();
+            let session = host
+                .capture_turn_step_session()
+                .await
+                .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
             let (mut stream, effective_model) = mod_turn_step_stream(
                 host,
+                session,
+                recovery_leases,
                 orch.streaming_api.clone(),
                 orch.output.clone(),
                 orch.api.clone(),
@@ -1252,7 +1325,19 @@ impl StreamingTurnDriver<'_> {
             mod_model_state = Some(effective_model.clone());
             // Poll one item before returning so connect-phase provider errors
             // still reach prompt-too-long and model-fallback handling below.
-            let first = stream.next().await;
+            let mut cancelled_before_first = false;
+            let first = if let Some(cancel) = user_cancel {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        cancelled_before_first = true;
+                        None
+                    }
+                    first = stream.next() => first,
+                }
+            } else {
+                stream.next().await
+            };
             if let Some((forwarded_model, forwarded_profile)) =
                 effective_model.lock().unwrap().clone()
             {
@@ -1263,12 +1348,20 @@ impl StreamingTurnDriver<'_> {
                 model: model.clone(),
                 profile: model_profile.clone(),
             });
-            match first {
-                Some(Ok(event)) => Ok(futures::stream::once(async move { Ok(event) })
-                    .chain(stream)
-                    .boxed()),
-                Some(Err(error)) => Err(error),
-                None => Ok(stream),
+            if cancelled_before_first {
+                // Drop the consumer so the detached Mod worker receives the
+                // same cancellation instead of remaining parked on a pending
+                // provider stream after the foreground turn has stopped.
+                drop(stream);
+                Ok(futures::stream::empty().boxed())
+            } else {
+                match first {
+                    Some(Ok(event)) => Ok(futures::stream::once(async move { Ok(event) })
+                        .chain(stream)
+                        .boxed()),
+                    Some(Err(error)) => Err(error),
+                    None => Ok(stream),
+                }
             }
         } else {
             crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
@@ -1336,12 +1429,8 @@ impl StreamingTurnDriver<'_> {
             drop(stream_result);
             let cost = orch.snapshot_cost_real().await;
             orch.emit_turn_terminal("aborted_streaming", &cost).await;
-            if orch.cancel_reason_now()
-                != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-            {
-                orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
-                    .await;
-            }
+            orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                .await;
             return Ok(OpenStreamingOutcome::Complete(assistant_id));
         }
         if stream_result.is_err() {
@@ -1410,14 +1499,8 @@ impl StreamingTurnDriver<'_> {
                     Ok(StreamErrorFallback::Cancelled) => {
                         let cost = orch.snapshot_cost_real().await;
                         orch.emit_turn_terminal("aborted_streaming", &cost).await;
-                        if orch.cancel_reason_now()
-                            != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                        {
-                            orch.inject_query_user_interruption(
-                                QueryUserInterruptionKind::Streaming,
-                            )
+                        orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
                             .await;
-                        }
                         return Ok(OpenStreamingOutcome::Complete(assistant_id));
                     }
                     Err(error) if crate::turn_loop::is_carveout_propagated(&error) => {
@@ -3858,17 +3941,8 @@ impl StreamingTurnDriver<'_> {
                         ("aborted_tools", QueryUserInterruptionKind::Tools)
                     };
                     orch.emit_turn_terminal(abort_reason, &cost).await;
-                    // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
-                    // urgent queued command will run next via the between-turn drain —
-                    // DON'T inject the user-interrupt message. For a plain user
-                    // interrupt (the default with no reason flag wired) inject as
-                    // before. claude-code `query.ts:1046-1050`/`1501-1505`:
-                    // `createUserInterruptionMessage`.
-                    if orch.cancel_reason_now()
-                        != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                    {
-                        orch.inject_query_user_interruption(interruption_kind).await;
-                    }
+                    // The persistence boundary filters non-user cancellations.
+                    orch.inject_query_user_interruption(interruption_kind).await;
                     return Ok(Some(StepExit::FinishThroughEpilogue(assistant_id)));
                 }
 
@@ -4017,6 +4091,23 @@ impl StreamingTurnDriver<'_> {
     }
 
     pub(super) async fn run(self) -> Result<ConversationOutcome, OrchestratorError> {
+        let Some(admission) = self.orch.capture_tool_dispatch_recovery_guard() else {
+            return self.run_inner().await;
+        };
+        let guard: hooks::mods::ModTurnRecoveryGuard = Arc::new(move || {
+            admission().map(|leases| leases.map(|lease| (lease.execution, lease.turn_work)))
+        });
+        hooks::mods::with_mod_turn_recovery_guard(guard, self.run_inner())
+            .await
+            .map_err(|error| match error {
+                hooks::RecoveryAdmissionError::Interrupted => {
+                    OrchestratorError::RecoveryInterrupted
+                }
+                hooks::RecoveryAdmissionError::Failure(error) => OrchestratorError::Internal(error),
+            })?
+    }
+
+    async fn run_inner(self) -> Result<ConversationOutcome, OrchestratorError> {
         let Self {
             orch,
             prompt,
@@ -4041,6 +4132,7 @@ impl StreamingTurnDriver<'_> {
         let system_prompt: Option<
             lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
         > = Some(orch.provider_system_prompt().await?);
+        ensure_mod_recovery_accepted()?;
 
         // A side query left unfinished when the previous user turn ended was
         // keyed to that previous prompt. Never surface it against new intent.
@@ -4536,7 +4628,7 @@ impl StreamingTurnDriver<'_> {
                 let prompt_projection = super::projected_content::exact_message_text(message);
                 if orch
                     .fire_user_prompt_submit_projected(&prompt_projection, message.id())
-                    .await
+                    .await?
                 {
                     return Ok(ConversationOutcome::StopHookPrevented {
                         turn_count: 0,
@@ -4600,20 +4692,9 @@ impl StreamingTurnDriver<'_> {
             {
                 let cost = orch.snapshot_cost_real().await;
                 orch.emit_turn_terminal("aborted_streaming", &cost).await;
-                // NOW-ABORT disambiguation: when the cancellation was driven by a
-                // `Now`-priority enqueue (not a user Ctrl+C/ESC), the urgent
-                // command IS the "interruption" and will be run next by the
-                // between-turn drain — so DON'T inject the user-interrupt message
-                // (which would mislabel the abort and pollute context). For a
-                // plain user interrupt (the default when no reason flag is wired)
-                // behavior is byte-identical to before: inject the message.
-                // claude-code `query.ts:1046-1050`: `createUserInterruptionMessage`.
-                if orch.cancel_reason_now()
-                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                {
-                    orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
-                        .await;
-                }
+                // The persistence boundary filters non-user cancellations.
+                orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                    .await;
                 final_message_id = loop_state.last_message_id;
                 break;
             }

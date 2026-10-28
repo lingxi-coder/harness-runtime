@@ -286,6 +286,9 @@ impl ConversationOrchestrator {
         let scalar_context = self
             .additional_context_message_from_load(instruction_key, &instruction_load)
             .await?;
+        // `prompt.context` is best-effort locally, but a failed recovery
+        // admission must stop this turn before even its compaction side call.
+        super::streaming::ensure_mod_recovery_accepted()?;
         let inline_context = if self.uses_announced_context().await {
             None
         } else {
@@ -294,7 +297,9 @@ impl ConversationOrchestrator {
         let instruction_reason = self.frozen_instruction_refresh_reason();
 
         self.seed_compact_cache_safe_params(system).await?;
+        super::streaming::ensure_mod_recovery_accepted()?;
         self.maybe_compact_before_call(user_cancel).await;
+        super::streaming::ensure_mod_recovery_accepted()?;
         // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
         // before the outgoing snapshot is cloned from history.
         let _ = self.drain_peer_inbox(false).await;

@@ -219,6 +219,9 @@ pub struct SubagentInvocationContext {
     /// Receivers must propagate this value explicitly and must not infer it
     /// from hook/session metadata.
     pub origin_session_id: Option<SessionId>,
+    /// Runtime-only origin generation inherited from the launching session.
+    /// This accompanies the immutable identity across nested tool calls.
+    pub session_origin: Option<Arc<dyn crate::host::subagent_spawn::SessionOriginCapability>>,
     /// Trusted host-selected execution policy. This is copied unchanged into
     /// the concrete tool-use context; it is not model-controlled.
     pub tool_execution_policy: ToolExecutionPolicy,

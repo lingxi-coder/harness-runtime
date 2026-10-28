@@ -3080,29 +3080,28 @@ impl Tool for TaskStopTool {
         } else {
             registry.kill_with_reason(&task_id, "parent").await
         };
-        if let Err(e) = stopped {
-            emit_failed(
-                &bus,
-                TASK_STOP_FAILED,
-                &invocation_id,
-                "registry_error",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            // claude-code `rY`'s default arm: a task whose type has no stop
-            // handler reports the TYPE, not a generic registry failure. Kept
-            // local to TaskStop — `registry_err_to_tool_err` is shared with
-            // TaskCreate / TaskOutput / TeamSpawn and with the spawn path,
-            // where a `TaskStop:`-prefixed message would be wrong.
-            return Err(match &e {
-                lingxi_core::host::task_registry::TaskRegistryError::InvalidInput(reason)
-                    if reason == "unknown task type" =>
-                {
-                    invalid_tool_input(format!("Unsupported task type: {task_type}"))
-                }
-                _ => registry_err_to_tool_err("TaskStop", e),
-            });
-        }
+        let stopped = match stopped {
+            Ok(stopped) => stopped,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_STOP_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                // A task whose type has no stop handler reports the type.
+                return Err(match &e {
+                    lingxi_core::host::task_registry::TaskRegistryError::InvalidInput(reason)
+                        if reason == "unknown task type" =>
+                    {
+                        invalid_tool_input(format!("Unsupported task type: {task_type}"))
+                    }
+                    _ => registry_err_to_tool_err("TaskStop", e),
+                });
+            }
+        };
         emit_completed(
             &bus,
             TASK_STOP_COMPLETED,
@@ -3115,9 +3114,14 @@ impl Tool for TaskStopTool {
         // No `content` key → the orchestrator JSON-stringifies the whole data.
         let mut fields = vec![
             ("message".to_owned(), {
-                let mut units = "Successfully stopped task: "
-                    .encode_utf16()
-                    .collect::<Vec<_>>();
+                let prefix = match stopped.status.as_str() {
+                    "exited_unknown" => "Task exited; its outcome is unknown: ".to_string(),
+                    "completed" | "failed" => {
+                        format!("Task exited with status {}: ", stopped.status)
+                    }
+                    _ => "Successfully stopped task: ".to_string(),
+                };
+                let mut units = prefix.encode_utf16().collect::<Vec<_>>();
                 units.extend(task_id.encode_utf16());
                 units.extend(" (".encode_utf16());
                 units.extend(command.string_units("").unwrap_or_default());
@@ -3493,6 +3497,17 @@ fn render_task_output(
         if let Some(error) = task.error.as_deref().filter(|error| !error.is_empty()) {
             sections.push(format!("<error>{error}</error>").encode_utf16().collect());
         }
+        if let Some(observation) = task
+            .observation_error
+            .as_deref()
+            .filter(|error| !error.is_empty())
+        {
+            sections.push(
+                format!("<observation_error>{observation}</observation_error>")
+                    .encode_utf16()
+                    .collect(),
+            );
+        }
     }
     let mut rendered = Vec::new();
     for (index, section) in sections.into_iter().enumerate() {
@@ -3606,6 +3621,8 @@ struct TaskOutputView {
     /// `<error>…</error>` element after `<output>`. `None`/empty for non-agent
     /// tasks (and successful agents).
     error: Option<String>,
+    /// A nonterminal observation failure, distinct from the task's outcome.
+    observation_error: Option<String>,
     /// Absolute on-disk spool path, threaded from `TaskOutputChunk.output_path`
     /// so the `[Truncated. Full output: <path>]` header shows the real path
     /// (claude-code `getTaskOutputPath(taskId)`). `None` ⟶ bare-filename fallback.
@@ -4022,6 +4039,16 @@ impl Tool for TaskOutputTool {
         let output = mcp_block
             .or(clean_result)
             .unwrap_or_else(|| source_text_projection(&chunk.content));
+        // A wait observation can change while a blocking output call waits.
+        // Refresh it without changing the existing terminal outcome contract.
+        let observation_error = if record.task_type == "local_bash" {
+            match registry.get(&task_id).await {
+                Ok(Some(current)) => current.observation_error,
+                _ => record.observation_error.clone(),
+            }
+        } else {
+            None
+        };
         let view = TaskOutputView {
             task_id: chunk.task_id.clone(),
             task_type: record.task_type.clone(),
@@ -4034,7 +4061,12 @@ impl Tool for TaskOutputTool {
             description: record.description.clone(),
             output,
             exit_code: chunk.exit_code,
-            error: chunk.error.clone(),
+            error: chunk.error.clone().or_else(|| {
+                (record.task_type == "local_bash" && chunk.done)
+                    .then(|| record.error.clone())
+                    .flatten()
+            }),
+            observation_error,
             // Absolute spool path threaded from the registry (T11/T16) for the
             // `[Truncated. Full output: <path>]` header.
             output_path: chunk.output_path.clone(),
@@ -4079,6 +4111,12 @@ impl Tool for TaskOutputTool {
         }
         if let Some(error) = view.error.as_deref().filter(|e| !e.is_empty()) {
             task_fields.push(("error".to_owned(), source_text_projection(error)));
+        }
+        if let Some(error) = view.observation_error.as_deref().filter(|e| !e.is_empty()) {
+            task_fields.push((
+                "observation_error".to_owned(),
+                source_text_projection(error),
+            ));
         }
 
         // Nested `{ retrieval_status, task: { … } }` plus the `content` render so

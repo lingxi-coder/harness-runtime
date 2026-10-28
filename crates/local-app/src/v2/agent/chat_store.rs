@@ -1,13 +1,14 @@
 //! Durable App-owned Chat metadata. Transcript text stays in the Harness
 //! session JSONL; this index holds only routing and attachment metadata.
 use super::{
-    AttachmentMetadata, ChatRole, ChatState, ChatSummary, State, invalid,
+    invalid,
     protocol::{self, ProtocolMessageDigest},
+    AttachmentMetadata, ChatRole, ChatState, ChatSummary, State,
 };
 use crate::v2::AppError;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,13 +18,19 @@ use std::{
     sync::Mutex,
 };
 
+/// Metadata for a stored chat message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatMessageMetadata {
+    /// Identifier of the message.
     pub message_id: String,
+    /// Identifier of the run.
     pub run_id: String,
+    /// Role of the message author.
     pub role: ChatRole,
+    /// Creation time in milliseconds since the Unix epoch.
     pub created_at: u64,
+    /// Metadata for attachments in the message.
     pub attachments: Vec<AttachmentMetadata>,
 }
 
@@ -148,6 +155,7 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), AppError> {
 }
 
 impl ChatStore {
+    /// Open the persistent store at the supplied root.
     pub fn open(root: &Path) -> Result<Self, AppError> {
         ensure_real_directory(root)?;
         ensure_real_directory(&root.join("chats"))?;
@@ -210,6 +218,7 @@ impl ChatStore {
         Ok(result)
     }
 
+    /// Create a chat bound to a session.
     pub fn create(&self, title: Option<&str>, session_id: &str) -> Result<ChatSummary, AppError> {
         if !safe_id(session_id) {
             return Err(invalid("invalid Harness session ID"));
@@ -250,6 +259,7 @@ impl ChatStore {
         result
     }
 
+    /// Load the requested record.
     pub fn get(&self, chat_id: &str) -> Result<ChatSummary, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -263,6 +273,7 @@ impl ChatStore {
             .ok_or_else(|| AppError::NotFound("App Chat".into()))
     }
 
+    /// List chat summaries after the optional cursor, with an archive filter.
     pub fn list(
         &self,
         cursor: Option<&str>,
@@ -330,6 +341,7 @@ impl ChatStore {
         Ok(chats)
     }
 
+    /// Return the session identifier bound to a chat.
     pub fn session_id(&self, chat_id: &str) -> Result<String, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -343,6 +355,7 @@ impl ChatStore {
             .ok_or_else(|| AppError::NotFound("App Chat".into()))
     }
 
+    /// Return the transcript path for a chat.
     pub fn transcript_path(&self, chat_id: &str) -> Result<PathBuf, AppError> {
         let session_id = self.session_id(chat_id)?;
         let directory = self.root.join("chats").join(chat_id);
@@ -350,6 +363,7 @@ impl ChatStore {
         Ok(directory.join(format!("{session_id}.jsonl")))
     }
 
+    /// Start a chat turn.
     pub fn start_turn(&self, chat_id: &str, run_id: &str) -> Result<(), AppError> {
         if !safe_id(chat_id) || run_id.is_empty() || run_id.len() > 128 {
             return Err(invalid("invalid Chat turn"));
@@ -372,6 +386,7 @@ impl ChatStore {
         })
     }
 
+    /// Finish an active chat turn.
     pub fn finish_turn(&self, chat_id: &str, run_id: &str) -> Result<(), AppError> {
         self.change(|index| {
             let record = index
@@ -404,6 +419,7 @@ impl ChatStore {
         })
     }
 
+    /// Return the active run for a chat, if any.
     pub fn active_run(&self, chat_id: &str) -> Result<Option<String>, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -417,6 +433,7 @@ impl ChatStore {
             .ok_or_else(|| AppError::NotFound("App Chat".into()))
     }
 
+    /// Record metadata for a chat message.
     pub fn record_message(
         &self,
         chat_id: &str,
@@ -447,6 +464,7 @@ impl ChatStore {
         })
     }
 
+    /// List stored message metadata for a chat.
     pub fn message_metadata(&self, chat_id: &str) -> Result<Vec<ChatMessageMetadata>, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -563,6 +581,7 @@ impl ChatStore {
         })
     }
 
+    /// Roll back a stored protocol message.
     pub fn rollback_protocol_message(
         &self,
         chat_id: &str,
@@ -619,6 +638,7 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Roll back stored metadata for a message.
     pub fn rollback_message_metadata(
         &self,
         chat_id: &str,
@@ -644,6 +664,7 @@ impl ChatStore {
         })
     }
 
+    /// Return digests of protocol history for a chat.
     pub fn protocol_history_digests(
         &self,
         chat_id: &str,
@@ -670,6 +691,7 @@ impl ChatStore {
             .collect())
     }
 
+    /// Load a stored protocol message.
     pub fn protocol_message(&self, chat_id: &str, message_id: &str) -> Result<Value, AppError> {
         if !safe_id(chat_id) || message_id.is_empty() || message_id.len() > 128 {
             return Err(invalid("invalid AG-UI message selector"));
@@ -692,6 +714,7 @@ impl ChatStore {
         self.rehydrate_protocol_message(chat_id, &stored)
     }
 
+    /// Return whether the chat has history without protocol messages.
     pub fn has_legacy_history_without_protocol(&self, chat_id: &str) -> Result<bool, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -891,6 +914,7 @@ impl ChatStore {
         Ok(message)
     }
 
+    /// Set the initial title for a chat.
     pub fn set_initial_title(&self, chat_id: &str, prompt: &str) -> Result<(), AppError> {
         let title = prompt
             .split_whitespace()
@@ -915,6 +939,7 @@ impl ChatStore {
         })
     }
 
+    /// Archive a chat.
     pub fn archive(&self, chat_id: &str) -> Result<(), AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -933,6 +958,7 @@ impl ChatStore {
         })
     }
 
+    /// Delete a chat.
     pub fn delete(&self, chat_id: &str) -> Result<(), AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -1254,20 +1280,18 @@ mod tests {
         let messages = store.message_metadata(&chat.chat_id).unwrap();
         assert_eq!(messages[0].message_id, "user-id");
         assert_eq!(messages[1].message_id, "assistant-id");
-        assert!(
-            store
-                .record_message(
-                    &chat.chat_id,
-                    ChatMessageMetadata {
-                        message_id: "assistant-id".into(),
-                        run_id: "other-run".into(),
-                        role: ChatRole::Assistant,
-                        created_at: 2,
-                        attachments: Vec::new(),
-                    },
-                )
-                .is_err()
-        );
+        assert!(store
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: "assistant-id".into(),
+                    run_id: "other-run".into(),
+                    role: ChatRole::Assistant,
+                    created_at: 2,
+                    attachments: Vec::new(),
+                },
+            )
+            .is_err());
     }
 
     #[test]
@@ -1313,13 +1337,11 @@ mod tests {
         recovered
             .rollback_protocol_message(&chat.chat_id, "task-private-uuid", "user-message-1")
             .unwrap();
-        assert!(
-            recovered
-                .protocol_history_page(&chat.chat_id, None, 10)
-                .unwrap()
-                .messages
-                .is_empty()
-        );
+        assert!(recovered
+            .protocol_history_page(&chat.chat_id, None, 10)
+            .unwrap()
+            .messages
+            .is_empty());
         assert_eq!(
             recovered.protocol_history_digests(&chat.chat_id).unwrap(),
             Vec::new()

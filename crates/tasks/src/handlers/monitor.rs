@@ -127,6 +127,72 @@ struct WorkerCancel {
     handle: BackgroundTaskHandle,
     flush_handle: Option<BackgroundTaskHandle>,
     runtime: Arc<dyn RuntimeSpawner>,
+    owned: Option<OwnedMonitorControl>,
+}
+
+#[derive(Clone)]
+struct OwnedMonitorControl {
+    cancel: CancellationToken,
+    completion: Arc<OwnedMonitorCompletion>,
+}
+
+#[derive(Default)]
+struct OwnedMonitorCompletion {
+    result: std::sync::Mutex<Option<Result<(), String>>>,
+    changed: Notify,
+}
+
+impl OwnedMonitorCompletion {
+    fn finish(&self, result: Result<(), String>) {
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        self.changed.notify_waiters();
+    }
+
+    async fn wait(&self) -> Result<(), String> {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let result = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(result) = result {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+// If a worker is aborted or a runner reports an unverified exit, keep its
+// opaque resource guard independently of the cancelled task. Releasing an
+// unverified sandbox would be worse than retaining it until process shutdown.
+struct MonitorLease {
+    guard: Option<lingxi_core::host::sandbox::BackendPlanHandle>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    verified: bool,
+}
+
+impl Drop for MonitorLease {
+    fn drop(&mut self) {
+        if self.started.load(std::sync::atomic::Ordering::SeqCst) && !self.verified {
+            if let Some(guard) = self.guard.take() {
+                static QUARANTINE: std::sync::OnceLock<
+                    std::sync::Mutex<Vec<lingxi_core::host::sandbox::BackendPlanHandle>>,
+                > = std::sync::OnceLock::new();
+                QUARANTINE
+                    .get_or_init(Default::default)
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(guard);
+            }
+        }
+    }
 }
 
 struct BatchState {
@@ -601,6 +667,7 @@ impl MonitorHandler {
                 handle,
                 flush_handle: None,
                 runtime: ctx.runtime,
+                owned: None,
             },
         );
         Ok(
@@ -635,6 +702,7 @@ impl Task for MonitorHandler {
             command,
             source_description: _,
             spawn_command,
+            lifetime_guard,
             timeout,
             cwd,
             tool_use_id: _,
@@ -650,6 +718,9 @@ impl Task for MonitorHandler {
         // 2.1.263 command monitors are local_bash tasks; Monitor remains
         // the internal handler key so TaskStop cancels the streaming worker.
         let task_id = crate::id::generate_task_id(TaskType::LocalBash);
+        if lifetime_guard.is_some() && !self.process.supports_owned_streaming_cleanup() {
+            return Err(TaskError::Unsupported);
+        }
         let output_file = self
             .output_manager
             .allocate(&task_id)
@@ -673,13 +744,19 @@ impl Task for MonitorHandler {
         // this encoding only at the process-command boundary.
         let command_for_os = process_command_text(&command);
         let to_spawn = spawn_command.unwrap_or(command_for_os);
+        let owner = lifetime_guard.as_ref().map(|_| {
+            format!(
+                "{}{task_id}",
+                lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX
+            )
+        });
         let sandboxed = self.sandbox.bypass_with_audit(
             ProcessCommand {
                 command: "bash".into(),
                 args: vec!["-c".into(), to_spawn],
                 cwd,
                 env: HashMap::new(),
-                timeout,
+                timeout: if owner.is_some() { None } else { timeout },
                 stdin: None,
             },
             if confined {
@@ -688,7 +765,18 @@ impl Task for MonitorHandler {
                 BYPASS_REASON
             },
         );
+        let sandboxed = if let Some(guard) = lifetime_guard.as_ref() {
+            sandboxed
+                .with_lifetime_guard(guard.clone())
+                .with_process_owner(owner.clone())
+        } else {
+            sandboxed
+        };
         let cancel = CancellationToken::new();
+        let owned = owner.as_ref().map(|_| OwnedMonitorControl {
+            cancel: cancel.clone(),
+            completion: Arc::new(OwnedMonitorCompletion::default()),
+        });
         let sink = Arc::new(MonitorStreamSink {
             task_id: task_id.clone(),
             output_file,
@@ -733,7 +821,13 @@ impl Task for MonitorHandler {
         let runtime = ctx.runtime.clone();
         let worker_runtime = ctx.runtime.clone();
         let worker_flush_handle = flush_handle.clone();
+        let worker_owned = owned.clone();
         let worker = Box::pin(async move {
+            let mut lease = MonitorLease {
+                guard: lifetime_guard,
+                started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                verified: false,
+            };
             // `TaskRegistry::spawn` can only insert the handler-generated id
             // after this method returns. Wait for that publication so an
             // `echo ready` monitor cannot finish before its event/status has a
@@ -759,17 +853,83 @@ impl Task for MonitorHandler {
                 // command was never started, so nothing runs unwatched.
                 flush_cancel.cancel();
                 let _ = worker_runtime.cancel(&worker_flush_handle).await;
+                drop(sandboxed);
+                drop(lease);
                 workers.lock().await.remove(&worker_id);
+                if let Some(control) = &worker_owned {
+                    control.completion.finish(Ok(()));
+                }
                 return;
             }
             status_sink
                 .set_status(&worker_id, TaskStatus::Running)
                 .await;
             let stream_sink: Arc<dyn ProcessStreamSink> = worker_sink.clone();
-            let result = tokio::select! {
-                result = process.run_streaming(&sandboxed, stream_sink) => result,
-                () = worker_cancel.cancelled() => {
-                    Err(ProcessError::Io(worker_sink.stop_reason().await.unwrap_or_else(|| "monitor cancelled".into())))
+            let result = if let Some(owner) = owner {
+                let started = lease.started.clone();
+                let run = async {
+                    started.store(true, std::sync::atomic::Ordering::SeqCst);
+                    process.run_streaming(&sandboxed, stream_sink).await
+                };
+                tokio::pin!(run);
+                let deadline = tokio::time::sleep(timeout.unwrap_or(Duration::from_secs(30 * 60)));
+                tokio::pin!(deadline);
+                let mut stopping = false;
+                let mut expired = false;
+                let mut tick = tokio::time::interval(Duration::from_millis(25));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        () = worker_cancel.cancelled(), if !stopping => {
+                            if !lease.started.load(std::sync::atomic::Ordering::SeqCst) {
+                                break Err(ProcessError::Io("monitor cancelled before start".into()));
+                            }
+                            stopping = true;
+                        }
+                        () = &mut deadline, if !stopping => {
+                            expired = true;
+                            if !lease.started.load(std::sync::atomic::Ordering::SeqCst) {
+                                break Err(ProcessError::Timeout);
+                            }
+                            stopping = true;
+                        }
+                        result = &mut run => break result,
+                        _ = tick.tick(), if stopping => { process.kill_owner_processes(&owner).await; }
+                    }
+                };
+                if matches!(&result, Err(ProcessError::Io(message)) if message.starts_with(lingxi_core::host::process::OWNED_STREAMING_CLEANUP_UNVERIFIED))
+                {
+                    tracing::warn!(task_id = %worker_id, error = ?result, "monitor cleanup remains unverified");
+                    if let Some(control) = &worker_owned {
+                        control
+                            .completion
+                            .finish(Err("monitor process cleanup is unverified".into()));
+                    }
+                    // The child identity could not be verified. Keep both the
+                    // worker and its guard alive rather than reporting terminal.
+                    std::future::pending::<()>().await;
+                    unreachable!();
+                }
+                lease.verified = true;
+                if expired {
+                    Err(ProcessError::Timeout)
+                } else if worker_cancel.is_cancelled() {
+                    Err(ProcessError::Io(
+                        worker_sink
+                            .stop_reason()
+                            .await
+                            .unwrap_or_else(|| "monitor cancelled".into()),
+                    ))
+                } else {
+                    result
+                }
+            } else {
+                tokio::select! {
+                    result = process.run_streaming(&sandboxed, stream_sink) => result,
+                    () = worker_cancel.cancelled() => {
+                        Err(ProcessError::Io(worker_sink.stop_reason().await.unwrap_or_else(|| "monitor cancelled".into())))
+                    }
                 }
             };
             worker_sink.flush().await;
@@ -814,10 +974,17 @@ impl Task for MonitorHandler {
                     .await;
             }
             let status = MonitorHandler::terminal_status(worker_cancel.is_cancelled(), &result);
-            status_sink.set_status(&worker_id, status).await;
             flush_cancel.cancel();
             let _ = worker_runtime.cancel(&worker_flush_handle).await;
+            // Publish neither terminal state nor completion while the verified
+            // call's sandbox lease is still waiting to run its cleanup callback.
+            drop(sandboxed);
+            drop(lease);
+            status_sink.set_status(&worker_id, status).await;
             workers.lock().await.remove(&worker_id);
+            if let Some(control) = &worker_owned {
+                control.completion.finish(Ok(()));
+            }
         });
         let mut workers = self.workers.lock().await;
         let handle = match ctx
@@ -837,6 +1004,7 @@ impl Task for MonitorHandler {
                 handle,
                 flush_handle: Some(flush_handle),
                 runtime: ctx.runtime.clone(),
+                owned,
             },
         );
         drop(workers);
@@ -847,6 +1015,31 @@ impl Task for MonitorHandler {
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        let owned = self
+            .workers
+            .lock()
+            .await
+            .get(task_id)
+            .and_then(|worker| worker.owned.clone());
+        if let Some(owned) = owned {
+            owned.cancel.cancel();
+            match tokio::time::timeout(Duration::from_secs(10), owned.completion.wait()).await {
+                Ok(Ok(())) => {
+                    if !self.status_sink.is_terminal(task_id).await {
+                        self.status_sink
+                            .set_status(task_id, TaskStatus::Killed)
+                            .await;
+                    }
+                    return Ok(());
+                }
+                Ok(Err(error)) => return Err(TaskError::Io(error)),
+                Err(_) => {
+                    return Err(TaskError::Io(
+                        "monitor process cleanup timed out; termination is unverified".into(),
+                    ))
+                }
+            }
+        }
         // Drop the map guard before awaiting cancellation. The main worker's
         // epilogue removes this same entry, so retaining the guard across
         // `RuntimeSpawner::cancel` can deadlock while cancel waits for the
@@ -1486,6 +1679,7 @@ mod tests {
             command: "echo hi".into(),
             source_description: "monitor".into(),
             spawn_command: None,
+            lifetime_guard: None,
             timeout: None,
             cwd: None,
             tool_use_id: None,
@@ -1549,6 +1743,207 @@ mod tests {
         // stop_reason was set).
         (handle.cleanup.expect("cleanup closure"))();
         assert_eq!(await_terminal(&sink).await, TaskStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn owned_monitor_keeps_lease_until_stop_is_verified() {
+        struct Lease(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Lease {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        struct Runner {
+            started: Notify,
+            stop_requested: Notify,
+            finish: Notify,
+        }
+        #[async_trait]
+        impl ProcessRunner for Runner {
+            fn supports_owned_streaming_cleanup(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+                assert!(owner.starts_with(lingxi_core::host::process::OWNED_STREAMING_OWNER_PREFIX));
+                self.stop_requested.notify_one();
+                Vec::new()
+            }
+            async fn run_streaming(
+                &self,
+                command: &SandboxedCommand,
+                _: Arc<dyn ProcessStreamSink>,
+            ) -> Result<ProcessOutput, ProcessError> {
+                assert!(command.lifetime_guard().is_some());
+                self.started.notify_one();
+                self.finish.notified().await;
+                Ok(ProcessOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    timed_out: false,
+                })
+            }
+        }
+        let runner = Arc::new(Runner {
+            started: Notify::new(),
+            stop_requested: Notify::new(),
+            finish: Notify::new(),
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let (handler, ctx) = make_handler(runner.clone(), sink.clone());
+        let handler = Arc::new(handler);
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut input = monitor_input();
+        if let TaskSpawnInput::Monitor { lifetime_guard, .. } = &mut input {
+            *lifetime_guard = Some(lingxi_core::host::sandbox::BackendPlanHandle::new(Lease(
+                released.clone(),
+            )));
+        }
+        let handle = handler.spawn(input, ctx.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), runner.started.notified())
+            .await
+            .unwrap();
+        let stopping = tokio::spawn({
+            let handler = handler.clone();
+            let id = handle.task_id.clone();
+            async move { handler.kill(&id, ctx).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), runner.stop_requested.notified())
+            .await
+            .unwrap();
+        assert!(
+            !stopping.is_finished(),
+            "stop must wait for process confirmation"
+        );
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "lease was dropped before verification"
+        );
+        runner.finish.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), stopping)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            released.load(std::sync::atomic::Ordering::SeqCst),
+            "stop returns only after verified lease cleanup"
+        );
+        assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+    }
+
+    #[tokio::test]
+    async fn owned_monitor_rejects_runner_without_verified_cleanup() {
+        let (handler, ctx) =
+            make_handler(BlockingRunner::new(), Arc::new(RecordingSink::default()));
+        let mut input = monitor_input();
+        if let TaskSpawnInput::Monitor { lifetime_guard, .. } = &mut input {
+            *lifetime_guard = Some(lingxi_core::host::sandbox::BackendPlanHandle::new(()));
+        }
+        assert!(matches!(
+            handler.spawn(input, ctx).await,
+            Err(TaskError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn owned_monitor_does_not_report_unverified_exit_as_killed() {
+        struct Lease(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Lease {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        struct Runner {
+            started: Notify,
+        }
+        #[async_trait]
+        impl ProcessRunner for Runner {
+            fn supports_owned_streaming_cleanup(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn run_streaming(
+                &self,
+                _: &SandboxedCommand,
+                _: Arc<dyn ProcessStreamSink>,
+            ) -> Result<ProcessOutput, ProcessError> {
+                self.started.notify_one();
+                Err(ProcessError::Io(format!(
+                    "{} test",
+                    lingxi_core::host::process::OWNED_STREAMING_CLEANUP_UNVERIFIED
+                )))
+            }
+        }
+        let sink = Arc::new(RecordingSink::default());
+        let runner = Arc::new(Runner {
+            started: Notify::new(),
+        });
+        let (handler, ctx) = make_handler(runner.clone(), sink.clone());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut input = monitor_input();
+        if let TaskSpawnInput::Monitor { lifetime_guard, .. } = &mut input {
+            *lifetime_guard = Some(lingxi_core::host::sandbox::BackendPlanHandle::new(Lease(
+                released.clone(),
+            )));
+        }
+        let handle = handler.spawn(input, ctx.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), runner.started.notified())
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            handler.kill(&handle.task_id, ctx.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("unverified"));
+        assert!(!sink
+            .last_status()
+            .is_some_and(|status| status.is_terminal()));
+        let worker = handler
+            .workers
+            .lock()
+            .await
+            .get(&handle.task_id)
+            .unwrap()
+            .handle
+            .clone();
+        ctx.runtime.cancel(&worker).await.unwrap();
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "aborting an unverified worker must retain its sandbox lease"
+        );
     }
 
     #[tokio::test]

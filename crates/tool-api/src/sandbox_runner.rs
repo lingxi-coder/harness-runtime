@@ -1,19 +1,80 @@
 //! `SandboxRunner` — the async seam the shell/skill tools call to wrap a
 //! command in a sandbox before spawning it.
 //!
-//! Today every tool calls the sync [`sandbox::wrap::wrap_with_sandbox`]
-//! directly. This trait hoists that call behind an injectable handle so a
-//! later task can swap in a live `sandbox-runtime`-backed runner (per-session
-//! `SandboxManager`, proxy/MITM/seccomp) without touching the tool call sites.
+//! The injected runner can use either the sync wrapper or a live
+//! `sandbox-runtime` manager with proxy/MITM/seccomp support.
 //!
-//! [`LegacyWrapRunner`] is the default: its [`wrap`](SandboxRunner::wrap)
-//! ignores `bin_shell` and forwards to [`sandbox::wrap::wrap_with_sandbox_at`]
-//! with `cwd` as the sandbox root. The live runner also uses `bin_shell`.
+//! [`LegacyWrapRunner`] is the default: it ignores `bin_shell` and forwards
+//! to [`sandbox::wrap::wrap_with_sandbox_at`] with `cwd` as the sandbox root.
 
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use sandbox::wrap::SandboxWrapError;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Per-command sandbox resources, released when the last clone is dropped.
+///
+/// Keep a lease until its command has completed, including after a foreground
+/// command moves to the background. A no-op lease owns no resources.
+#[derive(Clone)]
+pub struct SandboxLease {
+    inner: Arc<SandboxLeaseInner>,
+}
+
+struct SandboxLeaseInner {
+    cleanup: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
+}
+
+impl Drop for SandboxLeaseInner {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
+impl std::fmt::Debug for SandboxLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SandboxLease")
+            .field("is_noop", &self.is_noop())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SandboxLease {
+    /// Create a lease whose cleanup runs exactly once after the last clone.
+    #[must_use]
+    pub fn new(cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            inner: Arc::new(SandboxLeaseInner {
+                cleanup: Some(Box::new(cleanup)),
+            }),
+        }
+    }
+
+    /// Create a lease for a wrapper that owns no per-command resources.
+    #[must_use]
+    pub fn noop() -> Self {
+        Self {
+            inner: Arc::new(SandboxLeaseInner { cleanup: None }),
+        }
+    }
+
+    /// Whether this lease has no cleanup to defer until process completion.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        self.inner.cleanup.is_none()
+    }
+}
+
+/// A wrapped command and the resources needed for its entire execution.
+#[derive(Debug)]
+pub struct SandboxWrappedCommand {
+    /// Shell string to run.
+    pub command: String,
+    /// Independent per-invocation resource lease.
+    pub lease: SandboxLease,
+}
 
 /// User-facing sandbox-violation lines recorded for one command.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -29,8 +90,8 @@ pub struct SandboxCommandViolations {
 /// via `Arc`.
 #[async_trait::async_trait]
 pub trait SandboxRunner: Send + Sync {
-    /// Wrap `command` so it runs under the host sandbox described by `cfg` on
-    /// `platform`.
+    /// Wrap `command` under the sandbox described by `cfg` on `platform`,
+    /// returning an independent lease for the command's resources.
     ///
     /// `bin_shell` is the shell binary the command runs under (e.g. `/bin/bash`).
     /// `cwd` is the command's sandbox root — the agent's own directory or the
@@ -40,21 +101,19 @@ pub trait SandboxRunner: Send + Sync {
     /// mandatory `.git`/dotfile denies there.
     ///
     /// # Errors
-    /// Returns [`SandboxWrapError`] when the host cannot produce a wrapped
-    /// command (unsupported platform, SBPL write failure, …), matching the
-    /// behavior of [`sandbox::wrap::wrap_with_sandbox`].
-    async fn wrap(
+    /// Callers must keep the lease until the command and any background
+    /// handoff have finished.
+    ///
+    /// # Errors
+    /// Returns [`SandboxWrapError`] when the host cannot wrap the command.
+    async fn wrap_with_lease(
         &self,
         command: &str,
         cfg: &SandboxRuntimeConfig,
         platform: Platform,
         bin_shell: Option<&str>,
         cwd: Option<&Path>,
-    ) -> Result<String, SandboxWrapError>;
-
-    /// Tear down any per-command sandbox state (e.g. bwrap mount points) after
-    /// the wrapped command has finished. Default no-op.
-    async fn cleanup_after_command(&self) {}
+    ) -> Result<SandboxWrappedCommand, SandboxWrapError>;
 
     /// Reset any per-session sandbox state (e.g. drop the `SandboxManager` and
     /// its proxies) at session teardown. Default no-op.
@@ -68,23 +127,26 @@ pub trait SandboxRunner: Send + Sync {
 
 /// The sync wrap, hoisted behind the [`SandboxRunner`] seam.
 ///
-/// [`wrap`](SandboxRunner::wrap) forwards to
+/// [`wrap_with_lease`](SandboxRunner::wrap_with_lease) forwards to
 /// [`sandbox::wrap::wrap_with_sandbox_at`] with `cwd` as the sandbox root,
-/// ignoring `bin_shell`. `cleanup`/`reset` are the no-op defaults.
+/// ignoring `bin_shell`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LegacyWrapRunner;
 
 #[async_trait::async_trait]
 impl SandboxRunner for LegacyWrapRunner {
-    async fn wrap(
+    async fn wrap_with_lease(
         &self,
         command: &str,
         cfg: &SandboxRuntimeConfig,
         platform: Platform,
         _bin_shell: Option<&str>,
         cwd: Option<&Path>,
-    ) -> Result<String, SandboxWrapError> {
-        sandbox::wrap::wrap_with_sandbox_at(command, cfg, platform, cwd)
+    ) -> Result<SandboxWrappedCommand, SandboxWrapError> {
+        Ok(SandboxWrappedCommand {
+            command: sandbox::wrap::wrap_with_sandbox_at(command, cfg, platform, cwd)?,
+            lease: SandboxLease::noop(),
+        })
     }
 }
 
@@ -119,21 +181,24 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SandboxRunner for RecordingRunner {
-        async fn wrap(
+        async fn wrap_with_lease(
             &self,
             command: &str,
             _cfg: &SandboxRuntimeConfig,
             platform: Platform,
             bin_shell: Option<&str>,
             cwd: Option<&Path>,
-        ) -> Result<String, SandboxWrapError> {
+        ) -> Result<SandboxWrappedCommand, SandboxWrapError> {
             self.calls.lock().unwrap().push(RecordedCall {
                 command: command.to_string(),
                 platform,
                 bin_shell: bin_shell.map(ToString::to_string),
                 cwd: cwd.map(Path::to_path_buf),
             });
-            Ok(format!("RECORDED::{command}"))
+            Ok(SandboxWrappedCommand {
+                command: format!("RECORDED::{command}"),
+                lease: SandboxLease::noop(),
+            })
         }
     }
 
@@ -145,6 +210,23 @@ mod tests {
     /// forwarding is faithful on every platform.
     const PARITY_PLATFORM: Platform = Platform::Linux;
 
+    #[test]
+    fn lease_cleans_up_once_after_last_owner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cleanups = Arc::new(AtomicUsize::new(0));
+        let observed = cleanups.clone();
+        let lease = SandboxLease::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(!lease.is_noop());
+        let background = lease.clone();
+        drop(lease);
+        assert_eq!(cleanups.load(Ordering::SeqCst), 0);
+        drop(background);
+        assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+        assert!(SandboxLease::noop().is_noop());
+    }
+
     #[tokio::test]
     async fn legacy_runner_matches_wrap_with_sandbox() {
         let cfg = SandboxRuntimeConfig::default();
@@ -153,12 +235,15 @@ mod tests {
 
         let runner = LegacyWrapRunner;
         let via_seam = runner
-            .wrap(command, &cfg, platform, Some("/bin/bash"), None)
+            .wrap_with_lease(command, &cfg, platform, Some("/bin/bash"), None)
             .await;
         let direct = sandbox::wrap::wrap_with_sandbox(command, &cfg, platform);
 
         match (via_seam, direct) {
-            (Ok(a), Ok(b)) => assert_eq!(a, b, "seam wrap must be byte-identical"),
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a.command, b, "seam wrap must be byte-identical");
+                assert!(a.lease.is_noop());
+            }
             (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
             (a, b) => panic!("seam/direct disagreed: {a:?} vs {b:?}"),
         }
@@ -172,9 +257,11 @@ mod tests {
         let platform = PARITY_PLATFORM;
         let runner = LegacyWrapRunner;
 
-        let plain = runner.wrap("echo hi", &cfg, platform, None, None).await;
+        let plain = runner
+            .wrap_with_lease("echo hi", &cfg, platform, None, None)
+            .await;
         let with_extras = runner
-            .wrap(
+            .wrap_with_lease(
                 "echo hi",
                 &cfg,
                 platform,
@@ -184,7 +271,7 @@ mod tests {
             .await;
 
         match (plain, with_extras) {
-            (Ok(a), Ok(b)) => assert_eq!(a, b),
+            (Ok(a), Ok(b)) => assert_eq!(a.command, b.command),
             (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
             (a, b) => panic!("extras changed legacy output: {a:?} vs {b:?}"),
         }
@@ -196,12 +283,14 @@ mod tests {
         let platform = PARITY_PLATFORM;
         let runner = default_sandbox_runner();
 
-        let via_default = runner.wrap("echo hi", &cfg, platform, None, None).await;
+        let via_default = runner
+            .wrap_with_lease("echo hi", &cfg, platform, None, None)
+            .await;
         let direct = sandbox::wrap::wrap_with_sandbox("echo hi", &cfg, platform);
 
         assert_eq!(via_default.is_ok(), direct.is_ok());
         if let (Ok(a), Ok(b)) = (via_default, direct) {
-            assert_eq!(a, b);
+            assert_eq!(a.command, b);
         }
     }
 
@@ -213,13 +302,12 @@ mod tests {
 
         let cwd = std::path::PathBuf::from("/work/dir");
         let out = runner
-            .wrap("ls -la", &cfg, platform, Some("/bin/zsh"), Some(&cwd))
+            .wrap_with_lease("ls -la", &cfg, platform, Some("/bin/zsh"), Some(&cwd))
             .await
             .expect("recording runner never errors");
-        assert_eq!(out, "RECORDED::ls -la");
+        assert_eq!(out.command, "RECORDED::ls -la");
 
         // Defaults are no-ops; they must be callable through the trait object.
-        runner.cleanup_after_command().await;
         runner.reset().await;
         assert_eq!(
             runner.command_violations("ls -la").await,
@@ -230,7 +318,7 @@ mod tests {
         // concrete instance to assert the recorded args via a fresh call path.
         let concrete = RecordingRunner::default();
         let _ = concrete
-            .wrap("ls -la", &cfg, platform, Some("/bin/zsh"), Some(&cwd))
+            .wrap_with_lease("ls -la", &cfg, platform, Some("/bin/zsh"), Some(&cwd))
             .await;
         let calls = concrete.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);

@@ -2269,6 +2269,12 @@ impl AgentTool {
     /// stamped by the parent runner. Never infer this from hook/session
     /// metadata because those may describe a boot session after resume.
     async fn origin_session_id(ctx: &ToolUseContext) -> Option<lingxi_core::types::SessionId> {
+        if let Some(origin) = &ctx.session_origin {
+            return Some(origin.session_id());
+        }
+        if ctx.origin_session_id.is_some() {
+            return ctx.origin_session_id;
+        }
         if let Some(session) = ctx.session.as_ref() {
             return Some(session.lock().await.session_id);
         }
@@ -2494,9 +2500,21 @@ impl AgentTool {
     // a suggestion" — this one used to skip that filter entirely, so the
     // model could be steered into dispatching a type that is immediately
     // hard-rejected. Apply the SAME deny set here.
-    async fn fusion_available_agents_display(&self, is_coordinator: bool) -> String {
+    async fn fusion_available_agents_display(
+        &self,
+        is_coordinator: bool,
+        ctx: &ToolUseContext,
+    ) -> String {
         let mut listing = match &self.ctx.subagent_spawner {
-            Some(s) => s.agent_listing_for_model().await,
+            Some(s) => {
+                s.agent_listing_for_model(
+                    ctx.session_origin.clone(),
+                    ctx.origin_session_id.is_some()
+                        || ctx.session_origin.is_some()
+                        || ctx.session.is_some(),
+                )
+                .await
+            }
             None => Vec::new(),
         };
         drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
@@ -2622,7 +2640,9 @@ impl AgentTool {
         let fusion_services = match self.fusion_services.as_ref() {
             Some(services) => services,
             None => {
-                let available = self.fusion_available_agents_display(is_coordinator).await;
+                let available = self
+                    .fusion_available_agents_display(is_coordinator, &ctx)
+                    .await;
                 Self::emit_failed(
                     bus,
                     invocation_id,
@@ -2694,7 +2714,9 @@ impl AgentTool {
             }
         };
         if !surface.enabled {
-            let available = self.fusion_available_agents_display(is_coordinator).await;
+            let available = self
+                .fusion_available_agents_display(is_coordinator, &ctx)
+                .await;
             Self::emit_failed(
                 bus,
                 invocation_id,
@@ -2809,6 +2831,7 @@ impl AgentTool {
             SubagentInheritance {
                 tool_invoker: Arc::new(invoker_impl),
                 budget: budget.clone(),
+                session_origin: ctx.session_origin.clone(),
             },
             fusion_cancel.clone(),
         );
@@ -4093,6 +4116,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget,
+            session_origin: ctx.session_origin.clone(),
         };
         let request = SubagentSpawnRequest {
             agent_spawn_token: agent_spawn_token.clone(),
@@ -4441,7 +4465,10 @@ impl Tool for AgentTool {
         // server names. Pull the catalog from the spawner (defaulted-empty when
         // unwired) and the MCP server names from the registry.
         let mut agents = match &self.ctx.subagent_spawner {
-            Some(s) => s.agent_listing_for_model().await,
+            Some(s) => {
+                s.agent_listing_for_model(opts.session_origin.clone(), opts.require_session_origin)
+                    .await
+            }
             None => Vec::new(),
         };
         // 2.1.238 `generalPurposeAvailable` (`p7f(agents, allowedAgentTypes)`,
@@ -5093,6 +5120,7 @@ impl Tool for AgentTool {
                     SubagentInheritance {
                         tool_invoker: Arc::new(invoker),
                         budget,
+                        session_origin: ctx.session_origin.clone(),
                     },
                 )
                 .await;
@@ -5223,7 +5251,14 @@ impl Tool for AgentTool {
                     // is unreachable here: the port only reaches this arm when
                     // `is_fork` is false, and `is_fork` is exactly
                     // "fork enabled AND subagent_type omitted".
-                    let mut listing = spawner.agent_listing_for_model().await;
+                    let mut listing = spawner
+                        .agent_listing_for_model(
+                            ctx.session_origin.clone(),
+                            ctx.origin_session_id.is_some()
+                                || ctx.session_origin.is_some()
+                                || ctx.session.is_some(),
+                        )
+                        .await;
                     drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
                     if !general_purpose_is_available(&listing) {
                         let mut denied = match &self.ctx.permission_gate {
@@ -5264,7 +5299,14 @@ impl Tool for AgentTool {
                     if listing.iter().any(|a| a.agent_type == explicit) {
                         explicit.to_string()
                     } else {
-                        let mut offered_listing = spawner.agent_listing_for_model().await;
+                        let mut offered_listing = spawner
+                            .agent_listing_for_model(
+                                ctx.session_origin.clone(),
+                                ctx.origin_session_id.is_some()
+                                    || ctx.session_origin.is_some()
+                                    || ctx.session.is_some(),
+                            )
+                            .await;
                         drop_coordinator_hidden_builtins(&mut offered_listing, is_coordinator);
                         // The `Available agents:` set is the deny-filtered listing
                         // (claude-code `Pxe`), so a denied type never appears as a
@@ -6073,6 +6115,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget: budget.clone(),
+            session_origin: ctx.session_origin.clone(),
         };
         // Fork path: preserve the parent's history and replace its in-flight
         // assistant with the cloned tool-use/placeholder directive tail. The

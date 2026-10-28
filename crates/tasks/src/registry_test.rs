@@ -987,12 +987,29 @@ async fn external_teammate_stop_failure_is_retryable_through_public_task_registr
 
 struct InMemoryFs {
     files: tokio::sync::Mutex<HashMap<String, String>>,
+    read_gate: StdMutex<Option<Arc<InMemoryReadGate>>>,
+}
+struct InMemoryReadGate {
+    path: String,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 impl InMemoryFs {
     fn new() -> Self {
         Self {
             files: tokio::sync::Mutex::new(HashMap::new()),
+            read_gate: StdMutex::new(None),
         }
+    }
+
+    fn block_read_of(&self, path: &std::path::Path) -> Arc<InMemoryReadGate> {
+        let gate = Arc::new(InMemoryReadGate {
+            path: path.to_string_lossy().into_owned(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        *self.read_gate.lock().unwrap() = Some(gate.clone());
+        gate
     }
 }
 #[async_trait]
@@ -1003,6 +1020,18 @@ impl FileSystem for InMemoryFs {
         _offset: Option<u64>,
         _limit: Option<u64>,
     ) -> Result<FileContent, FsError> {
+        let gate = {
+            let mut armed = self.read_gate.lock().unwrap();
+            if armed.as_ref().is_some_and(|gate| gate.path == path) {
+                armed.take()
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         let map = self.files.lock().await;
         let content = map.get(path).cloned().unwrap_or_default();
         let total_lines = content.lines().count() as u64;
@@ -1806,6 +1835,13 @@ impl lingxi_core::host::task_registry::TaskBackgrounder for RecordingBackgrounde
     async fn background(&self) {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+    async fn background_with_outcome(
+        &self,
+        _: lingxi_core::host::task_registry::TaskBackgroundReason,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+        self.background().await;
+        lingxi_core::host::task_registry::TaskBackgroundOutcome::Backgrounded
+    }
 }
 
 async fn arm_foreground(
@@ -1833,6 +1869,921 @@ async fn arm_foreground(
         .await
         .unwrap();
     (id, requester)
+}
+
+#[tokio::test]
+async fn background_snapshot_excludes_later_tasks_and_replaced_instances() {
+    use lingxi_core::host::task_registry::TaskBackgroundReason;
+    let (_dir, registry) = make_registry();
+    let (old_id, old) = arm_foreground(&registry, "old").await;
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    let (new_id, new) = arm_foreground(&registry, "new").await;
+    assert_eq!(
+        registry
+            .background_snapshot_with_reason(snapshot, TaskBackgroundReason::TurnAbort)
+            .await,
+        1
+    );
+    assert_eq!(old.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(new.calls.load(Ordering::SeqCst), 0);
+
+    // Replacing the row under exactly the same ID must not let an older
+    // snapshot mutate the new instance or call its requester.
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    let replacement = registry.get(&new_id).await.unwrap();
+    registry.insert_state_for_test(replacement).await;
+    let replacement_requester = Arc::new(RecordingBackgrounder::default());
+    registry
+        .bind_background_requester(&new_id, replacement_requester.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        registry
+            .background_snapshot_with_reason(snapshot, TaskBackgroundReason::TurnAbort)
+            .await,
+        0
+    );
+    assert_eq!(new.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(replacement_requester.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        matches!(registry.get(&new_id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(false))
+    );
+
+    // Even rebinding the same callback is a new authority, not the snapshot.
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    registry
+        .bind_background_requester(&new_id, replacement_requester.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        registry
+            .background_snapshot_with_reason(snapshot, TaskBackgroundReason::TurnAbort)
+            .await,
+        0
+    );
+    assert_eq!(replacement_requester.calls.load(Ordering::SeqCst), 0);
+    assert_ne!(old_id, new_id);
+}
+
+#[tokio::test]
+async fn background_capture_timeout_preserves_inflight_notification_transaction() {
+    use lingxi_core::host::task_registry::TaskBackgroundReason;
+
+    let dir = tempdir().unwrap();
+    let fs = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(crate::output_manager::TaskOutputManager::new(
+        dir.path().to_path_buf(),
+        fs.clone(),
+    ));
+    let registry = TaskRegistry::new(runtime, fs.clone(), output);
+    let (foreground_id, requester) = arm_foreground(&registry, "foreground").await;
+    let (terminal_id, terminal_path) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_background_bash(
+            terminal_id.clone(),
+            "echo completed".into(),
+            "terminal".into(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    registry
+        .output_manager
+        .append(&terminal_path, "completed output\n")
+        .await
+        .unwrap();
+    registry
+        .settle_background_bash(&terminal_id, Some(0), false)
+        .await
+        .unwrap();
+
+    // The real notification path takes tasks.write(), then awaits the terminal
+    // spool read while retaining its transaction and intermediate state.
+    let spool = fs.block_read_of(&terminal_path);
+    let notifications = registry.take_pending_task_notifications(
+        lingxi_core::host::task_delivery::TaskDeliveryPolicy {
+            feature_enabled: true,
+            ..Default::default()
+        },
+    );
+    tokio::pin!(notifications);
+    tokio::select! {
+        _ = spool.entered.notified() => {},
+        _ = &mut notifications => panic!("notification completed before its spool read gate"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), registry.tasks.read())
+            .await
+            .is_err(),
+        "the gated spool read must occur while the rows write lock is held"
+    );
+    let snapshot = tokio::time::timeout(
+        Duration::from_secs(1),
+        registry.snapshot_backgroundable_tasks(),
+    )
+    .await
+    .expect("snapshot capture must be bounded");
+    assert!(snapshot.capture_unknown);
+    assert!(snapshot.targets.is_empty());
+    let result = registry
+        .background_snapshot_with_outcome(snapshot, TaskBackgroundReason::TurnAbort)
+        .await;
+    assert!(result.capture_unknown);
+    assert_eq!((result.backgrounded, result.unknown), (0, 0));
+    assert_eq!(requester.calls.load(Ordering::SeqCst), 0);
+
+    spool.release.notify_one();
+    let delivered = tokio::time::timeout(Duration::from_secs(1), &mut notifications)
+        .await
+        .expect("the original notification transaction must finish after the lock opens");
+    let terminal = delivered
+        .iter()
+        .find(|item| item.task_id == terminal_id)
+        .expect("the original notification must still be delivered");
+    assert!(terminal.task_delivery.is_some());
+    let retry = registry
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert!(!retry.capture_unknown);
+    assert_eq!((retry.backgrounded, retry.unknown), (1, 0));
+    assert_eq!(requester.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(registry.get(&foreground_id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(true))
+    );
+}
+
+#[tokio::test]
+async fn background_capture_timeout_releases_rows_while_binding_lock_is_busy() {
+    use lingxi_core::host::task_registry::TaskBackgroundReason;
+
+    let (_dir, registry) = make_registry();
+    let (_, requester) = arm_foreground(&registry, "binding-lock").await;
+    let bindings = registry.backgrounders.lock().await;
+    let snapshot = tokio::time::timeout(
+        Duration::from_secs(1),
+        registry.snapshot_backgroundable_tasks(),
+    )
+    .await
+    .expect("snapshot must not wait indefinitely on the binding lock");
+    assert!(snapshot.capture_unknown);
+    // The timeout must drop the rows read guard obtained before the binding
+    // lock, otherwise a timed-out capture could itself stall later mutations.
+    let rows = tokio::time::timeout(Duration::from_secs(1), registry.tasks.write())
+        .await
+        .expect("timed-out capture must release its partial rows lock");
+    drop(rows);
+    let result = registry
+        .background_snapshot_with_outcome(snapshot, TaskBackgroundReason::TurnAbort)
+        .await;
+    assert!(result.capture_unknown);
+    assert_eq!((result.backgrounded, result.unknown), (0, 0));
+    assert_eq!(requester.calls.load(Ordering::SeqCst), 0);
+    drop(bindings);
+}
+
+#[tokio::test]
+async fn background_admission_and_lookup_lock_timeouts_are_unknown() {
+    use lingxi_core::host::task_registry::{TaskBackgroundOutcome, TaskBackgroundReason};
+
+    let (_dir, registry) = make_registry();
+    let (id, requester) = arm_foreground(&registry, "locked-admission").await;
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    let rows = registry.tasks.write().await;
+    assert!(
+        registry.has_backgroundable_tasks().await,
+        "uncertain availability must not suppress the typed attempt"
+    );
+    assert_eq!(
+        registry
+            .background_task_for_tool_use_with_outcome("toolu_locked-admission")
+            .await,
+        TaskBackgroundOutcome::Unknown
+    );
+    let result = registry
+        .background_snapshot_with_outcome(snapshot, TaskBackgroundReason::TurnAbort)
+        .await;
+    assert!(!result.capture_unknown);
+    assert_eq!((result.backgrounded, result.unknown), (0, 1));
+    assert_eq!(requester.calls.load(Ordering::SeqCst), 0);
+    drop(rows);
+
+    // Unknown alias lookup cannot safely fall back to an unrelated raw ID.
+    let aliases = registry.aliases.write().await;
+    assert_eq!(
+        registry
+            .background_task_with_outcome("unresolved-alias")
+            .await,
+        TaskBackgroundOutcome::Unknown
+    );
+    drop(aliases);
+    assert_eq!(
+        registry.background_task_with_outcome(&id).await,
+        TaskBackgroundOutcome::Backgrounded
+    );
+}
+
+#[tokio::test]
+async fn background_commit_lock_timeout_preserves_receipt_for_retry() {
+    use lingxi_core::host::task_registry::{
+        TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+    };
+
+    struct DeferredReceipt {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl TaskBackgrounder for DeferredReceipt {
+        async fn background(&self) {}
+        async fn background_with_outcome(&self, _: TaskBackgroundReason) -> TaskBackgroundOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            TaskBackgroundOutcome::Backgrounded
+        }
+    }
+    let (_dir, registry) = make_registry();
+    let (id, _) = arm_foreground(&registry, "commit-lock").await;
+    let requester = Arc::new(DeferredReceipt {
+        calls: AtomicUsize::new(0),
+        entered: Default::default(),
+        release: Default::default(),
+    });
+    registry
+        .bind_background_requester(&id, requester.clone())
+        .await
+        .unwrap();
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    let attempt =
+        registry.background_snapshot_with_outcome(snapshot, TaskBackgroundReason::TurnAbort);
+    tokio::pin!(attempt);
+    tokio::select! {
+        _ = requester.entered.notified() => {},
+        _ = &mut attempt => panic!("request returned before its receipt was released"),
+    }
+    let mut rows = registry.tasks.write().await;
+    // Real Shell/Agent owners can mark their row backgrounded while creating
+    // the successful receipt, before this registry reconciles that receipt.
+    let Some(TaskState::LocalBash(shell)) = rows.get_mut(&id) else {
+        panic!("foreground row must exist");
+    };
+    shell.is_backgrounded = Some(true);
+    requester.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut attempt)
+        .await
+        .expect("commit must report uncertainty when the row lock remains busy");
+    assert!(!result.capture_unknown);
+    assert_eq!((result.backgrounded, result.unknown), (0, 1));
+    assert_eq!(requester.calls.load(Ordering::SeqCst), 1);
+    drop(rows);
+    assert!(
+        matches!(registry.get(&id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(true))
+    );
+    let retried = registry
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert!(!retried.capture_unknown);
+    assert_eq!((retried.backgrounded, retried.unknown), (1, 0));
+    assert_eq!(
+        requester.calls.load(Ordering::SeqCst),
+        1,
+        "retry must reuse the confirmed receipt"
+    );
+    let settled = registry
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert_eq!((settled.backgrounded, settled.unknown), (0, 0));
+    assert_eq!(requester.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn background_snapshot_keeps_owner_transition_until_late_receipt() {
+    use lingxi_core::host::task_registry::{
+        TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+    };
+
+    struct DeferredReceipt {
+        started: std::sync::atomic::AtomicBool,
+        starts: AtomicUsize,
+        entered: tokio::sync::Notify,
+        receipt: tokio::sync::watch::Sender<bool>,
+    }
+    #[async_trait::async_trait]
+    impl TaskBackgrounder for DeferredReceipt {
+        async fn background(&self) {}
+        fn outcome_wait_is_cancellation_safe(&self) -> bool {
+            true
+        }
+        async fn background_with_outcome(&self, _: TaskBackgroundReason) -> TaskBackgroundOutcome {
+            if !self.started.swap(true, Ordering::SeqCst) {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+            }
+            let mut receipt = self.receipt.subscribe();
+            self.entered.notify_one();
+            while !*receipt.borrow_and_update() {
+                if receipt.changed().await.is_err() {
+                    return TaskBackgroundOutcome::Unknown;
+                }
+            }
+            TaskBackgroundOutcome::Backgrounded
+        }
+    }
+
+    let (_dir, registry) = make_registry();
+    let (id, _) = arm_foreground(&registry, "owner-before-receipt").await;
+    let requester = Arc::new(DeferredReceipt {
+        started: Default::default(),
+        starts: AtomicUsize::new(0),
+        entered: Default::default(),
+        receipt: tokio::sync::watch::channel(false).0,
+    });
+    registry
+        .bind_background_requester(&id, requester.clone())
+        .await
+        .unwrap();
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    let mut first = Box::pin(
+        registry.background_snapshot_with_outcome(snapshot, TaskBackgroundReason::TurnAbort),
+    );
+    tokio::select! {
+        _ = requester.entered.notified() => {},
+        _ = &mut first => panic!("receipt must still be pending"),
+    }
+    {
+        let mut rows = registry.tasks.write().await;
+        let Some(TaskState::LocalBash(shell)) = rows.get_mut(&id) else {
+            panic!("the original row must remain present");
+        };
+        shell.is_backgrounded = Some(true);
+    }
+
+    // The row has changed, but no success receipt exists yet. A second batch
+    // must preserve the original binding and report uncertainty, not an empty
+    // successful snapshot or a second physical background request.
+    let second = registry
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert!(!second.capture_unknown);
+    assert_eq!((second.backgrounded, second.unknown), (0, 1));
+    assert_eq!(requester.starts.load(Ordering::SeqCst), 1);
+
+    // Dropping the first caller releases only its waiter. The originating
+    // operation owns the eventual receipt and a safe retry may observe it.
+    drop(first);
+    requester.receipt.send_replace(true);
+    let retry = registry
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert!(!retry.capture_unknown);
+    assert_eq!((retry.backgrounded, retry.unknown), (1, 0));
+    assert_eq!(requester.starts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn uncertain_background_does_not_claim_success_or_block_other_targets() {
+    use lingxi_core::host::task_registry::{
+        TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+    };
+    struct Unknown;
+    #[async_trait::async_trait]
+    impl TaskBackgrounder for Unknown {
+        async fn background(&self) {}
+        async fn background_with_outcome(&self, _: TaskBackgroundReason) -> TaskBackgroundOutcome {
+            TaskBackgroundOutcome::Unknown
+        }
+    }
+    let (_dir, registry) = make_registry();
+    let (uncertain_id, _) = arm_foreground(&registry, "uncertain").await;
+    registry
+        .bind_background_requester(&uncertain_id, Arc::new(Unknown))
+        .await
+        .unwrap();
+    let (confirmed_id, confirmed) = arm_foreground(&registry, "confirmed").await;
+    let outcome = registry
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert_eq!(outcome.unknown, 1);
+    assert_eq!(outcome.backgrounded, 1);
+    assert_eq!(confirmed.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(registry.get(&uncertain_id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(false))
+    );
+    assert!(
+        matches!(registry.get(&confirmed_id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(true))
+    );
+    let api: &dyn lingxi_core::host::task_registry::TaskRegistryHandle = &registry;
+    let repeated = api
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert_eq!(repeated.unknown, 1);
+    assert_eq!(repeated.backgrounded, 0);
+    assert_eq!(
+        api.background_task_with_outcome(&uncertain_id).await,
+        TaskBackgroundOutcome::Unknown
+    );
+}
+
+#[tokio::test]
+async fn withdrawn_background_request_does_not_count_as_detached() {
+    use lingxi_core::host::task_registry::{
+        TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+    };
+    struct Withdrawn;
+    #[async_trait::async_trait]
+    impl TaskBackgrounder for Withdrawn {
+        async fn background(&self) {}
+        async fn background_with_outcome(&self, _: TaskBackgroundReason) -> TaskBackgroundOutcome {
+            TaskBackgroundOutcome::NotBackgrounded
+        }
+    }
+    let (_dir, registry) = make_registry();
+    let (id, _) = arm_foreground(&registry, "finished").await;
+    registry
+        .bind_background_requester(&id, Arc::new(Withdrawn))
+        .await
+        .unwrap();
+    let outcome = registry
+        .background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort)
+        .await;
+    assert_eq!(outcome.backgrounded, 0);
+    assert_eq!(outcome.unknown, 0);
+    assert!(
+        matches!(registry.get(&id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(false))
+    );
+}
+
+#[tokio::test]
+async fn slow_background_receipt_does_not_block_others_or_start_twice() {
+    use lingxi_core::host::task_registry::{
+        TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+    };
+    struct Slow {
+        calls: AtomicUsize,
+        initiated: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl TaskBackgrounder for Slow {
+        async fn background(&self) {}
+        async fn background_with_outcome(&self, _: TaskBackgroundReason) -> TaskBackgroundOutcome {
+            if !self.initiated.swap(true, Ordering::SeqCst) {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+            TaskBackgroundOutcome::Backgrounded
+        }
+        fn outcome_wait_is_cancellation_safe(&self) -> bool {
+            true
+        }
+    }
+    let (_dir, registry) = make_registry();
+    let (slow_id, _) = arm_foreground(&registry, "slow-receipt").await;
+    let slow = Arc::new(Slow {
+        calls: AtomicUsize::new(0),
+        initiated: std::sync::atomic::AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    registry
+        .bind_background_requester(&slow_id, slow.clone())
+        .await
+        .unwrap();
+    let (fast_id, fast) = arm_foreground(&registry, "fast-receipt").await;
+    let batch = registry.background_all_tasks_with_outcome(TaskBackgroundReason::TurnAbort);
+    tokio::pin!(batch);
+    tokio::select! {
+        _ = slow.entered.notified() => {},
+        _ = &mut batch => panic!("slow receipt unexpectedly completed"),
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while fast.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut batch)
+        .await
+        .unwrap();
+    assert_eq!((result.backgrounded, result.unknown), (1, 1));
+    assert!(
+        matches!(registry.get(&fast_id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(true))
+    );
+    assert_eq!(
+        registry.background_task_with_outcome(&slow_id).await,
+        TaskBackgroundOutcome::Unknown
+    );
+    assert_eq!(
+        slow.calls.load(Ordering::SeqCst),
+        1,
+        "retry must reuse the in-flight request"
+    );
+    slow.release.notify_one();
+    assert_eq!(
+        registry.background_task_with_outcome(&slow_id).await,
+        TaskBackgroundOutcome::Backgrounded
+    );
+    assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn receipt_retry_survives_caller_drop_and_temporary_runtime_shutdown() {
+    use lingxi_core::host::task_registry::{
+        TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+    };
+    struct Reentrant {
+        initiated: std::sync::atomic::AtomicBool,
+        starts: AtomicUsize,
+        entered: tokio::sync::Notify,
+        receipt: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl TaskBackgrounder for Reentrant {
+        async fn background(&self) {}
+        async fn background_with_outcome(&self, _: TaskBackgroundReason) -> TaskBackgroundOutcome {
+            if !self.initiated.swap(true, Ordering::SeqCst) {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+            }
+            self.entered.notify_one();
+            self.receipt.notified().await;
+            TaskBackgroundOutcome::Backgrounded
+        }
+        fn outcome_wait_is_cancellation_safe(&self) -> bool {
+            true
+        }
+    }
+    let (_dir, registry) = make_registry();
+    let probe = Arc::new(Reentrant {
+        initiated: std::sync::atomic::AtomicBool::new(false),
+        starts: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        receipt: tokio::sync::Notify::new(),
+    });
+    let first_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let id = first_runtime.block_on(async {
+        let (id, _) = arm_foreground(&registry, "temporary-runtime").await;
+        registry
+            .bind_background_requester(&id, probe.clone())
+            .await
+            .unwrap();
+        let mut call = Box::pin(registry.background_task_with_outcome(&id));
+        tokio::select! {
+            _ = probe.entered.notified() => {},
+            _ = &mut call => panic!("receipt returned before caller drop"),
+        }
+        drop(call);
+        assert_eq!(
+            registry.background_task_with_outcome(&id).await,
+            TaskBackgroundOutcome::Unknown
+        );
+        id
+    });
+    drop(first_runtime);
+    probe.receipt.notify_one();
+    let second_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    second_runtime.block_on(async {
+        assert_eq!(
+            registry.background_task_with_outcome(&id).await,
+            TaskBackgroundOutcome::Backgrounded
+        );
+        assert_eq!(probe.starts.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[tokio::test]
+async fn late_background_receipt_cannot_update_replacement_and_panic_stays_unknown() {
+    use lingxi_core::host::task_registry::{
+        TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+    };
+    struct Panics(AtomicUsize);
+    #[async_trait::async_trait]
+    impl TaskBackgrounder for Panics {
+        async fn background(&self) {}
+        async fn background_with_outcome(&self, _: TaskBackgroundReason) -> TaskBackgroundOutcome {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("controlled requester panic");
+        }
+    }
+    let (_dir, registry) = make_registry();
+    let (id, _) = arm_foreground(&registry, "panic-receipt").await;
+    let panics = Arc::new(Panics(AtomicUsize::new(0)));
+    registry
+        .bind_background_requester(&id, panics.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        registry.background_task_with_outcome(&id).await,
+        TaskBackgroundOutcome::Unknown
+    );
+    assert_eq!(
+        registry.background_task_with_outcome(&id).await,
+        TaskBackgroundOutcome::Unknown
+    );
+    assert_eq!(panics.0.load(Ordering::SeqCst), 1);
+    let old_snapshot = registry.snapshot_backgroundable_tasks().await;
+    let replacement = registry.get(&id).await.unwrap();
+    registry.insert_state_for_test(replacement).await;
+    let next = Arc::new(RecordingBackgrounder::default());
+    registry
+        .bind_background_requester(&id, next.clone())
+        .await
+        .unwrap();
+    let outcome = registry
+        .background_snapshot_with_outcome(old_snapshot, TaskBackgroundReason::TurnAbort)
+        .await;
+    assert_eq!((outcome.backgrounded, outcome.unknown), (0, 0));
+    assert_eq!(next.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        matches!(registry.get(&id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(false))
+    );
+}
+
+#[tokio::test]
+async fn background_snapshot_does_not_mutate_a_replacement_after_callback() {
+    struct BlockingBackgrounder {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl lingxi_core::host::task_registry::TaskBackgrounder for BlockingBackgrounder {
+        async fn background(&self) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        async fn background_with_outcome(
+            &self,
+            _: lingxi_core::host::task_registry::TaskBackgroundReason,
+        ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+            self.background().await;
+            lingxi_core::host::task_registry::TaskBackgroundOutcome::Backgrounded
+        }
+    }
+    let (_dir, registry) = make_registry();
+    let (id, _) = arm_foreground(&registry, "old").await;
+    let blocking = Arc::new(BlockingBackgrounder {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    registry
+        .bind_background_requester(&id, blocking.clone())
+        .await
+        .unwrap();
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    let worker = registry.background_snapshot_with_outcome(
+        snapshot,
+        lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
+    );
+    tokio::pin!(worker);
+    tokio::select! {
+        _ = blocking.entered.notified() => {},
+        _ = &mut worker => panic!("background requester unexpectedly returned"),
+    }
+    let replacement = registry.get(&id).await.unwrap();
+    registry.insert_state_for_test(replacement).await;
+    let new = Arc::new(RecordingBackgrounder::default());
+    registry
+        .bind_background_requester(&id, new.clone())
+        .await
+        .unwrap();
+    blocking.release.notify_one();
+    let outcome = worker.await;
+    assert_eq!(outcome.backgrounded, 0);
+    assert_eq!(outcome.unknown, 1);
+    assert_eq!(new.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        matches!(registry.get(&id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(false))
+    );
+}
+
+#[tokio::test]
+async fn stale_foreground_lease_cannot_bind_or_withdraw_replacement() {
+    use lingxi_core::host::task_registry::{BackgroundBashRegistration, TaskBackgroundReason};
+    let (_dir, registry) = make_registry();
+    let (id, _) = registry.allocate_bash_output().await.unwrap();
+    let registration = BackgroundBashRegistration {
+        command: "sleep 60".into(),
+        description: "probe".into(),
+        ..Default::default()
+    };
+    let old_lease = registry
+        .register_foreground_bash_owned(&id, registration.clone(), true)
+        .await
+        .unwrap();
+    let replacement = registry.get(&id).await.unwrap();
+    registry.insert_state_for_test(replacement).await;
+    let new_lease = registry
+        .register_foreground_bash_owned(&id, registration, true)
+        .await
+        .unwrap();
+    let old = Arc::new(RecordingBackgrounder::default());
+    let new = Arc::new(RecordingBackgrounder::default());
+    assert!(registry
+        .bind_background_requester_owned(&old_lease, old.clone())
+        .await
+        .is_err());
+    registry
+        .bind_background_requester_owned(&new_lease, new.clone())
+        .await
+        .unwrap();
+    registry.unregister_foreground_bash_owned(&old_lease).await;
+    assert!(registry.get(&id).await.is_some());
+    let snapshot = registry.snapshot_backgroundable_tasks().await;
+    assert_eq!(
+        registry
+            .background_snapshot_with_reason(snapshot, TaskBackgroundReason::TurnAbort)
+            .await,
+        1
+    );
+    assert_eq!(old.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(new.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn panicking_task_created_cleans_only_its_foreground_instance() {
+    struct GatePanic {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl hooks::TaskCreatedFirer for GatePanic {
+        async fn fire(&self, _: hooks::TaskCreatedFire) {
+            self.entered.notify_one();
+            self.release.notified().await;
+            panic!("controlled TaskCreated panic");
+        }
+    }
+    for replace in [false, true] {
+        let (_dir, registry) = make_registry();
+        let firer = Arc::new(GatePanic {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let registry = Arc::new(registry.with_task_created_firer(firer.clone()));
+        let (id, _) = registry.allocate_bash_output().await.unwrap();
+        let owner = registry.clone();
+        let task_id = id.clone();
+        let registration = tokio::spawn(async move {
+            owner
+                .register_foreground_bash_owned(
+                    &task_id,
+                    lingxi_core::host::task_registry::BackgroundBashRegistration {
+                        command: "sleep 60".into(),
+                        description: "probe".into(),
+                        ..Default::default()
+                    },
+                    true,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), firer.entered.notified())
+            .await
+            .unwrap();
+        if replace {
+            let replacement = registry.get(&id).await.unwrap();
+            registry.insert_state_for_test(replacement).await;
+        }
+        firer.release.notify_one();
+        assert!(registration.await.unwrap().is_err());
+        assert_eq!(
+            registry.get(&id).await.is_some(),
+            replace,
+            "cleanup must target only the original row"
+        );
+    }
+}
+
+#[tokio::test]
+async fn foreground_cleanup_finishes_before_same_shell_is_promoted() {
+    use lingxi_core::host::task_registry::BackgroundBashRegistration;
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let (id, path) = registry.allocate_bash_output().await.unwrap();
+    let registration = BackgroundBashRegistration {
+        command: "sleep 60".into(),
+        description: "promotion".into(),
+        ..Default::default()
+    };
+    let lease = registry
+        .register_foreground_bash_owned(&id, registration.clone(), true)
+        .await
+        .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *registry.shell_cleanup_barrier.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let cleaning = registry.clone();
+    let cleanup =
+        tokio::spawn(async move { cleaning.unregister_foreground_bash_owned(&lease).await });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let promoting = registry.clone();
+    let promoted_id = id.clone();
+    let mut promotion = tokio::spawn(async move {
+        promoting
+            .register_background_bash(
+                promoted_id,
+                "sleep 60".into(),
+                "promotion".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut promotion)
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    cleanup.await.unwrap();
+    promotion.await.unwrap().unwrap();
+    assert!(
+        matches!(registry.get(&id).await, Some(TaskState::LocalBash(shell)) if shell.is_backgrounded == Some(true))
+    );
+    registry
+        .output_manager
+        .append(&path, "promoted output")
+        .await
+        .unwrap();
+    let output = registry
+        .output_manager
+        .read(&path, Default::default())
+        .await
+        .unwrap();
+    assert!(output.content.contains("promoted output"));
+}
+
+#[tokio::test]
+async fn foreground_agent_handoff_arbitrates_completion_and_replacement() {
+    use lingxi_core::host::task_registry::ForegroundAgentRegistration;
+    let (_dir, registry) = make_registry();
+    let registration = || ForegroundAgentRegistration {
+        agent_id: lingxi_core::types::AgentId::new(),
+        agent_type: "general-purpose".into(),
+        description: "probe".into(),
+        prompt: "work".into(),
+        tool_use_id: None,
+        creator_agent_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        agent_spawn_provenance: Default::default(),
+    };
+    let (finished, finished_lease) = registry
+        .register_foreground_agent_with_identity(registration())
+        .await
+        .unwrap();
+    registry
+        .unregister_foreground_agent_owned(&finished_lease)
+        .await;
+    assert!(
+        !registry
+            .commit_foreground_agent_background_owned(&finished_lease)
+            .await
+    );
+    assert!(registry.get(&finished.base().id).await.is_none());
+
+    let (claimed, claimed_lease) = registry
+        .register_foreground_agent_with_identity(registration())
+        .await
+        .unwrap();
+    assert!(
+        registry
+            .commit_foreground_agent_background_owned(&claimed_lease)
+            .await
+    );
+    registry
+        .unregister_foreground_agent_owned(&claimed_lease)
+        .await;
+    assert!(
+        matches!(registry.get(&claimed.base().id).await, Some(TaskState::LocalAgent(agent)) if agent.is_backgrounded)
+    );
+
+    let (old, old_lease) = registry
+        .register_foreground_agent_with_identity(registration())
+        .await
+        .unwrap();
+    registry.insert_state_for_test(old.clone()).await;
+    assert!(
+        !registry
+            .commit_foreground_agent_background_owned(&old_lease)
+            .await
+    );
+    assert!(
+        matches!(registry.get(&old.base().id).await, Some(TaskState::LocalAgent(agent)) if !agent.is_backgrounded)
+    );
 }
 
 /// claude-code `U6t` after `cnr` ms, then `W6t` when the command finishes in the
@@ -2344,6 +3295,7 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
         .spawn(
             TaskType::LocalFusion,
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request,
                 conversation_id: "11111111-2222-4333-8444-555555555555".into(),
             },
@@ -2450,6 +3402,7 @@ async fn a_finished_fusion_run_wakes_an_idle_host_with_the_material_as_result() 
         .spawn(
             TaskType::LocalFusion,
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request,
                 conversation_id: "11111111-2222-4333-8444-555555555555".into(),
             },
@@ -2533,6 +3486,7 @@ async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state(
         .spawn(
             TaskType::LocalFusion,
             TaskSpawnInput::LocalFusion {
+                session_origin: None,
                 request,
                 conversation_id: "11111111-2222-4333-8444-555555555555".into(),
             },
@@ -2666,6 +3620,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
         .spawn(
             TaskType::LocalWorkflow,
             TaskSpawnInput::LocalWorkflow {
+                session_origin: None,
                 session_uuid: None,
                 workflow_id: "budget-workflow".into(),
                 script: "return true".into(),
@@ -3517,6 +4472,173 @@ impl hooks::TaskCreatedFirer for GatedCreatedFirer {
     }
 }
 
+#[tokio::test]
+async fn monitor_releases_lease_before_terminal_while_created_hook_is_pending() {
+    use crate::handlers::{MonitorHandler, TaskStatusSink};
+    use crate::registry_status_sink::RegistryStatusSink;
+    use lingxi_core::host::{ProcessHandle, ProcessRunner, SandboxedCommand};
+    use mobile_linux_api::{ProcessError, ProcessOutput};
+
+    struct GatedRunner {
+        started: tokio::sync::Semaphore,
+        finish: tokio::sync::Semaphore,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for GatedRunner {
+        fn supports_owned_streaming_cleanup(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            assert!(command.lifetime_guard().is_some());
+            self.started.add_permits(1);
+            self.finish.acquire().await.unwrap().forget();
+            Ok(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _command: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    struct ObservingSink {
+        registry: Arc<RegistryStatusSink>,
+        releases: Arc<AtomicUsize>,
+        releases_at_terminal: AtomicUsize,
+        terminal: tokio::sync::Semaphore,
+    }
+
+    #[async_trait]
+    impl TaskStatusSink for ObservingSink {
+        async fn is_registered(&self, task_id: &str) -> bool {
+            self.registry.is_registered(task_id).await
+        }
+
+        async fn set_status(&self, task_id: &str, status: TaskStatus) {
+            if status.is_terminal() {
+                self.releases_at_terminal
+                    .store(self.releases.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            self.registry.set_status(task_id, status).await;
+            if status.is_terminal() {
+                self.terminal.add_permits(1);
+            }
+        }
+
+        async fn set_exit_code(&self, task_id: &str, exit_code: i32) {
+            self.registry.set_exit_code(task_id, exit_code).await;
+        }
+
+        async fn set_monitor_stdout_bytes(&self, task_id: &str, bytes: u64) {
+            self.registry.set_monitor_stdout_bytes(task_id, bytes).await;
+        }
+    }
+
+    let (_dir, mut registry) = make_registry();
+    let firer = GatedCreatedFirer::new();
+    registry = registry.with_task_created_firer(firer.clone());
+    let runner = Arc::new(GatedRunner {
+        started: tokio::sync::Semaphore::new(0),
+        finish: tokio::sync::Semaphore::new(0),
+    });
+    let releases = Arc::new(AtomicUsize::new(0));
+    let registry_sink = Arc::new(RegistryStatusSink::new());
+    let sink = Arc::new(ObservingSink {
+        registry: registry_sink.clone(),
+        releases: releases.clone(),
+        releases_at_terminal: AtomicUsize::new(usize::MAX),
+        terminal: tokio::sync::Semaphore::new(0),
+    });
+    let monitor = MonitorHandler::new(
+        runner.clone(),
+        Arc::new(PassSandbox),
+        registry.output_manager.clone(),
+    )
+    .with_status_sink(sink.clone());
+    registry.register_handler(TaskType::Monitor, Arc::new(monitor));
+    let registry = Arc::new(registry);
+    registry_sink.bind(registry.clone());
+
+    let cleanup_count = releases.clone();
+    let lease = tool_api::sandbox_runner::SandboxLease::new(move || {
+        cleanup_count.fetch_add(1, Ordering::SeqCst);
+    });
+    let input = TaskSpawnInput::Monitor {
+        command: "true".into(),
+        source_description: "monitor".into(),
+        spawn_command: Some("true".into()),
+        lifetime_guard: Some(lingxi_core::host::sandbox::BackendPlanHandle::new(lease)),
+        timeout: None,
+        cwd: None,
+        tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
+    };
+    let spawn = tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            registry
+                .spawn(TaskType::Monitor, input, "monitor".into())
+                .await
+        }
+    });
+    let wait = std::time::Duration::from_secs(5);
+    tokio::time::timeout(wait, firer.started.acquire())
+        .await
+        .expect("TaskCreated hook starts")
+        .unwrap()
+        .forget();
+    tokio::time::timeout(wait, runner.started.acquire())
+        .await
+        .expect("published Monitor starts")
+        .unwrap()
+        .forget();
+    assert_eq!(releases.load(Ordering::SeqCst), 0);
+    assert!(!spawn.is_finished(), "TaskCreated hook remains blocked");
+
+    runner.finish.add_permits(1);
+    tokio::time::timeout(wait, sink.terminal.acquire())
+        .await
+        .expect("Monitor publishes terminal status")
+        .unwrap()
+        .forget();
+    assert_eq!(
+        sink.releases_at_terminal.load(Ordering::SeqCst),
+        1,
+        "the lease must be cleaned before the real worker publishes terminal status"
+    );
+    assert_eq!(
+        registry.list().await[0].base().status,
+        TaskStatus::Completed
+    );
+    assert!(
+        !spawn.is_finished(),
+        "the hook is still blocked at terminal publication"
+    );
+
+    firer.release.add_permits(1);
+    spawn.await.unwrap().unwrap();
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+}
+
 struct CancellationActivationHandler {
     task_id: String,
     activated: Arc<std::sync::atomic::AtomicBool>,
@@ -3805,6 +4927,7 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
             .spawn(
                 TaskType::LocalFusion,
                 TaskSpawnInput::LocalFusion {
+                    session_origin: None,
                     request: lingxi_core::host::FusionRequest {
                         strategy: None,
                         strategy_revision: None,
@@ -5019,6 +6142,7 @@ fn state_for_spawn_stamps_local_workflow_tool_use_id() {
         creator_agent_id: None,
     };
     let input = TaskSpawnInput::LocalWorkflow {
+        session_origin: None,
         session_uuid: Some("session-1".into()),
         workflow_id: "audit".into(),
         script: "return 'ok'".into(),
@@ -8608,6 +9732,13 @@ impl lingxi_core::host::task_registry::TaskBackgrounder for ForegroundOwnerBackg
     async fn background(&self) {
         self.0.notify_one();
     }
+    async fn background_with_outcome(
+        &self,
+        _: lingxi_core::host::task_registry::TaskBackgroundReason,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+        self.background().await;
+        lingxi_core::host::task_registry::TaskBackgroundOutcome::Backgrounded
+    }
 }
 #[async_trait]
 impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for ForegroundOwnerFixture {
@@ -8783,6 +9914,7 @@ async fn foreground_owner_really_parks_and_folds_owned_child_completion_before_d
                     ..Default::default()
                 },
                 lingxi_core::host::SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: worker_fixture.clone(),
                     budget: worker_fixture.clone(),
                 },
@@ -9353,6 +10485,7 @@ fn handoff_fixture(
             supervisor_start_identity: None,
             process_start_identity: Some("fixture-birth".into()),
             owner: None,
+            require_group_cleanup_on_exit: false,
             socket_path: "/private/supervisor.sock".into(),
             receipt_path: "/private/result.json".into(),
             output_path: registry
@@ -9364,6 +10497,112 @@ fn handoff_fixture(
             nonce: "test-authenticated-capability".into(),
         },
     }
+}
+
+#[tokio::test]
+async fn adopted_owned_shell_retains_unverified_stop_until_receipt() {
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
+
+    let (_dir, mut registry) = make_registry();
+    let mut record = handoff_fixture(&registry, "badoptv01");
+    // Policy comes from the authenticated handoff, not the owner's spelling.
+    record.process.owner = Some("alternate-owner:adopted".into());
+    record.process.require_group_cleanup_on_exit = true;
+    let process = Arc::new(HandoffProbeRunner {
+        records: StdMutex::new(HashMap::from([(
+            record.task_id.clone(),
+            record.process.clone(),
+        )])),
+        sinks: StdMutex::new(HashMap::new()),
+        fail_attach: None,
+        complete_on_adopt: false,
+        attach_gate: StdMutex::new(None),
+    });
+    let status = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+    registry.shell_adoption_runtime = Some((process.clone(), status.clone()));
+    let registry = Arc::new(registry);
+    status.bind(registry.clone());
+    registry
+        .adopt_shell_handoff(std::slice::from_ref(&record))
+        .await
+        .unwrap();
+    assert!(registry.kill(&record.task_id).await.is_err());
+    assert_eq!(
+        registry.get(&record.task_id).await.unwrap().base().status,
+        TaskStatus::Running
+    );
+    let sink = process
+        .sinks
+        .lock()
+        .unwrap()
+        .get(&record.task_id)
+        .unwrap()
+        .clone();
+    sink.on_wait_failure(&record.task_id, "injected wait failure")
+        .await;
+    let pending = TaskRegistryHandle::get(registry.as_ref(), &record.task_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "running");
+    assert!(pending
+        .observation_error
+        .unwrap()
+        .contains("injected wait failure"));
+    assert!(registry.cleanups.lock().await.contains_key(&record.task_id));
+    sink.on_cleanup_verified(&record.task_id).await;
+    let finished = TaskRegistryHandle::get(registry.as_ref(), &record.task_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, "exited_unknown");
+    let observation = finished.observation_error.unwrap();
+    assert!(observation.contains("exit was verified"));
+    assert!(observation.contains("injected wait failure"));
+    assert!(finished.error.is_none());
+}
+
+#[tokio::test]
+async fn adopted_shell_stop_policy_uses_handoff_not_owner_prefix() {
+    let (_dir, mut registry) = make_registry();
+    let mut ordinary = handoff_fixture(&registry, "bprefix01");
+    ordinary.process.owner = Some("host-tool:ordinary".into());
+    let mut missing_owner = handoff_fixture(&registry, "bmissing1");
+    missing_owner.process.require_group_cleanup_on_exit = true;
+    let process = Arc::new(HandoffProbeRunner {
+        records: StdMutex::new(HashMap::from([
+            (ordinary.task_id.clone(), ordinary.process.clone()),
+            (missing_owner.task_id.clone(), missing_owner.process.clone()),
+        ])),
+        sinks: StdMutex::new(HashMap::new()),
+        fail_attach: None,
+        complete_on_adopt: false,
+        attach_gate: StdMutex::new(None),
+    });
+    let status = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+    registry.shell_adoption_runtime = Some((process, status.clone()));
+    let registry = Arc::new(registry);
+    status.bind(registry.clone());
+    registry
+        .adopt_shell_handoff(&[ordinary.clone(), missing_owner.clone()])
+        .await
+        .unwrap();
+
+    assert!(registry.kill(&missing_owner.task_id).await.is_err());
+    assert_eq!(
+        registry
+            .get(&missing_owner.task_id)
+            .await
+            .unwrap()
+            .base()
+            .status,
+        TaskStatus::Running
+    );
+    registry.kill(&ordinary.task_id).await.unwrap();
+    assert_eq!(
+        registry.get(&ordinary.task_id).await.unwrap().base().status,
+        TaskStatus::Killed
+    );
 }
 
 #[tokio::test]
@@ -9860,6 +11099,549 @@ async fn background_deadline_cause_survives_early_and_registered_completion() {
                 .unwrap()
                 .content,
             "\n[killed]\n"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shell_unverified_wait_reason_reaches_registry_without_exit_trailer() {
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
+    struct Killer(Arc<AtomicUsize>);
+    #[async_trait]
+    impl lingxi_core::host::task_registry::TaskKiller for Killer {
+        async fn kill(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let (_dir, registry) = make_registry();
+    for before_registration in [false, true] {
+        let (id, output) = registry.allocate_bash_output().await.unwrap();
+        let killed = Arc::new(AtomicUsize::new(0));
+        if !before_registration {
+            registry
+                .register_background_bash(
+                    id.clone(),
+                    "sleep".into(),
+                    "test".into(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            registry
+                .bind_background_bash_process(&id, Some(123), Arc::new(Killer(killed.clone())))
+                .await
+                .unwrap();
+        }
+        TaskRegistryHandle::settle_background_bash_unverified(&registry, &id, "wait failed")
+            .await
+            .unwrap();
+        if before_registration {
+            registry
+                .register_background_bash(
+                    id.clone(),
+                    "sleep".into(),
+                    "test".into(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            registry
+                .bind_background_bash_process(&id, Some(123), Arc::new(Killer(killed.clone())))
+                .await
+                .unwrap();
+        }
+        let record = TaskRegistryHandle::get(&registry, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "running");
+        assert_eq!(
+            record.observation_error.as_deref(),
+            Some("shell termination is unverified: wait failed")
+        );
+        assert!(record.error.is_none());
+        let content = registry
+            .output_manager
+            .read(&output, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap()
+            .content;
+        assert!(!content.contains("[exited"), "{content}");
+        assert!(!content.contains("[killed]"), "{content}");
+        assert!(registry.cleanups.lock().await.contains_key(&id));
+        TaskRegistryHandle::kill(&registry, &id).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while killed.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(killed.load(Ordering::SeqCst), 1);
+        let stopped = TaskRegistryHandle::get(&registry, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.status, "killed");
+        assert_eq!(
+            stopped.observation_error.as_deref(),
+            Some("shell termination is unverified: wait failed")
+        );
+        assert!(stopped.error.is_none());
+        TaskRegistryHandle::settle_background_bash(&registry, &id, None, false)
+            .await
+            .unwrap();
+        let verified = TaskRegistryHandle::get(&registry, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(verified.status, "killed");
+        assert!(verified.observation_error.is_none());
+        assert!(verified.error.is_none());
+    }
+    for before_registration in [false, true] {
+        let (id, _) = registry.allocate_bash_output().await.unwrap();
+        if !before_registration {
+            registry
+                .register_background_bash(
+                    id.clone(),
+                    "sleep".into(),
+                    "test".into(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        TaskRegistryHandle::settle_background_bash_unverified(&registry, &id, "wait failed")
+            .await
+            .unwrap();
+        // A later verified cleanup is the first point at which the task may be
+        // settled; the original diagnostic remains visible.
+        TaskRegistryHandle::settle_background_bash(&registry, &id, None, false)
+            .await
+            .unwrap();
+        if before_registration {
+            registry
+                .register_background_bash(
+                    id.clone(),
+                    "sleep".into(),
+                    "test".into(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let record = TaskRegistryHandle::get(&registry, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "failed");
+        assert!(record.observation_error.is_none());
+        assert_eq!(
+            record.error.as_deref(),
+            Some("shell termination was initially unverified: wait failed")
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_unverified_observation_is_not_lost_during_registration() {
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let (id, _) = registry.allocate_bash_output().await.unwrap();
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let lock_holder = std::thread::spawn({
+        let registry = registry.clone();
+        move || {
+            let _pending = registry.pending_bash_registration.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }
+    });
+    locked_rx.await.unwrap();
+    let observer = tokio::spawn({
+        let registry = registry.clone();
+        let id = id.clone();
+        async move {
+            TaskRegistryHandle::settle_background_bash_unverified(
+                registry.as_ref(),
+                &id,
+                "raced wait",
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if tokio::time::timeout(std::time::Duration::from_millis(20), registry.tasks.read())
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let registration = tokio::spawn({
+        let registry = registry.clone();
+        let id = id.clone();
+        async move {
+            registry
+                .register_background_bash(id, "sleep".into(), "test".into(), None, None, None)
+                .await
+        }
+    });
+    release_tx.send(()).unwrap();
+    lock_holder.join().unwrap();
+    observer.await.unwrap().unwrap();
+    registration.await.unwrap().unwrap();
+    let record = TaskRegistryHandle::get(registry.as_ref(), &id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, "running");
+    assert_eq!(
+        record.observation_error.as_deref(),
+        Some("shell termination is unverified: raced wait")
+    );
+}
+
+#[tokio::test]
+async fn owned_bash_stop_waits_for_receipt_and_keeps_failed_stop_retryable() {
+    use lingxi_core::host::task_registry::{TaskKiller, TaskRegistryError};
+
+    struct GatedKiller {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        returned: tokio::sync::Notify,
+        attempts: AtomicUsize,
+    }
+    #[async_trait]
+    impl TaskKiller for GatedKiller {
+        async fn kill(&self) {
+            panic!("owned stop must not use the best-effort path");
+        }
+
+        async fn kill_verified(&self) -> Result<(), TaskRegistryError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.returned.notify_one();
+            if attempt == 0 {
+                Err(TaskRegistryError::Internal("injected stop failure".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let (id, path) = registry.allocate_owned_bash_output().await.unwrap();
+    registry
+        .register_background_bash(id.clone(), "sleep".into(), "test".into(), None, None, None)
+        .await
+        .unwrap();
+    assert!(registry.kill(&id).await.is_err(), "not yet bound");
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Running
+    );
+
+    let killer = Arc::new(GatedKiller {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        returned: tokio::sync::Notify::new(),
+        attempts: AtomicUsize::new(0),
+    });
+    registry
+        .bind_background_bash_process(&id, Some(42), killer.clone())
+        .await
+        .unwrap();
+    let first = tokio::spawn({
+        let registry = registry.clone();
+        let id = id.clone();
+        async move { registry.kill(&id).await }
+    });
+    killer.entered.notified().await;
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Running
+    );
+    killer.release.notify_one();
+    assert!(first.await.unwrap().is_err());
+    killer.returned.notified().await;
+    let row = registry.get(&id).await.unwrap();
+    assert_eq!(row.base().status, TaskStatus::Running);
+    assert!(
+        matches!(row, TaskState::LocalBash(shell) if shell.stop_cause.as_deref().is_some_and(|cause| cause.contains("injected stop failure")))
+    );
+    assert!(registry.cleanups.lock().await.contains_key(&id));
+
+    let second = tokio::spawn({
+        let registry = registry.clone();
+        let id = id.clone();
+        async move { registry.kill(&id).await }
+    });
+    killer.entered.notified().await;
+    killer.release.notify_one();
+    killer.returned.notified().await;
+    tokio::task::yield_now().await;
+    assert!(
+        !second.is_finished(),
+        "verified stop still waits for its outcome"
+    );
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Running
+    );
+    // A natural completion may win while the stop is in flight. The real
+    // registry receipt must remain Completed, never be rewritten to Killed.
+    registry
+        .settle_background_bash(&id, Some(0), false)
+        .await
+        .unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Completed
+    );
+    let output = registry
+        .output_manager
+        .read(&path, crate::output_manager::OutputOptions::default())
+        .await
+        .unwrap();
+    assert!(!output.content.contains("[killed]"));
+}
+
+#[tokio::test]
+async fn owned_bash_early_receipt_survives_late_registration() {
+    use lingxi_core::host::{ProcessHandle, SandboxedCommand};
+    use tool_api::context::HostToolRequest;
+
+    struct EarlyReceiptRunner {
+        registry: Arc<TaskRegistry>,
+        receipt_written: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl ProcessRunner for EarlyReceiptRunner {
+        async fn run(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+            unreachable!()
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, mobile_linux_api::ProcessError> {
+            unreachable!()
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), mobile_linux_api::ProcessError> {
+            unreachable!()
+        }
+        async fn terminate_and_wait_owned_background(
+            &self,
+            handle: &ProcessHandle,
+            _: &str,
+        ) -> Result<(), mobile_linux_api::ProcessError> {
+            self.registry
+                .settle_background_bash(&handle.task_id, Some(0), false)
+                .await
+                .unwrap();
+            self.receipt_written.notify_one();
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let (id, path) = registry.allocate_owned_bash_output().await.unwrap();
+    let request = Arc::new(HostToolRequest::default());
+    let receipt_written = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let launch = tokio::spawn({
+        let request = request.clone();
+        let registry = registry.clone();
+        let id = id.clone();
+        let entered = entered.clone();
+        let release = release.clone();
+        let receipt_written = receipt_written.clone();
+        async move {
+            let owned = request.clone();
+            request
+                .run_background(async move {
+                    owned.track_background_with_cleanup(
+                        Arc::new(EarlyReceiptRunner {
+                            registry: registry.clone(),
+                            receipt_written,
+                        }),
+                        ProcessHandle {
+                            task_id: id.clone(),
+                            pid: 42,
+                        },
+                        "host-tool:late-registration".into(),
+                        Some((registry.clone(), id.clone())),
+                        None,
+                    );
+                    entered.notify_one();
+                    release.notified().await;
+                    registry
+                        .register_background_bash(
+                            id,
+                            "sleep".into(),
+                            "test".into(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+        }
+    });
+    entered.notified().await;
+    assert!(request.cancel());
+    receipt_written.notified().await;
+    tokio::task::yield_now().await;
+    assert!(registry
+        .pending_bash_registration
+        .lock()
+        .unwrap()
+        .contains_key(&id));
+    release.notify_one();
+    launch.await.unwrap();
+    request.cancel_and_reap().await.unwrap();
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Completed
+    );
+    let output = registry
+        .output_manager
+        .read(&path, crate::output_manager::OutputOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(output.content.matches("[exited with code 0]").count(), 1);
+}
+
+#[tokio::test]
+async fn owned_bash_unbound_allocation_prevents_false_shutdown_success() {
+    let (_dir, registry) = make_registry();
+    let (id, _) = registry.allocate_owned_bash_output().await.unwrap();
+    let error = registry.shutdown_background_tasks().await.unwrap_err();
+    assert!(error.to_string().contains("not bound yet"));
+    assert!(registry.allocate_owned_bash_output().await.is_err());
+    registry.discard_bash_output(&id).await;
+    registry.shutdown_background_tasks().await.unwrap();
+}
+
+#[tokio::test]
+async fn owned_bash_verified_unknown_is_terminal_before_or_after_registration() {
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
+    let (_dir, registry) = make_registry();
+    for before_registration in [false, true] {
+        let (id, path) = registry.allocate_owned_bash_output().await.unwrap();
+        if !before_registration {
+            registry
+                .register_background_bash(
+                    id.clone(),
+                    "sleep".into(),
+                    "test".into(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                TaskRegistryHandle::set_status(&registry, &id, "exited_unknown")
+                    .await
+                    .is_err()
+            );
+        }
+        TaskRegistryHandle::settle_background_bash_unverified(&registry, &id, "wait failed")
+            .await
+            .unwrap();
+        TaskRegistryHandle::settle_background_bash_unknown(&registry, &id, Some(0))
+            .await
+            .unwrap();
+        if before_registration {
+            registry
+                .register_background_bash(
+                    id.clone(),
+                    "sleep".into(),
+                    "test".into(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let record = TaskRegistryHandle::get(&registry, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, "exited_unknown");
+        assert!(record.error.is_none());
+        let observation = record.observation_error.unwrap();
+        assert!(observation.contains("exit was verified"));
+        assert!(observation.contains("wait failed"));
+        TaskRegistryHandle::settle_background_bash_unverified(&registry, &id, "late stale failure")
+            .await
+            .unwrap();
+        let after_stale = TaskRegistryHandle::get(&registry, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_stale.status, "exited_unknown");
+        assert!(after_stale
+            .observation_error
+            .unwrap()
+            .contains("wait failed"));
+        let output = TaskRegistryHandle::output(&registry, &id, None)
+            .await
+            .unwrap();
+        assert!(output.done);
+        assert_eq!(output.status.as_deref(), Some("exited_unknown"));
+        let body = registry
+            .output_manager
+            .read(&path, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap()
+            .content;
+        assert_eq!(body.matches("[exited; outcome unknown]").count(), 1);
+        assert!(!body.contains("[killed]"));
+        assert!(!registry.owned_bash_stops.lock().unwrap().contains_key(&id));
+        let notices = registry
+            .take_pending_task_notifications(
+                lingxi_core::host::task_delivery::TaskDeliveryPolicy::default(),
+            )
+            .await;
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.task_id == id && notice.status == "exited_unknown")
+                .count(),
+            1
         );
     }
 }

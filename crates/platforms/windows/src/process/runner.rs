@@ -74,14 +74,250 @@ impl WindowsProcess {
     }
 }
 
+#[cfg(all(test, windows))]
+mod owner_identity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn strict_unmanaged_entrypoints_reject_before_spawning() {
+        struct ClaimingSink;
+        #[async_trait]
+        impl lingxi_core::host::BackgroundExitSink for ClaimingSink {
+            fn requires_verified_supervised_stop(&self) -> bool {
+                true
+            }
+            async fn on_exit(&self, _: &str, _: Option<i32>) {}
+        }
+        struct Stream;
+        #[async_trait]
+        impl ProcessStreamSink for Stream {
+            async fn stdout_line(&self, _: String) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            async fn stderr_chunk(&self, _: Vec<u8>) -> Result<(), ProcessError> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("executed");
+        let strict = SandboxedCommand::__new_sandboxed(
+            lingxi_core::host::ProcessCommand {
+                command: "powershell.exe".into(),
+                args: vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    "Set-Content -LiteralPath $env:STRICT_FIXTURE_MARKER -Value executed".into(),
+                ],
+                cwd: Some(dir.path().to_path_buf()),
+                env: std::collections::HashMap::from([(
+                    "STRICT_FIXTURE_MARKER".into(),
+                    marker.to_string_lossy().into_owned(),
+                )]),
+                stdin: None,
+                timeout: Some(Duration::from_secs(30)),
+            },
+            lingxi_core::host::SandboxedTag::BypassAuditedWithReason {
+                reason: "strict marker fixture".into(),
+            },
+        )
+        .with_require_group_cleanup_on_exit(true)
+        .with_background_task(lingxi_core::host::BackgroundTaskBinding {
+            task_id: "unmanaged-strict-marker".into(),
+            output_path: dir.path().join("output"),
+            on_exit: Some(std::sync::Arc::new(ClaimingSink)),
+            on_demand: None,
+        });
+        let process = WindowsProcess::new();
+        assert!(matches!(
+            process.run(&strict).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process
+                .run_streaming(&strict, std::sync::Arc::new(Stream))
+                .await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process.run_foreground(&strict).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process.spawn_background(&strict).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(matches!(
+            process
+                .run_hook_with_async_detection(&strict, Duration::from_secs(1))
+                .await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(
+            !marker.exists(),
+            "no unsupported strict entrypoint may execute the payload"
+        );
+        let ordinary = strict.with_require_group_cleanup_on_exit(false);
+        assert_eq!(process.run(&ordinary).await.unwrap().exit_code, 0);
+        assert!(
+            marker.exists(),
+            "ordinary direct execution must remain available"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_owner_never_signals_a_registration_without_its_capability() {
+        let mut child = tokio::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let owner = format!("host-tool:unmatched-registration-{pid}");
+        let registration =
+            lingxi_core::host::agent_processes::register(Some(&owner), Some(pid)).unwrap();
+
+        let snapshot = WindowsProcess::new().kill_owner_processes(&owner).await;
+        let still_running = child.try_wait().unwrap().is_none();
+        // The test always terminates its own child before asserting.
+        if still_running {
+            child.kill().await.unwrap();
+        }
+        child.wait().await.unwrap();
+        drop(registration);
+        assert_eq!(snapshot, vec![pid]);
+        assert!(still_running, "an unmatched host PID must not be signalled");
+    }
+
+    #[tokio::test]
+    async fn mixed_owner_never_signals_capability_only_reused_pid() {
+        fn spawn() -> tokio::process::Child {
+            tokio::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 60",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        }
+        let mut unrelated = spawn();
+        let mut ordinary = spawn();
+        let unrelated_pid = unrelated.id().unwrap();
+        let ordinary_pid = ordinary.id().unwrap();
+        let owner = format!("mixed-capability-owner-{unrelated_pid}");
+        // Model a retired supervisor capability whose old numeric PID now
+        // aliases an unrelated process, while the same owner has a normal PID.
+        let stale = lingxi_core::host::agent_processes::register_with_capability_requirement(
+            Some(&owner),
+            Some(unrelated_pid),
+            true,
+        )
+        .unwrap();
+        let replacement = lingxi_core::host::agent_processes::register_with_capability_requirement(
+            Some(&owner),
+            Some(unrelated_pid),
+            false,
+        )
+        .unwrap();
+        assert!(
+            replacement.entry().requires_capability(),
+            "overlap cannot downgrade strict identity"
+        );
+        drop(stale);
+        let direct =
+            lingxi_core::host::agent_processes::register(Some(&owner), Some(ordinary_pid)).unwrap();
+        let mut seen = WindowsProcess::new().kill_owner_processes(&owner).await;
+        seen.sort_unstable();
+        let mut expected = vec![unrelated_pid, ordinary_pid];
+        expected.sort_unstable();
+        let untouched = unrelated.try_wait().unwrap().is_none();
+        let normal_exit =
+            tokio::time::timeout(std::time::Duration::from_secs(10), ordinary.wait()).await;
+        if normal_exit.is_err() {
+            let _ = ordinary.kill().await;
+        }
+        let _ = unrelated.kill().await;
+        let _ = unrelated.wait().await;
+        drop(replacement);
+        drop(direct);
+        assert_eq!(seen, expected);
+        assert!(
+            untouched,
+            "a capability-only numeric alias must not be signalled"
+        );
+        assert!(!normal_exit
+            .expect("ordinary entry must remain stoppable")
+            .unwrap()
+            .success());
+    }
+}
+
+fn require_native_supervisor_for_strict(cmd: &SandboxedCommand) -> Result<(), ProcessError> {
+    if cmd.requires_group_cleanup_on_exit()
+        && (!cmd.is_supervisor_request()
+            || !cmd
+                .background_task()
+                .and_then(|binding| binding.on_exit.as_ref())
+                .is_some_and(|sink| sink.requires_verified_supervised_stop()))
+    {
+        return Err(ProcessError::Unsupported);
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl ProcessRunner for WindowsProcess {
+    fn supports_background_lifetime_guard(&self) -> bool {
+        true
+    }
+
+    fn supports_verified_background_stop(&self, command: &SandboxedCommand) -> bool {
+        #[cfg(windows)]
+        {
+            super::supervisor::enabled(command)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = command;
+            false
+        }
+    }
+
+    async fn terminate_and_wait_owned_background(
+        &self,
+        handle: &ProcessHandle,
+        owner: &str,
+    ) -> Result<(), ProcessError> {
+        lingxi_core::host::shell_supervisor::terminate_and_wait(handle, owner)
+            .await
+            .unwrap_or(Err(ProcessError::Unsupported))
+    }
+
     async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
         let owned = lingxi_core::host::agent_processes::snapshot_entries(owner);
         for entry in &owned {
             if lingxi_core::host::shell_supervisor::kill_owned_registration(owner, *entry)
                 .await
                 .is_none()
+                // Host-owned supervisor jobs require their authenticated
+                // capability. A missing job is never permission to signal a
+                // bare PID that may already have been recycled.
+                && !entry.requires_capability()
+                && !owner.starts_with("host-tool:")
                 && lingxi_core::host::agent_processes::is_current(owner, *entry)
             {
                 let _ = super::kill_tree::kill_tree_windows(entry.pid).await;
@@ -91,6 +327,9 @@ impl ProcessRunner for WindowsProcess {
     }
 
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        if cmd.requires_group_cleanup_on_exit() {
+            return Err(ProcessError::Unsupported);
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -99,7 +338,11 @@ impl ProcessRunner for WindowsProcess {
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
         let _agent_registration =
-            lingxi_core::host::agent_processes::register(cmd.process_owner(), child.id());
+            lingxi_core::host::agent_processes::register_with_capability_requirement(
+                cmd.process_owner(),
+                child.id(),
+                cmd.requires_group_cleanup_on_exit(),
+            );
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -128,6 +371,9 @@ impl ProcessRunner for WindowsProcess {
         cmd: &SandboxedCommand,
         sink: std::sync::Arc<dyn ProcessStreamSink>,
     ) -> Result<ProcessOutput, ProcessError> {
+        if cmd.requires_group_cleanup_on_exit() {
+            return Err(ProcessError::Unsupported);
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -137,7 +383,11 @@ impl ProcessRunner for WindowsProcess {
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
         let _agent_registration =
-            lingxi_core::host::agent_processes::register(cmd.process_owner(), child.id());
+            lingxi_core::host::agent_processes::register_with_capability_requirement(
+                cmd.process_owner(),
+                child.id(),
+                cmd.requires_group_cleanup_on_exit(),
+            );
         let pid = child
             .id()
             .ok_or_else(|| ProcessError::Io("streaming child has no pid".into()))?;
@@ -259,6 +509,7 @@ impl ProcessRunner for WindowsProcess {
         if super::supervisor::enabled(cmd) {
             return super::supervisor::execute(cmd, limit, false).await;
         }
+        require_native_supervisor_for_strict(cmd)?;
         super::background::run(cmd, limit, false).await
     }
     async fn spawn_background(
@@ -272,6 +523,7 @@ impl ProcessRunner for WindowsProcess {
                 _ => Err(ProcessError::Io("supervisor did not detach shell".into())),
             };
         }
+        require_native_supervisor_for_strict(cmd)?;
         match super::background::run(cmd, Some(8192), true).await?.outcome {
             lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
             lingxi_core::host::ForegroundOutcome::Completed(_) => {

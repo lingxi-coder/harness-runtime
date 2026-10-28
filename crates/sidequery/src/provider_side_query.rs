@@ -1566,7 +1566,11 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
 
         let received = transport.received.lock().unwrap();
-        assert_eq!(received.len(), 1, "exactly one request reaches the recorder");
+        assert_eq!(
+            received.len(),
+            1,
+            "exactly one request reaches the recorder"
+        );
         let request_body = received[0].body.as_deref().expect("request body exists");
         let body: serde_json::Value =
             serde_json::from_str(request_body).expect("provider request body is JSON");

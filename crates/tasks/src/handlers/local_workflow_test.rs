@@ -146,6 +146,8 @@ struct EchoSpawner {
     seen: StdMutex<Vec<Utf16JsonProjection>>,
     seen_reqs: StdMutex<Vec<SubagentSpawnRequest>>,
     inherited_budget_totals: Option<Arc<StdMutex<Vec<u64>>>>,
+    inherited_origins:
+        StdMutex<Vec<Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>>>,
     fail: bool,
     total_tokens: u64,
     total_tool_use_count: u64,
@@ -367,6 +369,10 @@ impl SubagentSpawner for EchoSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.inherited_origins
+            .lock()
+            .unwrap()
+            .push(inherit.session_origin.clone());
         if let Some(totals) = &self.inherited_budget_totals {
             let total = inherit.budget.snapshot_total_nano_usd().await;
             totals.lock().unwrap().push(total);
@@ -866,6 +872,7 @@ fn make_ctx(fs: Arc<dyn FileSystem>) -> TaskContext {
 
 fn workflow_input(script: &str) -> TaskSpawnInput {
     TaskSpawnInput::LocalWorkflow {
+        session_origin: None,
         session_uuid: None,
         workflow_id: "wf".into(),
         script: script.into(),
@@ -1428,6 +1435,7 @@ fn nested_with_plugin_workflows(names: &[&str]) -> NestedConfig {
         registry.register(owner, entries);
     }
     NestedConfig {
+        session_origin: None,
         plugin_workflows: Some(Arc::new(registry)),
         ..Default::default()
     }
@@ -2102,6 +2110,7 @@ async fn top_level_args_global_reaches_the_script() {
         None,
         0,
         NestedConfig {
+            session_origin: None,
             allow_nested: false,
             args: Some(r#"{"a":5}"#.to_string()),
             fs: None,
@@ -2148,6 +2157,7 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
         None,
         0,
         NestedConfig {
+            session_origin: None,
             allow_nested: true,
             args: None,
             fs: Some(fs),
@@ -2206,6 +2216,7 @@ async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
         None,
         0,
         NestedConfig {
+            session_origin: None,
             allow_nested: true,
             args: None,
             fs: Some(fs),
@@ -2284,6 +2295,7 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
         None,
         0,
         NestedConfig {
+            session_origin: None,
             allow_nested: true,
             args: None,
             fs: Some(fs),
@@ -2403,6 +2415,32 @@ async fn workflow_process_owners_use_allocation_receipts_without_async_progress(
 
 #[tokio::test]
 async fn local_workflow_scopes_budget_to_its_origin_session_at_spawn() {
+    #[derive(Debug)]
+    struct Origin(lingxi_core::types::SessionId);
+    #[async_trait]
+    impl lingxi_core::host::subagent_spawn::SessionOriginCapability for Origin {
+        fn owner_id(&self) -> usize {
+            1
+        }
+        fn session_id(&self) -> lingxi_core::types::SessionId {
+            self.0
+        }
+        fn generation(&self) -> u64 {
+            7
+        }
+        fn cwd(&self) -> &std::path::Path {
+            std::path::Path::new("/workspace")
+        }
+        fn root(&self) -> &std::path::Path {
+            std::path::Path::new("/workspace")
+        }
+        async fn admit(
+            &self,
+        ) -> Result<Arc<dyn Send + Sync>, lingxi_core::host::subagent_spawn::SessionOriginError>
+        {
+            Ok(Arc::new(()))
+        }
+    }
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempfile::tempdir().unwrap();
     let output_manager = Arc::new(TaskOutputManager::new(
@@ -2432,10 +2470,18 @@ async fn local_workflow_scopes_budget_to_its_origin_session_at_spawn() {
         lingxi_core::types::SessionId::parse_prefixed("11111111-2222-4333-8444-555555555555")
             .expect("valid session id");
     let mut input = workflow_input("const a = await agent('probe'); return { a };");
-    let TaskSpawnInput::LocalWorkflow { session_uuid, .. } = &mut input else {
+    let TaskSpawnInput::LocalWorkflow {
+        session_uuid,
+        session_origin,
+        ..
+    } = &mut input
+    else {
         unreachable!("workflow_input builds a LocalWorkflow request");
     };
     *session_uuid = Some(expected.as_uuid().to_string());
+    let origin: Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability> =
+        Arc::new(Origin(expected));
+    *session_origin = Some(origin.clone());
 
     let handle = handler
         .spawn(input, make_ctx(fs))
@@ -2459,6 +2505,8 @@ async fn local_workflow_scopes_budget_to_its_origin_session_at_spawn() {
         Some(expected),
         "workflow agent() children must carry the trusted origin session for their own descendants"
     );
+    assert!(Arc::ptr_eq(spawner.inherited_origins.lock().unwrap()[0].as_ref().unwrap(), &origin),
+        "the workflow must forward the same generation capability, not reconstruct it from the UUID");
     assert!(!handle.task_id.is_empty());
 }
 
@@ -2484,6 +2532,7 @@ async fn workflow_isolation_spawner_creates_worktree_and_threads_cwd() {
         .spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(MockInvoker),
                 budget: Arc::new(MockBudget),
             },
@@ -2533,6 +2582,7 @@ async fn workflow_isolation_spawner_forwards_live_observer_and_watchdog() {
         .spawn_workflow_with_observer(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(MockInvoker),
                 budget: Arc::new(MockBudget),
             },
@@ -2969,6 +3019,7 @@ async fn workflow_transcript_root_stays_pinned_across_retarget() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalWorkflow {
+                session_origin: None,
                 session_uuid: None,
                 workflow_id: "wf".into(),
                 script: "await agent('a'); await agent('b'); return 'done';".into(),
@@ -3023,6 +3074,7 @@ async fn workflow_transcript_dir_matches_child_transcript_location() {
     handler
         .spawn(
             TaskSpawnInput::LocalWorkflow {
+                session_origin: None,
                 session_uuid: None,
                 workflow_id: "wf".into(),
                 script: "await agent('child'); return 'done';".into(),
@@ -3103,6 +3155,7 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
     let sink2 = Arc::new(RecordingSink::default());
     let h2 = make_handler(spawner2.clone(), mgr.clone(), sink2.clone());
     let input2 = TaskSpawnInput::LocalWorkflow {
+        session_origin: None,
         session_uuid: None,
         workflow_id: "wf".into(),
         script: script.into(),
@@ -3161,6 +3214,7 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
     handler
         .spawn(
             TaskSpawnInput::LocalWorkflow {
+                session_origin: None,
                 session_uuid: None,
                 workflow_id: "wf".into(),
                 script: script.into(),
@@ -3209,6 +3263,7 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
     resumed
         .spawn(
             TaskSpawnInput::LocalWorkflow {
+                session_origin: None,
                 session_uuid: None,
                 workflow_id: "wf".into(),
                 script: script.into(),
@@ -3291,6 +3346,7 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
     let sink2 = Arc::new(RecordingSink::default());
     let h2 = make_handler(spawner2.clone(), mgr.clone(), sink2.clone());
     let input2 = TaskSpawnInput::LocalWorkflow {
+        session_origin: None,
         session_uuid: None,
         workflow_id: "wf".into(),
         script: script2.into(),

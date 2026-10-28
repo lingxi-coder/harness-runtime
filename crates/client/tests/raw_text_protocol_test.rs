@@ -6,11 +6,16 @@ use client::protocol::{commands::ClientCommand, text::ClientTextDto};
 
 #[test]
 fn send_prompt_preserves_lone_surrogate_through_typed_command_roundtrip() {
-    let raw = r#"{"type":"send_prompt","text":"left\ud800right","images":[]}"#;
+    let raw =
+        r#"{"type":"send_prompt","session_id":"session-a","text":"left\ud800right","images":[]}"#;
     let command: ClientCommand = serde_json::from_str(raw).expect("deserialize raw prompt");
-    let ClientCommand::SendPrompt { text, .. } = &command else {
+    let ClientCommand::SendPrompt {
+        session_id, text, ..
+    } = &command
+    else {
         panic!("expected SendPrompt");
     };
+    assert_eq!(session_id.as_deref(), Some("session-a"));
     assert_eq!(
         text.code_units,
         [
@@ -31,11 +36,15 @@ fn send_prompt_preserves_lone_surrogate_through_typed_command_roundtrip() {
 
 #[test]
 fn slash_command_preserves_surrogate_pairs_and_ordinary_typed_text() {
-    let raw = r#"{"type":"run_slash_command","raw":"/deploy \ud83d\ude80","images":[]}"#;
+    let raw = r#"{"type":"run_slash_command","session_id":"session-a","raw":"/deploy \ud83d\ude80","images":[]}"#;
     let command: ClientCommand = serde_json::from_str(raw).expect("deserialize raw slash command");
-    let ClientCommand::RunSlashCommand { raw, .. } = &command else {
+    let ClientCommand::RunSlashCommand {
+        session_id, raw, ..
+    } = &command
+    else {
         panic!("expected RunSlashCommand");
     };
+    assert_eq!(session_id.as_deref(), Some("session-a"));
     assert_eq!(
         raw.code_units,
         [
@@ -52,6 +61,7 @@ fn slash_command_preserves_surrogate_pairs_and_ordinary_typed_text() {
     );
 
     let ordinary = ClientCommand::RunSlashCommand {
+        session_id: None,
         raw: ClientTextDto::from_utf8("/help"),
         images: Vec::new(),
         turn_id: None,
@@ -74,9 +84,10 @@ fn slash_command_preserves_surrogate_pairs_and_ordinary_typed_text() {
 
 #[test]
 fn prompt_raw_members_keep_last_duplicate_and_optional_null_semantics() {
-    let raw = r#"{"type":"send_prompt","text":"discarded","text":"kept\ud800","prompt_mode":null,"images":[],"turn_id":null,"visualization_context":null}"#;
+    let raw = r#"{"type":"send_prompt","session_id":"ignored","session_id":null,"text":"discarded","text":"kept\ud800","prompt_mode":null,"images":[],"turn_id":null,"visualization_context":null}"#;
     let command: ClientCommand = serde_json::from_str(raw).expect("deserialize duplicate prompt");
     let ClientCommand::SendPrompt {
+        session_id,
         text,
         prompt_mode,
         images,
@@ -91,9 +102,18 @@ fn prompt_raw_members_keep_last_duplicate_and_optional_null_semantics() {
         ["kept".encode_utf16().collect::<Vec<_>>(), vec![0xd800]].concat()
     );
     assert!(prompt_mode.is_none());
+    assert!(session_id.is_none());
     assert!(images.is_empty());
     assert!(turn_id.is_none());
     assert!(visualization_context.is_none());
+    assert!(serde_json::from_str::<ClientCommand>(
+        r#"{"type":"send_prompt","session_id":42,"text":"x","images":[]}"#
+    )
+    .is_err());
+    assert!(serde_json::from_str::<ClientCommand>(
+        r#"{"type":"run_slash_command","session_id":42,"raw":"/x","images":[]}"#
+    )
+    .is_err());
 
     assert!(
         serde_json::from_str::<ClientCommand>(r#"{"type":"send_prompt","images":[]}"#).is_err()

@@ -10870,6 +10870,104 @@ fn session_task_output_dir_is_session_scoped_under_project_temp() {
     assert!(dir.ends_with("tasks"));
 }
 
+// Run the actual session path builder in a child so exercising the default
+// and explicit LINGXI_TMPDIR cannot race unrelated tests using the environment.
+const TASK_OUTPUT_TEMP_PROBE: &str = "desktop::tests::task_output_temp_path_probe";
+
+fn run_task_output_temp_probe(mode: &str, explicit_root: Option<&std::path::Path>) {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([TASK_OUTPUT_TEMP_PROBE, "--exact", "--nocapture"])
+        .env("LINGXI_TASK_OUTPUT_TEMP_PROBE", mode);
+    if let Some(root) = explicit_root {
+        command.env("LINGXI_TMPDIR", root);
+    } else {
+        command.env_remove("LINGXI_TMPDIR");
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "task output probe {mode} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "task output probe did not run its fixture"
+    );
+}
+
+#[test]
+fn task_output_temp_path_probe() {
+    let Ok(mode) = std::env::var("LINGXI_TASK_OUTPUT_TEMP_PROBE") else {
+        return;
+    };
+    let expected_base = match mode.as_str() {
+        "default" if cfg!(windows) => std::env::temp_dir(),
+        "default" => std::path::PathBuf::from("/tmp"),
+        "explicit" | "relative" => std::path::PathBuf::from(
+            std::env::var_os("LINGXI_TMPDIR").expect("probe needs its explicit root"),
+        ),
+        _ => panic!("unknown task output probe mode: {mode}"),
+    };
+    if mode == "relative" {
+        let path = super::session_task_output_dir(std::path::Path::new("project"), "session");
+        assert_eq!(
+            path,
+            expected_base
+                .join(super::lingxi_temp_dir_name())
+                .join("project/session/tasks")
+        );
+        assert!(!path.is_absolute());
+        return;
+    }
+
+    let temp_root = expected_base.join(super::lingxi_temp_dir_name());
+    std::fs::create_dir_all(&temp_root).unwrap();
+    // This project component is unique and owned by the test; dropping the
+    // TempDir removes only that component and its test-created descendants.
+    let project = tempfile::Builder::new()
+        .prefix("lingxispool")
+        .tempdir_in(&temp_root)
+        .unwrap();
+    let cwd = std::path::Path::new(project.path().file_name().unwrap());
+    let path = super::session_task_output_dir(cwd, "session");
+    assert!(
+        path.is_absolute(),
+        "task output path must be absolute: {path:?}"
+    );
+    let parent = path.parent().unwrap();
+    assert_eq!(parent.parent(), Some(project.path()));
+    std::fs::create_dir(parent).unwrap();
+    let parent_identity = lingxi_core::host::rooted_fs::root_identity(parent).unwrap();
+    let output_identity = lingxi_core::host::rooted_fs::ensure_private_directory(
+        parent,
+        std::path::Path::new("tasks"),
+        lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+    )
+    .unwrap();
+    assert_eq!(
+        lingxi_core::host::rooted_fs::root_identity(parent).unwrap(),
+        parent_identity
+    );
+    assert_eq!(
+        lingxi_core::host::rooted_fs::root_identity(&path).unwrap(),
+        output_identity
+    );
+}
+
+#[test]
+fn task_output_dir_defaults_to_the_platform_temp_root() {
+    run_task_output_temp_probe("default", None);
+}
+
+#[test]
+fn task_output_temp_root_preserves_explicit_override() {
+    let root = tempfile::tempdir().unwrap();
+    run_task_output_temp_probe("explicit", Some(root.path()));
+    run_task_output_temp_probe("relative", Some(std::path::Path::new("relative-root")));
+}
+
 #[test]
 fn session_read_allowances_include_job_tmp_only_for_bg_jobs() {
     let home = std::path::Path::new("/home/u/.lingxi");

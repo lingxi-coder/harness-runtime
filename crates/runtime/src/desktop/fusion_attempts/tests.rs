@@ -1055,6 +1055,7 @@ async fn authority() -> Arc<RunAuthority> {
         control,
         inherit: lingxi_core::host::FusionInheritance::new(
             lingxi_core::host::SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertTools),
                 budget: budget.clone(),
             },

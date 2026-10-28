@@ -197,6 +197,8 @@ pub enum TaskSpawnInput {
         /// budget and transcript identity; the desktop registry may still
         /// leave listing filters unscoped.
         session_uuid: Option<String>,
+        /// Runtime-only capability captured by the authenticated launcher.
+        session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
         /// Workflow identifier.
         workflow_id: String,
         /// The model-authored workflow script source (JavaScript) to execute.
@@ -261,6 +263,8 @@ pub enum TaskSpawnInput {
         /// `command` unwrapped. `command` stays the raw text so `/tasks` and
         /// the notifications keep showing what the model asked for.
         spawn_command: Option<String>,
+        /// In-process guard held until the sandboxed process is verified stopped.
+        lifetime_guard: Option<lingxi_core::host::sandbox::BackendPlanHandle>,
         /// Optional deadline; `None` is session-persistent.
         timeout: Option<std::time::Duration>,
         /// Working directory inherited from the tool invocation.
@@ -306,6 +310,8 @@ pub enum TaskSpawnInput {
         request: lingxi_core::host::FusionRequest,
         /// Parent conversation id for the completion sink.
         conversation_id: String,
+        /// Runtime-only capability from the session owning this launch.
+        session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
     },
 }
 

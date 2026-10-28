@@ -1,7 +1,7 @@
 //! Desktop sandbox adapter — the LIVE [`tool_api::SandboxRunner`] backed by a
 //! per-session [`sandbox_runtime::SandboxManager`].
 //!
-//! The engine's shell/skill tools call `ctx.sandbox_runner.wrap(...)` to wrap a
+//! The engine's shell/skill tools call `ctx.sandbox_runner.wrap_with_lease(...)` to wrap a
 //! command before spawning it. The default
 //! [`tool_api::LegacyWrapRunner`] forwards straight to the sync
 //! [`sandbox::wrap::wrap_with_sandbox`]. This module provides the opt-in live
@@ -12,7 +12,7 @@
 //!
 //! ## Lifecycle
 //!
-//! The manager is **lazily initialized** on the first [`wrap`] call (so a
+//! The manager is **lazily initialized** on the first wrap call (so a
 //! session that never sandboxes a command pays nothing) and reused across
 //! subsequent calls. The engine config can change between calls; the runner
 //! distinguishes:
@@ -42,12 +42,11 @@ pub use convert::to_runtime_config;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig as EngineConfig};
 use sandbox::wrap::SandboxWrapError;
-use sandbox_runtime::linux::cleanup_bwrap_mount_points;
 use sandbox_runtime::manager::ManagerError;
 pub use sandbox_runtime::matcher::AskFn;
 use sandbox_runtime::SandboxManager;
@@ -105,21 +104,18 @@ fn domain_lists(rt: &sandbox_runtime::SandboxRuntimeConfig) -> (Vec<String>, Vec
 
 /// Mutable per-session sandbox state, guarded by the runner's async mutex.
 struct RunnerState {
-    /// The live manager, `Some` after the first successful [`wrap`].
+    /// The live manager, `Some` after the first successful wrap.
     manager: Option<SandboxManager>,
     /// `(allowed_domains, denied_domains)` of the active config — compared on
     /// each `wrap` to detect a live-swappable domain change.
     active_net: Option<(Vec<String>, Vec<String>)>,
     /// Structural key of the active config — a change forces reset + re-init.
     last_full_key: Option<u64>,
-    /// Mount points returned by the last `wrap_with_sandbox` (Linux bwrap
-    /// artifacts; always empty on macOS), cleaned by [`cleanup_after_command`].
-    mount_points: Vec<PathBuf>,
 }
 
 /// The live [`tool_api::SandboxRunner`] backed by a per-session
 /// [`SandboxManager`]. Cheap to construct; the manager is brought up lazily on
-/// the first [`wrap`](SandboxRunner::wrap).
+/// the first wrap.
 pub struct SandboxRuntimeRunner {
     state: Mutex<RunnerState>,
     ask_callback: Option<AskFn>,
@@ -133,7 +129,7 @@ impl Default for SandboxRuntimeRunner {
 
 impl SandboxRuntimeRunner {
     /// Create an idle runner. No manager / proxies are started until the first
-    /// [`wrap`](SandboxRunner::wrap).
+    /// wrap.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -141,7 +137,6 @@ impl SandboxRuntimeRunner {
                 manager: None,
                 active_net: None,
                 last_full_key: None,
-                mount_points: Vec::new(),
             }),
             ask_callback: None,
         }
@@ -156,7 +151,6 @@ impl SandboxRuntimeRunner {
                 manager: None,
                 active_net: None,
                 last_full_key: None,
-                mount_points: Vec::new(),
             }),
             ask_callback: Some(ask_callback),
         }
@@ -165,14 +159,14 @@ impl SandboxRuntimeRunner {
 
 #[async_trait]
 impl tool_api::SandboxRunner for SandboxRuntimeRunner {
-    async fn wrap(
+    async fn wrap_with_lease(
         &self,
         command: &str,
         cfg: &EngineConfig,
         _platform: Platform,
         bin_shell: Option<&str>,
         cwd: Option<&Path>,
-    ) -> Result<String, SandboxWrapError> {
+    ) -> Result<tool_api::sandbox_runner::SandboxWrappedCommand, SandboxWrapError> {
         // `platform` is informational here: the manager detects the host OS
         // itself (it must, since the proxies/bridge are host-side) and dispatches
         // the bwrap/seatbelt branch accordingly. The engine's `platform` already
@@ -236,17 +230,15 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
         } else {
             std::borrow::Cow::Owned(format!("{unset}{command}"))
         };
-        let (wrapped, mounts) = m
+        // Host targets are intentionally retained: a pathname does not prove
+        // who created its current object, and no temporary bind source is used.
+        let (wrapped, _potential_targets) = m
             .wrap_with_sandbox(&command, bin_shell, Some(&rt), cwd_s)
             .map_err(map_err)?;
-        state.mount_points = mounts;
-        Ok(wrapped)
-    }
-
-    async fn cleanup_after_command(&self) {
-        let mut state = self.state.lock().await;
-        cleanup_bwrap_mount_points(&state.mount_points);
-        state.mount_points.clear();
+        Ok(tool_api::sandbox_runner::SandboxWrappedCommand {
+            command: wrapped,
+            lease: tool_api::sandbox_runner::SandboxLease::noop(),
+        })
     }
 
     async fn reset(&self) {
@@ -257,7 +249,6 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
         state.manager = None;
         state.active_net = None;
         state.last_full_key = None;
-        state.mount_points.clear();
     }
 
     async fn command_violations(
@@ -278,8 +269,6 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
 mod tests {
     use super::*;
     use sandbox::runtime_config::NetworkRestrictionConfig;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     use tool_api::SandboxRunner as _;
 
     fn cfg_with_domains(domains: &[&str]) -> EngineConfig {
@@ -313,10 +302,10 @@ mod tests {
         let cwd = std::path::PathBuf::from("/tmp");
 
         let wrapped = runner
-            .wrap("echo hi", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
+            .wrap_with_lease("echo hi", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
             .await
             .expect("macOS initialize+wrap should succeed");
-        let decoded = decode_wrapped(&wrapped);
+        let decoded = decode_wrapped(&wrapped.command);
         assert!(
             decoded.contains("unset AWS_SECRET_ACCESS_KEY"),
             "the credential variable must be unset in the command the sandbox \
@@ -330,7 +319,7 @@ mod tests {
 
         // …and with no credentials configured the command is untouched.
         let plain = runner
-            .wrap(
+            .wrap_with_lease(
                 "echo hi",
                 &cfg_with_domains(&["github.com"]),
                 Platform::Mac,
@@ -340,7 +329,7 @@ mod tests {
             .await
             .expect("wrap should succeed");
         assert!(
-            !decode_wrapped(&plain).contains("unset "),
+            !decode_wrapped(&plain.command).contains("unset "),
             "an unconfigured sandbox must produce the same command as before"
         );
     }
@@ -379,12 +368,14 @@ mod tests {
         let cwd = std::path::PathBuf::from("/tmp");
 
         let first = runner
-            .wrap("echo hi", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
+            .wrap_with_lease("echo hi", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
             .await
             .expect("macOS initialize+wrap should succeed (Seatbelt is built in)");
+        assert!(first.lease.is_noop());
         assert!(
-            first.contains("sandbox-exec"),
-            "expected a sandbox-exec wrap, got: {first}"
+            first.command.contains("sandbox-exec"),
+            "expected a sandbox-exec wrap, got: {}",
+            first.command
         );
 
         // The manager is initialized; capture its proxy port to prove the 2nd
@@ -401,10 +392,10 @@ mod tests {
 
         // 2nd wrap with the SAME config: must reuse the manager (stable port).
         let second = runner
-            .wrap("echo hi2", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
+            .wrap_with_lease("echo hi2", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
             .await
             .expect("second wrap should succeed");
-        assert!(second.contains("sandbox-exec"));
+        assert!(second.command.contains("sandbox-exec"));
         let port_after_second = {
             let state = runner.state.lock().await;
             state.manager.as_ref().unwrap().http_proxy_port().unwrap()
@@ -422,10 +413,10 @@ mod tests {
             assert!(state.manager.is_none(), "reset must drop the manager");
         }
         let third = runner
-            .wrap("echo hi3", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
+            .wrap_with_lease("echo hi3", &cfg, Platform::Mac, Some("bash"), Some(&cwd))
             .await
             .expect("wrap after reset should re-initialize");
-        assert!(third.contains("sandbox-exec"));
+        assert!(third.command.contains("sandbox-exec"));
         runner.reset().await;
     }
 
@@ -439,7 +430,7 @@ mod tests {
         let cwd = std::path::PathBuf::from("/tmp");
 
         runner
-            .wrap(
+            .wrap_with_lease(
                 "echo a",
                 &cfg_with_domains(&["github.com"]),
                 Platform::Mac,
@@ -455,7 +446,7 @@ mod tests {
 
         // Only the allowed_domains list changes → live update, same manager.
         runner
-            .wrap(
+            .wrap_with_lease(
                 "echo b",
                 &cfg_with_domains(&["github.com", "npmjs.org"]),
                 Platform::Mac,
@@ -478,6 +469,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn unmatched_domain_reaches_host_ask_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpStream;
 
@@ -494,9 +487,9 @@ mod tests {
             })
         });
         let runner = SandboxRuntimeRunner::with_ask_callback(ask);
-        let cwd = PathBuf::from("/tmp");
+        let cwd = std::path::PathBuf::from("/tmp");
         runner
-            .wrap(
+            .wrap_with_lease(
                 "echo ask",
                 &EngineConfig::default(),
                 Platform::Mac,
@@ -538,7 +531,7 @@ mod tests {
         let mut changed = EngineConfig::default();
         changed.enable_weaker_nested_sandbox = true;
         runner
-            .wrap(
+            .wrap_with_lease(
                 "echo ask after reset",
                 &changed,
                 Platform::Mac,
@@ -607,16 +600,12 @@ mod tests {
         );
     }
 
-    /// `cleanup_after_command` and `reset` on a never-wrapped runner are no-ops
-    /// (no manager, empty mount points) and must not panic — host-independent.
     #[tokio::test]
-    async fn cleanup_and_reset_idle_are_noops() {
+    async fn reset_idle_is_a_noop() {
         let runner = SandboxRuntimeRunner::new();
-        runner.cleanup_after_command().await;
         runner.reset().await;
         let state = runner.state.lock().await;
         assert!(state.manager.is_none());
-        assert!(state.mount_points.is_empty());
     }
 
     #[tokio::test]

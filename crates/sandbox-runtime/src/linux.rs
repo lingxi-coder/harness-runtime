@@ -8,13 +8,11 @@
 //! The TS module keeps **module-global mutable state** — `activeSandboxCount`
 //! (a refcount) and a `bwrapMountPoints` `Set` populated as a side effect of
 //! `generateFilesystemArgs`. `cleanupBwrapMountPoints()` reads both globals.
-//! This port has **no global state**: [`crate::fs_args::generate_filesystem_args`]
-//! *returns* the `Vec<PathBuf>` of mount points, [`wrap_command_with_sandbox_linux`]
-//! threads it back to the caller, and [`cleanup_bwrap_mount_points`] takes that
-//! slice as an explicit argument. Each wrap invocation therefore owns exactly the
-//! mount points it created — the refcount/defer dance disappears because there is
-//! no shared set to protect. The observable file-cleanup behavior (unlink empty
-//! files, rmdir empty dirs, ignore errors) is identical.
+//! [`crate::fs_args::generate_filesystem_args`] returns potentially-created host
+//! destinations. Those paths can also be created or replaced by users, and
+//! POSIX cannot atomically unlink a pathname only if its identity still matches.
+//! They are deliberately retained. Missing intermediate directories are masked
+//! with a read-only tmpfs, so no host-side temporary bind source is allocated.
 //!
 //! # Seccomp (P7)
 //!
@@ -45,7 +43,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::env::Platform;
-use crate::fs_args::{generate_filesystem_args, ReadConfig, WriteConfig};
+use crate::fs_args::{
+    generate_filesystem_args, ReadConfig, WriteConfig, READ_DENY_RESOLUTION_FAILED,
+};
 
 /// `isExecutable(p)` (`linux-sandbox-utils.js:285-296`): is `p` executable by
 /// the current process (`access(p, X_OK)`).
@@ -281,32 +281,10 @@ fn workspace_apply_seccomp_candidates() -> Vec<PathBuf> {
     out
 }
 
-/// `cleanupBwrapMountPoints(mountPoints)` (:247-283), refactored to take the
-/// mount-point slice explicitly (see the module-level design note — no global
-/// `activeSandboxCount`/`bwrapMountPoints`).
-///
-/// For each mount point: if it is still the empty (size-0) **file** bwrap
-/// created, unlink it; if it is an empty **directory** (an intermediate-component
-/// mount point), rmdir it. Anything with real content is left alone. All errors
-/// are ignored — the file may already be gone.
-pub fn cleanup_bwrap_mount_points(mount_points: &[PathBuf]) {
-    for mount_point in mount_points {
-        let Ok(stat) = fs::symlink_metadata(mount_point) else {
-            // Ignore cleanup errors — the file may have already been removed.
-            continue;
-        };
-        if stat.is_file() && stat.len() == 0 {
-            let _ = fs::remove_file(mount_point);
-        } else if stat.is_dir() {
-            // Only remove if still empty (intermediate-component mount point).
-            if let Ok(mut entries) = fs::read_dir(mount_point) {
-                if entries.next().is_none() {
-                    let _ = fs::remove_dir(mount_point);
-                }
-            }
-        }
-    }
-}
+/// Preserve potentially-created destinations: their pathname alone cannot
+/// prove who created the current file or directory. Empty workspace
+/// placeholders may therefore remain after the sandbox exits.
+pub fn cleanup_bwrap_mount_points(_mount_points: &[PathBuf]) {}
 
 /// Shell-quote a single argument the way the TS `shellquote.quote([s])` does
 /// for a one-element list. Falls back to the raw string only when `shlex`
@@ -708,6 +686,12 @@ pub fn wrap_command_with_sandbox_linux(
         push_network_args(&mut bwrap_args, params)?;
     }
 
+    // Resolve the shell before computing filesystem arguments.
+    let shell_name = params.bin_shell.unwrap_or("bash");
+    let shell = which_sync(shell_name)
+        .ok_or_else(|| io::Error::other(format!("Shell '{shell_name}' not found in PATH")))?;
+    let shell = shell.to_string_lossy().into_owned();
+
     // ===== FILESYSTEM RESTRICTIONS =====
     let (fs_args, mount_points) = generate_filesystem_args(
         params.read_config,
@@ -717,6 +701,9 @@ pub fn wrap_command_with_sandbox_linux(
         params.allow_git_config,
         params.cwd,
     );
+    if fs_args.iter().any(|arg| arg == READ_DENY_RESOLUTION_FAILED) {
+        return Err(io::Error::other("a read-denied path could not be resolved"));
+    }
     bwrap_args.extend(fs_args);
 
     // Always bind /dev.
@@ -736,10 +723,6 @@ pub fn wrap_command_with_sandbox_linux(
     }
 
     // ===== COMMAND =====
-    let shell_name = params.bin_shell.unwrap_or("bash");
-    let shell = which_sync(shell_name)
-        .ok_or_else(|| io::Error::other(format!("Shell '{shell_name}' not found in PATH")))?;
-    let shell = shell.to_string_lossy().into_owned();
     bwrap_args.push("--".into());
     bwrap_args.push(shell.clone());
     bwrap_args.push("-c".into());
@@ -965,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_empty_file_and_empty_dir_keeps_nonempty() {
+    fn cleanup_preserves_unknown_empty_and_nonempty_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let empty_file = tmp.path().join("empty_mount");
         fs::write(&empty_file, b"").unwrap();
@@ -985,10 +968,27 @@ mod tests {
         ];
         cleanup_bwrap_mount_points(&points);
 
-        assert!(!empty_file.exists(), "empty file should be unlinked");
-        assert!(!empty_dir.exists(), "empty dir should be rmdir'd");
+        assert!(empty_file.exists(), "unknown empty file must be retained");
+        assert!(
+            empty_dir.exists(),
+            "unknown empty directory must be retained"
+        );
         assert!(nonempty_file.exists(), "non-empty file kept");
         assert!(nonempty_dir.exists(), "non-empty dir kept");
+    }
+
+    #[test]
+    fn cleanup_preserves_user_replacements_after_wrap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        fs::write(&target, b"").unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::write(&target, b"").unwrap();
+        cleanup_bwrap_mount_points(std::slice::from_ref(&target));
+        assert!(
+            target.is_file(),
+            "a replacement empty file belongs to the user"
+        );
     }
 
     #[test]
@@ -1155,6 +1155,222 @@ mod tests {
         let (cmd, mounts) = wrap_command_with_sandbox_linux(&p).unwrap();
         assert_eq!(cmd, "echo hi");
         assert!(mounts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrap_refuses_unresolvable_read_denies() {
+        let root = tempfile::tempdir().unwrap();
+        let cycle = root.path().join("cycle");
+        std::os::unix::fs::symlink("cycle", &cycle).unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+        let read = ReadConfig {
+            deny_only: vec![cycle.to_string_lossy().into_owned()],
+            allow_within_deny: Vec::new(),
+        };
+        let mut params = base_params("echo hi", &root_s, &root_s);
+        params.read_config = Some(&read);
+        params.bin_shell = Some("/bin/sh");
+        let error = wrap_command_with_sandbox_linux(&params).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("read-denied path could not be resolved"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn wrap_missing_shell_does_not_allocate_bind_sources() {
+        const CHILD_FLAG: &str = "LINGXI_TEST_MISSING_SHELL_CHILD";
+        if std::env::var_os(CHILD_FLAG).is_some() {
+            let root = std::env::temp_dir();
+            let workspace = root.join("workspace");
+            fs::create_dir(&workspace).unwrap();
+            let workspace = workspace.to_string_lossy().into_owned();
+            let config = WriteConfig {
+                allow_only: vec![workspace.clone()],
+                deny_within_allow: vec![format!("{workspace}/missing/config")],
+            };
+            let mut params = base_params("echo hi", &workspace, &workspace);
+            params.write_config = Some(&config);
+            params.bin_shell = Some("lingxi-deliberately-missing-test-shell");
+            let error = wrap_command_with_sandbox_linux(&params).unwrap_err();
+            assert!(error.to_string().contains("not found in PATH"));
+            assert!(
+                fs::read_dir(root).unwrap().all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("claude-empty-")),
+                "a refused wrap must not leave an allocated bind source"
+            );
+            return;
+        }
+
+        // Isolate TMPDIR in a subprocess; mutating the test process environment
+        // would race unrelated, parallel tempfile users.
+        let root = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "linux::tests::wrap_missing_shell_does_not_allocate_bind_sources",
+            ])
+            .env(CHILD_FLAG, "1")
+            .env("TMPDIR", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "subprocess failed: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("running 1 test"),
+            "the isolated regression must actually run"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires provisioned Linux bubblewrap and unprivileged user namespaces"]
+    fn bwrap_missing_directory_is_empty_readonly_and_user_files_are_preserved() {
+        let bwrap = which_sync("bwrap").expect("Linux regression requires bubblewrap");
+        let workspace = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(workspace.path()).unwrap();
+        let existing = root.join("existing");
+        fs::write(&existing, b"original").unwrap();
+        let secret_dir = root.join("secrets");
+        fs::create_dir(&secret_dir).unwrap();
+        let private = secret_dir.join("private");
+        let public = secret_dir.join("public");
+        fs::write(&private, b"private-value").unwrap();
+        fs::write(&public, b"public-value").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("public");
+        fs::write(&outside_file, b"outside-value").unwrap();
+        let outside_sub = outside.path().join("sub");
+        fs::create_dir(&outside_sub).unwrap();
+        let outside_hidden = outside.path().join("hidden");
+        fs::write(&outside_hidden, b"outside-secret").unwrap();
+        let outside_link = root.join("outside-link");
+        std::os::unix::fs::symlink(&outside_sub, &outside_link).unwrap();
+        let parent_deny = outside_link.join("../hidden");
+        let alias = secret_dir.join("external-link");
+        std::os::unix::fs::symlink(&outside_file, &alias).unwrap();
+        let target = root.join("missing");
+        let denied = target.join("config");
+        assert!(!target.exists());
+        let root_s = root.to_string_lossy().into_owned();
+        let target_s = target.to_string_lossy().into_owned();
+        let existing_s = existing.to_string_lossy().into_owned();
+        let private_s = private.to_string_lossy().into_owned();
+        let public_s = public.to_string_lossy().into_owned();
+        let alias_s = alias.to_string_lossy().into_owned();
+        let outside_hidden_s = outside_hidden.to_string_lossy().into_owned();
+        let allowed = root.join("allowed");
+        let allowed_s = allowed.to_string_lossy().into_owned();
+        let script = format!(
+            "test \"$(cat {})\" = original && test ! -e {} && test \"$(cat {})\" = public-value && \
+             test \"$(cat {})\" = outside-value && test ! -s {} && \
+             test -d {} && test -z \"$(ls -A {})\" && \
+             printf first > {} && printf second >> {} && \
+             if touch {}/created 2>/dev/null; then exit 4; fi && \
+             if (printf changed > {}) 2>/dev/null; then exit 5; fi",
+            shquote(&existing_s),
+            shquote(&private_s),
+            shquote(&public_s),
+            shquote(&alias_s),
+            shquote(&outside_hidden_s),
+            shquote(&target_s),
+            shquote(&target_s),
+            shquote(&allowed_s),
+            shquote(&allowed_s),
+            shquote(&target_s),
+            shquote(&existing_s),
+        );
+        let config = WriteConfig {
+            allow_only: vec![root_s.clone()],
+            deny_within_allow: vec![
+                denied.to_string_lossy().into_owned(),
+                target.join("another/secret").to_string_lossy().into_owned(),
+                existing_s.clone(),
+                private_s.clone(),
+                public_s.clone(),
+            ],
+        };
+        let read = ReadConfig {
+            deny_only: vec![
+                secret_dir.to_string_lossy().into_owned(),
+                parent_deny.to_string_lossy().into_owned(),
+            ],
+            allow_within_deny: vec![public_s.clone(), alias_s.clone()],
+        };
+        let bwrap_s = bwrap.to_string_lossy().into_owned();
+        let mut params = base_params(&script, &root_s, &root_s);
+        params.write_config = Some(&config);
+        params.read_config = Some(&read);
+        params.bin_shell = Some("/bin/sh");
+        params.bwrap_path = Some(&bwrap_s);
+        params.allow_all_unix_sockets = true;
+        let (wrapped, destinations) = wrap_command_with_sandbox_linux(&params).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &wrapped])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "real bwrap regression failed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(&outside_hidden).unwrap(),
+            "outside-secret"
+        );
+        assert_eq!(fs::read_to_string(&allowed).unwrap(), "firstsecond");
+        assert!(!target.join("created").exists());
+
+        // An ancestor write-deny bind also must not uncover an earlier read
+        // mask, and the explicitly allowed subpath stays readable.
+        let ancestor_script = format!(
+            "test ! -e {} && test \"$(cat {})\" = public-value && test \"$(cat {})\" = outside-value && \
+             if (printf changed > {}) 2>/dev/null; then exit 6; fi",
+            shquote(&private_s),
+            shquote(&public_s),
+            shquote(&alias_s),
+            shquote(&allowed_s),
+        );
+        let ancestor_config = WriteConfig {
+            allow_only: vec![root_s.clone()],
+            deny_within_allow: vec![root_s.clone()],
+        };
+        let mut ancestor_params = base_params(&ancestor_script, &root_s, &root_s);
+        ancestor_params.write_config = Some(&ancestor_config);
+        ancestor_params.read_config = Some(&read);
+        ancestor_params.bin_shell = Some("/bin/sh");
+        ancestor_params.bwrap_path = Some(&bwrap_s);
+        ancestor_params.allow_all_unix_sockets = true;
+        let (ancestor_wrapped, _) = wrap_command_with_sandbox_linux(&ancestor_params).unwrap();
+        let ancestor_output = std::process::Command::new("/bin/sh")
+            .args(["-c", &ancestor_wrapped])
+            .output()
+            .unwrap();
+        assert!(
+            ancestor_output.status.success(),
+            "ancestor deny regression failed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&ancestor_output.stdout),
+            String::from_utf8_lossy(&ancestor_output.stderr)
+        );
+        assert_eq!(fs::read_to_string(allowed).unwrap(), "firstsecond");
+        let user_empty = root.join("user-created-empty");
+        fs::write(&user_empty, b"").unwrap();
+        let mut cleanup_candidates = destinations;
+        cleanup_candidates.push(user_empty.clone());
+        cleanup_bwrap_mount_points(&cleanup_candidates);
+        assert!(user_empty.is_file(), "user-created empty file must survive");
+        assert_eq!(fs::read_to_string(existing).unwrap(), "original");
     }
 
     #[test]

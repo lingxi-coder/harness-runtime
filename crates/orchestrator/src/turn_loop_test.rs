@@ -429,7 +429,7 @@ mod read_file_state_tests {
     use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
     use lingxi_core::host::OrchestratorHandle;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
-    use lingxi_core::types::{HookId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, HookId, ToolUseId};
     use permission::{
         PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
         PermissionRuleValue, PolicyPermissionGate,
@@ -1696,14 +1696,30 @@ mod read_file_state_tests {
 
     /// Minimal Bash-shaped tool for end-to-end permission/Mod dispatch tests.
     struct BashDispatchProbeTool {
+        name: &'static str,
         called: Arc<std::sync::atomic::AtomicBool>,
         permission_checks: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        observed_host_policy:
+            Option<Arc<std::sync::Mutex<Vec<tool_api::context::HostToolCancellation>>>>,
     }
 
     #[async_trait]
     impl Tool for BashDispatchProbeTool {
         fn name(&self) -> &str {
-            "Bash"
+            self.name
+        }
+        async fn parse_output(
+            &self,
+            output: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolError> {
+            if output
+                .at_pointer("/force_test_output_error")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                return Err(ToolError::InvalidInput("fixture output rejected".into()));
+            }
+            Ok(output.clone())
         }
         fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
             static SCHEMA: once_cell::sync::Lazy<
@@ -1776,11 +1792,17 @@ mod read_file_state_tests {
         }
         async fn call(
             &self,
-            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
-            _ctx: ToolUseContext,
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(observed) = &self.observed_host_policy {
+                observed.lock().unwrap().push(ctx.host_tool_cancellation);
+            }
+            if input.string_at("/command") == Some("hook-test-failure") {
+                return Err(ToolError::Internal("fixture tool failure".into()));
+            }
             Ok(ToolCallResult {
                 data: source_fixture!({"ran":true}),
                 model_content: None,
@@ -2039,8 +2061,10 @@ mod read_file_state_tests {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(BashDispatchProbeTool {
+            name: "Bash",
             called: called.clone(),
             permission_checks: None,
+            observed_host_policy: None,
         }));
         let cwd = dir.path().to_path_buf();
         let roots = permission::FsRoots {
@@ -2313,6 +2337,219 @@ mod read_file_state_tests {
         );
     }
 
+    #[cfg(unix)]
+    mod host_owned_command_hook_test {
+        include!("turn_loop/host_owned_command_hook_test.rs");
+    }
+
+    #[tokio::test]
+    async fn host_cancellation_policy_reaches_tool_through_mod_forward() {
+        use tool_api::context::HostToolCancellation;
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("forward.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('tool.call', { tool: 'Bash' }, ($, e, next) => next(e));
+            }
+        "#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load(
+            "host-cancel-forward",
+            dir.path(),
+            &module,
+            source_fixture!({}),
+        )
+        .await
+        .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let orch = ConversationOrchestrator::into_shared(
+            orch_with_tools(
+                dir.path().to_path_buf(),
+                vec![Arc::new(BashDispatchProbeTool {
+                    name: "Bash",
+                    called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    permission_checks: None,
+                    observed_host_policy: Some(observed.clone()),
+                })],
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry))),
+        );
+        let input = source_fixture!({"command": "printf ok"});
+        let strict = orch
+            .call_tool_from_host_with_cancellation(
+                ToolUseId::new(),
+                "Bash".to_string(),
+                input.clone(),
+                None,
+                HostToolCancellation::TerminateOwnedProcess(Arc::new(Default::default())),
+            )
+            .await
+            .unwrap();
+        assert!(strict.is_some());
+        let ordinary = orch
+            .call_tool_from_host(ToolUseId::new(), "Bash".to_string(), input, None)
+            .await
+            .unwrap();
+        assert!(ordinary.is_some());
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        assert!(matches!(
+            observed[0],
+            HostToolCancellation::TerminateOwnedProcess(_)
+        ));
+        assert!(matches!(observed[1], HostToolCancellation::Ordinary));
+    }
+
+    #[tokio::test]
+    async fn host_scoped_mod_session_blocks_unowned_nested_spawns_across_tasks() {
+        use tool_api::context::{HostToolCancellation, HostToolRequest};
+        let directory = tempfile::tempdir().unwrap();
+        let module = directory.path().join("host-owned.js");
+        std::fs::write(&module, r#"
+            export function register(on) {
+              on('tool.call', {tool:'Bash'}, async ($, event) => {
+                if (event.command === 'ordinary') {
+                  await $.tool.call({tool:'Agent', command:'nested'});
+                  return {result:{ok:true}, text:'ordinary-ok'};
+                }
+                const errors = [];
+                try { await $.tool.call({tool:'Agent', command:'nested'}); } catch (e) { errors.push(String(e.message)); }
+                try { await $.tool.call({tool:'Read', file_path:'/example.pdf'}); } catch (e) { errors.push(String(e.message)); }
+                try { await $.agent.spawn({prompt:'nested'}); } catch (e) { errors.push(String(e.message)); }
+                try { await $.process.run(['/bin/sh','-c','exit 0']); } catch (e) { errors.push(String(e.message)); }
+                try { await $.prompt.submit({text:'nested turn'}); } catch (e) { errors.push(String(e.message)); }
+                try { await $.session.repo(); } catch (e) { errors.push(String(e.message)); }
+                try { await $.mcp.connect({server:'nested'}); } catch (e) { errors.push(String(e.message)); }
+                return {result:{errors}, text:errors.join('|')};
+              });
+            }
+        "#).unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("host-owned", directory.path(), &module, source_fixture!({}))
+            .await
+            .unwrap();
+        let mut hooks = hooks::HookRegistry::new();
+        hooks.set_mod_host(host);
+        let agent_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let bash_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = ConversationOrchestrator::into_shared(
+            orch_with_tools(
+                directory.path().to_path_buf(),
+                vec![
+                    Arc::new(BashDispatchProbeTool {
+                        name: "Bash",
+                        called: bash_called.clone(),
+                        permission_checks: None,
+                        observed_host_policy: None,
+                    }),
+                    Arc::new(BashDispatchProbeTool {
+                        name: "Agent",
+                        called: agent_called.clone(),
+                        permission_checks: None,
+                        observed_host_policy: None,
+                    }),
+                    Arc::new(BashDispatchProbeTool {
+                        name: "Read",
+                        called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        permission_checks: None,
+                        observed_host_policy: None,
+                    }),
+                ],
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks))),
+        );
+        let request = Arc::new(HostToolRequest::default());
+        let session = tool_api::context::with_host_tool_cancellation(
+            HostToolCancellation::TerminateOwnedProcess(request.clone()),
+            async { crate::turn_loop::tool_dispatch::scoped_mod_session_for_test(&orch).unwrap() },
+        )
+        .await;
+        let session_on_other_task = session.clone();
+        tokio::spawn(async move {
+            assert!(matches!(
+                tool_api::context::host_tool_cancellation(),
+                HostToolCancellation::Ordinary
+            ));
+            assert!(session_on_other_task.is_host_owned_request());
+            let error = match session_on_other_task
+                .prepare_tool_call(
+                    "test",
+                    "Agent".into(),
+                    None,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            {
+                Ok(_) => panic!("Agent must be refused before dispatch"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("cannot be owned"));
+        })
+        .await
+        .unwrap();
+        let strict = orch
+            .call_tool_from_host_with_cancellation(
+                ToolUseId::new(),
+                "Bash".into(),
+                source_fixture!({"command":"strict"}),
+                None,
+                HostToolCancellation::TerminateOwnedProcess(request.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            strict.to_string().contains("nested Agent cannot be owned"),
+            "{strict}"
+        );
+        assert!(!agent_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!bash_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(request.handoff_task_ids().unwrap().is_empty());
+        assert!(request.commit());
+        assert!(session
+            .prepare_tool_call(
+                "test",
+                "Bash".into(),
+                None,
+                tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .is_err());
+        let ordinary = orch
+            .call_tool_from_host(
+                ToolUseId::new(),
+                "Bash".into(),
+                source_fixture!({"command":"ordinary"}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let text = match ordinary {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_ne!(is_error, Some(true));
+                content.string_at("").unwrap().to_owned()
+            }
+            _ => panic!("expected tool result"),
+        };
+        // The model-facing value comes from result; the separate text field is
+        // not an override of the synthesized tool result.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!({"ok": true})
+        );
+        assert!(agent_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!bash_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     #[tokio::test]
     async fn mod_tool_check_denies_real_call_before_tool_execution() {
         let dir = tempfile::tempdir().unwrap();
@@ -2400,8 +2637,10 @@ mod read_file_state_tests {
         let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(BashDispatchProbeTool {
+            name: "Bash",
             called: called.clone(),
             permission_checks: Some(permission_checks.clone()),
+            observed_host_policy: None,
         }));
         let cwd = dir.path().to_path_buf();
         let roots = permission::FsRoots {
@@ -7076,6 +7315,7 @@ mod pre_tool_hook_tests {
         let registry = Arc::new(registry);
         let gate = Arc::new(crate::test_support::NoOpPermissionGate);
         let inheritance = lingxi_core::host::SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(
                 tool_api::RegistryToolInvoker::new(registry.clone()).with_gate(gate.clone()),
             ),
@@ -7208,7 +7448,10 @@ mod pre_tool_hook_tests {
             trace_context.traceparent,
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         );
-        assert_eq!(trace_context.tracestate.as_deref(), Some("foo=bar"));
+        assert!(
+            trace_context.tracestate.is_none(),
+            "vendor tracestate is intentionally removed at the serialized host boundary"
+        );
     }
 
     #[tokio::test]
@@ -11545,6 +11788,42 @@ mod pre_cancel_tests {
     /// A tool that always succeeds — if the pre-cancel guard lets it run, the
     /// test will get a success result instead of the CANCEL_MESSAGE error.
     struct NeverShouldRunTool;
+
+    struct ControlledPermissionTransport {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        outcome: lingxi_core::host::permission_gate::PermissionOutcome,
+    }
+
+    #[async_trait]
+    impl lingxi_core::host::permission_gate::PermissionGate for ControlledPermissionTransport {
+        async fn check(
+            &self,
+            _: &str,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
+            panic!("the test uses the typed prompt transport")
+        }
+
+        async fn resolve_detailed(
+            &self,
+            _: &str,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> lingxi_core::host::permission_gate::PermissionResolution {
+            lingxi_core::host::permission_gate::PermissionResolution::Ask
+        }
+
+        async fn check_with_context(
+            &self,
+            _: &str,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> lingxi_core::host::permission_gate::PermissionOutcome {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.outcome.clone()
+        }
+    }
     #[async_trait]
     impl Tool for NeverShouldRunTool {
         fn name(&self) -> &str {
@@ -11904,6 +12183,178 @@ mod pre_cancel_tests {
         );
     }
 
+    #[tokio::test]
+    async fn lifecycle_pre_cancel_pairs_batch_without_user_denial_or_dispatch() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let orch = orch_with_never_run();
+        let reason = CancelReasonFlag::new();
+        orch.set_cancel_reason(reason.clone());
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let calls = guard_calls.clone();
+        orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("a pre-cancelled batch must not be admitted".into())
+        }));
+        let cancel = CancellationToken::new();
+        reason.set(CancelReason::LifecyclePause);
+        cancel.cancel();
+        let ids = [ToolUseId::new(), ToolUseId::new()];
+        let uses = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                (
+                    id.clone(),
+                    "NeverRun".to_string(),
+                    source_fixture!({}),
+                    Some(format!("provider-{index}")),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let (results, _, injected, _) = dispatch_tool_uses_tracked(&orch, &uses, Some(cancel))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), ids.len());
+        for (index, result) in results.iter().enumerate() {
+            assert!(matches!(result,
+                ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true), provider_tool_use_id: Some(provider_id), .. }
+                if tool_use_id == &ids[index]
+                    && provider_id == &format!("provider-{index}")
+                    && content.string_at("") == Some(crate::streaming_executor::LIFECYCLE_INTERRUPTED_MESSAGE)
+            ));
+        }
+        assert!(injected.is_empty());
+        assert_eq!(guard_calls.load(Ordering::SeqCst), 0);
+        assert!(orch.transcript.tool_denial_kinds.lock().await.is_empty());
+        let sidecars = orch.transcript.tool_use_results.lock().await;
+        for id in ids {
+            assert_eq!(
+                sidecars.get(id.as_str()).and_then(|v| v.string_at("")),
+                Some(crate::streaming_executor::LIFECYCLE_INTERRUPTED_MESSAGE)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_recovery_admission_stops_batched_dispatch_before_hooks_or_tool() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let orch = orch_with_never_run();
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let calls = guard_calls.clone();
+        orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("checkpoint unavailable".into())
+        }));
+        let result = dispatch_tool_uses_tracked(
+            &orch,
+            &[(
+                ToolUseId::new(),
+                "NeverRun".into(),
+                source_fixture!({}),
+                None,
+            )],
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+        assert!(orch.transcript.tool_use_results.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_permission_transport_close_is_not_a_user_denial() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+        use lingxi_core::host::permission_gate::PermissionOutcome;
+
+        for (outcome, paused, expected, expected_denial) in [
+            (
+                PermissionOutcome::TransportClosed {
+                    reason: "transport closed".into(),
+                },
+                true,
+                crate::streaming_executor::LIFECYCLE_INTERRUPTED_MESSAGE,
+                false,
+            ),
+            (
+                PermissionOutcome::TransportClosed {
+                    reason: "transport closed".into(),
+                },
+                false,
+                "transport closed",
+                true,
+            ),
+            (
+                PermissionOutcome::Deny {
+                    reason: "user explicitly denied".into(),
+                },
+                true,
+                "user explicitly denied",
+                true,
+            ),
+        ] {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let mut registry = ToolRegistry::new();
+            registry.register_builtin(Arc::new(NeverShouldRunTool));
+            let output = Arc::new(MockOutputStream::new());
+            let orch = Arc::new(ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(registry),
+                noop_hook_executor(),
+                Arc::new(ControlledPermissionTransport {
+                    started: started.clone(),
+                    release: release.clone(),
+                    outcome,
+                }),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
+            let reason = CancelReasonFlag::new();
+            orch.set_cancel_reason(reason.clone());
+            let cancel = CancellationToken::new();
+            let id = ToolUseId::new();
+            let task_id = id.clone();
+            let task_orch = orch.clone();
+            let task_cancel = cancel.clone();
+            let task = tokio::spawn(async move {
+                dispatch_tool_uses_tracked(
+                    &task_orch,
+                    &[(task_id, "NeverRun".into(), source_fixture!({}), None)],
+                    Some(task_cancel),
+                )
+                .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+                .await
+                .unwrap();
+            if paused {
+                reason.set(CancelReason::LifecyclePause);
+                cancel.cancel();
+            }
+            release.notify_one();
+            let (results, _, _, _) = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(&results[0], ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true), .. }
+                if tool_use_id == &id && content.string_at("") == Some(expected))
+            );
+            let denials = output.denial_snapshot().await;
+            assert_eq!(denials.len(), usize::from(expected_denial));
+            if expected_denial {
+                assert_eq!(denials[0], (id, "permission-rule".to_string()));
+            }
+        }
+    }
+
     /// The dispatcher must enforce a Cancel tool's interrupt contract even when
     /// the tool implementation itself ignores the cancellation token.
     #[tokio::test]
@@ -12015,6 +12466,82 @@ mod pre_cancel_tests {
             )),
             "the accepted tool_result and terminal tool-use marker both count"
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pause_during_batched_tool_persists_uncertain_result() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let id = ToolUseId::new();
+        let response = mock_message_response(
+            vec![llm_runtime::ContentBlock::ToolCall {
+                id: id.to_string(),
+                name: "NonCooperativeCancel".into(),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
+            }],
+            Some("tool_use"),
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NonCooperativeCancelTool {
+            started: started.clone(),
+        }));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![response])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer);
+        let reason = CancelReasonFlag::new();
+        orch.set_cancel_reason(reason.clone());
+        let cancel = CancellationToken::new();
+        let cancel_after_start = cancel.clone();
+        let cancel_task = tokio::spawn(async move {
+            started.notified().await;
+            reason.set(CancelReason::LifecyclePause);
+            cancel_after_start.cancel();
+        });
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            orch.run_turn_with_cancel("query prompt", cancel),
+        )
+        .await
+        .expect("lifecycle cancellation stops the non-cooperative call")
+        .expect("cancelled turn finishes");
+        cancel_task.await.unwrap();
+        assert!(matches!(
+            outcome,
+            crate::conversation::TurnOutcome::Cancelled
+        ));
+        let history = &orch.session.lock().await.history;
+        assert!(history.iter().any(|message| matches!(message,
+            lingxi_core::types::ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { id: tool_id, .. } if tool_id == &id))
+        )));
+        assert!(history.iter().any(|message| matches!(message,
+            lingxi_core::types::ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(block,
+                    ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true), .. }
+                        if tool_use_id == &id && content.string_at("") == Some(crate::streaming_executor::LIFECYCLE_INTERRUPTED_MESSAGE)
+                ))
+        )));
+        assert!(output.denial_snapshot().await.is_empty());
+        let jsonl = std::fs::read_to_string(path).unwrap();
+        assert!(jsonl.contains(crate::streaming_executor::LIFECYCLE_INTERRUPTED_MESSAGE));
+        assert!(!jsonl.contains("User rejected tool use"));
+        assert!(!jsonl.contains("user-rejected"));
     }
 
     /// F01: run Agent's input-sensitive interrupt contract through the real

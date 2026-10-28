@@ -1311,14 +1311,14 @@ impl Tool for MonitorTool {
             // consumed.
             self.ctx.cwd(),
         );
-        let spawn_command = match decision {
-            sandbox::decision::SandboxDecision::NoSandbox => None,
+        let (spawn_command, lifetime_guard) = match decision {
+            sandbox::decision::SandboxDecision::NoSandbox => (None, None),
             sandbox::decision::SandboxDecision::Sandbox { .. } => {
                 let shell = lingxi_core::host::shell_support::resolve_shell_path().to_string();
                 match self
                     .ctx
                     .sandbox_runner
-                    .wrap(
+                    .wrap_with_lease(
                         &command,
                         &sandbox_runtime,
                         self.ctx.platform,
@@ -1327,7 +1327,12 @@ impl Tool for MonitorTool {
                     )
                     .await
                 {
-                    Ok(wrapped) => Some(wrapped),
+                    Ok(wrapped) => {
+                        let guard = (!wrapped.lease.is_noop()).then(|| {
+                            lingxi_core::host::sandbox::BackendPlanHandle::new(wrapped.lease)
+                        });
+                        (Some(wrapped.command), guard)
+                    }
                     // A refusal is the same error the Bash tool surfaces; a
                     // monitor that cannot be confined must not fall back to
                     // running unconfined.
@@ -1342,21 +1347,27 @@ impl Tool for MonitorTool {
         };
 
         let timeout_field = if persistent { 0 } else { timeout_ms as u64 };
-        let task_id = registry
-            .spawn_monitor(MonitorRegistration {
-                command: command_source,
-                spawn_command,
-                description,
-                timeout_ms: timeout_field,
-                persistent,
-                cwd: Some(cwd.to_string_lossy().into_owned()),
-                tool_use_id: ctx.tool_use_id.map(|id| id.to_string()),
-                creator_teammate_name: ctx.agent_name,
-                creator_team_name: ctx.team_name,
-                creator_agent_id: ctx.agent_id,
-            })
-            .await
-            .map_err(|e| ToolError::Internal(format!("Monitor: {e}")))?;
+        let registration = MonitorRegistration {
+            command: command_source,
+            spawn_command,
+            description,
+            timeout_ms: timeout_field,
+            persistent,
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            tool_use_id: ctx.tool_use_id.map(|id| id.to_string()),
+            creator_teammate_name: ctx.agent_name,
+            creator_team_name: ctx.team_name,
+            creator_agent_id: ctx.agent_id,
+        };
+        let task_id = match lifetime_guard {
+            Some(guard) => {
+                registry
+                    .spawn_monitor_with_lifetime_guard(registration, guard)
+                    .await
+            }
+            None => registry.spawn_monitor(registration).await,
+        }
+        .map_err(|e| ToolError::Internal(format!("Monitor: {e}")))?;
 
         let model_content = started_message(&task_id, timeout_ms, persistent);
 
@@ -1467,6 +1478,7 @@ mod tests {
     struct RecordingRegistry {
         websocket: Mutex<Option<WebSocketMonitorRegistration>>,
         monitor: Mutex<Option<MonitorRegistration>>,
+        monitor_guard: Mutex<Option<lingxi_core::host::sandbox::BackendPlanHandle>>,
     }
 
     #[async_trait]
@@ -1520,6 +1532,15 @@ mod tests {
         ) -> Result<String, TaskRegistryError> {
             *self.monitor.lock().expect("monitor lock") = Some(reg);
             Ok("m12345678".to_string())
+        }
+        async fn spawn_monitor_with_lifetime_guard(
+            &self,
+            reg: MonitorRegistration,
+            guard: lingxi_core::host::sandbox::BackendPlanHandle,
+        ) -> Result<String, TaskRegistryError> {
+            *self.monitor.lock().unwrap() = Some(reg);
+            *self.monitor_guard.lock().unwrap() = Some(guard);
+            Ok("m12345678".into())
         }
 
         async fn output(
@@ -1812,6 +1833,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_transfers_non_noop_sandbox_lease_to_registry() {
+        struct Runner(Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait]
+        impl tool_api::sandbox_runner::SandboxRunner for Runner {
+            async fn wrap_with_lease(
+                &self,
+                command: &str,
+                _: &sandbox::runtime_config::SandboxRuntimeConfig,
+                _: sandbox::runtime_config::Platform,
+                _: Option<&str>,
+                _: Option<&std::path::Path>,
+            ) -> Result<
+                tool_api::sandbox_runner::SandboxWrappedCommand,
+                sandbox::wrap::SandboxWrapError,
+            > {
+                let released = self.0.clone();
+                Ok(tool_api::sandbox_runner::SandboxWrappedCommand {
+                    command: format!("wrapped {command}"),
+                    lease: tool_api::sandbox_runner::SandboxLease::new(move || {
+                        released.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }),
+                })
+            }
+        }
+        let _g = guard();
+        let registry = Arc::new(RecordingRegistry::default());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut context = shell_test_ctx(dummy_out());
+        context.task_registry = Some(registry.clone());
+        context.sandbox_available = true;
+        context.sandbox_runtime.enabled = true;
+        context.sandbox_runner = Arc::new(Runner(released.clone()));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.cwd = Some(std::env::current_dir().unwrap());
+        MonitorTool::new(context)
+            .call(
+                json!({"command":"echo x", "description":"x"}),
+                call_ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(registry.monitor_guard.lock().unwrap().is_some());
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        drop(registry.monitor_guard.lock().unwrap().take());
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn call_returns_result_shape_with_ccr_cap() {
         let _g = guard();
         let registry = Arc::new(RecordingRegistry::default());
@@ -1883,6 +1953,7 @@ mod tests {
         };
         fn invocation_context() -> SubagentInvocationContext {
             SubagentInvocationContext {
+                session_origin: None,
                 available_tool_names: None,
                 cancellation_token: lingxi_core::host::CancellationToken::new(),
                 permission_pause_observer: None,

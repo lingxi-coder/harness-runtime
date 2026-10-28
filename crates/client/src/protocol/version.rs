@@ -177,4 +177,19 @@
 /// media-device and media-connection request/response variants and introduce
 /// new DTO families. They do not retype or remove an existing field/variant;
 /// host routing keeps these control messages outside model history and AG-UI.
-pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";
+/// Version 30 adds required durable metadata revision and projection uncertainty
+/// fields to turn recovery snapshots. The generated native bindings must be
+/// rebuilt with the runtime.
+/// `TurnEventLiveUnretained` is appended and carries live turn ownership when
+/// no durable event sequence can be confirmed. It does not change prior ordinals.
+/// `ModSessionEvent` appends session-owned detached Mod output without assigning
+/// it to whichever mobile turn happens to be active when the callback arrives.
+/// `AttachTurn` carries its expected session and a unique attempt id; appended
+/// `TurnAttachStarted`/`TurnAttachFinished` bound its ordered replay batch.
+/// Resume and pause carry their expected session; mobile cancel must supply
+/// its session using the optional cancel owner field.
+/// Mobile prompt and slash submissions likewise carry their captured session.
+/// `SubmissionNotAdmitted` is a typed zero-side-effect mobile submission error.
+/// `QueryQueuedTurn` and `QueuedTurnStatus` provide correlated, read-only
+/// queue disposition and durable aggregate-row identity for reconciliation.
+pub const CLIENT_PROTOCOL_VERSION: &str = "30.0.0";

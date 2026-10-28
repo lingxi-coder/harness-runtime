@@ -29,9 +29,12 @@ static RUN_INPUT_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new(
 static MESSAGE_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 static EVENT_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 
+/// Validation error returned by the protocol adapter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtocolError {
+    /// Machine-readable error code.
     pub code: &'static str,
+    /// Human-readable message.
     pub message: &'static str,
 }
 
@@ -53,17 +56,24 @@ fn error(code: &'static str, message: &'static str) -> ProtocolError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolMessageDigest {
+    /// Stable identifier.
     pub id: String,
+    /// Role of the message author.
     pub role: String,
+    /// SHA-256 digest.
     pub sha256: String,
 }
 
 /// Normalized run data after schema, options and canonical-history checks.
 #[derive(Clone, Debug)]
 pub struct NormalizedInput {
+    /// Identifier of the protocol thread.
     pub thread_id: String,
+    /// Identifier of the run.
     pub run_id: String,
+    /// Parent run identifier, when present.
     pub parent_run_id: Option<String>,
+    /// Normalized protocol input.
     pub input: Input,
     /// The official final UserMessage, retained for the private chat journal.
     pub user_message: Value,
@@ -129,6 +139,7 @@ pub fn run_input_fingerprint(value: &Value) -> Result<String, ProtocolError> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// Extract and validate a protocol run identifier.
 pub fn run_id(value: &Value) -> Result<String, ProtocolError> {
     validate_run_agent_input(value)?;
     value
@@ -148,6 +159,7 @@ pub fn validate_message(value: &Value) -> Result<(), ProtocolError> {
         .map_err(|_| error("invalid_agui_message", "The AG-UI message is invalid."))
 }
 
+/// Validate a protocol event.
 pub fn validate_event(value: &Value) -> Result<(), ProtocolError> {
     validator(&EVENT_VALIDATOR, None)?
         .validate(value)
@@ -278,7 +290,7 @@ fn normalize_message_content(content: &mut Value) -> Result<(), ProtocolError> {
 }
 
 fn decode_base64(encoded: &str) -> Result<Vec<u8>, ProtocolError> {
-    if encoded.len() > ((MAX_MEDIA_BYTES + 2) / 3) * 4 {
+    if encoded.len() > MAX_MEDIA_BYTES.div_ceil(3) * 4 {
         return Err(error(
             "invalid_agui_attachment",
             "The AG-UI attachment exceeds the supported size limit.",

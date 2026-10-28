@@ -84,6 +84,8 @@ pub const DEFAULT_PERMISSION_TIMEOUT: Duration = Duration::from_secs(300);
 pub trait PermissionRequestSink: Send + Sync {
     /// Forward one fully-lowered permission request to the underlying transport.
     /// Implementations should be cheap / non-blocking on the engine task.
+    /// Return before awaiting a resolution of this same request: its
+    /// resolution is delivered only after this callback completes.
     async fn emit_request(&self, request: PermissionRequestDto);
 }
 
@@ -103,6 +105,64 @@ struct ParkedRequest {
     /// malicious client, but that response must be downgraded to AllowOnce.
     suppress_always_allow_rule: bool,
     auto_mode_prompt: Option<AutoModePrompt>,
+    /// Held until this request's callback has returned, so its resolution can
+    /// never overtake publication on the separate event sink.
+    publication: Arc<Mutex<()>>,
+}
+
+async fn take_after_publication(
+    pending: &Arc<Mutex<HashMap<u64, ParkedRequest>>>,
+    request_id: u64,
+) -> Option<ParkedRequest> {
+    let publication = {
+        let requests = pending.lock().await;
+        requests.get(&request_id)?.publication.clone()
+    };
+    let _published = publication.lock().await;
+    pending.lock().await.remove(&request_id)
+}
+
+/// Once a pending request is removed, its live resolution must survive a
+/// dropped command future. Duplicate delivery on an interrupted callback is
+/// harmless because clients resolve by request id.
+struct ResolutionOnDrop {
+    sink: Option<Arc<dyn ClientEventSink>>,
+    request_id: u64,
+    resolution: PermissionResolutionDto,
+    armed: bool,
+}
+
+impl ResolutionOnDrop {
+    async fn emit(&mut self) {
+        if let Some(sink) = &self.sink {
+            sink.emit(ClientEvent::PermissionRequestResolved {
+                request_id: self.request_id,
+                resolution: self.resolution,
+            })
+            .await;
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for ResolutionOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let (Some(sink), Ok(handle)) = (self.sink.clone(), tokio::runtime::Handle::try_current())
+        {
+            let request_id = self.request_id;
+            let resolution = self.resolution;
+            handle.spawn(async move {
+                sink.emit(ClientEvent::PermissionRequestResolved {
+                    request_id,
+                    resolution,
+                })
+                .await;
+            });
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -151,7 +211,7 @@ impl Drop for ParkedRequestGuard {
                 // concurrent `resolve()`/`drain()`/`cancel_owner()`), in
                 // which case that caller already emitted its own resolution
                 // and this is a no-op.
-                let removed = pending.lock().await.remove(&request_id).is_some();
+                let removed = take_after_publication(&pending, request_id).await.is_some();
                 if removed {
                     if let Some(sink) = event_sink {
                         sink.emit(ClientEvent::PermissionRequestResolved {
@@ -311,16 +371,6 @@ impl AdapterPermissionGate {
             .and_then(|request| request.owner.as_ref().map(|owner| owner.id))
     }
 
-    async fn emit_resolution(&self, request_id: u64, resolution: PermissionResolutionDto) {
-        if let Some(sink) = &self.event_sink {
-            sink.emit(ClientEvent::PermissionRequestResolved {
-                request_id,
-                resolution,
-            })
-            .await;
-        }
-    }
-
     /// (3c) Enable persisting an `AllowAlways` choice to `settings.local.json`
     /// (under `paths.cwd/.lingxi/`). Without this, `AllowAlways` is session-only.
     #[must_use]
@@ -350,7 +400,7 @@ impl AdapterPermissionGate {
         response: PermissionResponseDto,
         _tool_name_hint: &str,
     ) -> bool {
-        let parked = { self.pending.lock().await.remove(&request_id) };
+        let parked = take_after_publication(&self.pending, request_id).await;
         let Some(ParkedRequest {
             sender,
             input,
@@ -361,6 +411,16 @@ impl AdapterPermissionGate {
         }) = parked
         else {
             return false;
+        };
+        let mut resolution_delivery = ResolutionOnDrop {
+            sink: self.event_sink.clone(),
+            request_id,
+            resolution: if matches!(response, PermissionResponseDto::Deny) {
+                PermissionResolutionDto::Denied
+            } else {
+                PermissionResolutionDto::Approved
+            },
+            armed: true,
         };
 
         let allow_always =
@@ -401,8 +461,8 @@ impl AdapterPermissionGate {
         // stuck on screen until connection-teardown `drain()`. Emit the same
         // terminal event the guard would have.
         if sender.send(mapped).is_err() {
-            self.emit_resolution(request_id, PermissionResolutionDto::Cancelled)
-                .await;
+            resolution_delivery.resolution = PermissionResolutionDto::Cancelled;
+            resolution_delivery.emit().await;
             return false;
         }
 
@@ -439,12 +499,7 @@ impl AdapterPermissionGate {
             }
         }
 
-        let resolution = if matches!(response, PermissionResponseDto::Deny) {
-            PermissionResolutionDto::Denied
-        } else {
-            PermissionResolutionDto::Approved
-        };
-        self.emit_resolution(request_id, resolution).await;
+        resolution_delivery.emit().await;
 
         true
     }
@@ -452,9 +507,9 @@ impl AdapterPermissionGate {
     /// Cancel requests belonging to one execution owner, preserving independent
     /// background executions. Foreground workers share their main turn's owner.
     pub async fn cancel_owner(&self, owner_id: u64) -> Vec<u64> {
-        let removed = {
-            let mut pending = self.pending.lock().await;
-            let ids = pending
+        let ids = {
+            let pending = self.pending.lock().await;
+            pending
                 .iter()
                 .filter_map(|(request_id, parked)| {
                     parked
@@ -463,23 +518,23 @@ impl AdapterPermissionGate {
                         .is_some_and(|owner| owner.id == owner_id)
                         .then_some(*request_id)
                 })
-                .collect::<Vec<_>>();
-            ids.into_iter()
-                .filter_map(|request_id| {
-                    pending
-                        .remove(&request_id)
-                        .map(|parked| (request_id, parked))
-                })
                 .collect::<Vec<_>>()
         };
-        let request_ids = removed
-            .iter()
-            .map(|(request_id, _)| *request_id)
-            .collect::<Vec<_>>();
-        drop(removed);
-        for request_id in &request_ids {
-            self.emit_resolution(*request_id, PermissionResolutionDto::Cancelled)
-                .await;
+        let mut request_ids = Vec::new();
+        for request_id in ids {
+            if take_after_publication(&self.pending, request_id)
+                .await
+                .is_some()
+            {
+                request_ids.push(request_id);
+                let mut delivery = ResolutionOnDrop {
+                    sink: self.event_sink.clone(),
+                    request_id,
+                    resolution: PermissionResolutionDto::Cancelled,
+                    armed: true,
+                };
+                delivery.emit().await;
+            }
         }
         request_ids
     }
@@ -488,13 +543,28 @@ impl AdapterPermissionGate {
     /// calls resolve `Deny`. Called on transport teardown / app-background.
     /// Returns the number of requests that were drained.
     pub async fn drain(&self) -> usize {
-        let mut pending = self.pending.lock().await;
-        let request_ids = pending.keys().copied().collect::<Vec<_>>();
-        pending.clear();
-        drop(pending);
-        for request_id in &request_ids {
-            self.emit_resolution(*request_id, PermissionResolutionDto::Cancelled)
-                .await;
+        let ids = self
+            .pending
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut request_ids = Vec::new();
+        for request_id in ids {
+            if take_after_publication(&self.pending, request_id)
+                .await
+                .is_some()
+            {
+                request_ids.push(request_id);
+                let mut delivery = ResolutionOnDrop {
+                    sink: self.event_sink.clone(),
+                    request_id,
+                    resolution: PermissionResolutionDto::Cancelled,
+                    armed: true,
+                };
+                delivery.emit().await;
+            }
         }
         request_ids.len()
     }
@@ -610,6 +680,8 @@ impl AdapterPermissionGate {
         // Step 3: reserve a fresh id, park the oneshot, emit the request.
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
+        let publication = Arc::new(Mutex::new(()));
+        let publication_guard = publication.clone().lock_owned().await;
         {
             self.pending.lock().await.insert(
                 request_id,
@@ -620,6 +692,7 @@ impl AdapterPermissionGate {
                     owner: owner.clone(),
                     suppress_always_allow_rule,
                     auto_mode_prompt,
+                    publication,
                 },
             );
         }
@@ -652,7 +725,18 @@ impl AdapterPermissionGate {
                 AutoModePrompt::ExitPlanMode => AutoModePromptDto::ExitPlanMode,
             }),
         };
-        self.sink.emit_request(request).await;
+        // Once parked, publication must finish even if the checking future is
+        // dropped. Cleanup waits on the same guard before sending resolution.
+        let request_sink = self.sink.clone();
+        let publish = tokio::spawn(async move {
+            let _publication_guard = publication_guard;
+            request_sink.emit_request(request).await;
+        });
+        if publish.await.is_err() {
+            return PermissionOutcome::TransportClosed {
+                reason: "permission request publication failed".into(),
+            };
+        }
 
         // Step 4: await the resolution, bounded by the per-request timeout.
         // A dropped sender (drain / vanished resolver) OR a timeout both fail
@@ -679,7 +763,7 @@ impl AdapterPermissionGate {
                 // The sender was dropped by `drain()`/`cancel_owner()`,
                 // which also already removed the entry.
                 parked_guard.armed = false;
-                return PermissionOutcome::Deny {
+                return PermissionOutcome::TransportClosed {
                     reason: "permission request dropped (connection closed)".into(),
                 };
             }
@@ -689,8 +773,13 @@ impl AdapterPermissionGate {
                 // removal, not before it.
                 parked_guard.armed = false;
                 if expired {
-                    self.emit_resolution(request_id, PermissionResolutionDto::Expired)
-                        .await;
+                    let mut delivery = ResolutionOnDrop {
+                        sink: self.event_sink.clone(),
+                        request_id,
+                        resolution: PermissionResolutionDto::Expired,
+                        armed: true,
+                    };
+                    delivery.emit().await;
                 }
                 return PermissionOutcome::Deny {
                     reason: "permission request timed out".into(),
@@ -755,7 +844,9 @@ impl PermissionGate for AdapterPermissionGate {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
                 PermissionDecision::Allow
             }
-            PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+            PermissionOutcome::Deny { reason } | PermissionOutcome::TransportClosed { reason } => {
+                PermissionDecision::Deny { reason }
+            }
         }
     }
 
@@ -786,6 +877,7 @@ mod tests {
     use super::*;
     use crate::adapter::test_support::MockSink;
     use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
 
@@ -870,13 +962,165 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct BlockingPublicationSink {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        order: TokioMutex<Vec<&'static str>>,
+    }
+
+    #[async_trait]
+    impl PermissionRequestSink for BlockingPublicationSink {
+        async fn emit_request(&self, _: PermissionRequestDto) {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.order.lock().await.push("request");
+        }
+    }
+
+    #[async_trait]
+    impl ClientEventSink for BlockingPublicationSink {
+        async fn emit(&self, event: ClientEvent) {
+            if matches!(event, ClientEvent::PermissionRequestResolved { .. }) {
+                self.order.lock().await.push("resolved");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_cancel_waits_for_permission_request_publication() {
+        let sink = Arc::new(BlockingPublicationSink::default());
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()).with_event_sink(sink.clone()));
+        let owner = gate.begin_main_turn(Some("session".into()), Some(7));
+        let checking_gate = gate.clone();
+        let check = tokio::spawn(async move {
+            checking_gate
+                .check_with_context(
+                    "Bash",
+                    &json!({"command": "true"}),
+                    &PermissionCheckContext::default(),
+                )
+                .await
+        });
+        sink.entered.notified().await;
+        let cancelling_gate = gate.clone();
+        let mut cancel = tokio::spawn(async move { cancelling_gate.cancel_owner(owner).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancel)
+                .await
+                .is_err()
+        );
+        assert!(sink.order.lock().await.is_empty());
+        sink.release.notify_one();
+        assert_eq!(cancel.await.unwrap(), vec![1]);
+        assert!(matches!(
+            check.await.unwrap(),
+            PermissionOutcome::TransportClosed { .. }
+        ));
+        assert_eq!(*sink.order.lock().await, vec!["request", "resolved"]);
+    }
+
+    #[tokio::test]
+    async fn dropped_permission_ask_finishes_publication_before_cancel_resolution() {
+        let sink = Arc::new(BlockingPublicationSink::default());
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()).with_event_sink(sink.clone()));
+        let checking_gate = gate.clone();
+        let check = tokio::spawn(async move {
+            checking_gate
+                .check("Bash", &json!({"command": "true"}))
+                .await
+        });
+        sink.entered.notified().await;
+        check.abort();
+        let _ = check.await;
+        assert!(sink.order.lock().await.is_empty());
+        sink.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while sink.order.lock().await.len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*sink.order.lock().await, vec!["request", "resolved"]);
+        assert_eq!(gate.pending_count().await, 0);
+    }
+
+    #[derive(Default)]
+    struct BlockFirstResolutionSink {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        delivered: tokio::sync::Notify,
+        events: TokioMutex<Vec<ClientEvent>>,
+    }
+
+    #[async_trait]
+    impl ClientEventSink for BlockFirstResolutionSink {
+        async fn emit(&self, event: ClientEvent) {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            self.events.lock().await.push(event);
+            self.delivered.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_permission_resolver_still_delivers_terminal_event() {
+        let requests = MockRequestSink::arc();
+        let events = Arc::new(BlockFirstResolutionSink::default());
+        let gate =
+            Arc::new(AdapterPermissionGate::new(requests.clone()).with_event_sink(events.clone()));
+        let checking_gate = gate.clone();
+        let check = tokio::spawn(async move {
+            checking_gate
+                .check("Bash", &json!({"command": "true"}))
+                .await
+        });
+        wait_for_pending(&gate, 1).await;
+        let request = requests.last().await;
+        let resolving_gate = gate.clone();
+        let resolver = tokio::spawn(async move {
+            resolving_gate
+                .resolve(request.request_id, PermissionResponseDto::Deny, "Bash")
+                .await
+        });
+        events.entered.notified().await;
+        resolver.abort();
+        let _ = resolver.await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            events.delivered.notified(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            check.await.unwrap(),
+            PermissionDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            events.events.lock().await.as_slice(),
+            [ClientEvent::PermissionRequestResolved {
+                request_id: 1,
+                resolution: PermissionResolutionDto::Denied,
+            }]
+        ));
+    }
+
     /// Spin until the gate has parked exactly `n` requests (the emit + park
     /// happens on the spawned `check()` task). Bounded so a bug can't hang.
     async fn wait_for_pending(gate: &AdapterPermissionGate, n: usize) {
         for _ in 0..2000 {
-            if gate.pending_count().await == n {
+            let pending = gate.pending.lock().await;
+            if pending.len() == n
+                && pending
+                    .values()
+                    .all(|request| request.publication.try_lock().is_ok())
+            {
                 return;
             }
+            drop(pending);
             tokio::task::yield_now().await;
         }
         panic!("gate never reached {n} pending requests");
@@ -1277,8 +1521,15 @@ mod tests {
         let owner_id = gate.begin_main_turn(Some("session-a".to_string()), Some(7));
 
         let main_gate = gate.clone();
-        let main =
-            tokio::spawn(async move { main_gate.check("Bash", &json!({"command": "main"})).await });
+        let main = tokio::spawn(async move {
+            main_gate
+                .check_with_context(
+                    "Bash",
+                    &json!({"command": "main"}),
+                    &PermissionCheckContext::default(),
+                )
+                .await
+        });
         let worker_gate = gate.clone();
         let worker = tokio::spawn(async move {
             worker_gate
@@ -1335,7 +1586,7 @@ mod tests {
         assert_eq!(gate.pending_count().await, 1);
         assert!(matches!(
             main.await.unwrap(),
-            PermissionDecision::Deny { .. }
+            PermissionOutcome::TransportClosed { .. }
         ));
 
         assert!(
@@ -1578,6 +1829,7 @@ mod tests {
                 owner: None,
                 suppress_always_allow_rule: false,
                 auto_mode_prompt: None,
+                publication: Arc::new(Mutex::new(())),
             },
         );
 
@@ -1616,6 +1868,7 @@ mod tests {
                 owner: None,
                 suppress_always_allow_rule: false,
                 auto_mode_prompt: None,
+                publication: Arc::new(Mutex::new(())),
             },
         );
 

@@ -322,6 +322,7 @@ fn action_enum(tool: &lingxi_core::host::SourceToolWireDefinition) -> String {
 #[tokio::test]
 async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     let (orchestrator, registry, supported_actions, schema_revision) = live_audio_orchestrator();
+    let session_id = orchestrator.session.lock().await.session_id;
     let search_view = registry.tool_search_view();
 
     let unknown = orchestrator.build_wire_tools().await.unwrap().0;
@@ -346,10 +347,10 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .await
         .clone()
         .expect("known capabilities should populate the wire cache");
-    assert!(known_cache
-        .key
-        .dynamic_schema_revisions
-        .contains(&("speech".into(), "native:1".into())));
+    assert!(known_cache.key.dynamic_schema_revisions.contains(&(
+        "speech".into(),
+        format!("native:1:{}", session_id.as_uuid())
+    )));
     let known_search = search_view.entries();
     assert_eq!(known_search.len(), 1);
     assert_eq!(known_search[0].name, "speech");
@@ -372,10 +373,10 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .await
         .clone()
         .expect("changed capabilities should refresh the wire cache");
-    assert!(changed_cache
-        .key
-        .dynamic_schema_revisions
-        .contains(&("speech".into(), "native:2".into())));
+    assert!(changed_cache.key.dynamic_schema_revisions.contains(&(
+        "speech".into(),
+        format!("native:2:{}", session_id.as_uuid())
+    )));
     assert_ne!(known_cache.key, changed_cache.key);
     assert_eq!(search_view.entries()[0].name, "speech");
 
@@ -427,6 +428,10 @@ async fn wire_schema_snapshot_and_cache_follow_the_current_request_session() {
         .clone()
         .expect("initial session schema populates cache");
     assert_eq!(initial_cache.key.session_id, Some(initial_session));
+    assert!(initial_cache.key.dynamic_schema_revisions.contains(&(
+        "speech".into(),
+        format!("native:1:{}", initial_session.as_uuid())
+    )));
 
     let retargeted_session = lingxi_core::types::SessionId::new();
     orchestrator.session.lock().await.session_id = retargeted_session;
@@ -451,5 +456,9 @@ async fn wire_schema_snapshot_and_cache_follow_the_current_request_session() {
         .clone()
         .expect("retargeted session refreshes cache");
     assert_eq!(retargeted_cache.key.session_id, Some(retargeted_session));
+    assert!(retargeted_cache.key.dynamic_schema_revisions.contains(&(
+        "speech".into(),
+        format!("native:1:{}", retargeted_session.as_uuid())
+    )));
     assert_ne!(initial_cache.key, retargeted_cache.key);
 }

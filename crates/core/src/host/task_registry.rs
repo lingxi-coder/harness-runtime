@@ -307,6 +307,17 @@ pub struct BackgroundBashHandle {
 pub trait TaskKiller: Send + Sync {
     /// Kill the underlying OS process. Best-effort.
     async fn kill(&self);
+
+    /// Stop the exact owned process and wait for verified termination.
+    ///
+    /// # Errors
+    /// Returns an error when the owner cannot prove termination. The default
+    /// deliberately does not promote a best-effort kill into a receipt.
+    async fn kill_verified(&self) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "verified task termination is unavailable".into(),
+        ))
+    }
 }
 
 /// The rosters claude-code appends to a TaskStop / TaskOutput "no task found"
@@ -327,6 +338,33 @@ pub struct TaskNotFoundRosters {
 pub struct ForegroundAgentHandle {
     pub task_id: String,
     pub output_path: String,
+}
+
+/// Capability for one particular registry row, not merely its reusable ID.
+#[derive(Debug, Clone)]
+pub struct ForegroundTaskLease {
+    task_id: String,
+    identity: std::sync::Arc<()>,
+}
+
+impl ForegroundTaskLease {
+    /// Construct a lease using the registry's freshly minted row identity.
+    #[must_use]
+    pub fn new(task_id: String, identity: std::sync::Arc<()>) -> Self {
+        Self { task_id, identity }
+    }
+
+    /// The row's address, useful for diagnostics and ordinary control APIs.
+    #[must_use]
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    /// Opaque instance identity, compared by pointer identity by its issuer.
+    #[must_use]
+    pub fn identity(&self) -> &std::sync::Arc<()> {
+        &self.identity
+    }
 }
 
 /// Metadata for a foreground agent allocated by the Agent tool.
@@ -385,6 +423,23 @@ pub enum TaskBackgroundReason {
     DeliverMessage = 3,
 }
 
+/// What a requester can prove about a background transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBackgroundOutcome {
+    Backgrounded,
+    NotBackgrounded,
+    Unknown,
+}
+
+/// Results of independently requesting a set of background transitions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskBackgroundBatchOutcome {
+    pub backgrounded: usize,
+    pub unknown: usize,
+    /// The task set itself could not be captured; its size is unknown.
+    pub capture_unknown: bool,
+}
+
 #[async_trait]
 pub trait TaskBackgrounder: Send + Sync {
     /// Ask the in-flight command to detach. Best-effort and idempotent: the
@@ -393,6 +448,18 @@ pub trait TaskBackgrounder: Send + Sync {
     /// Preserve reason-aware result text; old backgrounders remain compatible.
     async fn background_with_reason(&self, _reason: TaskBackgroundReason) {
         self.background().await;
+    }
+
+    /// A legacy signal alone does not prove that the task detached.
+    async fn background_with_outcome(&self, reason: TaskBackgroundReason) -> TaskBackgroundOutcome {
+        self.background_with_reason(reason).await;
+        TaskBackgroundOutcome::Unknown
+    }
+
+    /// Opt in only when dropping and re-polling the outcome cannot repeat a
+    /// side effect and the underlying handoff retains its own lifetime.
+    fn outcome_wait_is_cancellation_safe(&self) -> bool {
+        false
     }
 }
 
@@ -589,11 +656,16 @@ pub struct TaskRecord {
     /// Terminal failure reason for a task whose `status` is `failed`, when the
     /// producing handler reported one. `local_workflow` fills it from
     /// [`WorkflowTerminalOutcome::error`] and `local_agent` from the agent's
-    /// recorded error; every other task type leaves it `None`. Appended field
+    /// recorded error; a failed `local_bash` can report an unverified wait. Appended field
     /// (default `None`) — the clients render it next to `description` so a
     /// failed background task is not a bare id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// An observation limitation, independent of task status. A running shell
+    /// may lack a verified exit receipt; an `exited_unknown` shell has a
+    /// verified exit but an undetermined outcome and may include prior errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_error: Option<String>,
     /// `local_fusion` only (F005): the run's current progress-stage label —
     /// e.g. "Running panels 2/3" — the SAME text `FusionStage::label()`
     /// produces for the Agent-tool path's `subagent_activity` forwarding, so
@@ -644,6 +716,7 @@ impl Default for TaskRecord {
             forked_skill_name: None,
             is_backgrounded: None,
             error: None,
+            observation_error: None,
             stage: None,
             agent_facts: None,
         }
@@ -854,7 +927,8 @@ pub struct TaskNotification {
     /// Selects the
     /// per-type notification format (bash / agent / monitor / generic).
     pub task_type: String,
-    /// Terminal status wire string — one of `completed` / `failed` / `killed`
+    /// Terminal status wire string, including `exited_unknown` when verified
+    /// termination does not establish the command's outcome.
     /// → `<status>` and the human-readable summary verb.
     pub status: String,
     /// Exact source description → interpolated into `<summary>`.
@@ -1661,6 +1735,18 @@ pub trait TaskRegistryHandle: Send + Sync {
         ))
     }
 
+    /// Transfer an in-process resource guard to the monitor worker. Hosts that
+    /// cannot retain and verify it must fail before starting the process.
+    async fn spawn_monitor_with_lifetime_guard(
+        &self,
+        _reg: MonitorRegistration,
+        _guard: crate::host::sandbox::BackendPlanHandle,
+    ) -> Result<String, TaskRegistryError> {
+        Err(TaskRegistryError::InvalidInput(
+            "monitor lifetime ownership is unavailable on this host".into(),
+        ))
+    }
+
     /// Enqueue one live stdout event for the next task-notification drain.
     ///
     /// `housekeeping` marks a line the harness produced ABOUT the monitor (the
@@ -1806,6 +1892,17 @@ pub trait TaskRegistryHandle: Send + Sync {
         ))
     }
 
+    /// Allocate an identity whose task stop requires a verified receipt.
+    /// The registry must reserve this policy before exposing any task row.
+    ///
+    /// # Errors
+    /// Returns an error if the registry cannot preserve this ownership policy.
+    async fn allocate_owned_bash_output(&self) -> Result<BackgroundBashHandle, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "owned background bash allocation unwired".into(),
+        ))
+    }
+
     /// Register a `local_bash` record for an identity already minted by
     /// [`Self::allocate_bash_output`], because the command is being
     /// backgrounded (explicitly, or after exceeding its timeout).
@@ -1865,6 +1962,18 @@ pub trait TaskRegistryHandle: Send + Sync {
         ))
     }
 
+    /// Register and return a capability for exactly the published row.
+    async fn register_foreground_bash_owned(
+        &self,
+        _task_id: &str,
+        _registration: BackgroundBashRegistration,
+        _auto_background_armed: bool,
+    ) -> Result<ForegroundTaskLease, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "owned foreground bash registration unwired".into(),
+        ))
+    }
+
     /// Bind messaging for a foreground runner the registry did not spawn.
     async fn bind_agent_message_receiver(
         &self,
@@ -1888,8 +1997,31 @@ pub trait TaskRegistryHandle: Send + Sync {
         ))
     }
 
+    /// Register a foreground agent and return its generation-bound row lease.
+    async fn register_foreground_agent_owned(
+        &self,
+        _registration: ForegroundAgentRegistration,
+    ) -> Result<(ForegroundAgentHandle, ForegroundTaskLease), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "owned foreground agent registration unwired".into(),
+        ))
+    }
+
     /// Remove a finished foreground agent; preserve rows already backgrounded.
     async fn unregister_foreground_agent(&self, _task_id: &str) {}
+
+    /// Remove only the agent row identified by this capability.
+    async fn unregister_foreground_agent_owned(&self, _lease: &ForegroundTaskLease) {}
+
+    /// Atomically claim handoff of the exact live foreground agent row.
+    async fn commit_foreground_agent_background_owned(
+        &self,
+        _lease: &ForegroundTaskLease,
+    ) -> Result<bool, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "owned agent background handoff unwired".into(),
+        ))
+    }
 
     /// Withdraw an armed foreground row because the command finished in the
     /// foreground (claude-code `W6t`: `if(!bp(o)||o.isBackgrounded||o.notified)
@@ -1900,6 +2032,9 @@ pub trait TaskRegistryHandle: Send + Sync {
     async fn unregister_foreground_bash(&self, task_id: &str) {
         let _ = task_id;
     }
+
+    /// Remove only the shell row identified by this capability.
+    async fn unregister_foreground_bash_owned(&self, _lease: &ForegroundTaskLease) {}
 
     /// Attach the handle that moves an armed foreground shell to the background
     /// on demand.
@@ -1918,11 +2053,28 @@ pub trait TaskRegistryHandle: Send + Sync {
         ))
     }
 
+    /// Bind a requester only if the original registered row still exists.
+    async fn bind_background_requester_owned(
+        &self,
+        _lease: &ForegroundTaskLease,
+        _requester: std::sync::Arc<dyn TaskBackgrounder>,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "owned background requester binding unwired".into(),
+        ))
+    }
+
     /// Move one task to the background (claude-code `Wer` for `local_bash`,
     /// `s9` for everything else). Returns whether anything moved.
     async fn background_task(&self, task_id: &str) -> bool {
         let _ = task_id;
         false
+    }
+
+    /// Request one background transition while preserving an uncertain receipt.
+    async fn background_task_with_outcome(&self, task_id: &str) -> TaskBackgroundOutcome {
+        let _ = self.background_task(task_id).await;
+        TaskBackgroundOutcome::Unknown
     }
 
     /// Collect the rosters a "no task found" message names (claude-code `bjn`
@@ -1948,6 +2100,14 @@ pub trait TaskRegistryHandle: Send + Sync {
         false
     }
 
+    async fn background_task_for_tool_use_with_outcome(
+        &self,
+        tool_use_id: &str,
+    ) -> TaskBackgroundOutcome {
+        let _ = self.background_task_for_tool_use(tool_use_id).await;
+        TaskBackgroundOutcome::Unknown
+    }
+
     /// Move every backgroundable task to the background (claude-code `zM`) and
     /// report how many moved.
     async fn background_all_tasks(&self) -> usize {
@@ -1957,6 +2117,20 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Detach work with the trigger that caused the transition.
     async fn background_all_tasks_with_reason(&self, _reason: TaskBackgroundReason) -> usize {
         self.background_all_tasks().await
+    }
+
+    /// Legacy implementations have no verifiable receipt and therefore report
+    /// uncertainty instead of treating their integer as a successful handoff.
+    async fn background_all_tasks_with_outcome(
+        &self,
+        reason: TaskBackgroundReason,
+    ) -> TaskBackgroundBatchOutcome {
+        let _ = self.background_all_tasks_with_reason(reason).await;
+        TaskBackgroundBatchOutcome {
+            backgrounded: 0,
+            unknown: 0,
+            capture_unknown: true,
+        }
     }
 
     /// Whether anything is currently backgroundable (claude-code `H_t`), i.e.
@@ -2070,6 +2244,33 @@ pub trait TaskRegistryHandle: Send + Sync {
         exit_code: Option<i32>,
     ) -> Result<(), TaskRegistryError> {
         self.settle_background_bash(id, exit_code, true).await
+    }
+
+    /// Record that a shell's termination could not be verified. This is a
+    /// failed observation, not proof that the process has exited.
+    async fn settle_background_bash_unverified(
+        &self,
+        _id: &str,
+        _reason: &str,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "this task registry cannot record an unverified shell wait".into(),
+        ))
+    }
+
+    /// Record verified termination when the command's outcome is unknown.
+    /// This must not be used when termination itself is unverified.
+    ///
+    /// # Errors
+    /// Returns an error when the registry cannot represent this outcome.
+    async fn settle_background_bash_unknown(
+        &self,
+        _id: &str,
+        _exit_code: Option<i32>,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "this task registry cannot record an unknown shell outcome".into(),
+        ))
     }
 
     async fn settle_background_bash(
@@ -2609,6 +2810,15 @@ mod tests {
 
     #[async_trait]
     impl TaskRegistryHandle for FixedRoster {
+        async fn settle_background_bash(
+            &self,
+            id: &str,
+            _: Option<i32>,
+            _: bool,
+        ) -> Result<(), TaskRegistryError> {
+            self.killed.lock().unwrap().push(format!("settle:{id}"));
+            Ok(())
+        }
         async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
             unimplemented!("not exercised by this test")
         }
@@ -2652,6 +2862,19 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn unverified_shell_default_never_settles_a_task() {
+        let registry = FixedRoster {
+            tasks: vec![running("b1", "local_bash")],
+            killed: Mutex::new(Vec::new()),
+        };
+        assert!(registry
+            .settle_background_bash_unverified("b1", "wait failed")
+            .await
+            .is_err());
+        assert!(registry.killed.lock().unwrap().is_empty());
+    }
+
     fn running(task_id: &str, task_type: &str) -> TaskRecord {
         TaskRecord {
             task_id: task_id.into(),
@@ -2677,6 +2900,22 @@ mod tests {
         assert!(value.get("agent_facts").is_none());
         let decoded: TaskRecord = serde_json::from_value(value).unwrap();
         assert!(decoded.agent_facts.is_none());
+    }
+
+    #[test]
+    fn shell_observation_round_trips_without_changing_terminal_error() {
+        let mut record = running("b1", "local_bash");
+        let old_wire = serde_json::to_value(&record).unwrap();
+        assert!(old_wire.get("observation_error").is_none());
+        assert!(serde_json::from_value::<TaskRecord>(old_wire)
+            .unwrap()
+            .observation_error
+            .is_none());
+        record.observation_error = Some("wait unverified".into());
+        let wire = serde_json::to_value(&record).unwrap();
+        assert_eq!(wire["observation_error"], "wait unverified");
+        assert!(wire.get("error").is_none());
+        assert_eq!(serde_json::from_value::<TaskRecord>(wire).unwrap(), record);
     }
 
     #[tokio::test]

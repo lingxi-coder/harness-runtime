@@ -64,7 +64,7 @@ impl CoordinatorStatusSink {
             TaskStatus::Completed => Some(WorkerStatus::Completed),
             // No transition: Pending predates the worker link and Paused has no
             // teammate analogue.
-            TaskStatus::Pending | TaskStatus::Paused => None,
+            TaskStatus::Pending | TaskStatus::Paused | TaskStatus::ExitedUnknown => None,
         }
     }
 }

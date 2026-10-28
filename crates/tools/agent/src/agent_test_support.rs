@@ -526,7 +526,13 @@ impl SubagentSpawner for MockSubagentSpawner {
         ]
     }
 
-    async fn agent_listing_for_model(&self) -> Vec<SubagentListingEntry> {
+    async fn agent_listing_for_model(
+        &self,
+        _session_origin: Option<
+            Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>,
+        >,
+        _require_origin: bool,
+    ) -> Vec<SubagentListingEntry> {
         if let Some(entries) = self.model_listing_override.lock().unwrap().clone() {
             return entries;
         }
@@ -609,6 +615,10 @@ pub struct MockTaskRegistryHandle {
         Mutex<HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskMessageReceiver>>>,
     backgrounders:
         Mutex<HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>>>,
+    foreground_instances: Mutex<HashMap<String, Arc<()>>>,
+    block_foreground_handoff: std::sync::atomic::AtomicBool,
+    foreground_handoff_entered: tokio::sync::Notify,
+    foreground_handoff_release: tokio::sync::Notify,
     outcomes: Mutex<HashMap<String, lingxi_core::host::task_registry::AgentTerminalOutcome>>,
     records: Mutex<HashMap<String, TaskRecord>>,
     counter: AtomicU64,
@@ -643,6 +653,47 @@ impl MockTaskRegistryHandle {
         receiver.send(message.into()).await
     }
 
+    /// Pause the mock foreground handoff until the test releases it.
+    pub fn block_foreground_handoff(&self) {
+        self.block_foreground_handoff.store(true, Ordering::SeqCst);
+    }
+
+    /// Wait until the foreground handoff reaches its test barrier.
+    pub async fn wait_for_foreground_handoff(&self) {
+        self.foreground_handoff_entered.notified().await;
+    }
+
+    /// Release a foreground handoff paused by the test barrier.
+    pub fn release_foreground_handoff(&self) {
+        self.foreground_handoff_release.notify_one();
+    }
+
+    /// Request that the registered foreground agent move to the background.
+    pub async fn foreground_background_outcome(
+        &self,
+        id: &str,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+        let requester = self.foreground_background_requester(id);
+        match requester {
+            Some(requester) => {
+                requester
+                    .background_with_outcome(
+                        lingxi_core::host::task_registry::TaskBackgroundReason::User,
+                    )
+                    .await
+            }
+            None => lingxi_core::host::task_registry::TaskBackgroundOutcome::NotBackgrounded,
+        }
+    }
+
+    /// Return the background requester registered for a foreground agent.
+    pub fn foreground_background_requester(
+        &self,
+        id: &str,
+    ) -> Option<Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>> {
+        self.backgrounders.lock().unwrap().get(id).cloned()
+    }
+
     /// Empty registry.
     #[must_use]
     pub fn new() -> Self {
@@ -653,6 +704,10 @@ impl MockTaskRegistryHandle {
             killers: Mutex::new(HashMap::new()),
             receivers: Mutex::new(HashMap::new()),
             backgrounders: Mutex::new(HashMap::new()),
+            foreground_instances: Mutex::new(HashMap::new()),
+            block_foreground_handoff: Default::default(),
+            foreground_handoff_entered: Default::default(),
+            foreground_handoff_release: Default::default(),
             outcomes: Mutex::new(HashMap::new()),
             records: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(0),
@@ -761,6 +816,28 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
             output_path: format!("/tmp/{id}.output"),
         })
     }
+    async fn register_foreground_agent_owned(
+        &self,
+        registration: lingxi_core::host::task_registry::ForegroundAgentRegistration,
+    ) -> Result<
+        (
+            lingxi_core::host::task_registry::ForegroundAgentHandle,
+            lingxi_core::host::task_registry::ForegroundTaskLease,
+        ),
+        TaskRegistryError,
+    > {
+        let handle = self.register_foreground_agent(registration).await?;
+        let identity = Arc::new(());
+        self.foreground_instances
+            .lock()
+            .unwrap()
+            .insert(handle.task_id.clone(), identity.clone());
+        let lease = lingxi_core::host::task_registry::ForegroundTaskLease::new(
+            handle.task_id.clone(),
+            identity,
+        );
+        Ok((handle, lease))
+    }
     async fn unregister_foreground_agent(&self, id: &str) {
         let mut records = self.records.lock().unwrap();
         if records
@@ -769,6 +846,48 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
         {
             records.remove(id);
         }
+    }
+    async fn unregister_foreground_agent_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+    ) {
+        let mut rows = self.foreground_instances.lock().unwrap();
+        let mut records = self.records.lock().unwrap();
+        if rows
+            .get(lease.task_id())
+            .is_some_and(|current| Arc::ptr_eq(current, lease.identity()))
+            && records
+                .get(lease.task_id())
+                .is_some_and(|record| record.is_backgrounded != Some(true))
+        {
+            rows.remove(lease.task_id());
+            records.remove(lease.task_id());
+        }
+    }
+    async fn commit_foreground_agent_background_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+    ) -> Result<bool, TaskRegistryError> {
+        if self.block_foreground_handoff.load(Ordering::SeqCst) {
+            self.foreground_handoff_entered.notify_one();
+            self.foreground_handoff_release.notified().await;
+        }
+        let rows = self.foreground_instances.lock().unwrap();
+        let mut records = self.records.lock().unwrap();
+        if !rows
+            .get(lease.task_id())
+            .is_some_and(|current| Arc::ptr_eq(current, lease.identity()))
+        {
+            return Ok(false);
+        }
+        let Some(record) = records.get_mut(lease.task_id()) else {
+            return Ok(false);
+        };
+        if record.status != "running" || record.is_backgrounded == Some(true) {
+            return Ok(false);
+        }
+        record.is_backgrounded = Some(true);
+        Ok(true)
     }
     async fn bind_background_killer(
         &self,
@@ -789,20 +908,26 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
             .insert(id.into(), requester);
         Ok(())
     }
-    async fn background_task(&self, id: &str) -> bool {
-        let requester = self.backgrounders.lock().unwrap().get(id).cloned();
-        if let Some(requester) = requester {
-            self.records
-                .lock()
-                .unwrap()
-                .get_mut(id)
-                .unwrap()
-                .is_backgrounded = Some(true);
-            requester.background().await;
-            true
-        } else {
-            false
+    async fn bind_background_requester_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+        requester: Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>,
+    ) -> Result<(), TaskRegistryError> {
+        if !self
+            .foreground_instances
+            .lock()
+            .unwrap()
+            .get(lease.task_id())
+            .is_some_and(|current| Arc::ptr_eq(current, lease.identity()))
+        {
+            return Err(TaskRegistryError::NotFound(lease.task_id().into()));
         }
+        self.bind_background_requester(lease.task_id(), requester)
+            .await
+    }
+    async fn background_task(&self, id: &str) -> bool {
+        self.foreground_background_outcome(id).await
+            == lingxi_core::host::task_registry::TaskBackgroundOutcome::Backgrounded
     }
     async fn set_agent_outcome(
         &self,

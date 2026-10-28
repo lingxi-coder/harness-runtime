@@ -108,6 +108,181 @@ const SEC_DEFAULT_CALLER_EVENT: &str = "internal.sec-default";
 
 tokio::task_local! {
     static MOD_WORKER_RECOVERY_SCOPE: bool;
+    static MOD_TURN_RECOVERY_SCOPE: Arc<ModTurnRecoveryScope>;
+    static MOD_DETACHED_RECOVERY_LEASES: ModRecoveryLeases;
+    static MOD_SESSION_WORK_SCOPE: ModSessionWorkScope;
+}
+
+/// Execution ownership and residual-work ownership for one durable turn.
+pub type ModRecoveryLeases = (Arc<dyn Send + Sync>, Arc<dyn Send + Sync>);
+
+#[derive(Clone)]
+struct ModSessionWorkScope {
+    session_identity: usize,
+    lease: Option<Arc<dyn Send + Sync>>,
+}
+
+fn mod_session_identity(session: &dyn ModSessionContext) -> usize {
+    (session as *const dyn ModSessionContext as *const ()) as usize
+}
+
+async fn acquire_mod_session_work_lease(
+    session: &dyn ModSessionContext,
+) -> Result<Option<Arc<dyn Send + Sync>>, ModError> {
+    let identity = mod_session_identity(session);
+    if let Ok(Some(lease)) = MOD_SESSION_WORK_SCOPE
+        .try_with(|scope| (scope.session_identity == identity).then(|| scope.lease.clone()))
+    {
+        return Ok(lease);
+    }
+    session.acquire_session_work_lease().await
+}
+
+async fn with_mod_session_work_scope<F, T>(
+    session: Option<&dyn ModSessionContext>,
+    event: &str,
+    transaction_lease: Option<Option<Arc<dyn Send + Sync>>>,
+    future: F,
+) -> Result<T, ModError>
+where
+    F: Future<Output = Result<T, ModError>>,
+{
+    // Pure timer waits and origin-bound output do not read a mutable session.
+    // Their middleware and callback APIs acquire their own leases when invoked.
+    if matches!(
+        event,
+        "clock.sleep"
+            | "clock.after"
+            | "clock.every"
+            | "ui.log"
+            | "ui.toast"
+            | "ui.notify"
+            | "ui.status"
+    ) {
+        return future.await;
+    }
+    let Some(session) = session else {
+        return future.await;
+    };
+    let lease = match transaction_lease {
+        Some(lease) => lease,
+        None => acquire_mod_session_work_lease(session).await?,
+    };
+    MOD_SESSION_WORK_SCOPE
+        .scope(
+            ModSessionWorkScope {
+                session_identity: mod_session_identity(session),
+                lease,
+            },
+            future,
+        )
+        .await
+}
+
+/// Guard captured from the originating durable turn, never from a later
+/// mutable current-session slot. The leases cover synchronous execution and
+/// work which may outlive it respectively.
+pub type ModTurnRecoveryGuard =
+    Arc<dyn Fn() -> Result<Option<ModRecoveryLeases>, crate::RecoveryAdmissionError> + Send + Sync>;
+
+struct ModTurnRecoveryScope {
+    guard: ModTurnRecoveryGuard,
+    leases: StdMutex<Option<ModRecoveryLeases>>,
+    failure: StdMutex<Option<crate::RecoveryAdmissionError>>,
+    failed: tokio::sync::Notify,
+}
+
+/// Explicitly carry a turn's already-admitted ownership into a spawned Mod
+/// worker. Tokio task-local values are not inherited by spawned tasks.
+pub async fn with_detached_mod_recovery_leases<F: Future>(
+    leases: ModRecoveryLeases,
+    future: F,
+) -> F::Output {
+    MOD_DETACHED_RECOVERY_LEASES.scope(leases, future).await
+}
+
+fn current_mod_recovery_leases() -> Option<ModRecoveryLeases> {
+    MOD_DETACHED_RECOVERY_LEASES
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(|| {
+            MOD_TURN_RECOVERY_SCOPE
+                .try_with(|scope| {
+                    scope
+                        .leases
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                })
+                .ok()
+                .flatten()
+        })
+}
+
+/// Return a latched turn admission failure before a provider request starts.
+/// A best-effort Mod caller may have swallowed its own local dispatch error.
+pub fn check_mod_turn_recovery_failure() -> Result<(), crate::RecoveryAdmissionError> {
+    match MOD_TURN_RECOVERY_SCOPE
+        .try_with(|scope| {
+            scope
+                .failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .ok()
+        .flatten()
+    {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+async fn run_mod_blocking<F, T>(work: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let recovery_leases = current_mod_recovery_leases();
+    tokio::task::spawn_blocking(move || {
+        // A blocking operation can continue after its caller is dropped.
+        // Its inputs have already been resolved and it does not retain a
+        // dynamic session context, so it need not keep the session gate.
+        let _recovery_leases = recovery_leases;
+        work()
+    })
+    .await
+}
+
+/// Apply recovery admission only to Mod dispatches belonging to this turn.
+/// Admission errors stop the turn even if a best-effort caller logs a ModError.
+pub async fn with_mod_turn_recovery_guard<F: Future>(
+    guard: ModTurnRecoveryGuard,
+    future: F,
+) -> Result<F::Output, crate::RecoveryAdmissionError> {
+    let scope = Arc::new(ModTurnRecoveryScope {
+        guard,
+        leases: StdMutex::new(None),
+        failure: StdMutex::new(None),
+        failed: tokio::sync::Notify::new(),
+    });
+    MOD_TURN_RECOVERY_SCOPE
+        .scope(scope.clone(), async move {
+            tokio::select! {
+                biased;
+                () = scope.failed.notified() => {
+                    Err(scope.failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone().unwrap_or_else(|| crate::RecoveryAdmissionError::Failure("Mod recovery admission failed".into())))
+                }
+                result = future => {
+                    match scope.failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+                        Some(error) => Err(error),
+                        None => Ok(result),
+                    }
+                }
+            }
+        })
+        .await
 }
 
 const WORKER_EPOCH_RUNNING: u8 = 0;
@@ -778,6 +953,7 @@ pub struct ModToolCallContext {
     pub prepared: Arc<PreparedModToolCall>,
     pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
     finalization: Arc<AtomicU8>,
+    session_work_lease: Option<Arc<dyn Send + Sync>>,
 }
 
 impl ModToolCallContext {
@@ -785,6 +961,7 @@ impl ModToolCallContext {
         cancellation: lingxi_core::host::CancellationToken,
         prepared: PreparedModToolCall,
         api_context: &ResolvedModApiContext,
+        session_work_lease: Option<Arc<dyn Send + Sync>>,
     ) -> Self {
         let transaction_id = NEXT_MOD_TOOL_CALL_TRANSACTION_ID
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -812,7 +989,15 @@ impl ModToolCallContext {
                 ),
             },
             finalization: Arc::new(AtomicU8::new(TOOL_CALL_PENDING)),
+            session_work_lease,
         }
+    }
+
+    /// Keep the originating session generation owned while detached tool work
+    /// still has access to its dynamic session context.
+    #[must_use]
+    pub fn session_work_lease(&self) -> Option<Arc<dyn Send + Sync>> {
+        self.session_work_lease.clone()
     }
 
     fn begin_completion(&self) -> bool {
@@ -986,7 +1171,15 @@ async fn complete_tool_call(
         ));
     }
     let mut completion_guard = ReleaseToolCallCompletionOnDrop(Some(context.clone()));
-    session.complete_tool_call(context.transaction_id).await?;
+    MOD_SESSION_WORK_SCOPE
+        .scope(
+            ModSessionWorkScope {
+                session_identity: mod_session_identity(session),
+                lease: context.session_work_lease(),
+            },
+            session.complete_tool_call(context.transaction_id),
+        )
+        .await?;
     context.finish_completion();
     completion_guard.0.take();
     Ok(())
@@ -1000,7 +1193,15 @@ async fn abort_tool_call(
     if !context.begin_abort() {
         return Ok(());
     }
-    let result = session.abort_tool_call(context.transaction_id).await;
+    let result = MOD_SESSION_WORK_SCOPE
+        .scope(
+            ModSessionWorkScope {
+                session_identity: mod_session_identity(session),
+                lease: context.session_work_lease(),
+            },
+            session.abort_tool_call(context.transaction_id),
+        )
+        .await;
     context.finish_abort();
     result
 }
@@ -1047,11 +1248,25 @@ async fn acquire_tool_call_context(
     let session = session
         .ok_or_else(|| ModError::Unavailable(format!("{plugin}: $.tool.call needs a session")))
         .map_err(native_tool_call_api_error)?;
-    let prepared = session
-        .prepare_tool_call(plugin, requested_tool_name, consent, cancellation.clone())
+    let session_work_lease = acquire_mod_session_work_lease(session)
         .await
         .map_err(native_tool_call_api_error)?;
-    Ok(ModToolCallContext::new(cancellation, prepared, api_context))
+    let prepared = MOD_SESSION_WORK_SCOPE
+        .scope(
+            ModSessionWorkScope {
+                session_identity: mod_session_identity(session),
+                lease: session_work_lease.clone(),
+            },
+            session.prepare_tool_call(plugin, requested_tool_name, consent, cancellation.clone()),
+        )
+        .await
+        .map_err(native_tool_call_api_error)?;
+    Ok(ModToolCallContext::new(
+        cancellation,
+        prepared,
+        api_context,
+        session_work_lease,
+    ))
 }
 
 fn native_tool_call_api_error(error: ModError) -> ModError {
@@ -1059,6 +1274,24 @@ fn native_tool_call_api_error(error: ModError) -> ModError {
         ModError::Hook(message) | ModError::Unavailable(message) => ModError::Native(message),
         other => other,
     }
+}
+
+fn strict_host_api_denial(session: Option<&dyn ModSessionContext>, method: &str) -> Option<String> {
+    let session = session.filter(|session| session.is_host_owned_request())?;
+    if !matches!(
+        method,
+        "process.run"
+            | "session.repo"
+            | "agent.spawn"
+            | "mcp.connect"
+            | "prompt.submit"
+            | "command.run"
+    ) {
+        return None;
+    }
+    let reason = format!("{method} cannot be owned by this host request");
+    session.note_owned_denial(&reason);
+    Some(reason)
 }
 
 fn new_api_origin_contexts() -> ModApiOriginContexts {
@@ -1145,6 +1378,48 @@ fn parse_mod_api_callers(
 /// another awaited operation changes the running session.
 #[async_trait::async_trait]
 pub trait ModSessionContext: Send + Sync {
+    /// Return the immutable runtime-only origin carried by this session view.
+    fn session_origin_capability(
+        &self,
+    ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>> {
+        None
+    }
+
+    /// Bind a child view to an already-admitted origin, without consulting the
+    /// host's currently selected session. Actual APIs still admit separately.
+    fn bind_session_origin(
+        &self,
+        _origin: Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>,
+    ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+        Ok(None)
+    }
+
+    /// Capture a session view for a dispatch and its delayed callbacks.
+    /// Implementations with mutable session identity should return a view
+    /// bound to the identity observed at this point. The default preserves
+    /// the behavior of hosts that do not provide an owned context.
+    async fn capture_dispatch_context(
+        &self,
+    ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+        Ok(self.ui_invalidation_context())
+    }
+
+    /// Bind one active API operation to this session's captured generation.
+    /// The returned owned lease must remain live until any spawned work that
+    /// can still access this session has physically stopped.
+    async fn acquire_session_work_lease(&self) -> Result<Option<Arc<dyn Send + Sync>>, ModError> {
+        Ok(None)
+    }
+
+    /// This view belongs to a host request requiring verified process cleanup.
+    fn is_host_owned_request(&self) -> bool {
+        false
+    }
+    /// Worker registration generation admitted for this strict request.
+    fn owned_mod_registration(&self) -> Option<OwnedModRegistration> {
+        None
+    }
+    fn note_owned_denial(&self, _reason: &str) {}
     fn cwd(&self) -> PathBuf;
     fn root(&self) -> PathBuf;
     /// Trusted Projects-session observations captured by the host. Missing
@@ -1544,52 +1819,183 @@ pub trait ModCommandCatalog: Send + Sync {
     async fn unregister_plugin(&self, plugin: &str);
 }
 
-struct WeakModSessionContext(Weak<dyn ModSessionContext>);
+#[derive(Clone)]
+struct UnavailableChildModSession {
+    cwd: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl ModSessionContext for UnavailableChildModSession {
+    async fn capture_dispatch_context(
+        &self,
+    ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+        Ok(Some(Arc::new(self.clone())))
+    }
+
+    async fn acquire_session_work_lease(&self) -> Result<Option<Arc<dyn Send + Sync>>, ModError> {
+        Err(ModError::Unavailable(
+            "child Mod session origin is unavailable".into(),
+        ))
+    }
+
+    fn ui_invalidation_context(&self) -> Option<Arc<dyn ModSessionContext>> {
+        Some(Arc::new(self.clone()))
+    }
+
+    fn cwd(&self) -> PathBuf {
+        self.cwd.clone()
+    }
+
+    fn root(&self) -> PathBuf {
+        self.cwd.clone()
+    }
+
+    async fn model(&self) -> String {
+        String::new()
+    }
+
+    async fn id(&self) -> String {
+        String::new()
+    }
+
+    async fn turns(&self) -> u64 {
+        0
+    }
+}
+
+type ModSessionFactory = dyn Fn() -> Result<Arc<dyn ModSessionContext>, ModError> + Send + Sync;
+
+#[derive(Clone)]
+enum WeakModSessionSource {
+    Weak(Weak<dyn ModSessionContext>),
+    Factory(Arc<ModSessionFactory>),
+}
+
+#[derive(Clone)]
+struct WeakModSessionContext(WeakModSessionSource);
+
+impl WeakModSessionContext {
+    fn upgrade(&self) -> Result<Arc<dyn ModSessionContext>, ModError> {
+        match &self.0 {
+            WeakModSessionSource::Weak(session) => session
+                .upgrade()
+                .ok_or_else(|| ModError::Unavailable("Mod session ended".into())),
+            WeakModSessionSource::Factory(factory) => factory(),
+        }
+    }
+}
+
+/// Create a detached session view that reconstitutes the original context only
+/// for an active API call. The factory should capture weak owners and must not
+/// retain the returned view, so idle worker generations cannot keep a host alive.
+pub fn weak_mod_session_factory(
+    factory: Arc<dyn Fn() -> Result<Arc<dyn ModSessionContext>, ModError> + Send + Sync>,
+) -> Arc<dyn ModSessionContext> {
+    Arc::new(WeakModSessionContext(WeakModSessionSource::Factory(
+        factory,
+    )))
+}
 
 #[async_trait::async_trait]
 impl ModSessionContext for WeakModSessionContext {
+    fn session_origin_capability(
+        &self,
+    ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>> {
+        self.upgrade()
+            .ok()
+            .and_then(|session| session.session_origin_capability())
+    }
+
+    fn bind_session_origin(
+        &self,
+        origin: Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>,
+    ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+        self.upgrade()?.bind_session_origin(origin)
+    }
+
+    async fn capture_dispatch_context(
+        &self,
+    ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+        if matches!(&self.0, WeakModSessionSource::Factory(_)) {
+            return Ok(Some(Arc::new(self.clone())));
+        }
+        let session = self.upgrade()?;
+        session.capture_dispatch_context().await
+    }
+
+    async fn acquire_session_work_lease(&self) -> Result<Option<Arc<dyn Send + Sync>>, ModError> {
+        let session = self.upgrade()?;
+        session.acquire_session_work_lease().await
+    }
+
+    fn is_host_owned_request(&self) -> bool {
+        self.upgrade()
+            .ok()
+            .is_none_or(|session| session.is_host_owned_request())
+    }
+
+    fn owned_mod_registration(&self) -> Option<OwnedModRegistration> {
+        self.upgrade()
+            .ok()
+            .and_then(|session| session.owned_mod_registration())
+    }
+
+    fn note_owned_denial(&self, reason: &str) {
+        if let Ok(session) = self.upgrade() {
+            session.note_owned_denial(reason);
+        }
+    }
+
     fn ui_invalidation_context(&self) -> Option<Arc<dyn ModSessionContext>> {
-        self.0
-            .upgrade()
+        if matches!(&self.0, WeakModSessionSource::Factory(_)) {
+            return Some(Arc::new(self.clone()));
+        }
+        self.upgrade()
+            .ok()
             .and_then(|session| session.ui_invalidation_context())
     }
 
     fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
-        self.0
-            .upgrade()
-            .and_then(|session| session.generation_cancellation_token())
+        match self.upgrade() {
+            Ok(session) => session.generation_cancellation_token(),
+            Err(_) => {
+                // A detached ticket can outlive its weak owner while a timer
+                // API is sleeping. Mark that ticket cancelled so the worker's
+                // sweep aborts the pending API and releases its ModHost.
+                let cancelled = lingxi_core::host::CancellationToken::new();
+                cancelled.cancel();
+                Some(cancelled)
+            }
+        }
     }
 
     fn cwd(&self) -> PathBuf {
-        self.0
-            .upgrade()
+        self.upgrade()
+            .ok()
             .map_or_else(PathBuf::new, |session| session.cwd())
     }
 
     fn root(&self) -> PathBuf {
-        self.0
-            .upgrade()
+        self.upgrade()
+            .ok()
             .map_or_else(PathBuf::new, |session| session.root())
     }
 
     async fn projects_consent_facts(&self) -> ProjectsConsentFacts {
-        match self.0.upgrade() {
+        match self.upgrade().ok() {
             Some(session) => session.projects_consent_facts().await,
             None => ProjectsConsentFacts::default(),
         }
     }
 
     fn surfaces(&self) -> Vec<String> {
-        self.0
-            .upgrade()
+        self.upgrade()
+            .ok()
             .map_or_else(Vec::new, |session| session.surfaces())
     }
 
     async fn ui_selection(&self) -> Result<Option<Utf16JsonProjection>, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.ui_selection().await
     }
 
@@ -1598,10 +2004,7 @@ impl ModSessionContext for WeakModSessionContext {
         plugin_storage_id: &str,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.mcp_connect(plugin_storage_id, input).await
     }
 
@@ -1611,15 +2014,12 @@ impl ModSessionContext for WeakModSessionContext {
         input: Utf16JsonProjection,
         plugin: &str,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.remote_ui_operation(event, input, plugin).await
     }
 
     async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_ui_client_frame(runtime_id, frame).await;
         }
     }
@@ -1630,7 +2030,7 @@ impl ModSessionContext for WeakModSessionContext {
         uuid: &str,
         session_id: &str,
     ) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session
                 .emit_mod_ui_invalidate(instances, uuid, session_id)
                 .await;
@@ -1641,10 +2041,7 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         input: Option<Utf16JsonProjection>,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.messages(input).await
     }
 
@@ -1652,10 +2049,7 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         input: Option<Utf16JsonProjection>,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.usage(input).await
     }
 
@@ -1663,10 +2057,7 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.model_fork(input).await
     }
 
@@ -1675,10 +2066,7 @@ impl ModSessionContext for WeakModSessionContext {
         input: Utf16JsonProjection,
         plugin: &str,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.model_complete(input, plugin).await
     }
 
@@ -1687,10 +2075,7 @@ impl ModSessionContext for WeakModSessionContext {
         input: Utf16JsonProjection,
         plugin: &str,
     ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.model_classify(input, plugin).await
     }
 
@@ -1698,10 +2083,7 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.fs_ancestors(input).await
     }
 
@@ -1710,10 +2092,7 @@ impl ModSessionContext for WeakModSessionContext {
         input: Utf16JsonProjection,
         cwd: &Path,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.fs_ancestors_at(input, cwd).await
     }
 
@@ -1721,10 +2100,7 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.settings_read(input).await
     }
 
@@ -1732,10 +2108,7 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.prompt_compose_facts(input).await
     }
 
@@ -1745,75 +2118,51 @@ impl ModSessionContext for WeakModSessionContext {
         origin: Option<Value>,
         skip_hook_id: Option<u64>,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session
             .prompt_compose_core(facts, origin, skip_hook_id)
             .await
     }
 
     async fn invalidate_prompt_section(&self) -> Result<(), ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.invalidate_prompt_section().await
     }
 
     async fn invalidate_prompt_context(&self) -> Result<(), ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.invalidate_prompt_context().await
     }
 
     async fn invalidate_prompt_attachment(&self) -> Result<(), ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.invalidate_prompt_attachment().await
     }
 
     async fn prompt_attachment_generation(&self) -> u64 {
-        match self.0.upgrade() {
+        match self.upgrade().ok() {
             Some(session) => session.prompt_attachment_generation().await,
             None => 0,
         }
     }
 
     async fn invalidate_tool_describe(&self) -> Result<(), ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.invalidate_tool_describe().await
     }
 
     async fn invalidate_command_describe(&self) -> Result<(), ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.invalidate_command_describe().await
     }
 
     async fn tool_list(&self) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.tool_list().await
     }
 
     async fn agent_list(&self) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.agent_list().await
     }
 
@@ -1822,10 +2171,7 @@ impl ModSessionContext for WeakModSessionContext {
         input: ModAgentSpawnInput,
         context: ModAgentSpawnContext,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.agent_spawn_api(input, context).await
     }
 
@@ -1836,10 +2182,7 @@ impl ModSessionContext for WeakModSessionContext {
         consent: Option<String>,
         cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<PreparedModToolCall, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session
             .prepare_tool_call(plugin, requested_tool_name, consent, cancellation)
             .await
@@ -1851,10 +2194,7 @@ impl ModSessionContext for WeakModSessionContext {
         input: Utf16JsonProjection,
         context: &ModToolCallContext,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.tool_call(plugin, input, context).await
     }
 
@@ -1864,10 +2204,7 @@ impl ModSessionContext for WeakModSessionContext {
         accepted_answer: Utf16JsonProjection,
         context: &ModToolCallContext,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session
             .project_tool_call_api_result(input, accepted_answer, context)
             .await
@@ -1877,10 +2214,7 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         transaction_id: ModToolCallTransactionId,
     ) -> Result<(), ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.complete_tool_call(transaction_id).await
     }
 
@@ -1888,18 +2222,12 @@ impl ModSessionContext for WeakModSessionContext {
         &self,
         transaction_id: ModToolCallTransactionId,
     ) -> Result<(), ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.abort_tool_call(transaction_id).await
     }
 
     async fn command_list(&self) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.command_list().await
     }
 
@@ -1908,10 +2236,7 @@ impl ModSessionContext for WeakModSessionContext {
         plugin: &str,
         spec: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.command_register(plugin, spec).await
     }
 
@@ -1921,10 +2246,7 @@ impl ModSessionContext for WeakModSessionContext {
         command: Utf16JsonProjection,
         args: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.command_run(plugin, command, args).await
     }
 
@@ -1934,15 +2256,12 @@ impl ModSessionContext for WeakModSessionContext {
         text: Utf16JsonProjection,
         as_user: bool,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.prompt_submit(plugin, text, as_user).await
     }
 
     async fn command_unregister_plugin(&self, plugin: &str) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session.command_unregister_plugin(plugin).await;
         }
     }
@@ -1952,45 +2271,39 @@ impl ModSessionContext for WeakModSessionContext {
         plugin: &str,
         spec: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.tool_register(plugin, spec).await
     }
 
     fn tool_unregister_plugin(&self, plugin: &str) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session.tool_unregister_plugin(plugin);
         }
     }
 
     async fn model(&self) -> String {
-        match self.0.upgrade() {
+        match self.upgrade().ok() {
             Some(session) => session.model().await,
             None => String::new(),
         }
     }
 
     async fn id(&self) -> String {
-        match self.0.upgrade() {
+        match self.upgrade().ok() {
             Some(session) => session.id().await,
             None => String::new(),
         }
     }
 
     async fn turns(&self) -> u64 {
-        match self.0.upgrade() {
+        match self.upgrade().ok() {
             Some(session) => session.turns().await,
             None => 0,
         }
     }
 
     async fn version(&self) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.version().await
     }
 
@@ -1999,33 +2312,30 @@ impl ModSessionContext for WeakModSessionContext {
         tool: &str,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
-        let session = self
-            .0
-            .upgrade()
-            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        let session = self.upgrade()?;
         session.tool_check(tool, input).await
     }
 
     async fn emit_mod_log(&self, plugin: &str, text: Utf16JsonProjection) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_log(plugin, text).await;
         }
     }
 
     async fn emit_mod_toast(&self, plugin: &str, text: Utf16JsonProjection, timeout_ms: u64) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_toast(plugin, text, timeout_ms).await;
         }
     }
 
     async fn emit_mod_notify(&self, plugin: &str, text: Utf16JsonProjection) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_notify(plugin, text).await;
         }
     }
 
     async fn emit_mod_status(&self, plugin: &str, text: Option<Utf16JsonProjection>) {
-        if let Some(session) = self.0.upgrade() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_status(plugin, text).await;
         }
     }
@@ -3303,10 +3613,45 @@ struct TestWorkerRoutePause {
 struct TestWorkerRouteGate {
     pause: StdMutex<Option<TestWorkerRoutePause>>,
     expired_callback_error: StdMutex<Option<oneshot::Sender<()>>>,
+    generation_notify: StdMutex<Option<oneshot::Sender<(String, bool)>>>,
 }
 
 #[cfg(test)]
 impl TestWorkerRouteGate {
+    fn expect_generation_notify(&self) -> oneshot::Receiver<(String, bool)> {
+        let (sender, receiver) = oneshot::channel();
+        let previous = self
+            .generation_notify
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(sender);
+        assert!(previous.is_none());
+        receiver
+    }
+
+    fn observe_generation_notify(
+        &self,
+        message: &Utf16JsonProjection,
+        retained_ticket: Option<&str>,
+    ) {
+        if projection_u64(message, "/id") != Some(0) || message.string_at("/kind") != Some("notify")
+        {
+            return;
+        }
+        let Some(ticket) = projection_string(message, "/generationContextTicket") else {
+            return;
+        };
+        if let Some(sender) = self
+            .generation_notify
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let retained = retained_ticket == Some(ticket.as_str());
+            let _ = sender.send((ticket, retained));
+        }
+    }
+
     fn pause_state_key(
         &self,
         key: &str,
@@ -3444,7 +3789,7 @@ async fn route_worker_output(
                     }
                 }
             }
-            Some("log" | "toast" | "status") if id == 0 => {
+            Some("log" | "toast" | "notify" | "status") if id == 0 => {
                 if let Some(ticket) = projection_string(&message, "/generationContextTicket") {
                     if retain_generation_api_session(&generation_api_sessions, &ticket) {
                         retained_ticket = Some(ticket);
@@ -3461,6 +3806,7 @@ async fn route_worker_output(
         #[cfg(test)]
         {
             test_route_gate.observe_expired_callback_error(&message);
+            test_route_gate.observe_generation_notify(&message, retained_ticket.as_deref());
             test_route_gate
                 .pause_before_delivery(&message, retained_ticket.as_deref())
                 .await;
@@ -3624,7 +3970,7 @@ async fn background_api_loop(
                         );
                         let generation_cancellation = context_owner.as_ref()
                             .and_then(|session| session.generation_cancellation_token());
-                        let api_session = WeakModSessionContext(bound_session.clone());
+                        let api_session = WeakModSessionContext(WeakModSessionSource::Weak(bound_session.clone()));
                         let input_projection = message
                             .get_property("input")
                             .and_then(|_| message.subprojection("/input").ok());
@@ -3978,6 +4324,21 @@ struct ModUiPressRegistry {
     targets: HashSet<ModUiPressTarget>,
 }
 
+/// The worker's actual listener generation at strict request admission.
+#[derive(Clone, Debug)]
+pub struct OwnedModRegistration {
+    host_id: u64,
+    worker_epoch: u64,
+    version: u64,
+    can_invoke_tools: bool,
+}
+
+impl OwnedModRegistration {
+    pub fn can_invoke_tools(&self) -> bool {
+        self.can_invoke_tools
+    }
+}
+
 /// A session-owned Mod worker. Request ids route nested `next(e)` dispatches
 /// without keeping a worker-wide lock while Rust core actions are running.
 pub struct ModHost {
@@ -4273,6 +4634,13 @@ async fn emit_ui_render_site_invalidations_for_session(
     if sites.is_empty() {
         return;
     }
+    let _session_work_lease = match acquire_mod_session_work_lease(session).await {
+        Ok(lease) => lease,
+        Err(error) => {
+            tracing::debug!(%error, "discarded Mod UI invalidation for an expired session");
+            return;
+        }
+    };
     let instances = sites
         .iter()
         .map(|site| {
@@ -4701,6 +5069,68 @@ async fn spawn_mod_worker(
 }
 
 impl ModHost {
+    /// Capture listener facts from the worker after all earlier load/unload
+    /// messages. The Rust event mirror may lag behind the worker commit.
+    pub async fn snapshot_owned_registration(&self) -> Result<OwnedModRegistration, ModError> {
+        let mut request = self
+            .request_projection(generated_projection(
+                &json!({"kind":"host.registration.snapshot"}),
+            )?)
+            .await?;
+        let epoch = request
+            .worker_epoch
+            .as_ref()
+            .ok_or_else(|| ModError::Unavailable("Mod snapshot worker epoch is missing".into()))?
+            .id;
+        let reply = self.receive(&mut request).await?;
+        if reply.string_at("/kind") != Some("host.registration.snapshot.result") {
+            return Err(ModError::Unavailable(
+                "Mod registration snapshot failed".into(),
+            ));
+        }
+        Ok(OwnedModRegistration {
+            host_id: self.instance_id,
+            worker_epoch: epoch,
+            version: projection_u64(&reply, "/version").ok_or_else(|| {
+                ModError::Protocol("Mod registration snapshot has no version".into())
+            })?,
+            can_invoke_tools: reply
+                .at_pointer("/canInvokeTools")
+                .and_then(JsonValueView::as_bool)
+                .ok_or_else(|| {
+                    ModError::Protocol("Mod registration snapshot has no event facts".into())
+                })?,
+        })
+    }
+
+    fn attach_owned_registration(
+        &self,
+        message: &mut Utf16JsonProjection,
+        session: Option<&dyn ModSessionContext>,
+    ) -> Result<(), ModError> {
+        let Some(session) = session.filter(|session| session.is_host_owned_request()) else {
+            return Ok(());
+        };
+        let registration = session.owned_mod_registration().ok_or_else(|| {
+            ModError::Unavailable("owned host Mod registration snapshot is missing".into())
+        })?;
+        if registration.host_id != self.instance_id {
+            return Err(ModError::Unavailable(
+                "owned host Mod worker changed".into(),
+            ));
+        }
+        set_projection_field(
+            message,
+            "ownedWorkerEpoch",
+            projection_u64_value(registration.worker_epoch)?,
+        )?;
+        set_projection_field(
+            message,
+            "ownedRegistrationVersion",
+            projection_u64_value(registration.version)?,
+        )?;
+        Ok(())
+    }
     /// Run a Mod `turn.step` stream with one-chunk-at-a-time backpressure. The
     /// source callback is invoked only when the bottom of the hook chain is
     /// pulled, so a hook's rewritten model/effort reaches the actual request.
@@ -4716,12 +5146,75 @@ impl ModHost {
         C: FnMut(Utf16JsonProjection) -> CFut,
         CFut: Future<Output = Result<(), ModError>>,
     {
-        let session = self.background_session();
+        let session = self.capture_turn_step_session().await?;
+        self.dispatch_turn_step_stream_with_session(input, session, source, on_chunk)
+            .await
+    }
+
+    /// Capture the current Mod session before spawning a turn.step worker.
+    /// A host without an owned context retains its original session behavior.
+    pub async fn capture_turn_step_session(
+        &self,
+    ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+        let Some(session) = self.background_session() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            session.capture_dispatch_context().await?.unwrap_or(session),
+        ))
+    }
+
+    /// Resolve a child's captured origin without relabeling it as the current
+    /// host session. Missing or unsupported trusted origins fail closed for
+    /// Mod APIs while leaving the child's ordinary provider path available.
+    pub async fn bind_child_turn_step_session(
+        &self,
+        capability: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+        require_origin: bool,
+        cwd: &Path,
+    ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+        if let Some(capability) = capability {
+            if let Some(background) = self.background_session() {
+                match background.bind_session_origin(capability) {
+                    Ok(Some(bound)) => return Ok(Some(bound)),
+                    Ok(None) => {}
+                    Err(error) => tracing::debug!(%error, "could not bind child Mod session"),
+                }
+            }
+        } else if !require_origin {
+            return self.capture_turn_step_session().await;
+        }
+        Ok(Some(Arc::new(UnavailableChildModSession {
+            cwd: cwd.to_path_buf(),
+        })))
+    }
+
+    /// Dispatch with a view captured by the caller before any task spawn.
+    pub async fn dispatch_turn_step_stream_with_session<F, Fut, C, CFut>(
+        &self,
+        input: Utf16JsonProjection,
+        session: Option<Arc<dyn ModSessionContext>>,
+        source: F,
+        on_chunk: C,
+    ) -> Result<Utf16JsonProjection, ModError>
+    where
+        F: FnMut(Utf16JsonProjection) -> Fut,
+        Fut: Future<Output = Result<ModStreamSource, ModError>> + Send,
+        C: FnMut(Utf16JsonProjection) -> CFut,
+        CFut: Future<Output = Result<(), ModError>>,
+    {
         let cwd = session
             .as_ref()
             .map_or_else(std::env::current_dir, |session| Ok(session.cwd()))?;
-        self.dispatch_turn_step_stream_at(input, &cwd, source, on_chunk)
-            .await
+        self.dispatch_turn_step_stream_at_and_origin_with_session(
+            input,
+            &cwd,
+            lingxi_core::host::task_registry::FieldPresence::Missing,
+            session,
+            source,
+            on_chunk,
+        )
+        .await
     }
 
     /// Dispatch a child stream with the child's effective working directory.
@@ -4755,6 +5248,29 @@ impl ModHost {
         input: Utf16JsonProjection,
         agent_cwd: &Path,
         api_origin: lingxi_core::host::task_registry::FieldPresence<Value>,
+        source: F,
+        on_chunk: C,
+    ) -> Result<Utf16JsonProjection, ModError>
+    where
+        F: FnMut(Utf16JsonProjection) -> Fut,
+        Fut: Future<Output = Result<ModStreamSource, ModError>> + Send,
+        C: FnMut(Utf16JsonProjection) -> CFut,
+        CFut: Future<Output = Result<(), ModError>>,
+    {
+        let session = self.capture_turn_step_session().await?;
+        self.dispatch_turn_step_stream_at_and_origin_with_session(
+            input, agent_cwd, api_origin, session, source, on_chunk,
+        )
+        .await
+    }
+
+    /// Dispatch a child stream using the session view captured before spawn.
+    pub async fn dispatch_turn_step_stream_at_and_origin_with_session<F, Fut, C, CFut>(
+        &self,
+        input: Utf16JsonProjection,
+        agent_cwd: &Path,
+        api_origin: lingxi_core::host::task_registry::FieldPresence<Value>,
+        session: Option<Arc<dyn ModSessionContext>>,
         mut source: F,
         mut on_chunk: C,
     ) -> Result<Utf16JsonProjection, ModError>
@@ -4764,7 +5280,6 @@ impl ModHost {
         C: FnMut(Utf16JsonProjection) -> CFut,
         CFut: Future<Output = Result<(), ModError>>,
     {
-        let session = self.background_session();
         let generation_session = session
             .as_ref()
             .and_then(|session| session.ui_invalidation_context());
@@ -6284,6 +6799,13 @@ impl ModHost {
         post_action: Option<&mut client_ui_host::ClientPostActionGuard>,
     ) -> Result<RequestChannel, ModError> {
         let epoch = self.current_worker_epoch().await;
+        if projection_u64(&message, "/ownedWorkerEpoch")
+            .is_some_and(|expected| expected != epoch.id)
+        {
+            return Err(ModError::Unavailable(
+                "owned host Mod worker changed".into(),
+            ));
+        }
         if let Some(post_action) = post_action {
             post_action.bind_worker_epoch(epoch.id)?;
         }
@@ -6444,6 +6966,7 @@ impl ModHost {
                     message.string_at("/kind"),
                     Some(
                         "loaded"
+                            | "host.registration.snapshot.result"
                             | "unloaded"
                             | "result"
                             | "error"
@@ -6501,7 +7024,7 @@ impl ModHost {
             .clone();
         let plugin = plugin.to_owned();
         let event = event.to_owned();
-        tokio::task::spawn_blocking(move || {
+        run_mod_blocking(move || {
             let key = if event == "store.keys" {
                 None
             } else {
@@ -6663,7 +7186,58 @@ impl ModHost {
         ui_render_state_read: Option<ModUiRenderStateReadScope>,
         generation_context_ticket: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<HostApiValue, ModError>> + Send + 'a>> {
+        let transaction_lease = tool_call_context
+            .as_ref()
+            .map(ModToolCallContext::session_work_lease);
+        let operation = self.dispatch_host_api_inner(
+            event,
+            input_projection,
+            cwd,
+            session,
+            cwd_is_pinned,
+            depth,
+            origin,
+            api_context,
+            storage_id,
+            skip_hook_id,
+            log_route_id,
+            tool_call_context,
+            ui_render_state_read,
+            generation_context_ticket,
+        );
+        Box::pin(with_mod_session_work_scope(
+            session,
+            event,
+            transaction_lease,
+            operation,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_host_api_inner<'a>(
+        &'a self,
+        event: &'a str,
+        input_projection: Option<Utf16JsonProjection>,
+        cwd: &'a Path,
+        session: Option<&'a dyn ModSessionContext>,
+        cwd_is_pinned: bool,
+        depth: u8,
+        origin: Value,
+        api_context: ResolvedModApiContext,
+        storage_id: String,
+        skip_hook_id: Option<u64>,
+        log_route_id: u64,
+        tool_call_context: Option<ModToolCallContext>,
+        ui_render_state_read: Option<ModUiRenderStateReadScope>,
+        generation_context_ticket: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<HostApiValue, ModError>> + Send + 'a>> {
         Box::pin(async move {
+            // These operations can launch unowned work. Reject before their
+            // middleware is dispatched: a listener may otherwise short-circuit
+            // or perform side effects before reaching the core guard.
+            if let Some(reason) = strict_host_api_denial(session, event) {
+                return Err(ModError::Unavailable(reason));
+            }
             let mut input_projection = input_projection;
             let input = input_projection.as_ref();
             if event == "ui.notify" && session.is_none() {
@@ -6879,6 +7453,7 @@ impl ModHost {
                 &json!({"kind":"dispatch","event":event,"cwd":live_cwd,"origin":origin,"skipHookId":skip_hook_id,"logRouteId":log_route_id,
                 "secDefaultOrder":self.sec_default_order.load(Ordering::Acquire)}),
             )?;
+            self.attach_owned_registration(&mut dispatch_message, session)?;
             if let Some(input) = input_projection.clone() {
                 set_projection_field(&mut dispatch_message, "input", input)?;
             }
@@ -7568,6 +8143,10 @@ impl ModHost {
                             }
                         };
                         let method = message.string_at("/method").unwrap_or("");
+                        if let Some(reason) = strict_host_api_denial(session, method) {
+                            self.send_generated(&json!({"id":request.id,"kind":"api.error","callId":call_id,"message":reason})).await?;
+                            continue;
+                        }
                         if matches!(
                             method,
                             "clock.sleep"
@@ -7584,17 +8163,47 @@ impl ModHost {
                         {
                             let (abort, registration) = AbortHandle::new_pair();
                             let cancellation = lingxi_core::host::CancellationToken::new();
+                            let input_projection = message
+                                .at_pointer("/input")
+                                .map(|_| message.subprojection("/input"))
+                                .transpose()
+                                .map_err(|error| ModError::Protocol(error.to_string()))?;
+                            let admitted_tool = if method == "tool.call"
+                                && session.is_some_and(|s| s.is_host_owned_request())
+                            {
+                                let result = match input_projection.as_ref() {
+                                    Some(input) => {
+                                        acquire_tool_call_context(
+                                            session,
+                                            cancellation.clone(),
+                                            input,
+                                            &api_context,
+                                        )
+                                        .await
+                                    }
+                                    None => {
+                                        Err(ModError::Protocol("tool.call requires input".into()))
+                                    }
+                                };
+                                match result {
+                                    Ok(context) => Some(context),
+                                    Err(error) => {
+                                        if let Some(session) = session {
+                                            session.note_owned_denial(&error.to_string());
+                                        }
+                                        self.send_generated(&json!({"id":request.id,"kind":"api.error","callId":call_id,"message":error.to_string()})).await?;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
                             let control = ApiCallControl::new(
                                 abort,
                                 cancellation.clone(),
                                 method == "tool.call",
                             );
                             clock_abort.insert(call_id, control.clone());
-                            let input_projection = message
-                                .at_pointer("/input")
-                                .map(|_| message.subprojection("/input"))
-                                .transpose()
-                                .map_err(|error| ModError::Protocol(error.to_string()))?;
                             if method == "tool.call" && input_projection.is_none() {
                                 self.send_generated(&json!({
                                     "id":request.id,
@@ -7626,19 +8235,23 @@ impl ModHost {
                                 let execution = Abortable::new(
                                     async {
                                         let tool_call_context = if method == "tool.call" {
-                                            let input = input_for_tool
-                                                .as_ref()
-                                                .expect("tool.call input validated above");
-                                            match acquire_tool_call_context(
-                                                session,
-                                                cancellation.clone(),
-                                                input,
-                                                &api_context_for_call,
-                                            )
-                                            .await
-                                            {
-                                                Ok(context) => Some(context),
-                                                Err(error) => return (Err(error), None),
+                                            if let Some(context) = admitted_tool {
+                                                Some(context)
+                                            } else {
+                                                let input = input_for_tool
+                                                    .as_ref()
+                                                    .expect("tool.call input validated above");
+                                                match acquire_tool_call_context(
+                                                    session,
+                                                    cancellation.clone(),
+                                                    input,
+                                                    &api_context_for_call,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(context) => Some(context),
+                                                    Err(error) => return (Err(error), None),
+                                                }
                                             }
                                         } else {
                                             None
@@ -8289,7 +8902,16 @@ impl ModHost {
                     .ok_or_else(|| ModError::Unavailable("session.turns needs a session".into()))?;
                 projection_u64_value(session.turns().await)?
             }
-            "session.repo" => generated_projection(&session_repo(&cwd).await)?,
+            "session.repo" => {
+                // This helper launches git directly, outside the host-owned
+                // process lifecycle. Do not start it from a strict request.
+                if session.is_some_and(|session| session.is_host_owned_request()) {
+                    return Err(ModError::Unavailable(
+                        "session.repo cannot be owned by this host request".into(),
+                    ));
+                }
+                generated_projection(&session_repo(&cwd).await)?
+            }
             "session.version" => {
                 let session = session.ok_or_else(|| {
                     ModError::Unavailable("session.version needs a session".into())
@@ -8343,6 +8965,11 @@ impl ModHost {
                 static_projection("null")
             }
             "process.run" => {
+                if session.is_some_and(|session| session.is_host_owned_request()) {
+                    return Err(ModError::Unavailable(
+                        "process.run cannot be owned by this host request".into(),
+                    ));
+                }
                 let input =
                     input.ok_or_else(|| ModError::Hook("process.run input is required".into()))?;
                 let environment = self
@@ -8396,7 +9023,7 @@ impl ModHost {
                 }
                 let path = resolve_mod_api_path(&raw, &cwd)?;
                 let bytes = text.into_bytes();
-                tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                run_mod_blocking(move || -> std::io::Result<()> {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
@@ -9095,6 +9722,9 @@ impl ModHost {
                 "ui.press needs a positive site revision".into(),
             ));
         }
+        // A delayed press may still carry an older generation-bound session.
+        // Bind its identity lookup and dispatch before consulting live state.
+        let _session_work_lease = acquire_mod_session_work_lease(session).await?;
         let site = ModUiPressSite {
             session_id: session.id().await,
             surface: request.surface.clone(),
@@ -9626,6 +10256,70 @@ impl ModHost {
         S: FnMut(String, Option<Utf16JsonProjection>) -> SFut,
         SFut: Future<Output = ()>,
     {
+        let recovery_scope = MOD_TURN_RECOVERY_SCOPE.try_with(Arc::clone).ok();
+        let _recovery_leases = if let Some(scope) = recovery_scope {
+            // If the captured registration has no handler for this event,
+            // execute the core locally. Sending the event to the worker after
+            // this check could otherwise race a newly loaded handler.
+            let builtin_policy = matches!(
+                event,
+                "plugin.register"
+                    | "prompt.context"
+                    | "settings.read"
+                    | "tool.check"
+                    | "tool.describe"
+                    | "tool.list"
+                    | "tool.register"
+            ) && skip_hook_id != Some(0)
+                && self.sec_default_order.load(Ordering::Acquire) >= -1;
+            if !self.has_event(event) && !builtin_policy {
+                let result = core(Some(input))
+                    .await?
+                    .unwrap_or_else(|| static_projection("null"));
+                return Ok(ModDispatchOutcome {
+                    result_projection: result,
+                    hooked: Vec::new(),
+                    all_hooked_builtin: false,
+                    ui_render_plugins: Vec::new(),
+                    ui_render_duration_ms: (event == "ui.render").then_some(0),
+                });
+            }
+            match (scope.guard)() {
+                Ok(leases) => {
+                    if let Some(leases) = &leases {
+                        // Blocking host I/O can outlive a dropped dispatch
+                        // future. Its closure clones this original turn's
+                        // ownership before it enters the blocking pool.
+                        *scope
+                            .leases
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(leases.clone());
+                    }
+                    leases
+                }
+                Err(error) => {
+                    scope
+                        .failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_or_insert_with(|| error.clone());
+                    scope.failed.notify_one();
+                    return Err(ModError::Unavailable(format!(
+                        "Mod recovery admission failed: {error}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        // Keep a single identity-bound view for both this request's live APIs
+        // and any worker callbacks which survive the request itself.
+        let captured_session = match session {
+            Some(session) => session.capture_dispatch_context().await?,
+            None => None,
+        };
+        let session = captured_session.as_deref().or(session);
         let terminal_above_prompt_render =
             event == "ui.render" && input.string_at("/surface") == Some("terminal");
         if terminal_above_prompt_render {
@@ -9654,6 +10348,7 @@ impl ModHost {
             generated_projection(&json!({"kind":"dispatch","event":event,"cwd":live_cwd,
             "origin":origin,"skipHookId":skip_hook_id,
             "secDefaultOrder":self.sec_default_order.load(Ordering::Acquire)}))?;
+        self.attach_owned_registration(&mut dispatch_message, session)?;
         set_projection_field(&mut dispatch_message, "input", input.clone())?;
         if press_href_admitted {
             set_projection_field(
@@ -9826,6 +10521,10 @@ impl ModHost {
                         "tier":message.string_at("/tier").unwrap_or("user")
                     });
                     let method = message.string_at("/method").unwrap_or_default().to_owned();
+                    if let Some(reason) = strict_host_api_denial(session, &method) {
+                        self.send_generated(&json!({"id":request.id,"kind":"api.error","callId":call_id,"message":reason})).await?;
+                        continue;
+                    }
                     let ui_render_state_read = match parse_ui_render_state_read_scope(
                         &message,
                         &method,
@@ -9864,6 +10563,34 @@ impl ModHost {
                         }
                         let (abort, registration) = AbortHandle::new_pair();
                         let cancellation = lingxi_core::host::CancellationToken::new();
+                        let admitted_tool = if method == "tool.call"
+                            && session.is_some_and(|s| s.is_host_owned_request())
+                        {
+                            let result = match api_input.as_ref() {
+                                Some(input) => {
+                                    acquire_tool_call_context(
+                                        session,
+                                        cancellation.clone(),
+                                        input,
+                                        &api_context,
+                                    )
+                                    .await
+                                }
+                                None => Err(ModError::Protocol("tool.call requires input".into())),
+                            };
+                            match result {
+                                Ok(context) => Some(context),
+                                Err(error) => {
+                                    if let Some(session) = session {
+                                        session.note_owned_denial(&error.to_string());
+                                    }
+                                    self.send_generated(&json!({"id":request.id,"kind":"api.error","callId":call_id,"message":error.to_string()})).await?;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         let control =
                             ApiCallControl::new(abort, cancellation.clone(), method == "tool.call");
                         clock_abort.insert(call_id, control.clone());
@@ -9884,19 +10611,23 @@ impl ModHost {
                             let execution = Abortable::new(
                                 async {
                                     let tool_call_context = if method == "tool.call" {
-                                        let input = input_for_tool
-                                            .as_ref()
-                                            .expect("tool.call input validated above");
-                                        match acquire_tool_call_context(
-                                            session,
-                                            cancellation.clone(),
-                                            input,
-                                            &api_context_for_call,
-                                        )
-                                        .await
-                                        {
-                                            Ok(context) => Some(context),
-                                            Err(error) => return (Err(error), None),
+                                        if let Some(context) = admitted_tool {
+                                            Some(context)
+                                        } else {
+                                            let input = input_for_tool
+                                                .as_ref()
+                                                .expect("tool.call input validated above");
+                                            match acquire_tool_call_context(
+                                                session,
+                                                cancellation.clone(),
+                                                input,
+                                                &api_context_for_call,
+                                            )
+                                            .await
+                                            {
+                                                Ok(context) => Some(context),
+                                                Err(error) => return (Err(error), None),
+                                            }
                                         }
                                     } else {
                                         None
@@ -10206,6 +10937,656 @@ impl ModHost {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn weak_session_factory_retains_owner_only_for_active_work() {
+        struct Session {
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl ModSessionContext for Session {
+            fn cwd(&self) -> PathBuf {
+                PathBuf::new()
+            }
+
+            fn root(&self) -> PathBuf {
+                PathBuf::new()
+            }
+
+            async fn model(&self) -> String {
+                self.entered.notify_one();
+                self.release.notified().await;
+                "origin model".into()
+            }
+
+            async fn id(&self) -> String {
+                "origin".into()
+            }
+
+            async fn turns(&self) -> u64 {
+                0
+            }
+        }
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let owner = Arc::new(Session {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let owner_weak = Arc::downgrade(&owner);
+        let factory_owner = owner_weak.clone();
+        let calls = Arc::new(AtomicU64::new(0));
+        let factory_calls = calls.clone();
+        let detached = weak_mod_session_factory(Arc::new(move || {
+            factory_calls.fetch_add(1, Ordering::AcqRel);
+            let owner = factory_owner
+                .upgrade()
+                .ok_or_else(|| ModError::Unavailable("origin ended".into()))?;
+            Ok(owner as Arc<dyn ModSessionContext>)
+        }));
+
+        let timer_session = detached.ui_invalidation_context().unwrap();
+        let dispatch_session = detached.capture_dispatch_context().await.unwrap().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        assert!(dispatch_session.generation_cancellation_token().is_none());
+
+        let active = tokio::spawn(async move { timer_session.model().await });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the session API started");
+        drop(owner);
+        assert!(owner_weak.upgrade().is_some(), "active work owns the view");
+        release.notify_one();
+        assert_eq!(active.await.unwrap(), "origin model");
+        assert!(
+            owner_weak.upgrade().is_none(),
+            "idle views do not own the host"
+        );
+
+        match dispatch_session.acquire_session_work_lease().await {
+            Err(ModError::Unavailable(message)) => assert_eq!(message, "origin ended"),
+            _ => panic!("a dead owner must preserve the factory error"),
+        }
+        assert!(dispatch_session
+            .generation_cancellation_token()
+            .is_some_and(|token| token.is_cancelled()));
+        assert_eq!(calls.load(Ordering::Acquire), 4);
+    }
+
+    #[tokio::test]
+    async fn dropped_mod_waiter_keeps_blocking_work_owned_until_it_finishes() {
+        let execution = Arc::new(());
+        let work = Arc::new(());
+        let session_work = Arc::new(());
+        let execution_weak = Arc::downgrade(&execution);
+        let work_weak = Arc::downgrade(&work);
+        let session_work_weak = Arc::downgrade(&session_work);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let leases: ModRecoveryLeases = (execution.clone(), work.clone());
+        let waiter = tokio::spawn(MOD_SESSION_WORK_SCOPE.scope(
+            ModSessionWorkScope {
+                session_identity: 0,
+                lease: Some(session_work.clone()),
+            },
+            with_detached_mod_recovery_leases(leases, async move {
+                let _ = run_mod_blocking(move || {
+                    let _ = entered_tx.send(());
+                    release_rx.recv().expect("release blocking work");
+                })
+                .await;
+            }),
+        ));
+        drop(execution);
+        drop(work);
+        drop(session_work);
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .expect("blocking work started")
+            .expect("entry signal");
+        waiter.abort();
+        let _ = waiter.await;
+        assert!(execution_weak.upgrade().is_some());
+        assert!(work_weak.upgrade().is_some());
+        assert!(
+            session_work_weak.upgrade().is_none(),
+            "path-only blocking work must not prevent a later session switch"
+        );
+        release_tx.send(()).expect("release blocking work");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while execution_weak.upgrade().is_some() || work_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both leases must release after the blocking work finishes");
+    }
+
+    #[tokio::test]
+    async fn worker_session_api_holds_generation_until_completion_and_rejects_stale_origin() {
+        struct GenerationSession {
+            cwd: PathBuf,
+            gate: Arc<tokio::sync::RwLock<()>>,
+            generation: Arc<AtomicU64>,
+            calls: Arc<AtomicU64>,
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl ModSessionContext for GenerationSession {
+            async fn acquire_session_work_lease(
+                &self,
+            ) -> Result<Option<Arc<dyn Send + Sync>>, ModError> {
+                let lease = self
+                    .gate
+                    .clone()
+                    .try_read_owned()
+                    .map_err(|_| ModError::Unavailable("session switching".into()))?;
+                if self.generation.load(Ordering::Acquire) != 1 {
+                    return Err(ModError::Unavailable("stale generation".into()));
+                }
+                Ok(Some(Arc::new(lease)))
+            }
+
+            fn cwd(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+
+            fn root(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+
+            async fn model(&self) -> String {
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                self.entered.notify_one();
+                self.release.notified().await;
+                format!("generation-{}", self.generation.load(Ordering::Acquire))
+            }
+
+            async fn id(&self) -> String {
+                "generation-session".into()
+            }
+
+            async fn turns(&self) -> u64 {
+                0
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("session-generation.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('tool.call', async ($) => {
+                try { return { result: await $.session.model() }; }
+                catch (_) { return { result: 'denied' }; }
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "session-generation",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+        let session = Arc::new(GenerationSession {
+            cwd: dir.path().to_path_buf(),
+            gate: Arc::new(tokio::sync::RwLock::new(())),
+            generation: Arc::new(AtomicU64::new(1)),
+            calls: Arc::new(AtomicU64::new(0)),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        });
+        let dispatch_host = host.clone();
+        let dispatch_session = session.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_host
+                .dispatch_with_log_at_session(
+                    "tool.call",
+                    test_projection(json!({"tool":"Generation"})),
+                    dispatch_session.as_ref(),
+                    |_| async { panic!("the Mod answers tool.call") },
+                    |_, _| async {},
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), session.entered.notified())
+            .await
+            .expect("the real worker reaches session.model");
+        assert!(
+            session.gate.clone().try_write_owned().is_err(),
+            "a session switch must wait for the admitted API"
+        );
+        session.release.notify_one();
+        let first = tokio::time::timeout(Duration::from_secs(5), dispatch)
+            .await
+            .expect("the admitted API completes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mod_test_value(&first)["result"], "generation-1");
+
+        let switch = session
+            .gate
+            .clone()
+            .try_write_owned()
+            .expect("the session lease releases after the API completes");
+        session.generation.store(2, Ordering::Release);
+        drop(switch);
+        let stale = host
+            .dispatch_with_log_at_session(
+                "tool.call",
+                test_projection(json!({"tool":"Generation"})),
+                session.as_ref(),
+                |_| async { panic!("the Mod answers tool.call") },
+                |_, _| async {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(mod_test_value(&stale)["result"], "denied");
+        assert_eq!(session.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_dispatch_and_turn_step_timers_keep_their_captured_session() {
+        #[derive(Clone)]
+        struct CapturedSession {
+            cwd: PathBuf,
+            gate: Arc<tokio::sync::RwLock<()>>,
+            generation: Arc<AtomicU64>,
+            expected: Option<u64>,
+            notification: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl ModSessionContext for CapturedSession {
+            async fn capture_dispatch_context(
+                &self,
+            ) -> Result<Option<Arc<dyn ModSessionContext>>, ModError> {
+                if self.expected.is_some() {
+                    return Ok(Some(Arc::new(self.clone())));
+                }
+                let _gate = self
+                    .gate
+                    .clone()
+                    .try_read_owned()
+                    .map_err(|_| ModError::Unavailable("session switching".into()))?;
+                let mut captured = self.clone();
+                captured.expected = Some(self.generation.load(Ordering::Acquire));
+                Ok(Some(Arc::new(captured)))
+            }
+
+            async fn acquire_session_work_lease(
+                &self,
+            ) -> Result<Option<Arc<dyn Send + Sync>>, ModError> {
+                let lease = self
+                    .gate
+                    .clone()
+                    .try_read_owned()
+                    .map_err(|_| ModError::Unavailable("session switching".into()))?;
+                if self.expected != Some(self.generation.load(Ordering::Acquire)) {
+                    return Err(ModError::Unavailable("stale session generation".into()));
+                }
+                Ok(Some(Arc::new(lease)))
+            }
+
+            fn ui_invalidation_context(&self) -> Option<Arc<dyn ModSessionContext>> {
+                Some(Arc::new(self.clone()))
+            }
+
+            fn cwd(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+
+            fn root(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+
+            async fn model(&self) -> String {
+                "test".into()
+            }
+
+            async fn id(&self) -> String {
+                // Deliberately unchanged for the A -> B -> A generation case.
+                "same-session-id".into()
+            }
+
+            async fn turns(&self) -> u64 {
+                0
+            }
+
+            async fn emit_mod_notify(&self, _plugin: &str, _text: Utf16JsonProjection) {
+                self.notification.notify_one();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("captured-timer.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              const schedule = ($, key) => $.clock.after(0, async () => {
+                try { await $.state.set({plugin:'captured-timer', key}, true); }
+                catch (_) { await $.ui.notify('old generation rejected'); }
+              });
+              on('turn.start', ($, e) => { schedule($, 'ingress'); return e; });
+              on('turn.step', async function* ($, e) {
+                schedule($, 'step');
+                yield {kind:'stop', stopReason:'end_turn', usage:null};
+                return {turnId:e.turnId, index:e.index, answer:'', toolUses:[],
+                  stopReason:'end_turn', usage:null};
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "captured-timer",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+        let session = Arc::new(CapturedSession {
+            cwd: dir.path().to_path_buf(),
+            gate: Arc::new(tokio::sync::RwLock::new(())),
+            generation: Arc::new(AtomicU64::new(1)),
+            expected: None,
+            notification: Arc::new(tokio::sync::Notify::new()),
+        });
+        let background: Arc<dyn ModSessionContext> = session.clone();
+        host.attach_background_context(Arc::downgrade(&background));
+        let step_session = host.capture_turn_step_session().await.unwrap();
+        let (entered, release) = host.test_route_gate.pause_state_key("ingress");
+        let ingress_host = host.clone();
+        let ingress_session = session.clone();
+        let ingress = tokio::spawn(async move {
+            ingress_host
+                .dispatch_with_log_at_session(
+                    "turn.start",
+                    test_projection(json!({"turnId":"origin-a"})),
+                    ingress_session.as_ref(),
+                    |event| async move { Ok(event) },
+                    |_, _| async {},
+                )
+                .await
+        });
+        let (ticket, retained) = tokio::time::timeout(Duration::from_secs(5), entered)
+            .await
+            .expect("ingress timer reaches the real worker route")
+            .unwrap();
+        assert!(!ticket.is_empty() && retained);
+        let switch = session.gate.clone().try_write_owned().unwrap();
+        session.generation.store(2, Ordering::Release);
+        drop(switch);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session.notification.notified())
+            .await
+            .expect("the stale ingress timer was rejected");
+        tokio::time::timeout(Duration::from_secs(5), ingress)
+            .await
+            .expect("the ingress dispatch completes")
+            .unwrap()
+            .unwrap();
+
+        // Return to the same session ID with a newer generation before the
+        // separately spawned turn.step dispatch gets to run.
+        let switch = session.gate.clone().try_write_owned().unwrap();
+        session.generation.store(3, Ordering::Release);
+        drop(switch);
+        let (entered, release) = host.test_route_gate.pause_state_key("step");
+        let step_host = host.clone();
+        let step = tokio::spawn(async move {
+            step_host
+                .dispatch_turn_step_stream_with_session(
+                    test_projection(
+                        json!({"turnId":"origin-a","index":0,"model":"test","messageCount":1}),
+                    ),
+                    step_session,
+                    |_| async { panic!("synthetic turn.step must not open the provider") },
+                    |_| async { Ok(()) },
+                )
+                .await
+        });
+        let (ticket, retained) = tokio::time::timeout(Duration::from_secs(5), entered)
+            .await
+            .expect("turn.step timer reaches the real worker route")
+            .unwrap();
+        assert!(!ticket.is_empty() && retained);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session.notification.notified())
+            .await
+            .expect("the stale turn.step timer was rejected");
+        tokio::time::timeout(Duration::from_secs(5), step)
+            .await
+            .expect("turn.step completes")
+            .unwrap()
+            .unwrap();
+        let state = host.state.lock().unwrap();
+        assert!(!state
+            .values
+            .contains_key(&ModStateKey::test("captured-timer", "ingress")));
+        assert!(!state
+            .values
+            .contains_key(&ModStateKey::test("captured-timer", "step")));
+    }
+
+    #[tokio::test]
+    async fn mod_admission_failure_stops_a_real_handler_before_its_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("recovery.js");
+        let marker = dir.path().join("effect.txt");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('prompt.section', async ($, event, next) => {
+                await $.fs.write('effect.txt', 'ran');
+                return next(event);
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load("recovery", dir.path(), &module, test_mod_options(json!({})))
+            .await
+            .unwrap();
+        let rejected: ModTurnRecoveryGuard = Arc::new(|| {
+            Err(crate::RecoveryAdmissionError::Failure(
+                "storage failed".into(),
+            ))
+        });
+        let result = with_mod_turn_recovery_guard(rejected, async {
+            // Even callers that treat a Mod failure as best-effort must not
+            // continue the durable turn after failed admission.
+            let _ = host
+                .dispatch_with_log_at(
+                    "prompt.section",
+                    test_projection(json!({"name":"x","text":"original"})),
+                    dir.path(),
+                    |event| async move { Ok(event) },
+                    |_, _| async {},
+                )
+                .await;
+        })
+        .await;
+        assert!(
+            matches!(result, Err(crate::RecoveryAdmissionError::Failure(message)) if message == "storage failed")
+        );
+        assert!(!marker.exists());
+
+        let admitted = Arc::new(AtomicBool::new(false));
+        let admission = admitted.clone();
+        let accepted: ModTurnRecoveryGuard = Arc::new(move || {
+            admission.store(true, Ordering::SeqCst);
+            Ok(Some((Arc::new(()), Arc::new(()))))
+        });
+        with_mod_turn_recovery_guard(accepted, async {
+            host.dispatch_with_log_at(
+                "prompt.section",
+                test_projection(json!({"name":"x","text":"original"})),
+                dir.path(),
+                |event| async move { Ok(event) },
+                |_, _| async {},
+            )
+            .await
+            .unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(admitted.load(Ordering::SeqCst));
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
+    }
+
+    #[tokio::test]
+    async fn recovery_scope_does_not_skip_builtin_security_policy() {
+        let host = ModHost::start(None).await.unwrap();
+        host.set_sec_default_order(Some(-1));
+        assert!(!host.has_event("tool.check"));
+        let admissions = Arc::new(AtomicU64::new(0));
+        let observed = admissions.clone();
+        let guard: ModTurnRecoveryGuard = Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Some((Arc::new(()), Arc::new(()))))
+        });
+        with_mod_turn_recovery_guard(guard, async {
+            host.dispatch(
+                "tool.check",
+                test_projection(json!({"tool":"Read","input":{},"toolUseId":"test"})),
+                |_| async { Ok(Some(test_projection(json!({"decision":"deny"})))) },
+            )
+            .await
+            .expect("builtin security policy must run");
+        })
+        .await
+        .unwrap();
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+    }
+
+    struct OwnedRegistrationSession {
+        cwd: PathBuf,
+        registration: Option<OwnedModRegistration>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModSessionContext for OwnedRegistrationSession {
+        fn is_host_owned_request(&self) -> bool {
+            self.registration.is_some()
+        }
+        fn owned_mod_registration(&self) -> Option<OwnedModRegistration> {
+            self.registration.clone()
+        }
+        fn cwd(&self) -> PathBuf {
+            self.cwd.clone()
+        }
+        fn root(&self) -> PathBuf {
+            self.cwd.clone()
+        }
+        async fn model(&self) -> String {
+            "fixture-model".into()
+        }
+        async fn id(&self) -> String {
+            "fixture-session".into()
+        }
+        async fn turns(&self) -> u64 {
+            0
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_registration_reload_rejects_before_new_listener_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let registration = host.snapshot_owned_registration().await.unwrap();
+        assert!(!registration.can_invoke_tools());
+        let module = directory.path().join("reload.js");
+        std::fs::write(&module, r#"export function register(on) {
+          on('tool.call', async ($) => { await $.fs.write('marker', 'ran'); return {result:'new'}; });
+        }"#).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            host.load(
+                "reload",
+                directory.path(),
+                &module,
+                test_mod_options(json!({})),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let strict = OwnedRegistrationSession {
+            cwd: directory.path().to_path_buf(),
+            registration: Some(registration),
+        };
+        let error = host
+            .dispatch_with_log_at_session(
+                "tool.call",
+                test_projection(json!({"tool":"Bash"})),
+                &strict,
+                |_| async { panic!("stale dispatch must not call core") },
+                |_, _| async {},
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("registrations changed"));
+        assert!(!directory.path().join("marker").exists());
+        let ordinary = OwnedRegistrationSession {
+            cwd: directory.path().to_path_buf(),
+            registration: None,
+        };
+        let result = host
+            .dispatch_with_log_at_session(
+                "tool.call",
+                test_projection(json!({"tool":"Bash"})),
+                &ordinary,
+                |_| async { panic!("ordinary Mod answers") },
+                |_, _| async {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.string_at("/result"), Some("new"));
+        assert!(directory.path().join("marker").exists());
+    }
+
+    #[tokio::test]
+    async fn owned_registration_worker_recovery_never_waits_for_request_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let registration = host.snapshot_owned_registration().await.unwrap();
+        let mut failures = host.subscribe_worker_failures().unwrap();
+        host.terminate_current_worker_for_test().await;
+        tokio::time::timeout(Duration::from_secs(5), failures.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), host.recover_epoch(&[]))
+            .await
+            .unwrap()
+            .unwrap();
+        let strict = OwnedRegistrationSession {
+            cwd: directory.path().to_path_buf(),
+            registration: Some(registration),
+        };
+        let error = host
+            .dispatch_with_log_at_session(
+                "tool.call",
+                test_projection(json!({"tool":"Bash"})),
+                &strict,
+                |_| async { panic!("old epoch must not call core") },
+                |_, _| async {},
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("worker changed"));
+    }
+
     fn test_mod_options(value: Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(&value).expect("fixture options are valid JSON")
     }
@@ -10398,9 +11779,20 @@ mod tests {
 
     #[tokio::test]
     async fn late_request_id_never_sends_on_the_replacement_epoch() {
-        async fn echo_worker(label: &str) -> (Child, ChildStdin, ChildStdout) {
+        async fn next_line(lines: &mut Lines<BufReader<ChildStdout>>) -> String {
+            tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("echo worker did not respond")
+                .expect("echo worker output failed")
+                .expect("echo worker exited before responding")
+        }
+
+        async fn echo_worker(label: &str) -> (Child, ChildStdin, Lines<BufReader<ChildStdout>>) {
             let source = format!(
-                "process.stdin.on('data', data => process.stdout.write({label:?} + ':' + data))"
+                "const label = {label:?};\n\
+                 require('readline').createInterface({{ input: process.stdin }})\n\
+                   .on('line', line => process.stdout.write(label + ':' + line + '\\n'));\n\
+                 process.stdout.write(label + ':ready\\n');"
             );
             let mut child = Command::new("node")
                 .arg("-e")
@@ -10412,13 +11804,14 @@ mod tests {
                 .spawn()
                 .unwrap();
             let input = child.stdin.take().unwrap();
-            let output = child.stdout.take().unwrap();
-            (child, input, output)
+            let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+            assert_eq!(next_line(&mut lines).await, format!("{label}:ready"));
+            (child, input, lines)
         }
 
         let host = ModHost::start(None).await.unwrap();
-        let (old_child, old_input, old_output) = echo_worker("old").await;
-        let (new_child, new_input, new_output) = echo_worker("new").await;
+        let (old_child, old_input, mut old_lines) = echo_worker("old").await;
+        let (new_child, new_input, mut new_lines) = echo_worker("new").await;
         let (old_epoch, old_background) =
             ModWorkerEpoch::new(100, old_child, old_input, None, false);
         let (new_epoch, new_background) =
@@ -10443,20 +11836,18 @@ mod tests {
         host.send_generated(&json!({"id":0,"kind":"current.probe"}))
             .await
             .unwrap();
-        let mut new_lines = BufReader::new(new_output).lines();
-        let line = tokio::time::timeout(Duration::from_secs(1), new_lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(line.starts_with("new:"));
-        assert!(line.contains("current.probe"));
-        let mut old_lines = BufReader::new(old_output).lines();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), old_lines.next_line())
-                .await
-                .is_err()
-        );
+
+        // A barrier sent directly to the old process proves every preceding
+        // attempted write has drained; silence for an arbitrary time cannot.
+        {
+            let mut input = old_epoch.input.lock().await;
+            input.write_all(b"barrier\n").await.unwrap();
+            input.flush().await.unwrap();
+        }
+        let line = next_line(&mut new_lines).await;
+        let frame: Value = serde_json::from_str(line.strip_prefix("new:").unwrap()).unwrap();
+        assert_eq!(frame["message"], json!({"id":0,"kind":"current.probe"}));
+        assert_eq!(next_line(&mut old_lines).await, "old:barrier");
     }
 
     #[tokio::test]
@@ -19914,6 +21305,184 @@ mod tests {
         assert_eq!(sessions.lock().unwrap()[ticket].references, 1);
         release_generation_api_session(&sessions, ticket);
         assert!(!sessions.lock().unwrap().contains_key(ticket));
+    }
+
+    #[tokio::test]
+    async fn worker_timer_notify_retains_generation_for_following_api() {
+        #[derive(Clone)]
+        struct NotifyGenerationSession {
+            cwd: PathBuf,
+            timer_gate_entered: Arc<tokio::sync::Notify>,
+            timer_gate_release: Arc<tokio::sync::Notify>,
+            notification_delivered: Arc<tokio::sync::Notify>,
+            notifications: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ModSessionContext for NotifyGenerationSession {
+            fn cwd(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+
+            fn root(&self) -> PathBuf {
+                self.cwd.clone()
+            }
+
+            fn ui_invalidation_context(&self) -> Option<Arc<dyn ModSessionContext>> {
+                Some(Arc::new(self.clone()))
+            }
+
+            async fn model(&self) -> String {
+                self.timer_gate_entered.notify_one();
+                self.timer_gate_release.notified().await;
+                "test-model".into()
+            }
+
+            async fn id(&self) -> String {
+                "notify-generation".into()
+            }
+
+            async fn turns(&self) -> u64 {
+                1
+            }
+
+            async fn emit_mod_notify(&self, _plugin: &str, text: Utf16JsonProjection) {
+                self.notifications
+                    .lock()
+                    .await
+                    .push(text.string_at("").unwrap_or_default().to_owned());
+                self.notification_delivered.notify_one();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("generation-notify-timer.js");
+        std::fs::write(
+            &module,
+            r#"
+            export function register(on) {
+              on('clock.after', async ($, e, next) => {
+                await $.session.model();
+                return next(e);
+              });
+              on('tool.call', ($) => {
+                $.clock.after(0, async () => {
+                  await $.ui.notify('timer notification');
+                  await $.state.set({ plugin: 'notify-ticket-test', key: 'afterNotify' }, true);
+                });
+                return { result: 'scheduled' };
+              });
+            }
+        "#,
+        )
+        .unwrap();
+
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "notify-ticket-test",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+        let session = NotifyGenerationSession {
+            cwd: dir.path().to_path_buf(),
+            timer_gate_entered: Arc::new(tokio::sync::Notify::new()),
+            timer_gate_release: Arc::new(tokio::sync::Notify::new()),
+            notification_delivered: Arc::new(tokio::sync::Notify::new()),
+            notifications: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (state_set_entered, release_state_set) =
+            host.test_route_gate.pause_state_key("afterNotify");
+        let notify_routed = host.test_route_gate.expect_generation_notify();
+        let scheduled = tokio::time::timeout(
+            Duration::from_secs(5),
+            host.dispatch_with_log_at_session(
+                "tool.call",
+                test_projection(json!({"tool":"Schedule"})),
+                &session,
+                |_| async { panic!("the Mod schedules the timer") },
+                |_, _| async {},
+            ),
+        )
+        .await
+        .expect("the scheduling hook settles while its timer is gated")
+        .unwrap();
+        assert_eq!(mod_test_value(&scheduled), json!({"result":"scheduled"}));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            session.timer_gate_entered.notified(),
+        )
+        .await
+        .expect("the actual clock.after worker reached the session gate");
+        session.timer_gate_release.notify_one();
+
+        let (notify_ticket, notify_retained) =
+            tokio::time::timeout(Duration::from_secs(5), notify_routed)
+                .await
+                .expect("the timer notification crosses the actual worker output route")
+                .expect("the notification route observer remains open");
+        assert!(!notify_ticket.is_empty());
+        assert!(
+            notify_retained,
+            "a queued notification must retain the generation reference it releases"
+        );
+        let (ticket, retained) = tokio::time::timeout(Duration::from_secs(5), state_set_entered)
+            .await
+            .expect("the timer reaches state.set after its notification")
+            .expect("the worker route gate remains open");
+        assert_eq!(ticket, notify_ticket);
+        assert!(
+            retained,
+            "the notification must not release the callback's generation ticket"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            session.notification_delivered.notified(),
+        )
+        .await
+        .expect("the originating generation receives the notification");
+        assert_eq!(
+            *session.notifications.lock().await,
+            vec!["timer notification".to_string()]
+        );
+        release_state_set.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let value = host
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .values
+                    .get(&ModStateKey::test("notify-ticket-test", "afterNotify"))
+                    .map(|entry| entry.value.clone());
+                if value.as_ref() == Some(&test_projection(json!(true))) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the callback keeps its originating generation for state.set");
+
+        let epoch = host.current_worker_epoch().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let live = epoch
+                    .generation_api_sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains_key(&ticket);
+                if !live {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the notification and completed callback release their references");
     }
 
     #[tokio::test]

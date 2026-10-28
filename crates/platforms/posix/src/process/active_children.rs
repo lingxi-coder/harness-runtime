@@ -73,12 +73,19 @@ pub fn unregister(pid: u32) {
 /// signal-exit cleanup. Called from the CLI's print/SDK signal handler right
 /// before the process exits; an already-gone group is not an error.
 pub fn kill_all_active_children() {
-    let pids: Vec<u32> = registry()
-        .lock()
-        .map(|g| g.iter().copied().collect())
-        .unwrap_or_default();
-    for pid in pids {
+    for_each_registered(|pid| {
         let _ = kill_tree_force(pid);
+    });
+}
+
+// Hold the lock through each synchronous signal. A strict runner unregisters
+// before reaping its leader, so an in-flight signal cannot outlive the PID
+// reservation and accidentally reach a subsequently reused process group.
+fn for_each_registered(mut action: impl FnMut(u32)) {
+    if let Ok(groups) = registry().lock() {
+        for &pid in groups.iter() {
+            action(pid);
+        }
     }
 }
 
@@ -95,6 +102,35 @@ mod tests {
     use nix::unistd::Pid;
     use std::time::Duration;
     use tokio::process::Command;
+
+    #[test]
+    fn unregister_waits_for_an_inflight_registered_signal() {
+        use std::sync::mpsc;
+        const TEST_ID: u32 = u32::MAX;
+        register(TEST_ID);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let visitor = std::thread::spawn(move || {
+            for_each_registered(|pid| {
+                if pid == TEST_ID {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+            });
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let remover = std::thread::spawn(move || {
+            unregister(TEST_ID);
+            dropped_tx.send(()).unwrap();
+        });
+        assert!(dropped_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        release_tx.send(()).unwrap();
+        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        visitor.join().unwrap();
+        remover.join().unwrap();
+        assert!(!is_registered(TEST_ID));
+    }
 
     /// A single sequential test (no parallel access to the shared registry): the
     /// empty-registry no-op, register/unregister bookkeeping, and — the core

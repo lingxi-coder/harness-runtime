@@ -235,6 +235,7 @@ fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
         can_show_permission_prompts: false,
         session_interactive: None,
         origin_session_id: None,
+        session_origin: None,
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
         transcript_fs: None,
@@ -440,6 +441,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
 
 fn inheritance() -> SubagentInheritance {
     SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(InertInvoker),
         budget: Arc::new(OpenBudget),
     }

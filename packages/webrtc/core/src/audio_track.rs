@@ -31,7 +31,7 @@ pub(crate) struct AudioTrack {
 }
 
 impl AudioTrack {
-    pub(crate) fn new() -> Result<(MediaEngine, Self), &'static str> {
+    pub(crate) fn new(now: Instant) -> Result<(MediaEngine, Self), &'static str> {
         let ssrc = rand::random();
         let codec = RTCRtpCodec {
             mime_type: "audio/opus".into(),
@@ -50,21 +50,24 @@ impl AudioTrack {
                 RtpCodecKind::Audio,
             )
             .map_err(|_| "failed to register voice codec")?;
-        let track = TrackLocalStaticSample::new(MediaStreamTrack::new(
-            "realtime".into(),
-            format!("audio-{ssrc}"),
-            "microphone".into(),
-            RtpCodecKind::Audio,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(ssrc),
+        let track = TrackLocalStaticSample::new(
+            now,
+            MediaStreamTrack::new(
+                "realtime".into(),
+                format!("audio-{ssrc}"),
+                "microphone".into(),
+                RtpCodecKind::Audio,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        ..Default::default()
+                    },
+                    codec,
+                    active: true,
                     ..Default::default()
-                },
-                codec,
-                active: true,
-                ..Default::default()
-            }],
-        ))
+                }],
+            ),
+        )
         .map_err(|_| "failed to create voice track")?;
         Ok((
             media,
@@ -100,7 +103,7 @@ impl AudioTrack {
                             // write_sample truncates floating-point seconds to RTP ticks.
                             // Bias empty gaps by 1 ns to keep whole packets exact.
                             duration: duration + Duration::from_nanos(/*nanos*/ 1),
-                            ..Default::default()
+                            ..Sample::new(frame.at)
                         },
                         &[],
                     )
@@ -115,7 +118,7 @@ impl AudioTrack {
                     &Sample {
                         data: frame.data.into(),
                         duration,
-                        ..Default::default()
+                        ..Sample::new(frame.at)
                     },
                     &[],
                 )

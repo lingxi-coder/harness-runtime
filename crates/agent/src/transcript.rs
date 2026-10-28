@@ -1005,6 +1005,7 @@ fn source_attachment_projection(
 
 async fn dispatch_append_event<F, Fut>(
     host: &Arc<ModHost>,
+    session: Option<Arc<dyn hooks::mods::ModSessionContext>>,
     cwd: &std::path::Path,
     input: Utf16JsonProjection,
     core: F,
@@ -1013,7 +1014,7 @@ where
     F: FnMut(Option<Utf16JsonProjection>) -> Fut,
     Fut: std::future::Future<Output = Result<Option<Utf16JsonProjection>, ModError>>,
 {
-    if let Some(session) = host.bound_session() {
+    if let Some(session) = session {
         let log_session = session.clone();
         let toast_session = session.clone();
         let status_session = session.clone();
@@ -1062,6 +1063,7 @@ where
 
 async fn mod_append_message_row(
     host: &Arc<ModHost>,
+    session: Option<Arc<dyn hooks::mods::ModSessionContext>>,
     cwd: &std::path::Path,
     agent_id: AgentId,
     model: Option<&str>,
@@ -1088,7 +1090,7 @@ async fn mod_append_message_row(
         None::<(ConversationMessage, Utf16JsonProjection)>,
     ));
     let applied_by_core = applied.clone();
-    let result = dispatch_append_event(host, cwd, input, move |forwarded| {
+    let result = dispatch_append_event(host, session, cwd, input, move |forwarded| {
         let core_input = core_input.clone();
         let core_uuid = core_uuid.clone();
         let core_original = core_original.clone();
@@ -1164,6 +1166,7 @@ async fn mod_append_message_row(
 
 async fn mod_append_source_attachment(
     host: &Arc<ModHost>,
+    session: Option<Arc<dyn hooks::mods::ModSessionContext>>,
     cwd: &std::path::Path,
     agent_id: AgentId,
     original: &SourceAttachment,
@@ -1186,7 +1189,7 @@ async fn mod_append_source_attachment(
         .expect("generated message exists");
     let applied = Arc::new(Mutex::new(None::<(SourceAttachment, Utf16JsonProjection)>));
     let applied_by_core = applied.clone();
-    let result = dispatch_append_event(host, cwd, input, move |forwarded| {
+    let result = dispatch_append_event(host, session, cwd, input, move |forwarded| {
         let core_input = core_input.clone();
         let core_original = core_original.clone();
         let core_message = core_message.clone();
@@ -1329,6 +1332,8 @@ pub struct AgentTranscriptWriter {
     source_attachments: Arc<Mutex<HashMap<MessageId, SourceAttachment>>>,
     mod_executor: Option<Arc<hooks::HookExecutorImpl>>,
     mod_cwd: Option<PathBuf>,
+    mod_session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+    mod_require_session_origin: bool,
     appended_rows: Arc<Mutex<HashMap<MessageId, AppendedRow>>>,
     dispatched_attachment_rows: Arc<Mutex<HashSet<String>>>,
 }
@@ -1349,6 +1354,8 @@ impl AgentTranscriptWriter {
             source_attachments: Arc::new(Mutex::new(HashMap::new())),
             mod_executor: None,
             mod_cwd: None,
+            mod_session_origin: None,
+            mod_require_session_origin: false,
             appended_rows: Arc::new(Mutex::new(HashMap::new())),
             dispatched_attachment_rows: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -1371,6 +1378,8 @@ impl AgentTranscriptWriter {
             source_attachments: Arc::new(Mutex::new(HashMap::new())),
             mod_executor: None,
             mod_cwd: None,
+            mod_session_origin: None,
+            mod_require_session_origin: false,
             appended_rows: Arc::new(Mutex::new(HashMap::new())),
             dispatched_attachment_rows: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -1422,6 +1431,19 @@ impl AgentTranscriptWriter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .mod_model = model;
+        self
+    }
+
+    /// Retain the child launch's immutable Mod origin without holding a
+    /// session work lease while the transcript writer is idle.
+    #[must_use]
+    pub fn with_mod_session_origin(
+        mut self,
+        origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+        require_origin: bool,
+    ) -> Self {
+        self.mod_session_origin = origin;
+        self.mod_require_session_origin = require_origin;
         self
     }
 
@@ -1764,7 +1786,7 @@ impl AgentTranscriptWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&row_id)
             .cloned();
-        let host = match &self.mod_executor {
+        let mut host = match &self.mod_executor {
             Some(executor) => executor.mod_host().await,
             None => None,
         }
@@ -1774,6 +1796,25 @@ impl AgentTranscriptWriter {
                 .parent()
                 .unwrap_or(&self.transcript_path)
         });
+        let session = if let Some(current_host) = host.as_ref() {
+            match current_host
+                .bind_child_turn_step_session(
+                    self.mod_session_origin.clone(),
+                    self.mod_require_session_origin,
+                    cwd,
+                )
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(%error, "child session.append binding failed; preserving row");
+                    host = None;
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let source_attachment = match source_attachment {
             Some(source_attachment) => {
@@ -1784,8 +1825,14 @@ impl AgentTranscriptWriter {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(source_attachment.uuid.clone());
                     let rewritten = if should_dispatch {
-                        mod_append_source_attachment(host, cwd, self.agent_id, &source_attachment)
-                            .await
+                        mod_append_source_attachment(
+                            host,
+                            session.clone(),
+                            cwd,
+                            self.agent_id,
+                            &source_attachment,
+                        )
+                        .await
                     } else {
                         source_attachment
                     };
@@ -1806,6 +1853,7 @@ impl AgentTranscriptWriter {
                 let selection = self.model_selection();
                 *message = mod_append_message_row(
                     host,
+                    session,
                     cwd,
                     self.agent_id,
                     selection
@@ -2333,7 +2381,75 @@ pub(crate) fn restore_thinking_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mod_turn_step::tests::{Origin, Session};
+    use lingxi_core::host::subagent_spawn::SessionOriginCapability;
+    use lingxi_core::types::SessionId;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn child_session_append_keeps_launch_origin_after_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("append-origin.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+          on('session.append', async ($, event, next) => {
+            try { await $.session.model(); } catch (_) {}
+            return next(event);
+          });
+        }"#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "append-origin",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let session: Arc<dyn hooks::mods::ModSessionContext> = Arc::new(Session {
+            root: dir.path().to_path_buf(),
+            origin: None,
+            model_reads: reads.clone(),
+        });
+        host.attach_background_context(Arc::downgrade(&session));
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let executor = Arc::new(hooks::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+        ));
+        let original = SessionId::new();
+        let other = SessionId::new();
+        let active = Arc::new(Mutex::new((original, 1)));
+        let origin: Arc<dyn SessionOriginCapability> = Arc::new(Origin {
+            id: original,
+            generation: 1,
+            active: active.clone(),
+            root: dir.path().to_path_buf(),
+        });
+        for (current, generation, capability) in [
+            (original, 1, Some(origin.clone())),
+            (other, 2, Some(origin.clone())),
+            (original, 3, Some(origin.clone())),
+            (original, 3, None),
+        ] {
+            *active.lock().unwrap() = (current, generation);
+            let writer = AgentTranscriptWriter::without_persistence(
+                dir.path().join("child.jsonl"),
+                AgentId::new(),
+            )
+            .with_mod_append(Some(executor.clone()), dir.path().to_path_buf(), None)
+            .with_mod_session_origin(capability, true);
+            let mut message = ConversationMessage::user(MessageId::new(), "hello".into());
+            writer.accept_retained(&mut message, &[]).await.unwrap();
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "only live A may read");
+    }
 
     #[test]
     fn session_append_rewrite_preserves_refused_message_id_utf16_carrier() {

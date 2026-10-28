@@ -110,7 +110,6 @@ G1	crates/command-api/src/builtins/stop.rs	LINGXI
 G1	crates/command-api/src/builtins/templates.rs	LINGXI
 G1	crates/command-api/src/builtins/templates.rs	LingXi
 G1	crates/command-api/src/builtins/version.rs	LINGXI
-G1	crates/command-api/src/cd.rs	CLAUDE\.md
 G1	crates/command-api/src/expand.rs	LINGXI
 G1	crates/command-api/src/expand.rs	\.lingxi
 G1	crates/command-api/src/markdown_loader.rs	\.lingxi

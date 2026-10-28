@@ -110,8 +110,21 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     handle
         .runtime()
         .block_on(async {
+            start_new_session(&handle).await;
+            let session_id = listener
+                .received
+                .lock()
+                .await
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    ClientEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+                    _ => None,
+                })
+                .expect("NewSession emits the active session id");
             handle
                 .submit(ClientCommand::SendPrompt {
+                    session_id: Some(session_id),
                     text: ClientTextDto::from_utf8("drive the skeleton"),
                     prompt_mode: None,
                     images: Vec::new(),
@@ -249,6 +262,7 @@ fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_pro
 
         handle
             .submit(ClientCommand::RunSlashCommand {
+                session_id: Some(session_id.clone()),
                 raw: ClientTextDto::from_code_units(raw_command),
                 images: Vec::new(),
                 turn_id: Some(7),
@@ -397,10 +411,11 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
                     _ => None,
                 })
                 .expect("SessionStarted carries the durable id");
-            session_ids.push(session_id);
+            session_ids.push(session_id.clone());
 
             handle
                 .submit(ClientCommand::SendPrompt {
+                    session_id: Some(session_id),
                     text: ClientTextDto::from_utf8(prompt),
                     prompt_mode: None,
                     images: Vec::new(),

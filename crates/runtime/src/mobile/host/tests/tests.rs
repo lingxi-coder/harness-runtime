@@ -3,12 +3,20 @@ include!("../permission_preference_tests.rs");
 include!("../model_preference_tests.rs");
 include!("../provider_region_tests.rs");
 include!("../reasoning_preference_tests.rs");
+#[path = "attach_recovery_tests.rs"]
+mod attach_recovery_tests;
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
 #[path = "device_tools_tests.rs"]
 mod device_tools_tests;
+#[path = "mod_origin_tests.rs"]
+mod mod_origin_tests;
+#[path = "prompt_hooks_recovery_tests.rs"]
+mod prompt_hooks_recovery_tests;
 #[path = "prompt_suggestion_tests.rs"]
 mod prompt_suggestion_tests;
+#[path = "turn_step_recovery_tests.rs"]
+mod turn_step_recovery_tests;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -90,6 +98,7 @@ async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store.clone(),
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
 
     let inputs = source
@@ -141,6 +150,49 @@ async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
         [first_identity, last_identity]
     );
     assert!(queue.snapshot().await.is_empty());
+}
+
+#[tokio::test]
+async fn stale_midturn_producer_cannot_bind_a_replacement_owner() {
+    use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
+        temp.path().join("turns"),
+    ));
+    let checkpoint = store
+        .admit_queued_prompt(
+            "session",
+            Some(330),
+            Some(330),
+            source_text("queued"),
+            None,
+            vec![],
+        )
+        .unwrap();
+    let queue = Arc::new(msgqueue::MessageQueueManager::new());
+    enqueue_mobile_prompt_dispatch(&queue, "session", &checkpoint).await;
+    let old = Arc::new(super::ActiveTurn::new_owned(Some(328), "session".into(), 1));
+    let new = Arc::new(super::ActiveTurn::new_owned(Some(329), "session".into(), 2));
+    let active = Arc::new(tokio::sync::Mutex::new(Some(new.clone())));
+    let source = MobileMsgQueueInput {
+        queue,
+        loop_state: Arc::new(tool_cron::LoopRuntime::default()),
+        durable_turns: store,
+        active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: Some(active),
+    };
+    let stale = super::MOBILE_TURN_ORIGIN
+        .scope(Arc::downgrade(&old), source.take_mid_turn_batch())
+        .await
+        .unwrap();
+    assert!(stale.is_none());
+    assert!(!new.mid_turn_members.lock().unwrap().contains(&330));
+    let accepted = super::MOBILE_TURN_ORIGIN
+        .scope(Arc::downgrade(&new), source.take_mid_turn_batch())
+        .await
+        .unwrap();
+    assert!(accepted.is_some());
+    assert!(new.mid_turn_members.lock().unwrap().contains(&330));
 }
 
 #[tokio::test]
@@ -211,6 +263,7 @@ async fn mobile_midturn_batches_stop_at_bash_and_never_join_commands() {
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store.clone(),
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
 
     let normal_batch = source
@@ -337,6 +390,7 @@ async fn cancel_before_midturn_admission_keeps_uncancelled_mobile_dispatch_membe
         loop_state: Arc::new(tool_cron::LoopRuntime::default()),
         durable_turns: store,
         active_session_uuid: Arc::new(std::sync::Mutex::new("session".into())),
+        active_turn: None,
     };
     assert!(source.take_mid_turn_batch().await.unwrap().is_none());
     assert_eq!(
@@ -3527,8 +3581,10 @@ fn submit_attach_turn_emits_snapshot_then_replays_strictly_after_cursor() {
 
         handle
             .submit(ClientCommand::AttachTurn {
+                session_id: session_id.clone(),
                 turn_id: 77,
                 after_sequence: Some(1),
+                request_id: "attach-77".into(),
             })
             .await
             .expect("attach turn");
@@ -3536,13 +3592,13 @@ fn submit_attach_turn_emits_snapshot_then_replays_strictly_after_cursor() {
         let events = listener.received.lock().await.clone();
         assert!(matches!(
             events.first(),
-            Some(Ev::TurnRecoveryState { snapshot })
-                if snapshot.session_id == session_id
+            Some(Ev::TurnAttachStarted { request_id, snapshot })
+                if request_id == "attach-77" && snapshot.session_id == session_id
                     && snapshot.turn_id == 77
                     && snapshot.last_sequence == 2
         ));
         assert!(matches!(
-            events.get(1),
+            events.get(2),
             Some(Ev::TurnEventReplay {
                 session_id: replay_session,
                 turn_id: 77,
@@ -3552,9 +3608,10 @@ fn submit_attach_turn_emits_snapshot_then_replays_strictly_after_cursor() {
         ));
         assert_eq!(
             events.len(),
-            2,
+            4,
             "cursor must suppress the first retained event"
         );
+        assert!(matches!(events.last(), Some(Ev::TurnAttachFinished { request_id, session_id: origin, turn_id: 77 }) if request_id == "attach-77" && origin == &session_id));
     });
 }
 
@@ -3672,8 +3729,10 @@ fn submit_attach_turn_blocks_truncated_replay_history() {
 
         handle
             .submit(ClientCommand::AttachTurn {
+                session_id: session_id.clone(),
                 turn_id: 78,
                 after_sequence: None,
+                request_id: "attach-78".into(),
             })
             .await
             .expect("attach turn");
@@ -3681,8 +3740,8 @@ fn submit_attach_turn_blocks_truncated_replay_history() {
         let events = listener.received.lock().await.clone();
         assert!(matches!(
             events.as_slice(),
-            [Ev::TurnRecoveryState { snapshot }]
-                if snapshot.session_id == session_id
+            [Ev::TurnAttachStarted { request_id, snapshot }, Ev::TurnAttachFinished { request_id: finished, session_id: origin, turn_id: 78 }]
+                if request_id == "attach-78" && finished == "attach-78" && origin == &session_id && snapshot.session_id == session_id
                     && snapshot.turn_id == 78
                     && snapshot.state == TurnRecoveryStateDto::WaitingForUser
                     && !snapshot.safe_to_resume
@@ -4313,8 +4372,10 @@ fn submit_attach_turn_preserves_terminal_state_when_replay_history_is_truncated(
             listener.received.lock().await.clear();
             handle
                 .submit(ClientCommand::AttachTurn {
+                    session_id: session_id.clone(),
                     turn_id,
                     after_sequence: None,
+                    request_id: format!("attach-{turn_id}"),
                 })
                 .await
                 .expect("attach terminal turn");
@@ -4322,8 +4383,8 @@ fn submit_attach_turn_preserves_terminal_state_when_replay_history_is_truncated(
             let events = listener.received.lock().await.clone();
             assert!(matches!(
                 events.as_slice(),
-                [Ev::TurnRecoveryState { snapshot }]
-                    if snapshot.session_id == session_id
+                [Ev::TurnAttachStarted { request_id, snapshot }, Ev::TurnAttachFinished { request_id: finished, session_id: origin, turn_id: finished_turn }]
+                    if request_id == &format!("attach-{turn_id}") && finished == request_id && origin == &session_id && *finished_turn == turn_id && snapshot.session_id == session_id
                         && snapshot.turn_id == turn_id
                         && snapshot.state == state
                         && !snapshot.safe_to_resume
@@ -4543,6 +4604,7 @@ fn submit_lists_and_loads_nested_workflow_agents() {
                     lingxi_core::host::SubagentInheritance {
                         tool_invoker: Arc::new(NoToolUse),
                         budget: Arc::new(NoToolUse),
+                        session_origin: None,
                     },
                 )
                 .await
@@ -4719,7 +4781,10 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
     let base = format!("http://{}", server.local_addr().unwrap());
     let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
     let server_thread = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // The whole workspace suite runs many independently built runtimes in
+        // parallel. Keep the local server available through engine setup and
+        // the bounded provider-request assertion below.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         let mut socket = loop {
             match server.accept() {
                 Ok((socket, _)) => break socket,
@@ -4738,11 +4803,11 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         // bytes are buffered rather than waiting — so the unwrap below
         // panicked with `Os { code: 35 }` whenever the request had not landed
         // yet. In isolation it always had; under full-suite load it had not.
-        // Put the socket back into blocking mode so the 5s timeout is the
+        // Put the socket back into blocking mode so the timeout is the
         // thing that actually bounds the read.
         socket.set_nonblocking(false).unwrap();
         socket
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .unwrap();
         let mut bytes = Vec::new();
         let header_end = loop {
@@ -4853,6 +4918,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
             lingxi_core::host::SubagentInheritance {
                 tool_invoker: Arc::new(NoWork),
                 budget: Arc::new(NoWork),
+                session_origin: None,
             },
         )
         .await
@@ -4873,7 +4939,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         .await
         .unwrap()
         .unwrap();
-        let body = match tokio::time::timeout(std::time::Duration::from_secs(5), captured_rx).await
+        let body = match tokio::time::timeout(std::time::Duration::from_secs(30), captured_rx).await
         {
             Ok(Ok(body)) => body,
             Ok(Err(error)) => panic!("provider request capture channel closed: {error}"),
@@ -4887,7 +4953,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
                     )
                     .await;
                 panic!(
-                    "no provider request arrived within 5s after human-resume startup: {error}; task state: {state:?}; task output: {output:?}"
+                    "no provider request arrived within 30s after human-resume startup: {error}; task state: {state:?}; task output: {output:?}"
                 );
             }
         };
@@ -4926,6 +4992,7 @@ fn submit_task_stop_skips_second_workflow_status_event() {
             .create(
                 tasks::TaskType::LocalWorkflow,
                 tasks::TaskSpawnInput::LocalWorkflow {
+                    session_origin: None,
                     session_uuid: None,
                     workflow_id: "workflow".to_string(),
                     script: "return null;".to_string(),
@@ -5425,6 +5492,7 @@ fn submit_send_prompt_returns_promptly() {
     let result = handle.runtime().block_on(async {
         handle
             .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
                 text: "hello".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -5526,6 +5594,164 @@ impl orchestrator::StreamingApiClient for PendingPromptStreamClient {
     }
 }
 
+fn assert_paused_turn_before_cold_resume(
+    handle: &super::MobileEngineHandle,
+    session_id: &str,
+    turn_id: u64,
+) {
+    let paused = handle
+        .durable_turns
+        .load(session_id, turn_id)
+        .expect("load paused checkpoint");
+    assert_eq!(paused.state, Some(TurnRecoveryStateDto::PausedRecoverable));
+    assert_eq!(paused.queue_delivery, QueueDeliveryState::Claimed);
+    assert!(paused.safe_to_resume, "pause must preserve replay safety");
+    assert_eq!(paused.reason.as_deref(), Some("ordered_cold_restart"));
+}
+
+/// Stop the live owner through the same ordered pause used by mobile clients
+/// before rebuilding the engine against its persisted turn.
+async fn pause_pending_turn_before_cold_resume(
+    handle: &super::MobileEngineHandle,
+    listener: &FakeListener,
+    session_id: &str,
+    turn_id: u64,
+) {
+    let running = handle
+        .durable_turns
+        .load(session_id, turn_id)
+        .expect("load active checkpoint before pause");
+    assert_eq!(running.state, Some(TurnRecoveryStateDto::Running));
+    assert_eq!(running.queue_delivery, QueueDeliveryState::Claimed);
+    assert!(running.safe_to_resume, "pending request must be resumable");
+
+    let transcript_path =
+        session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd(), session_id);
+    let count_markers =
+        |transcript: &str| transcript.matches("[Request interrupted by user").count();
+    let markers_before = count_markers(
+        &std::fs::read_to_string(&transcript_path).expect("read transcript before pause"),
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        handle.submit(ClientCommand::PauseTurn {
+            session_id: handle.active_session_id(),
+            turn_id,
+            reason: "ordered_cold_restart".to_owned(),
+        }),
+    )
+    .await
+    .expect("pause must finish after the active owner unwinds")
+    .expect("pause the pending request before rebuilding the engine");
+
+    assert_paused_turn_before_cold_resume(handle, session_id, turn_id);
+    assert!(handle.active_cancel.lock().await.is_none());
+    assert_eq!(
+        count_markers(&std::fs::read_to_string(&transcript_path).expect("read paused transcript")),
+        markers_before,
+        "a lifecycle pause must not append a user-interruption row"
+    );
+    assert!(!handle.inner().orchestrator.snapshot_history().await.iter().any(|message| {
+        matches!(message, lingxi_core::types::ConversationMessage::User { content, .. }
+            if content.iter().any(|block| exact_native_text_block(block, "[Request interrupted by user]")
+                || exact_native_text_block(block, "[Request interrupted by user for tool use]")))
+    }), "a lifecycle pause must not add an interruption to live history");
+
+    let events = listener.received.lock().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::TurnRecoveryState { snapshot }
+            if snapshot.session_id == session_id
+                && snapshot.turn_id == turn_id
+                && snapshot.state == TurnRecoveryStateDto::PausedRecoverable
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::TurnEnded {
+            outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn mobile_pause_then_resume_and_user_cancel_preserves_interrupt_semantics() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use orchestrator::prompt::mid_turn_input::CancelReason;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let listener = Arc::new(FakeListener::default());
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(pending.clone()),
+    )
+    .expect("build mobile engine");
+
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .inner()
+            .session_writer
+            .append_mobile_empty_session(&session_id, "pause and cancel", &handle.session_cwd())
+            .await
+            .expect("anchor session");
+        handle
+            .submit(ClientCommand::SendPrompt { session_id: Some(handle.active_session_id()),
+                text: "pause then cancel".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(248),
+                visualization_context: None,
+            })
+            .await
+            .expect("start the original request");
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .expect("original request reaches the model")
+            .expect("model entry signal remains open");
+        pause_pending_turn_before_cold_resume(&handle, &listener, &session_id, 248).await;
+        assert_eq!(handle.cancel_reason.get(), CancelReason::LifecyclePause);
+
+        handle
+            .submit(ClientCommand::ResumeTurn { session_id: handle.active_session_id(), turn_id: 248 })
+            .await
+            .expect("resume the paused turn on the same engine");
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while pending.captured_calls().len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resumed request reaches the model");
+        assert_eq!(handle.cancel_reason.get(), CancelReason::UserInterrupt);
+        handle
+            .submit(ClientCommand::Cancel { session_id: Some(handle.active_session_id()), turn_id: Some(248) })
+            .await
+            .expect("user cancels the resumed request");
+
+        let history = handle.inner().orchestrator.snapshot_history().await;
+        let interruption_count = history.iter().filter(|message| {
+            matches!(message, lingxi_core::types::ConversationMessage::User { content, .. }
+                if content.iter().any(|block| exact_native_text_block(block, "[Request interrupted by user]")))
+        }).count();
+        assert_eq!(interruption_count, 1, "only the explicit cancel adds an interruption");
+        let transcript_path =
+            session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd(), &session_id);
+        let transcript = std::fs::read_to_string(transcript_path).expect("read cancelled transcript");
+        assert_eq!(transcript.matches("[Request interrupted by user]").count(), 1);
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 248).unwrap().state,
+            Some(TurnRecoveryStateDto::Cancelled)
+        );
+    });
+}
+
 #[derive(Default)]
 struct MobileBashProcess {
     commands: StdMutex<Vec<String>>,
@@ -5544,6 +5770,97 @@ struct InterruptibleMobileBashProcess {
     release: Notify,
     joined: AtomicBool,
     killed_owner: StdMutex<Option<String>>,
+}
+
+#[derive(Default)]
+struct GatedCancelMobileBashProcess {
+    commands: StdMutex<Vec<String>>,
+    started: Notify,
+    stop_started: Notify,
+    allow_stop: Notify,
+    stopped: Notify,
+}
+
+#[async_trait]
+impl lingxi_core::host::ProcessRunner for GatedCancelMobileBashProcess {
+    async fn run(
+        &self,
+        command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        self.commands
+            .lock()
+            .unwrap()
+            .push(command.inner().args.last().cloned().unwrap_or_default());
+        self.started.notify_one();
+        self.stopped.notified().await;
+        Ok(mobile_linux_api::ProcessOutput {
+            stdout: "partial stdout".into(),
+            stderr: "partial stderr".into(),
+            exit_code: 130,
+            timed_out: false,
+        })
+    }
+
+    async fn spawn_background(
+        &self,
+        _: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
+    }
+
+    async fn kill(
+        &self,
+        _: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), mobile_linux_api::ProcessError> {
+        Ok(())
+    }
+
+    async fn kill_owner_processes(&self, _: &str) -> Vec<u32> {
+        self.stop_started.notify_one();
+        self.allow_stop.notified().await;
+        self.stopped.notify_one();
+        vec![42]
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Default)]
+struct TimedOutMobileBashProcess;
+
+#[async_trait]
+impl lingxi_core::host::ProcessRunner for TimedOutMobileBashProcess {
+    async fn run(
+        &self,
+        _command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        Ok(mobile_linux_api::ProcessOutput {
+            stdout: "timeout partial output".into(),
+            stderr: "timeout partial error".into(),
+            exit_code: -1,
+            timed_out: true,
+        })
+    }
+
+    async fn spawn_background(
+        &self,
+        _command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
+    }
+
+    async fn kill(
+        &self,
+        _handle: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), mobile_linux_api::ProcessError> {
+        Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
 impl InterruptibleMobileBashProcess {
@@ -5604,6 +5921,456 @@ impl lingxi_core::host::ProcessRunner for InterruptibleMobileBashProcess {
 
     fn is_available(&self) -> bool {
         true
+    }
+}
+
+#[test]
+fn mobile_bash_timeout_preserves_partial_output_without_user_interrupt() {
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let handle = new_engine_with_streaming(
+        config,
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(Arc::new(TimedOutMobileBashProcess))
+                .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+        ),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(pending.clone()),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
+                text: "printf timeout".into(),
+                prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                images: Vec::new(),
+                turn_id: Some(254),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .expect("timed-out Bash still reaches the model")
+            .unwrap();
+        let checkpoint = handle
+            .durable_turns
+            .load(&handle.active_session_id(), 254)
+            .unwrap();
+        let result = checkpoint.bash_result.expect("timeout result is durable");
+        assert!(result.stdout.contains("timeout partial output"));
+        assert!(result.stderr.contains("timeout partial error"));
+        assert!(!result.interrupted);
+        assert_eq!(checkpoint.bash_should_query, Some(true));
+        let calls = pending.captured_calls();
+        assert_eq!(calls.len(), 1);
+        let text = calls[0]
+            .messages
+            .iter()
+            .flat_map(|message| match message {
+                ConversationMessage::User { content, .. } => content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text, .. }
+                        | ContentBlock::TextJsUtf16 { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("timeout partial output"));
+        assert!(text.contains("timeout partial error"));
+        assert!(!text.contains("[Request interrupted by user]"));
+        handle
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: Some(254),
+            })
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn mobile_bash_pause_then_cancel_has_one_terminal_state_and_no_false_interrupt() {
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let process = Arc::new(GatedCancelMobileBashProcess::default());
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    let handle = new_engine_with_streaming(
+        config,
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(process.clone())
+                .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+        ),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
+                text: "printf pause-race".into(),
+                prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                images: Vec::new(),
+                turn_id: Some(258),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            process.started.notified(),
+        )
+        .await
+        .unwrap();
+        let pause_handle = handle.clone();
+        let pause = tokio::spawn(async move {
+            pause_handle
+                .submit(ClientCommand::PauseTurn {
+                    session_id: pause_handle.active_session_id(),
+                    turn_id: 258,
+                    reason: "background".into(),
+                })
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            process.stop_started.notified(),
+        )
+        .await
+        .unwrap();
+        let owner = handle.active_cancel.lock().await.clone().unwrap();
+        assert!(owner.is_quiescing());
+        let cancel_handle = handle.clone();
+        let cancel = tokio::spawn(async move {
+            cancel_handle
+                .submit(ClientCommand::Cancel {
+                    session_id: Some(cancel_handle.active_session_id()),
+                    turn_id: Some(258),
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !owner.explicit_cancel_requested.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        process.allow_stop.notify_one();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(30), pause)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(30), cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 258).unwrap().state,
+            Some(TurnRecoveryStateDto::Cancelled)
+        );
+        assert_eq!(process.commands.lock().unwrap().len(), 1);
+        let transcript =
+            session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd(), &session_id);
+        assert!(!std::fs::read_to_string(transcript)
+            .unwrap_or_default()
+            .contains("[Request interrupted by user]"));
+        let events = listener.received.lock().await;
+        assert!(!events.iter().any(
+            |event| matches!(event, ClientEvent::TurnRecoveryState { snapshot }
+            if snapshot.turn_id == 258 && snapshot.state == TurnRecoveryStateDto::PausedRecoverable)
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, ClientEvent::TurnRecoveryState { snapshot }
+            if snapshot.turn_id == 258 && snapshot.state == TurnRecoveryStateDto::Cancelled)
+        ));
+    });
+}
+
+#[test]
+fn dropping_running_bash_never_replays_its_uncertain_command() {
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let process = Arc::new(GatedCancelMobileBashProcess::default());
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    let (first_tx, _first_rx) = tokio::sync::oneshot::channel();
+    let first = new_engine_with_streaming(
+        config,
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(process.clone())
+                .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+        ),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(first_tx))),
+    )
+    .unwrap();
+    let session_id = first.runtime().block_on(async {
+        let session_id = first.active_session_id();
+        first
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session_id, "abandoned Bash", &first.session_cwd())
+            .await
+            .unwrap();
+        first
+            .inner
+            .session_writer
+            .append_session_mode(first.inner.session_mode.as_str())
+            .await
+            .unwrap();
+        first
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(first.active_session_id()),
+                text: "printf abandoned".into(),
+                prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                images: Vec::new(),
+                turn_id: Some(260),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            process.started.notified(),
+        )
+        .await
+        .unwrap();
+        session_id
+    });
+    drop(first);
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    let (resumed_tx, _resumed_rx) = tokio::sync::oneshot::channel();
+    let resumed = new_engine_with_streaming(
+        config,
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(process.clone())
+                .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+        ),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(resumed_tx))),
+    )
+    .unwrap();
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                match resumed
+                    .submit(ClientCommand::ResumeTurn {
+                        session_id: resumed.active_session_id(),
+                        turn_id: 260,
+                    })
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(ClientError::Rejected { .. }) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await
+                    }
+                    Err(error) => panic!("unexpected recovery error: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("best-effort disposal eventually releases the owner");
+        assert_eq!(
+            resumed.durable_turns.load(&session_id, 260).unwrap().state,
+            Some(TurnRecoveryStateDto::WaitingForUser)
+        );
+        assert_eq!(process.commands.lock().unwrap().len(), 1);
+        let transcript =
+            session::jsonl::session_path(&resumed.lingxi_home, &resumed.session_cwd(), &session_id);
+        assert!(!std::fs::read_to_string(transcript)
+            .unwrap_or_default()
+            .contains("[Request interrupted by user]"));
+    });
+}
+
+#[test]
+fn mobile_bash_pause_keeps_uncertain_claim_user_gated_across_cold_resume() {
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
+
+    for pause_before_start in [true, false] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let process = Arc::new(InterruptibleMobileBashProcess::default());
+        let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
+        let pending = Arc::new(PendingPromptStreamClient::new(entered_tx));
+        let mut config = test_config(tmp.path());
+        config.enable_mobile_linux_shell();
+        let first = new_engine_with_streaming(
+            config,
+            Arc::new(
+                HostFakePlatform::new(tmp.path().to_path_buf())
+                    .with_process_runner(process.clone())
+                    .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+            ),
+            Arc::new(FakeListener::default()),
+            Arc::new(RecordingPermissionSink::default()),
+            Some(pending.clone()),
+        )
+        .expect("build mobile Bash engine");
+
+        let session_id = first.runtime().block_on(async {
+            let session_id = first.active_session_id();
+            first
+                .inner()
+                .session_writer
+                .append_mobile_empty_session(&session_id, "paused Bash", &first.session_cwd())
+                .await
+                .expect("anchor session");
+            first
+                .inner()
+                .session_writer
+                .append_session_mode(first.inner().session_mode.as_str())
+                .await
+                .expect("persist mode");
+            if pause_before_start {
+                first
+                    .durable_turns
+                    .admit_queued_prompt(
+                        &session_id,
+                        Some(250),
+                        Some(250),
+                        "printf interrupted-mobile-bash".into(),
+                        Some(client::protocol::commands::PromptModeDto::Bash),
+                        Vec::new(),
+                    )
+                    .expect("admit Bash");
+                let owner = first.reserve_turn(Some(250)).await.expect("reserve Bash");
+                let claimed = first
+                    .durable_turns
+                    .claim_queued_bash(&session_id, 250, true)
+                    .expect("claim Bash side-effect boundary");
+                first.prepare_mobile_bash_owner(&claimed).await;
+                {
+                    let _active = first.active_cancel.lock().await;
+                    owner.request_lifecycle_quiesce(&first.cancel_reason);
+                }
+                first.spawn_mobile_bash_turn(owner, claimed);
+            } else {
+                first
+                    .submit(ClientCommand::SendPrompt {
+                        session_id: Some(first.active_session_id()),
+                        text: "printf interrupted-mobile-bash".into(),
+                        prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                        images: Vec::new(),
+                        turn_id: Some(250),
+                        visualization_context: None,
+                    })
+                    .await
+                    .expect("start Bash");
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    process.started.notified(),
+                )
+                .await
+                .expect("Bash enters process runner");
+            }
+            first
+                .submit(ClientCommand::PauseTurn {
+                    session_id: first.active_session_id(),
+                    turn_id: 250,
+                    reason: "background_time_expired".into(),
+                })
+                .await
+                .expect("pause Bash");
+            let checkpoint = first.durable_turns.load(&session_id, 250).unwrap();
+            assert_eq!(
+                checkpoint.state,
+                Some(TurnRecoveryStateDto::PausedRecoverable)
+            );
+            assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::BashClaimed);
+            assert!(!checkpoint.safe_to_resume);
+            assert!(checkpoint.bash_result.is_none());
+            session_id
+        });
+        assert_eq!(process.commands().len(), usize::from(!pause_before_start));
+        drop(first);
+
+        let mut config = test_config(tmp.path());
+        config.enable_mobile_linux_shell();
+        let resumed = new_engine_with_streaming(
+            config,
+            Arc::new(
+                HostFakePlatform::new(tmp.path().to_path_buf())
+                    .with_process_runner(process.clone())
+                    .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+            ),
+            Arc::new(FakeListener::default()),
+            Arc::new(RecordingPermissionSink::default()),
+            Some(pending.clone()),
+        )
+        .expect("rebuild Bash engine");
+        resumed.runtime().block_on(async {
+            resumed
+                .submit(ClientCommand::ResumeSession {
+                    session_id: session_id.clone(),
+                    cwd: None,
+                })
+                .await
+                .expect("restore session");
+            resumed
+                .submit(ClientCommand::ResumeTurn {
+                    session_id: resumed.active_session_id(),
+                    turn_id: 250,
+                })
+                .await
+                .expect("request Bash recovery");
+            let checkpoint = resumed.durable_turns.load(&session_id, 250).unwrap();
+            assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::WaitingForUser));
+            assert!(!checkpoint.safe_to_resume);
+            let transcript_path = session::jsonl::session_path(
+                &resumed.lingxi_home,
+                &resumed.session_cwd(),
+                &session_id,
+            );
+            let transcript = std::fs::read_to_string(transcript_path).unwrap();
+            assert!(!transcript.contains("[Request interrupted by user]"));
+        });
+        assert_eq!(process.commands().len(), usize::from(!pause_before_start));
+        assert!(pending.captured_calls().is_empty());
     }
 }
 
@@ -5744,7 +6511,7 @@ fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model
             },
         ];
         handle
-            .submit(ClientCommand::SendPrompt {
+            .submit(ClientCommand::SendPrompt { session_id: Some(handle.active_session_id()),
                 text: "printf mobile-bash".into(),
                 prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
                 images: prompt_images,
@@ -5875,7 +6642,7 @@ fn mobile_bash_prompt_runs_shell_once_then_sends_native_rows_and_images_to_model
         ));
 
         handle
-            .submit(ClientCommand::Cancel { turn_id: Some(806) })
+            .submit(ClientCommand::Cancel { session_id: Some(handle.active_session_id()), turn_id: Some(806) })
             .await
             .expect("join the pending follow-up before leaving the test");
     });
@@ -5912,7 +6679,7 @@ fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::SendPrompt {
+            .submit(ClientCommand::SendPrompt { session_id: Some(handle.active_session_id()),
                 text: "printf interrupted-mobile-bash".into(),
                 prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
                 images: Vec::new(),
@@ -5931,7 +6698,7 @@ fn mobile_bash_interrupt_persists_native_rows_and_ends_once_without_query() {
         assert_eq!(process.commands(), ["printf interrupted-mobile-bash"]);
 
         handle
-            .submit(ClientCommand::Cancel { turn_id: Some(812) })
+            .submit(ClientCommand::Cancel { session_id: Some(handle.active_session_id()), turn_id: Some(812) })
             .await
             .expect("interrupt and join the owned Shell process");
 
@@ -6049,7 +6816,7 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::SendPrompt {
+            .submit(ClientCommand::SendPrompt { session_id: Some(handle.active_session_id()),
                 text: "printf no-response".into(),
                 prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
                 images: Vec::new(),
@@ -6079,8 +6846,26 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
             .load(&session_id, 807)
             .expect("completed Bash checkpoint");
         assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Completed));
-        assert_eq!(process.commands(), ["printf no-response"]);
-        assert!(pending.captured_calls().is_empty(), "false suppresses model follow-up");
+        // The durable transition is written before the listener receives the
+        // event. Wait for delivery and owner cleanup before inspecting it.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let has_terminal_event = listener
+                    .received
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::TurnEnded { .. }));
+                if has_terminal_event && handle.active_cancel.lock().await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("completed Bash turn delivers its terminal event and releases its owner");
+        // Read after the owner is released: a snapshot taken before checking
+        // the owner could miss an event delivered between the two checks.
         let terminal_events = listener
             .received
             .lock()
@@ -6097,6 +6882,8 @@ fn mobile_bash_with_responses_disabled_persists_native_rows_without_hooks_or_que
                 ..
             })
         ));
+        assert_eq!(process.commands(), ["printf no-response"]);
+        assert!(pending.captured_calls().is_empty(), "false suppresses model follow-up");
 
         let history = handle.inner().orchestrator.snapshot_history().await;
         let rows = history
@@ -6194,6 +6981,7 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
             .expect("persist session mode");
         first
             .submit(ClientCommand::SendPrompt {
+                session_id: Some(first.active_session_id()),
                 text: "printf cold-no-response".into(),
                 prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
                 images: Vec::new(),
@@ -6255,7 +7043,10 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
             .await
             .expect("restore completed session");
         resumed
-            .submit(ClientCommand::ResumeTurn { turn_id: 808 })
+            .submit(ClientCommand::ResumeTurn {
+                session_id: resumed.active_session_id(),
+                turn_id: 808,
+            })
             .await
             .expect("completed no-response Bash stays terminal");
         assert!(resumed_pending.captured_calls().is_empty());
@@ -6365,6 +7156,7 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
         first
             .submit(client::protocol::commands::ClientCommand::SendPrompt {
+                session_id: Some(first.active_session_id()),
                 text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
                 prompt_mode: None,
                 images: first_image_refs.clone(),
@@ -6465,16 +7257,8 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             Some(initial_prompt_units.clone())
         );
 
-        first
-            .durable_turns
-            .transition(
-                &session_id,
-                246,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
-            )
-            .expect("mark the in-flight request recoverable before restart");
+        pause_pending_turn_before_cold_resume(&first, &first_listener, &session_id, 246).await;
+        assert_eq!(pending.captured_calls().len(), 1);
         session_id
     });
     drop(first);
@@ -6497,6 +7281,9 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
     )
     .expect("rebuild mobile engine after restart");
 
+    // A fresh engine must read the same paused checkpoint from disk before
+    // ResumeTurn is allowed to claim and replay it.
+    assert_paused_turn_before_cold_resume(&resumed, &session_id, 246);
     resumed.runtime().block_on(async {
         resumed
             .submit(client::protocol::commands::ClientCommand::ResumeSession {
@@ -6506,7 +7293,10 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             .await
             .expect("restore the session containing the durable turn");
         resumed
-            .submit(client::protocol::commands::ClientCommand::ResumeTurn { turn_id: 246 })
+            .submit(client::protocol::commands::ClientCommand::ResumeTurn {
+                session_id: resumed.active_session_id(),
+                turn_id: 246,
+            })
             .await
             .expect("resume from the exact stored prompt");
         let wait_result =
@@ -6660,6 +7450,7 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
 
         engine_for_work
             .submit(client::protocol::commands::ClientCommand::SendPrompt {
+                session_id: Some(engine_for_work.active_session_id()),
                 text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
                 prompt_mode: None,
                 images: image_refs.clone(),
@@ -6727,16 +7518,14 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         assert_eq!(checkpoint.images, image_refs);
         assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Running));
         assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::Claimed);
-        engine_for_work
-            .durable_turns
-            .transition(
-                &session_id,
-                turn_id,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
-            )
-            .expect("mark the active request resumable before restart");
+        pause_pending_turn_before_cold_resume(
+            &engine_for_work,
+            &first_listener,
+            &session_id,
+            turn_id,
+        )
+        .await;
+        assert_eq!(pending.captured_calls().len(), 1);
         (session_id, turn_id)
     });
     drop(engine);
@@ -6759,6 +7548,7 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
     )
     .expect("rebuild mobile engine after restart");
 
+    assert_paused_turn_before_cold_resume(&resumed, &session_id, turn_id);
     resumed.runtime().block_on(async {
         resumed
             .submit(client::protocol::commands::ClientCommand::ResumeSession {
@@ -6768,11 +7558,11 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
             .await
             .expect("restore the session containing the no-ID prompt");
         resumed
-            .submit(client::protocol::commands::ClientCommand::ResumeTurn { turn_id })
+            .submit(client::protocol::commands::ClientCommand::ResumeTurn { session_id: resumed.active_session_id(), turn_id })
             .await
             .expect("resume the internally assigned turn ID");
         let wait_result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
                 loop {
                     if !resumed_stream.captured_calls().await.is_empty() {
                         return Ok(());
@@ -6792,7 +7582,16 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         match wait_result {
             Ok(Ok(())) => {}
             Ok(Err(message)) => panic!("cold resume failed before the provider call: {message}"),
-            Err(_) => panic!("cold resume did not reach the provider within five seconds"),
+            Err(_) => {
+                let checkpoint = resumed
+                    .durable_turns
+                    .load(&session_id, turn_id)
+                    .map(|checkpoint| (checkpoint.state, checkpoint.queue_delivery));
+                let active = resumed.active_cancel.lock().await.is_some();
+                panic!(
+                    "cold resume did not reach the provider within 30 seconds; checkpoint: {checkpoint:?}; active owner: {active}"
+                );
+            }
         }
         let calls = resumed_stream.captured_calls().await;
         let actual_images = calls[0]
@@ -7677,7 +8476,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 .expect("persist session mode");
 
             first
-                .submit(ClientCommand::RunSlashCommand {
+                .submit(ClientCommand::RunSlashCommand { session_id: Some(first.active_session_id()),
                     raw: ClientTextDto::from_code_units(first_command_units.clone()),
                     images: first_command_images.clone(),
                     turn_id: Some(247),
@@ -7987,16 +8786,8 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 "checkpoint retains the hook's exact source projection"
             );
 
-            first
-                .durable_turns
-                .transition(
-                    &session_id,
-                    247,
-                    TurnRecoveryStateDto::PausedRecoverable,
-                    true,
-                    Some("simulated_process_restart".into()),
-                )
-                .expect("mark the still-pending skill batch recoverable");
+            pause_pending_turn_before_cold_resume(&first, &first_listener, &session_id, 247).await;
+            assert_eq!(pending.captured_calls().len(), 1);
             (
                 session_id,
                 skill_listing_uuid,
@@ -8049,6 +8840,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
     )
     .expect("rebuild mobile host after restart");
 
+    assert_paused_turn_before_cold_resume(&resumed, &session_id, 247);
     resumed.runtime().block_on(async {
         resumed
             .submit(ClientCommand::ResumeSession {
@@ -8058,11 +8850,11 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             .await
             .expect("restore the session containing the skill turn");
         resumed
-            .submit(ClientCommand::ResumeTurn { turn_id: 247 })
+            .submit(ClientCommand::ResumeTurn { session_id: resumed.active_session_id(), turn_id: 247 })
             .await
             .expect("resume the whole stored skill batch");
         let wait_result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
                 loop {
                     if !resumed_stream.captured_calls().await.is_empty() {
                         return None;
@@ -8093,7 +8885,14 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                panic!("cold resume reaches the model request; listener errors: {errors:?}");
+                let checkpoint = resumed
+                    .durable_turns
+                    .load(&session_id, 247)
+                    .map(|checkpoint| (checkpoint.state, checkpoint.queue_delivery));
+                let active = resumed.active_cancel.lock().await.is_some();
+                panic!(
+                    "cold resume did not reach the model within 30 seconds; listener errors: {errors:?}; checkpoint: {checkpoint:?}; active owner: {active}"
+                );
             }
         }
 
@@ -8110,7 +8909,8 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         assert_eq!(
             resumed_body_index + 1,
             resumed_user_rows.len(),
-            "cold Native packing leaves the original command/body pair at the request tail"
+            "cold Native packing leaves the original command/body pair at the request tail; {}",
+            bounded_request_rows_diagnostic(&calls[0].messages)
         );
         for (index, row) in resumed_user_rows[..resumed_command_index]
             .iter()
@@ -8252,7 +9052,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         .await
         .expect("cold resumed turn releases its slot before a new send");
         resumed
-            .submit(ClientCommand::RunSlashCommand {
+            .submit(ClientCommand::RunSlashCommand { session_id: Some(resumed.active_session_id()),
                 raw: ClientTextDto::from_code_units(command_units.clone()),
                 images: Vec::new(),
                 turn_id: Some(248),
@@ -8409,6 +9209,7 @@ fn submit_cancel_waits_for_cleanup_before_new_session() {
         // Arm a turn so a cancel token is in flight.
         handle
             .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
                 text: "drive a turn".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -8424,7 +9225,10 @@ fn submit_cancel_waits_for_cleanup_before_new_session() {
         );
 
         handle
-            .submit(ClientCommand::Cancel { turn_id: None })
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: None,
+            })
             .await
             .expect("submit(Cancel) ok");
 
@@ -8469,8 +9273,11 @@ fn submit_cancel_waits_for_blocking_owner_to_finish() {
         turn.set_task_handle(parked);
 
         let cancelling_handle = handle.clone();
-        let cancel_task =
-            tokio::spawn(async move { cancelling_handle.cancel_active_turn(Some(7)).await });
+        let cancel_task = tokio::spawn(async move {
+            cancelling_handle
+                .cancel_active_turn(&cancelling_handle.active_session_id(), Some(7))
+                .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !turn.cancel.is_cancelled() {
                 tokio::task::yield_now().await;
@@ -8537,6 +9344,7 @@ fn submit_pause_waits_for_owner_and_publishes_paused_without_cancelled() {
         let pause_task = tokio::spawn(async move {
             pausing_handle
                 .submit(ClientCommand::PauseTurn {
+                    session_id: pausing_handle.active_session_id(),
                     turn_id: 16,
                     reason: "background_time_expired".to_string(),
                 })
@@ -8591,6 +9399,1677 @@ fn submit_pause_waits_for_owner_and_publishes_paused_without_cancelled() {
 }
 
 #[test]
+fn mobile_pause_and_explicit_cancel_preserve_the_first_reason() {
+    use orchestrator::prompt::mid_turn_input::CancelReason;
+
+    for pause_first in [false, true] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            let session_id = handle.active_session_id();
+            handle
+                .durable_turns
+                .begin(&session_id, 249, "race".into(), None, Vec::new())
+                .expect("begin durable turn");
+            let turn = handle.reserve_turn(Some(249)).await.expect("reserve turn");
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            let active = handle.active_cancel.clone();
+            let task_turn = turn.clone();
+            let parked = handle.runtime().spawn(async move {
+                let _ = release_rx.await;
+                let mut owner = active.lock().await;
+                if owner
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
+                {
+                    *owner = None;
+                }
+                drop(owner);
+                task_turn.mark_completed();
+            });
+            turn.set_task_handle(parked);
+
+            let command = |pause| {
+                if pause {
+                    ClientCommand::PauseTurn {
+                        session_id: session_id.clone(),
+                        turn_id: 249,
+                        reason: "background_time_expired".into(),
+                    }
+                } else {
+                    ClientCommand::Cancel {
+                        session_id: Some(session_id.clone()),
+                        turn_id: Some(249),
+                    }
+                }
+            };
+            let first_handle = handle.clone();
+            let first_command = command(pause_first);
+            let first = tokio::spawn(async move { first_handle.submit(first_command).await });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !turn.cancel.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("first command cancels the owner");
+            let expected_reason = if pause_first {
+                CancelReason::LifecyclePause
+            } else {
+                CancelReason::UserInterrupt
+            };
+            assert_eq!(handle.cancel_reason.get(), expected_reason);
+            assert_eq!(turn.is_quiescing(), pause_first);
+
+            let second_handle = handle.clone();
+            let second_command = command(!pause_first);
+            let mut second =
+                tokio::spawn(async move { second_handle.submit(second_command).await });
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+                    .await
+                    .is_err(),
+                "the second command must wait for the owned task"
+            );
+            assert_eq!(handle.cancel_reason.get(), expected_reason);
+            assert_eq!(turn.is_quiescing(), pause_first);
+            assert_eq!(
+                handle.durable_turns.load(&session_id, 249).unwrap().state,
+                Some(TurnRecoveryStateDto::Cancelled)
+            );
+
+            release_tx.send(()).expect("release owned task");
+            let first_result = first.await.expect("first command joined");
+            let second_result = second.await.expect("second command joined");
+            let (pause_result, cancel_result) = if pause_first {
+                (first_result, second_result)
+            } else {
+                (second_result, first_result)
+            };
+            assert!(
+                pause_result.is_err(),
+                "a terminal cancelled turn cannot become paused"
+            );
+            assert!(cancel_result.is_ok());
+        });
+    }
+}
+
+#[test]
+fn dropped_lifecycle_submit_still_finishes_durable_transition() {
+    for pause in [true, false] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            let session_id = handle.active_session_id();
+            if pause {
+                handle
+                    .durable_turns
+                    .begin(&session_id, 251, "pause".into(), None, Vec::new())
+                    .unwrap();
+            } else {
+                handle
+                    .durable_turns
+                    .admit_queued_prompt(
+                        &session_id,
+                        Some(251),
+                        Some(251),
+                        "echo once".into(),
+                        Some(client::protocol::commands::PromptModeDto::Bash),
+                        Vec::new(),
+                    )
+                    .unwrap();
+                handle
+                    .durable_turns
+                    .claim_queued_bash(&session_id, 251, false)
+                    .unwrap();
+            }
+            let turn = handle.reserve_turn(Some(251)).await.unwrap();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            let active = handle.active_cancel.clone();
+            let queue = handle.message_queue.clone();
+            let task_turn = turn.clone();
+            let parked = handle.runtime().spawn(async move {
+                let _ = release_rx.await;
+                let mut owner = active.lock().await;
+                super::release_active_turn(&mut owner, &queue, &task_turn);
+                drop(owner);
+                task_turn.mark_completed();
+            });
+            turn.set_task_handle(parked);
+            let command = if pause {
+                ClientCommand::PauseTurn {
+                    session_id: session_id.clone(),
+                    turn_id: 251,
+                    reason: "background_time_expired".into(),
+                }
+            } else {
+                ClientCommand::Cancel {
+                    session_id: Some(session_id.clone()),
+                    turn_id: Some(251),
+                }
+            };
+            let caller_handle = handle.clone();
+            let caller = tokio::spawn(async move { caller_handle.submit(command).await });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !turn.cancel.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("lifecycle command fires its token");
+            caller.abort();
+            let _ = caller.await;
+            release_tx.send(()).expect("release owner");
+            let expected = if pause {
+                TurnRecoveryStateDto::PausedRecoverable
+            } else {
+                TurnRecoveryStateDto::Cancelled
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let state = handle.durable_turns.load(&session_id, 251).unwrap().state;
+                    let delivered = listener.received.lock().await.iter().any(|event| {
+                        matches!(event, ClientEvent::TurnRecoveryState { snapshot }
+                            if snapshot.turn_id == 251 && snapshot.state == expected)
+                    });
+                    if state == Some(expected.clone()) && delivered {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("dropped caller still completes state and event");
+        });
+    }
+}
+
+#[test]
+fn cancel_paused_turn_does_not_cancel_a_different_live_owner() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, _listener) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .durable_turns
+            .begin(&session_id, 252, "paused".into(), None, Vec::new())
+            .unwrap();
+        handle
+            .durable_turns
+            .transition(
+                &session_id,
+                252,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("background".into()),
+            )
+            .unwrap();
+        let other = handle.reserve_turn(Some(253)).await.unwrap();
+        handle
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: Some(252),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 252).unwrap().state,
+            Some(TurnRecoveryStateDto::Cancelled)
+        );
+        assert!(!other.cancel.is_cancelled());
+        assert!(handle.message_queue.has_active_turn().await);
+        let mut active = handle.active_cancel.lock().await;
+        assert!(active
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, &other)));
+        super::release_active_turn(&mut active, &handle.message_queue, &other);
+        other.mark_completed();
+    });
+}
+
+#[test]
+fn cancelled_owner_rejects_side_effect_admission_without_internal_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, listener) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .durable_turns
+            .begin(&session_id, 264, "prompt".into(), None, Vec::new())
+            .unwrap();
+        let turn = handle.reserve_turn(Some(264)).await.unwrap();
+        let guard = turn.tool_recovery_guard(handle.durable_turns.clone());
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let active = handle.active_cancel.clone();
+        let queue = handle.message_queue.clone();
+        let task_turn = turn.clone();
+        let parked = handle.runtime().spawn(async move {
+            let _ = release_rx.await;
+            let mut active = active.lock().await;
+            super::release_active_turn(&mut active, &queue, &task_turn);
+            drop(active);
+            task_turn.mark_completed();
+        });
+        turn.set_task_handle(parked);
+        let cancel_handle = handle.clone();
+        let cancel = tokio::spawn(async move {
+            cancel_handle
+                .submit(ClientCommand::Cancel {
+                    session_id: Some(cancel_handle.active_session_id()),
+                    turn_id: Some(264),
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !turn.cancel.is_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            guard(),
+            Err(hooks::RecoveryAdmissionError::Interrupted)
+        ));
+        super::report_owned_turn_error(
+            &handle.inner.orchestrator,
+            &turn,
+            &handle.event_sink,
+            &handle.inner.message_output,
+            &orchestrator::OrchestratorError::RecoveryInterrupted,
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        cancel.await.unwrap().unwrap();
+        let events = listener.received.lock().await;
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Error { .. })));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    ClientEvent::TurnEnded {
+                        outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn inactive_cancel_rejects_old_turn_with_detached_work_then_can_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .durable_turns
+            .begin(&session_id, 265, "old".into(), None, Vec::new())
+            .unwrap();
+        handle
+            .durable_turns
+            .transition(
+                &session_id,
+                265,
+                TurnRecoveryStateDto::PausedRecoverable,
+                false,
+                Some("background".into()),
+            )
+            .unwrap();
+        let old_owner = handle
+            .durable_turns
+            .reserve_live_owner(&session_id, Some(265))
+            .unwrap();
+        let detached = old_owner.detached_work_lease();
+        drop(old_owner);
+        let next = handle
+            .reserve_turn(Some(266))
+            .await
+            .expect("new turn may start while old hook finishes");
+        assert!(matches!(
+            handle
+                .submit(ClientCommand::Cancel {
+                    session_id: Some(handle.active_session_id()),
+                    turn_id: Some(265)
+                })
+                .await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 265).unwrap().state,
+            Some(TurnRecoveryStateDto::PausedRecoverable)
+        );
+        assert!(!next.cancel.is_cancelled());
+        drop(detached);
+        handle
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: Some(265),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 265).unwrap().state,
+            Some(TurnRecoveryStateDto::Cancelled)
+        );
+        assert!(!next.cancel.is_cancelled());
+        let mut active = handle.active_cancel.lock().await;
+        super::release_active_turn(&mut active, &handle.message_queue, &next);
+        next.mark_completed();
+    });
+}
+
+#[test]
+fn cancelling_old_owner_cannot_touch_same_id_in_another_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, _) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let store = &handle.durable_turns;
+        store
+            .begin("session-a", 253, "old".into(), None, Vec::new())
+            .unwrap();
+        store
+            .transition(
+                "session-a",
+                253,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                None,
+            )
+            .unwrap();
+        let a = Arc::new(super::ActiveTurn::with_live_owner(
+            Some(253),
+            "session-a".into(),
+            1,
+            store.reserve_live_owner("session-a", Some(253)).unwrap(),
+        ));
+        let b = Arc::new(super::ActiveTurn::with_live_owner(
+            Some(253),
+            "session-b".into(),
+            2,
+            store.reserve_live_owner("session-b", Some(253)).unwrap(),
+        ));
+        *handle.active_cancel.lock().await = Some(b.clone());
+        assert!(matches!(
+            handle
+                .cancel_inactive_turn("session-a", 253, Some(&a))
+                .await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert_eq!(
+            store.load("session-a", 253).unwrap().state,
+            Some(TurnRecoveryStateDto::PausedRecoverable)
+        );
+        assert!(!b.cancel.is_cancelled());
+        assert!(handle
+            .active_cancel
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|turn| Arc::ptr_eq(turn, &b)));
+        *handle.active_cancel.lock().await = None;
+    });
+}
+
+#[test]
+fn another_mobile_handle_cannot_cancel_or_resume_a_live_session() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let first = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    let (second_tx, _second_rx) = tokio::sync::oneshot::channel();
+    let second = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(second_tx))),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&first.durable_turns, &second.durable_turns));
+    let session_id = first.runtime().block_on(async {
+        let session_id = first.active_session_id();
+        first
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session_id, "two handles", &first.session_cwd())
+            .await
+            .unwrap();
+        first
+            .inner
+            .session_writer
+            .append_session_mode(first.inner.session_mode.as_str())
+            .await
+            .unwrap();
+        session_id
+    });
+    second.runtime().block_on(async {
+        second
+            .submit(ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            })
+            .await
+            .unwrap();
+    });
+    first.runtime().block_on(async {
+        first
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(first.active_session_id()),
+                text: "stay running".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(255),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+    });
+    second.runtime().block_on(async {
+        for command in [
+            ClientCommand::Cancel {
+                session_id: Some(session_id.clone()),
+                turn_id: Some(255),
+            },
+            ClientCommand::AttachTurn {
+                session_id: session_id.clone(),
+                turn_id: 255,
+                after_sequence: None,
+                request_id: "attach-255".into(),
+            },
+            ClientCommand::PauseTurn {
+                session_id: session_id.clone(),
+                turn_id: 255,
+                reason: "background".into(),
+            },
+            ClientCommand::ResumeTurn {
+                session_id: session_id.clone(),
+                turn_id: 255,
+            },
+        ] {
+            assert!(matches!(
+                second.submit(command).await,
+                Err(ClientError::Rejected { .. })
+            ));
+        }
+        assert_eq!(
+            second.durable_turns.load(&session_id, 255).unwrap().state,
+            Some(TurnRecoveryStateDto::Running)
+        );
+    });
+    first.runtime().block_on(async {
+        assert!(!first
+            .active_cancel
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .cancel
+            .is_cancelled());
+        first
+            .submit(ClientCommand::PauseTurn {
+                session_id: first.active_session_id(),
+                turn_id: 255,
+                reason: "background".into(),
+            })
+            .await
+            .unwrap();
+    });
+    second.runtime().block_on(async {
+        assert_eq!(
+            second.durable_turns.load(&session_id, 255).unwrap().state,
+            Some(TurnRecoveryStateDto::PausedRecoverable)
+        );
+    });
+}
+
+struct BlockingLifecycleListener {
+    terminal: bool,
+    blocked: AtomicBool,
+    entered: Notify,
+    release: Notify,
+    events: tokio::sync::Mutex<Vec<ClientEvent>>,
+}
+
+fn projected_turn_event(event: &ClientEvent) -> ClientEvent {
+    match event {
+        ClientEvent::TurnEventReplay { event_json, .. }
+        | ClientEvent::TurnEventLiveUnretained { event_json, .. } => {
+            serde_json::from_str(event_json).unwrap()
+        }
+        _ => event.clone(),
+    }
+}
+
+#[derive(Default)]
+struct BlockingSequenceListener {
+    entered: Notify,
+    release: Notify,
+    events: tokio::sync::Mutex<Vec<ClientEvent>>,
+}
+
+#[derive(Default)]
+struct ReentrantPermissionListener {
+    handle: StdMutex<Option<std::sync::Weak<super::MobileEngineHandle>>>,
+    invoked: AtomicBool,
+    command_succeeded: AtomicBool,
+    events: tokio::sync::Mutex<Vec<ClientEvent>>,
+}
+
+#[derive(Default)]
+struct ReentrantQuestionListener {
+    handle: StdMutex<Option<std::sync::Weak<super::MobileEngineHandle>>>,
+    invoked: AtomicBool,
+    answered: AtomicBool,
+    events: tokio::sync::Mutex<Vec<ClientEvent>>,
+}
+
+#[async_trait]
+impl ClientEventListener for ReentrantQuestionListener {
+    async fn on_event(&self, event: ClientEvent) {
+        let run = matches!(projected_turn_event(&event), ClientEvent::TextDelta { .. })
+            && !self.invoked.swap(true, Ordering::AcqRel);
+        self.events.lock().await.push(event);
+        if run {
+            let handle = self
+                .handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .unwrap();
+            let result = handle
+                .submit(ClientCommand::AnswerAskUserQuestion {
+                    request_id: 1,
+                    answers: client::protocol::ask_user_question::AskUserQuestionAnswersDto {
+                        pairs: Vec::new(),
+                    },
+                })
+                .await;
+            self.answered.store(result.is_ok(), Ordering::Release);
+        }
+    }
+
+    async fn on_workflow_progress(
+        &self,
+        _: String,
+        _: String,
+        _: String,
+        _: client::protocol::listings::WorkflowProgressDto,
+    ) {
+    }
+}
+
+#[test]
+fn background_question_does_not_change_main_turn_and_can_be_answered_reentrantly() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    let tmp = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let listener = Arc::new(ReentrantQuestionListener::default());
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    *listener.handle.lock().unwrap() = Some(Arc::downgrade(&handle));
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
+                text: "foreground".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(269),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+        handle
+            .ask_user_question_tx
+            .send(tool_ui::AskUserQuestionExchange {
+                questions: Vec::new(),
+                timeout_secs: None,
+                resp_tx: answer_tx,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if listener
+                    .events
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::AskUserQuestion { .. }))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 269).unwrap().state,
+            Some(TurnRecoveryStateDto::Running)
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle.event_sink.emit(ClientEvent::TextDelta {
+                text: "answer from callback".into(),
+            }),
+        )
+        .await
+        .expect("answer callback must not wait for its own turn gate");
+        assert!(listener.answered.load(Ordering::Acquire));
+        assert!(answer_rx.await.unwrap().is_empty());
+        let checkpoint = handle.durable_turns.load(&session_id, 269).unwrap();
+        assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Running));
+        assert!(checkpoint
+            .events
+            .iter()
+            .all(|event| !event.event_json.contains("ask_user_question")));
+        assert!(listener.events.lock().await.iter().any(|event| matches!(
+            event,
+            ClientEvent::AskUserQuestionResolved { request_id: 1 }
+        )));
+        handle
+            .submit(ClientCommand::PauseTurn {
+                session_id: handle.active_session_id(),
+                turn_id: 269,
+                reason: "background".into(),
+            })
+            .await
+            .unwrap();
+    });
+}
+
+#[async_trait]
+impl ClientEventListener for ReentrantPermissionListener {
+    async fn on_event(&self, event: ClientEvent) {
+        let run = matches!(projected_turn_event(&event), ClientEvent::TextDelta { .. })
+            && !self.invoked.swap(true, Ordering::AcqRel);
+        self.events.lock().await.push(event);
+        if run {
+            let handle = self
+                .handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .unwrap();
+            let ui = handle
+                .submit(ClientCommand::UiClientModule {
+                    request_id: "nested".into(),
+                    plugin: "missing".into(),
+                })
+                .await;
+            let deny = handle
+                .submit(ClientCommand::DenyPermission { request_id: 1 })
+                .await;
+            self.command_succeeded
+                .store(ui.is_ok() && deny.is_ok(), Ordering::Release);
+        }
+    }
+
+    async fn on_workflow_progress(
+        &self,
+        _: String,
+        _: String,
+        _: String,
+        _: client::protocol::listings::WorkflowProgressDto,
+    ) {
+    }
+}
+
+#[test]
+fn listener_can_resolve_permission_reentrantly_and_reconnect_without_replaying_resolution() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = Arc::new(ReentrantPermissionListener::default());
+    let requests = Arc::new(RecordingPermissionSink::default());
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        requests.clone(),
+        None,
+    )
+    .unwrap();
+    *listener.handle.lock().unwrap() = Some(Arc::downgrade(&handle));
+    let session_id = handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session_id, "permission reconnect", &handle.session_cwd())
+            .await
+            .unwrap();
+        handle
+            .inner
+            .session_writer
+            .append_session_mode(handle.inner.session_mode.as_str())
+            .await
+            .unwrap();
+        handle
+            .durable_turns
+            .begin(&session_id, 263, "prompt".into(), None, Vec::new())
+            .unwrap();
+        let owner = handle.reserve_turn(Some(263)).await.unwrap();
+        let permission_gate = handle.inner.permission_gate.clone();
+        let check = tokio::spawn(async move {
+            use permission::gate::PermissionGate;
+            permission_gate
+                .check(
+                    "Bash",
+                    &source_value(&serde_json::json!({"command": "true"})),
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while requests.count.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let transition = handle.loop_transition.lock().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle.event_sink.emit(ClientEvent::TextDelta {
+                text: "trigger".into(),
+            }),
+        )
+        .await
+        .expect("reentrant non-turn commands must not wait for the turn gate");
+        drop(transition);
+        assert!(listener.command_succeeded.load(Ordering::Acquire));
+        assert!(matches!(
+            check.await.unwrap(),
+            permission::gate::PermissionDecision::Deny { .. }
+        ));
+        assert!(listener.events.lock().await.iter().any(|event| matches!(
+            event,
+            ClientEvent::PermissionRequestResolved { request_id: 1, .. }
+        )));
+        let mut active = handle.active_cancel.lock().await;
+        super::release_active_turn(&mut active, &handle.message_queue, &owner);
+        drop(active);
+        owner.mark_completed();
+        drop(owner);
+        handle
+            .durable_turns
+            .transition(
+                &session_id,
+                263,
+                TurnRecoveryStateDto::PausedRecoverable,
+                false,
+                Some("background".into()),
+            )
+            .unwrap();
+        session_id
+    });
+    drop(handle);
+    let resumed_listener = Arc::new(FakeListener::default());
+    let resumed = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        resumed_listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        None,
+    )
+    .unwrap();
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        resumed_listener.received.lock().await.clear();
+        resumed
+            .submit(ClientCommand::AttachTurn {
+                session_id: session_id.clone(),
+                turn_id: 263,
+                after_sequence: None,
+                request_id: "attach-263".into(),
+            })
+            .await
+            .unwrap();
+        let events = resumed_listener.received.lock().await;
+        let replay = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::TurnEventReplay { event_json, .. } => Some(event_json),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(replay.iter().any(|event| event.contains("text_delta")));
+        assert!(replay
+            .iter()
+            .all(|event| !event.contains("permission_request_resolved")));
+    });
+}
+
+#[async_trait]
+impl ClientEventListener for BlockingSequenceListener {
+    async fn on_event(&self, event: ClientEvent) {
+        let first = matches!(&projected_turn_event(&event), ClientEvent::TextDelta { text } if text.display() == "first");
+        self.events.lock().await.push(event);
+        if first {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    async fn on_workflow_progress(
+        &self,
+        _: String,
+        _: String,
+        _: String,
+        _: client::protocol::listings::WorkflowProgressDto,
+    ) {
+    }
+}
+
+#[tokio::test]
+async fn sequenced_events_complete_in_order_after_producer_is_dropped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store =
+        crate::mobile::turn_durability::DurableTurnStore::open_shared(tmp.path().join("turns"))
+            .unwrap();
+    store
+        .begin("session-a", 261, "prompt".into(), None, Vec::new())
+        .unwrap();
+    let active = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+        super::ActiveTurn::new_owned(Some(261), "session-a".into(), 1),
+    ))));
+    let inner = Arc::new(BlockingSequenceListener::default());
+    let listener = Arc::new(super::TurnLifecycleListener::new_durable(
+        inner.clone(),
+        active.clone(),
+        store.clone(),
+    ));
+    let first_listener = listener.clone();
+    let first = tokio::spawn(async move {
+        first_listener
+            .on_event(ClientEvent::TextDelta {
+                text: "first".into(),
+            })
+            .await;
+    });
+    inner.entered.notified().await;
+    let committed = store.load("session-a", 261).unwrap();
+    assert_eq!(committed.last_sequence, 1);
+    assert!(committed.projection_uncertain);
+    assert!(!committed.safe_to_resume);
+    tokio::time::timeout(std::time::Duration::from_secs(1), active.lock())
+        .await
+        .expect("callback must not hold active lock");
+    let second_listener = listener.clone();
+    let mut second = tokio::spawn(async move {
+        second_listener
+            .on_event(ClientEvent::TextDelta {
+                text: "second".into(),
+            })
+            .await;
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.load("session-a", 261).unwrap().last_sequence,
+        1,
+        "second sequence must wait for first delivery"
+    );
+    first.abort();
+    let _ = first.await;
+    inner.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = inner.events.lock().await;
+    assert!(
+        matches!(events.as_slice(), [
+        ClientEvent::TurnEventReplay { session_id: first_session, turn_id: 261, sequence: 1, event_json: first },
+        ClientEvent::TurnEventReplay { session_id: second_session, turn_id: 261, sequence: 2, event_json: second },
+    ] if first_session == "session-a" && second_session == "session-a"
+       && first.contains("first") && second.contains("second")),
+        "unexpected delivery order: {events:?}"
+    );
+}
+
+#[test]
+fn cancel_waits_for_abandoned_delivery_and_permission_resolution_stays_reentrant() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = Arc::new(BlockingSequenceListener::default());
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        None,
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .durable_turns
+            .begin(&session_id, 275, "prompt".into(), None, Vec::new())
+            .unwrap();
+        let owner = handle.reserve_turn(Some(275)).await.unwrap();
+        let cancelling_handle = handle.clone();
+        let mut cancel = tokio::spawn(async move {
+            cancelling_handle
+                .submit(ClientCommand::Cancel { session_id: Some(cancelling_handle.active_session_id()), turn_id: Some(275) })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if owner.cancel.is_cancelled()
+                    && listener.events.lock().await.iter().any(|event| matches!(
+                        event,
+                        ClientEvent::TurnRecoveryState { snapshot }
+                            if snapshot.turn_id == 275 && snapshot.state == TurnRecoveryStateDto::Cancelled
+                    ))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // The cancelled checkpoint refuses this late live result. The actual
+        // callback owns its delivery task even if its producer is dropped.
+        let event_handle = handle.clone();
+        let producer = tokio::spawn(async move {
+            event_handle
+                .event_sink
+                .emit(ClientEvent::TextDelta { text: "first".into() })
+                .await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), listener.entered.notified())
+            .await
+            .unwrap();
+        producer.abort();
+        let _ = producer.await;
+        let mut active = handle.active_cancel.lock().await;
+        super::release_active_turn(&mut active, &handle.message_queue, &owner);
+        drop(active);
+        owner.mark_completed();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancel)
+            .await
+            .is_err(), "Cancel must drain its committed callback before returning");
+
+        // Permission resolution is connection-scoped and does not acquire
+        // this held turn gate, even while Cancel is draining it.
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.submit(ClientCommand::DenyPermission { request_id: u64::MAX })
+            )
+            .await
+            .expect("permission resolution must not wait for the turn gate"),
+            Err(ClientError::NotFound { .. })
+        ));
+        listener.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    });
+}
+
+#[tokio::test]
+async fn poisoned_delivery_reports_reconnect_and_does_not_advance_cursor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store =
+        crate::mobile::turn_durability::DurableTurnStore::open_shared(tmp.path().join("turns"))
+            .unwrap();
+    store
+        .begin("session-a", 262, "prompt".into(), None, Vec::new())
+        .unwrap();
+    let gate = store.delivery_gate("session-a", 262).unwrap();
+    let mut abandoned = gate.lock().await.unwrap();
+    abandoned.arm();
+    drop(abandoned);
+    let active = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+        super::ActiveTurn::new_owned(Some(262), "session-a".into(), 1),
+    ))));
+    let inner = Arc::new(FakeListener::default());
+    let listener = super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+    for _ in 0..2 {
+        listener
+            .on_event(ClientEvent::TextDelta {
+                text: "must not advance".into(),
+            })
+            .await;
+    }
+    assert_eq!(store.load("session-a", 262).unwrap().last_sequence, 0);
+    let events = inner.received.lock().await;
+    assert_eq!(events.len(), 1);
+    assert!(
+        matches!(&events[0], ClientEvent::Error { message, .. } if message.display().contains("reconnect"))
+    );
+}
+
+#[tokio::test]
+async fn uncertain_journal_write_freezes_cursor_and_delivers_only_live_envelopes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store =
+        crate::mobile::turn_durability::DurableTurnStore::open_shared(tmp.path().join("turns"))
+            .unwrap();
+    store
+        .begin("session-a", 267, "prompt".into(), None, Vec::new())
+        .unwrap();
+    let turn = Arc::new(super::ActiveTurn::new_owned(
+        Some(267),
+        "session-a".into(),
+        1,
+    ));
+    let active = Arc::new(tokio::sync::Mutex::new(Some(turn.clone())));
+    let inner = Arc::new(BlockingSequenceListener::default());
+    let listener = super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+    store.fail_after_next_journal_flush();
+    listener
+        .on_event(ClientEvent::TurnStarted { turn_id: Some(267) })
+        .await;
+    listener
+        .on_event(ClientEvent::TextDelta {
+            text: "later".into(),
+        })
+        .await;
+    assert!(turn.journal_degraded.load(Ordering::Acquire));
+    // The injected failure is after write/flush, so the first event may be on
+    // disk despite having no acknowledged sequence. No later event is appended.
+    assert_eq!(store.load("session-a", 267).unwrap().last_sequence, 1);
+    let checkpoint = store.load("session-a", 267).unwrap();
+    assert!(!checkpoint.safe_to_resume);
+    assert!(checkpoint.projection_uncertain);
+    let events = inner.events.lock().await;
+    assert!(
+        matches!(events.as_slice(), [
+        ClientEvent::TurnEventLiveUnretained { session_id: first_session, turn_id: 267, event_json: first },
+        ClientEvent::SystemNotice { .. },
+        ClientEvent::TurnEventLiveUnretained { session_id: second_session, turn_id: 267, event_json: second },
+    ] if first_session == "session-a" && second_session == "session-a"
+        && first.contains("turn_started") && second.contains("later")),
+        "unexpected live-only output: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn journal_write_failure_fences_output_before_reopen_and_resume() {
+    use crate::mobile::turn_durability::{DurableTurnStore, ResumeDisposition};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("turns");
+    let store = Arc::new(DurableTurnStore::new(root.clone()));
+    store
+        .begin("session-a", 270, "prompt".into(), None, Vec::new())
+        .unwrap();
+    let turn = Arc::new(super::ActiveTurn::new_owned(
+        Some(270),
+        "session-a".into(),
+        1,
+    ));
+    let active = Arc::new(tokio::sync::Mutex::new(Some(turn.clone())));
+    let inner = Arc::new(BlockingSequenceListener::default());
+    let listener = super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+    listener
+        .on_event(ClientEvent::TurnStarted { turn_id: Some(270) })
+        .await;
+    assert!(store.load("session-a", 270).unwrap().safe_to_resume);
+    assert!(!store.load("session-a", 270).unwrap().projection_uncertain);
+    store.fail_before_next_journal_write();
+    listener
+        .on_event(ClientEvent::TextDelta {
+            text: "visible but not retained".into(),
+        })
+        .await;
+    assert!(!store.load("session-a", 270).unwrap().safe_to_resume);
+    assert_eq!(store.load("session-a", 270).unwrap().last_sequence, 1);
+    assert!(inner.events.lock().await.iter().any(|event| matches!(
+        event,
+        ClientEvent::TurnEventLiveUnretained { session_id, turn_id: 270, event_json }
+            if session_id == "session-a" && event_json.contains("visible but not retained")
+    )));
+
+    // Discard all in-process state before reopening, as after a process exit.
+    // This tests the disk boundary; it does not simulate an actual power loss.
+    drop(listener);
+    drop(turn);
+    drop(store);
+    let reopened = DurableTurnStore::new(root);
+    let checkpoint = reopened.load("session-a", 270).unwrap();
+    assert!(!checkpoint.safe_to_resume);
+    assert!(checkpoint.projection_uncertain);
+    assert_eq!(checkpoint.last_sequence, 1);
+    let paused = reopened
+        .transition(
+            "session-a",
+            270,
+            TurnRecoveryStateDto::PausedRecoverable,
+            false,
+            Some("background".into()),
+        )
+        .unwrap();
+    assert!(paused.projection_uncertain);
+    let (disposition, snapshot) = reopened.resume("session-a", 270).unwrap();
+    assert_eq!(disposition, ResumeDisposition::WaitingForUser);
+    assert!(snapshot.unwrap().projection_uncertain);
+}
+
+#[tokio::test]
+async fn failed_output_recovery_fence_stops_without_publishing_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store =
+        crate::mobile::turn_durability::DurableTurnStore::open_shared(tmp.path().join("turns"))
+            .unwrap();
+    store
+        .begin("session-a", 271, "prompt".into(), None, Vec::new())
+        .unwrap();
+    let turn = Arc::new(super::ActiveTurn::new_owned(
+        Some(271),
+        "session-a".into(),
+        1,
+    ));
+    let active = Arc::new(tokio::sync::Mutex::new(Some(turn.clone())));
+    let inner = Arc::new(BlockingSequenceListener::default());
+    let listener = super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+    listener
+        .on_event(ClientEvent::TurnStarted { turn_id: Some(271) })
+        .await;
+    store.fail_after_next_metadata_publish();
+    listener
+        .on_event(ClientEvent::TextDelta {
+            text: "must never be published".into(),
+        })
+        .await;
+    assert!(turn.cancel.is_cancelled());
+    assert!(turn.is_quiescing());
+    assert!(store
+        .delivery_gate("session-a", 271)
+        .unwrap()
+        .lock()
+        .await
+        .is_err());
+    let events = inner.events.lock().await;
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, ClientEvent::Error { .. })));
+    assert!(!events.iter().any(|event| match event {
+        ClientEvent::TextDelta { text } => text.display().contains("must never"),
+        ClientEvent::TurnEventReplay { event_json, .. }
+        | ClientEvent::TurnEventLiveUnretained { event_json, .. } => {
+            event_json.contains("must never")
+        }
+        _ => false,
+    }));
+}
+
+#[test]
+fn mobile_unretained_output_is_not_automatically_replayed_after_reopen() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+    let first_listener = Arc::new(BlockingSequenceListener::default());
+    let first = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        first_listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(first_started_tx))),
+    )
+    .unwrap();
+    let session_id = first.runtime().block_on(async {
+        let session_id = first.active_session_id();
+        first
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session_id, "unretained output", &first.session_cwd())
+            .await
+            .unwrap();
+        first
+            .inner
+            .session_writer
+            .append_session_mode(first.inner.session_mode.as_str())
+            .await
+            .unwrap();
+        first
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(first.active_session_id()),
+                text: "pending provider".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(272),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), first_started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        first.durable_turns.fail_before_next_journal_write();
+        first
+            .event_sink
+            .emit(ClientEvent::TextDelta {
+                text: "visible without a replay sequence".into(),
+            })
+            .await;
+        assert!(first_listener.events.lock().await.iter().any(|event| matches!(
+            event,
+            ClientEvent::TurnEventLiveUnretained { session_id: origin, turn_id: 272, event_json }
+                if origin == &session_id && event_json.contains("visible without a replay sequence")
+        )));
+        assert!(
+            !first
+                .durable_turns
+                .load(&session_id, 272)
+                .unwrap()
+                .safe_to_resume
+        );
+        session_id
+    });
+    // Drop tears down the engine and its in-memory cache; it is not an OS
+    // power-loss simulation. Recovery below uses a newly constructed engine.
+    drop(first);
+    let (resumed_started_tx, _resumed_started_rx) = tokio::sync::oneshot::channel();
+    let resumed_provider = Arc::new(PendingPromptStreamClient::new(resumed_started_tx));
+    let resumed_listener = Arc::new(BlockingSequenceListener::default());
+    let resumed = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        resumed_listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(resumed_provider.clone()),
+    )
+    .unwrap();
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                match resumed
+                    .submit(ClientCommand::ResumeTurn { session_id: resumed.active_session_id(), turn_id: 272 })
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(ClientError::Rejected { .. }) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await
+                    }
+                    Err(error) => panic!("unexpected recovery error: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("disposed engine releases its owner");
+        assert_eq!(
+            resumed.durable_turns.load(&session_id, 272).unwrap().state,
+            Some(TurnRecoveryStateDto::WaitingForUser)
+        );
+        assert!(resumed_provider.captured_calls().is_empty());
+        resumed_listener.events.lock().await.clear();
+        resumed
+            .submit(ClientCommand::AttachTurn {
+                session_id: session_id.clone(),
+                turn_id: 272,
+                after_sequence: None,
+                request_id: "attach-272".into(),
+            })
+            .await
+            .unwrap();
+        assert!(resumed_listener
+            .events
+            .lock()
+            .await
+            .iter()
+            .any(|event| matches!(
+                event,
+                ClientEvent::TurnAttachStarted { request_id, snapshot }
+                    if request_id == "attach-272" && snapshot.turn_id == 272 && snapshot.projection_uncertain
+            )));
+    });
+}
+
+#[tokio::test]
+async fn unserializable_turn_event_reports_failure_and_stops_the_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store =
+        crate::mobile::turn_durability::DurableTurnStore::open_shared(tmp.path().join("turns"))
+            .unwrap();
+    store
+        .begin("session-a", 268, "prompt".into(), None, Vec::new())
+        .unwrap();
+    let turn = Arc::new(super::ActiveTurn::new_owned(
+        Some(268),
+        "session-a".into(),
+        1,
+    ));
+    let active = Arc::new(tokio::sync::Mutex::new(Some(turn.clone())));
+    let inner = Arc::new(BlockingSequenceListener::default());
+    let listener = super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+    listener
+        .fail_next_serialization
+        .store(true, Ordering::Release);
+    listener
+        .on_event(ClientEvent::TextDelta {
+            text: "cannot serialize".into(),
+        })
+        .await;
+    listener
+        .on_event(ClientEvent::TextDelta {
+            text: "must be suppressed".into(),
+        })
+        .await;
+    assert!(turn.cancel.is_cancelled());
+    assert!(turn.is_quiescing());
+    assert_eq!(
+        store.load("session-a", 268).unwrap().state,
+        Some(TurnRecoveryStateDto::Failed)
+    );
+    assert!(store
+        .delivery_gate("session-a", 268)
+        .unwrap()
+        .lock()
+        .await
+        .is_err());
+    let events = inner.events.lock().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::Error { .. }))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::TextDelta { .. }
+            | ClientEvent::TurnEventReplay { .. }
+            | ClientEvent::TurnEventLiveUnretained { .. }
+    )));
+}
+
+impl BlockingLifecycleListener {
+    fn new(terminal: bool) -> Self {
+        Self {
+            terminal,
+            blocked: AtomicBool::new(false),
+            entered: Notify::new(),
+            release: Notify::new(),
+            events: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl ClientEventListener for BlockingLifecycleListener {
+    async fn on_event(&self, event: ClientEvent) {
+        let target = if self.terminal {
+            matches!(projected_turn_event(&event), ClientEvent::TurnEnded { .. })
+        } else {
+            matches!(
+                projected_turn_event(&event),
+                ClientEvent::TurnStarted { .. }
+            )
+        };
+        if target && !self.blocked.swap(true, Ordering::AcqRel) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.events.lock().await.push(event);
+    }
+
+    async fn on_workflow_progress(
+        &self,
+        _: String,
+        _: String,
+        _: String,
+        _: client::protocol::listings::WorkflowProgressDto,
+    ) {
+    }
+}
+
+#[test]
+fn dropped_send_submit_finishes_reserved_turn_startup() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let listener = Arc::new(BlockingLifecycleListener::new(false));
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        let sender = handle.clone();
+        let caller = tokio::spawn(async move {
+            sender
+                .submit(ClientCommand::SendPrompt {
+                    session_id: Some(sender.active_session_id()),
+                    text: "start even if caller drops".into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: Some(256),
+                    visualization_context: None,
+                })
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            listener.entered.notified(),
+        )
+        .await
+        .unwrap();
+        caller.abort();
+        let _ = caller.await;
+        listener.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        handle
+            .submit(ClientCommand::PauseTurn {
+                session_id: handle.active_session_id(),
+                turn_id: 256,
+                reason: "background".into(),
+            })
+            .await
+            .unwrap();
+        assert!(handle.active_cancel.lock().await.is_none());
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 256).unwrap().state,
+            Some(TurnRecoveryStateDto::PausedRecoverable)
+        );
+    });
+}
+
+#[test]
+fn dropping_live_mobile_engine_requests_lifecycle_quiesce() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use orchestrator::prompt::mid_turn_input::CancelReason;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    let (turn, reason) = handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
+                text: "engine teardown".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(259),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            handle.active_cancel.lock().await.clone().unwrap(),
+            handle.cancel_reason.clone(),
+        )
+    });
+    drop(handle);
+    assert!(turn.cancel.is_cancelled());
+    assert!(turn.is_quiescing());
+    assert_eq!(reason.get(), CancelReason::LifecyclePause);
+}
+
+#[test]
+fn terminal_claim_wins_over_cancel_and_pause_before_callback_delivery() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config};
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = Arc::new(BlockingLifecycleListener::new(true));
+    let stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+        message_start("terminal-race", "test"),
+        content_block_start_text(0),
+        text_delta(0, "done"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]]));
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(stream),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
+                text: "complete".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(257),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            listener.entered.notified(),
+        )
+        .await
+        .unwrap();
+        let turn = handle.active_cancel.lock().await.clone().unwrap();
+        let cancelling_handle = handle.clone();
+        let mut cancel = tokio::spawn(async move {
+            cancelling_handle
+                .submit(ClientCommand::Cancel {
+                    session_id: Some(cancelling_handle.active_session_id()),
+                    turn_id: Some(257),
+                })
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancel)
+                .await
+                .is_err()
+        );
+        assert!(!turn.cancel.is_cancelled());
+        assert!(matches!(
+            handle
+                .submit(ClientCommand::PauseTurn {
+                    session_id: handle.active_session_id(),
+                    turn_id: 257,
+                    reason: "background".into()
+                })
+                .await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 257).unwrap().state,
+            Some(TurnRecoveryStateDto::Completed)
+        );
+        listener.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(30), cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), turn.wait_completed())
+            .await
+            .unwrap();
+        assert!(handle.active_cancel.lock().await.is_none());
+        assert!(listener.events.lock().await.iter().any(|event| matches!(
+            projected_turn_event(event),
+            ClientEvent::TurnEnded {
+                outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
+                ..
+            }
+        )));
+    });
+}
+
+#[test]
 fn stale_specific_cancel_does_not_touch_current_turn() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (handle, _listener) = build_submit_handle(tmp.path());
@@ -8598,7 +11077,7 @@ fn stale_specific_cancel_does_not_touch_current_turn() {
     handle.runtime().block_on(async {
         let turn = handle.reserve_turn(Some(8)).await.expect("reserve turn");
         handle
-            .cancel_active_turn(Some(7))
+            .cancel_active_turn(&handle.active_session_id(), Some(7))
             .await
             .expect("stale cancel is a no-op");
 
@@ -8668,11 +11147,17 @@ fn submit_cancel_terminalizes_inactive_paused_and_waiting_turns() {
         listener.received.lock().await.clear();
 
         handle
-            .submit(ClientCommand::Cancel { turn_id: Some(91) })
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: Some(91),
+            })
             .await
             .expect("cancel paused turn");
         handle
-            .submit(ClientCommand::Cancel { turn_id: Some(92) })
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: Some(92),
+            })
             .await
             .expect("cancel waiting turn");
 
@@ -8756,6 +11241,7 @@ fn submit_cancel_inactive_stale_terminal_and_other_session_are_noops() {
         for turn_id in [999, 94, 95] {
             handle
                 .submit(ClientCommand::Cancel {
+                    session_id: Some(handle.active_session_id()),
                     turn_id: Some(turn_id),
                 })
                 .await
@@ -8871,6 +11357,7 @@ fn submit_pause_cancels_only_owned_ask_user_question() {
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
             handle.submit(ClientCommand::PauseTurn {
+                session_id: handle.active_session_id(),
                 turn_id: 96,
                 reason: "background_time_expired".to_string(),
             }),
@@ -8974,7 +11461,10 @@ fn submit_cancel_cancels_only_owned_ask_user_question() {
         listener.received.lock().await.clear();
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            handle.submit(ClientCommand::Cancel { turn_id: Some(97) }),
+            handle.submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: Some(97),
+            }),
         )
         .await
         .expect("cancel must not hang on a Block question")
@@ -9441,6 +11931,7 @@ async fn media_handoff_defers_terminal_until_the_owned_continuation_finishes() {
         active,
         store,
         queue.clone(),
+        None,
     );
     let terminal = ClientEvent::TurnEnded {
         outcome: Outcome::EndTurn,
@@ -9977,7 +12468,7 @@ fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
 
     engine.runtime().block_on(async {
         engine
-            .submit(ClientCommand::SendPrompt {
+            .submit(ClientCommand::SendPrompt { session_id: Some(engine.active_session_id()),
                 text: ClientTextDto::from("Start an audio conversation"),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -10427,11 +12918,10 @@ async fn lifecycle_listener_keeps_connection_scoped_events_out_of_the_turn_journ
     );
 }
 
-/// `AskUserQuestion` is connection-scoped, so its recovery transition needs
-/// the reverse edge the broker always emits. Without it the turn stayed
-/// labelled `WaitingForUser` for the rest of its life.
+/// Background workflows share the question broker. A question without an
+/// owner identity must not mutate an unrelated foreground turn.
 #[tokio::test]
-async fn lifecycle_listener_restores_running_when_a_question_resolves() {
+async fn lifecycle_listener_keeps_connection_questions_out_of_turn_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
         temp.path().join("turns"),
@@ -10463,7 +12953,7 @@ async fn lifecycle_listener_restores_running_when_a_question_resolves() {
         .await;
     assert_eq!(
         store.load("session-a", 24).expect("load parked").state,
-        Some(TurnRecoveryStateDto::WaitingForUser)
+        Some(TurnRecoveryStateDto::Running)
     );
 
     listener
@@ -10474,31 +12964,17 @@ async fn lifecycle_listener_restores_running_when_a_question_resolves() {
     assert_eq!(
         checkpoint.state,
         Some(TurnRecoveryStateDto::Running),
-        "AskUserQuestionResolved must restore Running"
+        "a connection-scoped question must not change the foreground turn"
     );
-    assert!(
-        !checkpoint.safe_to_resume,
-        "a resolved question is still a side effect: re-running the prompt \
-             stays user-gated"
-    );
-    let snapshots = inner
-        .received
-        .lock()
-        .await
-        .iter()
-        .filter_map(|event| match event {
-            Ev::TurnRecoveryState { snapshot } => Some(snapshot.state.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        snapshots,
-        vec![
-            TurnRecoveryStateDto::WaitingForUser,
-            TurnRecoveryStateDto::Running
-        ],
-        "the client must observe both edges"
-    );
+    assert_eq!(checkpoint.last_sequence, 0);
+    let events = inner.received.lock().await;
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Ev::AskUserQuestion { .. },
+            Ev::AskUserQuestionResolved { .. }
+        ]
+    ));
 }
 
 /// `PauseTurn` for a turn that does not own the live executor slot used to
@@ -10532,6 +13008,7 @@ fn submit_pause_for_a_non_active_turn_still_acknowledges() {
 
         handle
             .submit(ClientCommand::PauseTurn {
+                session_id: handle.active_session_id(),
                 turn_id: 41,
                 reason: "background_time_expired".to_string(),
             })
@@ -10579,6 +13056,7 @@ fn submit_send_prompt_queues_overlapping_turn() {
 
         let result = handle
             .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
                 text: "pending guidance".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -10942,7 +13420,10 @@ fn dynamic_loop_idle_cancel_removes_timer_and_raw_queued_prompt() {
             })
             .await;
         handle
-            .submit(ClientCommand::Cancel { turn_id: None })
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: None,
+            })
             .await
             .unwrap();
         assert!(scheduler.cancel_pending().await.is_empty());
@@ -11085,6 +13566,7 @@ fn mobile_turn_end_preserves_recording_until_engine_disposal() {
 
         handle
             .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
                 text: "finish this turn".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -11230,6 +13712,7 @@ fn submit_model_error_releases_slot() {
     handle.runtime().block_on(async {
         handle
             .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
                 text: "fail deterministically".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -11356,9 +13839,14 @@ fn async_submit_resolves_on_handle_runtime() {
     // `Cancel` (no in-flight turn) drives the full `submit` future through the
     // executor and returns `Ok` — proving the async entry point itself awaits
     // on the registered runtime, not just the inspection helper.
-    let cancel_result = handle
-        .runtime()
-        .block_on(async { handle.submit(ClientCommand::Cancel { turn_id: None }).await });
+    let cancel_result = handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::Cancel {
+                session_id: Some(handle.active_session_id()),
+                turn_id: None,
+            })
+            .await
+    });
     assert!(
         cancel_result.is_ok(),
         "submit must resolve on the handle-owned runtime: {cancel_result:?}"
@@ -11799,6 +14287,7 @@ fn chat_source_rejects_a_code_only_slash_command_before_dispatch() {
     handle.runtime().block_on(async {
         handle
             .submit(ClientCommand::RunSlashCommand {
+                session_id: Some(handle.active_session_id()),
                 raw: "/loop every 5 minutes inspect the workspace".into(),
                 images: Vec::new(),
                 turn_id: Some(42),
@@ -12098,6 +14587,7 @@ fn submit_resume_session_mid_turn_is_rejected() {
         // Arm an in-flight turn so a live cancel token is recorded.
         handle
             .submit(ClientCommand::SendPrompt {
+                session_id: Some(handle.active_session_id()),
                 text: "drive a turn".into(),
                 prompt_mode: None,
                 images: Vec::new(),
@@ -12434,6 +14924,7 @@ fn mobile_prompt_rejects_foreign_transcript_symlink_without_mutation() {
     let error = handle
         .runtime()
         .block_on(handle.submit(ClientCommand::SendPrompt {
+            session_id: Some(handle.active_session_id()),
             text: ClientTextDto::from_code_units("must not append".encode_utf16().collect()),
             prompt_mode: None,
             images: Vec::new(),
@@ -12683,6 +15174,7 @@ fn mobile_context_settings_failure_delivers_and_settles_durable_slash_without_mo
 
         handle
             .submit(ClientCommand::RunSlashCommand {
+                session_id: Some(handle.active_session_id()),
                 raw: "/context".into(),
                 images: Vec::new(),
                 turn_id: Some(641),

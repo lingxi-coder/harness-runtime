@@ -20,7 +20,10 @@ runs:
         dest="$GITHUB_WORKSPACE/../llm-client"
         rm -rf "$dest"
         git init -q "$dest"
-        auth=$(printf 'x-access-token:%s' "$LLM_CLIENT_TOKEN" | base64 -w0)
+        # BSD base64 on macOS does not support GNU's -w option; strip any
+        # line wrapping so the encoded credential works on every runner.
+        auth=$(printf 'x-access-token:%s' "$LLM_CLIENT_TOKEN" | base64 | tr -d '\r\n')
+        echo "::add-mask::$auth"
         git -C "$dest" -c http.extraheader="AUTHORIZATION: basic $auth" \
           fetch -q --depth 1 https://github.com/lingxi-coder/llm-client.git "$rev"
         git -C "$dest" checkout -q FETCH_HEAD

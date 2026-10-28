@@ -51,6 +51,9 @@ pub trait ClientEventListener: Send + Sync {
     ///
     /// Implementations must be cheap / non-blocking with respect to the engine
     /// task — they typically enqueue onto the host UI's event stream.
+    /// Return before awaiting a command that waits for this same turn's event
+    /// delivery or completion; permission resolution and connection-scoped
+    /// commands may be issued independently.
     async fn on_event(&self, event: ClientEvent);
 
     /// Deliver one structured workflow progress update directly to the host.

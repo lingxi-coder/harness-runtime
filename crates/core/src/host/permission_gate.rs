@@ -472,6 +472,12 @@ pub enum PermissionOutcome {
         /// Reason surfaced to the model.
         reason: Utf16JsonProjection,
     },
+    /// The prompt transport stopped before returning a decision. This remains
+    /// fail-closed, but is distinct from an explicit user or policy denial.
+    TransportClosed {
+        /// Reason surfaced when the caller is not pausing for recovery.
+        reason: Utf16JsonProjection,
+    },
 }
 
 /// Trusted tool metadata selecting classifier-only permission composition.

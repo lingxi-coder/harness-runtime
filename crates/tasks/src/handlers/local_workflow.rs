@@ -2483,6 +2483,8 @@ pub struct NestedConfig {
     /// Session that owns this workflow run, kept even if the active
     /// router/model changes while a background workflow is still running.
     pub session_uuid: Option<String>,
+    /// Original session capability, including its immutable generation.
+    pub session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
 }
 
 /// Per-call plan for one batch: decided sequentially in Phase A (prefix-cache
@@ -2855,6 +2857,7 @@ async fn run_workflow_script_with_live_updates_recorded(
         fs: nested_fs,
         plugin_workflows: nested_plugin_workflows,
         session_uuid: workflow_session_uuid,
+        session_origin: workflow_session_origin,
     } = nested;
     use std::sync::atomic::Ordering;
     // Resume reuses the persisted run/journal identity, but a real script
@@ -3087,6 +3090,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                     let live_tx = worker_live_progress_tx.clone();
                     let workflow_metrics = workflow_metrics.clone();
                     let workflow_session_uuid = workflow_session_uuid.clone();
+                    let workflow_session_origin = workflow_session_origin.clone();
                     async move {
                         if output_accounting_failed.load(Ordering::Acquire) {
                             return wf_throw("workflow output accounting failed; further dispatch is disabled");
@@ -3320,6 +3324,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                         let inherit = SubagentInheritance {
                             tool_invoker,
                             budget,
+                            session_origin: workflow_session_origin,
                         };
                         let mut request = make_request(&subagent_type, &prompt, &opts_json);
                         request.origin_session_id = workflow_session_uuid
@@ -3619,6 +3624,7 @@ impl Task for LocalWorkflowHandler {
         // 1. Only the LocalWorkflow variant is accepted.
         let TaskSpawnInput::LocalWorkflow {
             session_uuid,
+            session_origin,
             workflow_id,
             script,
             resume_from_run_id,
@@ -3650,6 +3656,16 @@ impl Task for LocalWorkflowHandler {
         {
             return Err(TaskError::Internal(
                 "workflow session_uuid must be a valid session id".into(),
+            ));
+        }
+        if session_origin.as_ref().is_some_and(|origin| {
+            session_uuid
+                .as_deref()
+                .and_then(lingxi_core::types::SessionId::parse_prefixed)
+                != Some(origin.session_id())
+        }) {
+            return Err(TaskError::Internal(
+                "workflow session capability does not match its owner".into(),
             ));
         }
 
@@ -3982,6 +3998,7 @@ impl Task for LocalWorkflowHandler {
                         fs: Some(fs.clone()),
                         plugin_workflows: plugin_workflows.clone(),
                         session_uuid: session_uuid.clone(),
+                        session_origin: session_origin.clone(),
                     },
                     worker_cancel,
                     worker_bus.clone(),

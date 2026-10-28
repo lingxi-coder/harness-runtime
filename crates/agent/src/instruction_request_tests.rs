@@ -676,6 +676,7 @@ async fn unconfigured_api_failure_releases_the_one_shot_pool_slot() {
             .spawn(
                 request,
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: CountingInvoker::new(),
                     budget: Arc::new(MockBudget { exceeded: false }),
                 },
@@ -716,6 +717,7 @@ async fn failed_full_load_uses_the_one_shot_terminal_cleanup_path() {
             spawner.spawn(
                 request,
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: CountingInvoker::new(),
                     budget: Arc::new(MockBudget { exceeded: false }),
                 },

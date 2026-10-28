@@ -306,6 +306,7 @@ async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_f
         ..Default::default()
     };
     let inherit = || lingxi_core::host::SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(NoWork),
         budget: Arc::new(NoWork),
     };

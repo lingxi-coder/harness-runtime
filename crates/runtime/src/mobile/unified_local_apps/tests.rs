@@ -201,9 +201,8 @@ async fn external_browser_static_html_loads_the_run_scoped_webmcp_resource_first
     assert!(page.contains("Content-Security-Policy:"));
     assert!(page.contains("script-src 'self'"));
     let html = page.split_once("\r\n\r\n").unwrap().1;
-    let script = format!(
-        "<script src=\"/__run/{run_id}/__host/webmcp.js\" data-lingxi-webmcp></script>"
-    );
+    let script =
+        format!("<script src=\"/__run/{run_id}/__host/webmcp.js\" data-lingxi-webmcp></script>");
     assert_eq!(html.matches("data-lingxi-webmcp").count(), 1);
     assert!(html.find(&script).unwrap() < html.find("id=\"app-start\"").unwrap());
 

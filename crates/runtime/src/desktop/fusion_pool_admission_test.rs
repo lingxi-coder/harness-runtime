@@ -480,6 +480,7 @@ impl Fixture {
         };
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(Invoker),
                 budget: self.budget.clone(),
             },

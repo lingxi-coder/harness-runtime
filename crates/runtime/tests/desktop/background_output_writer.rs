@@ -249,6 +249,14 @@ async fn supervised_spill_process_helper() {
         supervised_real_bash_source(&directory).await;
         return;
     }
+    if role == "host-cancel" {
+        supervised_host_cancellation_source(&directory).await;
+        return;
+    }
+    if role == "host-receipt" {
+        supervised_host_receipt_source(&directory).await;
+        return;
+    }
     let output = directory.join("b1234567.output");
     let command = SandboxedCommand::__new_sandboxed(
         ProcessCommand {
@@ -410,6 +418,500 @@ async fn supervised_real_bash_source(directory: &Path) {
     )
     .unwrap();
 }
+async fn supervised_host_cancellation_source(directory: &Path) {
+    use tool_api::context::{HostToolCancellation, HostToolRequest};
+    use tool_api::Tool;
+    let (_, ctx) = supervised_registry(directory);
+    let tool = tool_shell::bash::BashTool::new(ctx);
+
+    for (name, explicit) in [("explicit", true), ("automatic", false)] {
+        let ready = directory.join(format!("{name}-ready"));
+        let done = directory.join(format!("{name}-done"));
+        let command = format!(
+            "printf ready > '{}'; sleep 30; printf escaped > '{}'",
+            ready.display(),
+            done.display()
+        );
+        let request = Arc::new(HostToolRequest::default());
+        let mut context = tool_api::test_support::fresh_ctx();
+        context.host_tool_cancellation =
+            HostToolCancellation::TerminateOwnedProcess(request.clone());
+        context.cancel = Some(tokio_util::sync::CancellationToken::new());
+        // For explicit background launches, `timeout` is the lifetime of the
+        // background process; for automatic handoff it is the foreground wait
+        // before backgrounding. Only the automatic case needs a short timeout.
+        let input_json = if explicit {
+            serde_json::json!({ "command": command, "run_in_background": true })
+        } else {
+            serde_json::json!({ "command": command, "run_in_background": false, "timeout": 150 })
+        };
+        let input =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&input_json)
+                .unwrap();
+        let result = tool
+            .call(input, context, tool_api::test_support::fresh_tx())
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(
+            request.handoff_task_ids().unwrap().len(),
+            1,
+            "{name} handoff not ready"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(request.cancel());
+        request.cancel_and_reap().await.unwrap();
+        assert!(!request.commit());
+        assert!(!done.exists());
+    }
+
+    let ready = directory.join("committed-ready");
+    let gate = directory.join("committed-gate");
+    let done = directory.join("committed-done");
+    let command = format!(
+        "printf ready > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; printf completed > '{}'",
+        ready.display(),
+        gate.display(),
+        done.display()
+    );
+    let request = Arc::new(HostToolRequest::default());
+    let mut context = tool_api::test_support::fresh_ctx();
+    context.host_tool_cancellation = HostToolCancellation::TerminateOwnedProcess(request.clone());
+    context.cancel = Some(tokio_util::sync::CancellationToken::new());
+    tool.call(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"command": command, "run_in_background": true}),
+        )
+        .unwrap(),
+        context,
+        tool_api::test_support::fresh_tx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(request.handoff_task_ids().unwrap().len(), 1);
+    assert!(request.commit());
+    assert!(!request.cancel());
+    std::fs::write(&gate, "go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !done.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+struct GatedSupervisedRunner {
+    inner: platform_posix::PosixProcess,
+    fail_ack: bool,
+    ack_entered: tokio::sync::Notify,
+    ack_release: tokio::sync::Notify,
+    handle: std::sync::Mutex<Option<lingxi_core::host::ProcessHandle>>,
+    stop_entered: tokio::sync::Notify,
+    stop_release: tokio::sync::Notify,
+    stop_failures: AtomicUsize,
+}
+
+#[async_trait]
+impl ProcessRunner for GatedSupervisedRunner {
+    fn supports_verified_background_stop(&self, cmd: &SandboxedCommand) -> bool {
+        self.inner.supports_verified_background_stop(cmd)
+    }
+    fn supports_foreground_backgrounding(&self) -> bool {
+        self.inner.supports_foreground_backgrounding()
+    }
+    fn supports_background_lifetime_guard(&self) -> bool {
+        self.inner.supports_background_lifetime_guard()
+    }
+    async fn run(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<mobile_linux_api::ProcessOutput, ProcessError> {
+        self.inner.run(cmd).await
+    }
+    async fn run_foreground_with_output_limit(
+        &self,
+        cmd: &SandboxedCommand,
+        limit: Option<usize>,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        self.inner
+            .run_foreground_with_output_limit(cmd, limit)
+            .await
+    }
+    async fn spawn_background(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, ProcessError> {
+        self.inner.spawn_background(cmd).await
+    }
+    async fn acknowledge_shell(
+        &self,
+        handle: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), ProcessError> {
+        *self.handle.lock().unwrap() = Some(handle.clone());
+        self.ack_entered.notify_one();
+        if self.fail_ack {
+            self.ack_release.notified().await;
+            return Err(ProcessError::Io("injected acknowledgement failure".into()));
+        }
+        self.inner.acknowledge_shell(handle).await
+    }
+    async fn terminate_and_wait_owned_background(
+        &self,
+        handle: &lingxi_core::host::ProcessHandle,
+        owner: &str,
+    ) -> Result<(), ProcessError> {
+        self.stop_entered.notify_one();
+        self.stop_release.notified().await;
+        if self
+            .stop_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(ProcessError::Io("injected verified stop failure".into()));
+        }
+        self.inner
+            .terminate_and_wait_owned_background(handle, owner)
+            .await
+    }
+    async fn kill(&self, handle: &lingxi_core::host::ProcessHandle) -> Result<(), ProcessError> {
+        self.inner.kill(handle).await
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+fn gated_supervised_runner(fail_ack: bool, stop_failures: usize) -> Arc<GatedSupervisedRunner> {
+    Arc::new(GatedSupervisedRunner {
+        inner: platform_posix::PosixProcess::new(),
+        fail_ack,
+        ack_entered: tokio::sync::Notify::new(),
+        ack_release: tokio::sync::Notify::new(),
+        handle: std::sync::Mutex::new(None),
+        stop_entered: tokio::sync::Notify::new(),
+        stop_release: tokio::sync::Notify::new(),
+        stop_failures: AtomicUsize::new(stop_failures),
+    })
+}
+
+async fn wait_for_path(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn supervised_host_receipt_source(directory: &Path) {
+    use tool_api::context::{HostToolCancellation, HostToolRequest};
+    use tool_api::Tool;
+
+    for explicit in [true, false] {
+        let (registry, mut ctx) = supervised_registry(directory);
+        let runner = gated_supervised_runner(true, 0);
+        ctx.process = runner.clone();
+        let tool = tool_shell::bash::BashTool::new(ctx);
+        let request = Arc::new(HostToolRequest::default());
+        let ready = directory.join(if explicit {
+            "ack-explicit"
+        } else {
+            "ack-automatic"
+        });
+        let probe = ready.with_extension("probe");
+        let alive = ready.with_extension("alive");
+        let command = format!(
+            "printf ready > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; printf alive > '{}'; sleep 30",
+            ready.display(),
+            probe.display(),
+            alive.display()
+        );
+        let mut context = tool_api::test_support::fresh_ctx();
+        context.host_tool_cancellation =
+            HostToolCancellation::TerminateOwnedProcess(request.clone());
+        let input = if explicit {
+            serde_json::json!({"command": command, "run_in_background": true})
+        } else {
+            serde_json::json!({"command": command, "run_in_background": false, "timeout": 150})
+        };
+        let call = tokio::spawn(async move {
+            tool.call(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&input)
+                    .unwrap(),
+                context,
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), runner.ack_entered.notified())
+            .await
+            .unwrap();
+        wait_for_path(&ready).await;
+        let id = runner
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .task_id
+            .clone();
+        assert!(request.cancel());
+        tokio::time::timeout(Duration::from_secs(5), runner.stop_entered.notified())
+            .await
+            .unwrap();
+        runner.ack_release.notify_one();
+        assert!(tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        let row = TaskRegistryHandle::get(registry.as_ref(), &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.status, "running",
+            "ack failure is not a termination receipt"
+        );
+        let output_path = registry.get(&id).await.unwrap().base().output_file.clone();
+        let output = std::fs::read_to_string(output_path).unwrap();
+        assert!(!output.contains("[killed]"));
+        std::fs::write(&probe, "go").unwrap();
+        wait_for_path(&alive).await;
+        runner.stop_release.notify_one();
+        request.cancel_and_reap().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while TaskRegistryHandle::get(registry.as_ref(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                == "running"
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let (registry, mut ctx) = supervised_registry(directory);
+    let runner = gated_supervised_runner(false, 1);
+    ctx.process = runner.clone();
+    let tool = tool_shell::bash::BashTool::new(ctx);
+    let request = Arc::new(HostToolRequest::default());
+    let ready = directory.join("stop-ready");
+    let probe = directory.join("stop-probe");
+    let alive = directory.join("stop-alive");
+    let command = format!("printf ready > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; printf alive > '{}'; sleep 30", ready.display(), probe.display(), alive.display());
+    let mut context = tool_api::test_support::fresh_ctx();
+    context.host_tool_cancellation = HostToolCancellation::TerminateOwnedProcess(request.clone());
+    tool.call(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"command": command, "run_in_background": true}),
+        )
+        .unwrap(),
+        context,
+        tool_api::test_support::fresh_tx(),
+    )
+    .await
+    .unwrap();
+    let ids = request.handoff_task_ids().unwrap();
+    assert!(request.commit());
+    let id = ids[0].clone();
+    wait_for_path(&ready).await;
+    let first = tokio::spawn({
+        let registry = registry.clone();
+        let id = id.clone();
+        async move { registry.kill(&id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), runner.stop_entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        TaskRegistryHandle::get(registry.as_ref(), &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    runner.stop_release.notify_one();
+    assert!(first.await.unwrap().is_err());
+    std::fs::write(&probe, "go").unwrap();
+    wait_for_path(&alive).await;
+    assert_eq!(
+        TaskRegistryHandle::get(registry.as_ref(), &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    let second = tokio::spawn({
+        let registry = registry.clone();
+        let id = id.clone();
+        async move { registry.kill(&id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), runner.stop_entered.notified())
+        .await
+        .unwrap();
+    runner.stop_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(20), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        TaskRegistryHandle::get(registry.as_ref(), &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "exited_unknown"
+    );
+    let output = TaskRegistryHandle::output(registry.as_ref(), &id, None)
+        .await
+        .unwrap();
+    assert!(output.done);
+    assert!(output.content.contains("[exited; outcome unknown]"));
+    assert!(!output.content.contains("[killed]"));
+
+    // Natural completion can win while TaskStop is waiting to issue its stop.
+    // The registry must retain the real completed outcome in either case.
+    let (registry, mut ctx) = supervised_registry(directory);
+    let runner = gated_supervised_runner(false, 0);
+    ctx.process = runner.clone();
+    let tool = tool_shell::bash::BashTool::new(ctx);
+    let request = Arc::new(HostToolRequest::default());
+    let ready = directory.join("natural-ready");
+    let finish = directory.join("natural-finish");
+    let done = directory.join("natural-done");
+    let command = format!(
+        "printf ready > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; printf done > '{}'",
+        ready.display(),
+        finish.display(),
+        done.display()
+    );
+    let mut context = tool_api::test_support::fresh_ctx();
+    context.host_tool_cancellation = HostToolCancellation::TerminateOwnedProcess(request.clone());
+    tool.call(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"command": command, "run_in_background": true}),
+        )
+        .unwrap(),
+        context,
+        tool_api::test_support::fresh_tx(),
+    )
+    .await
+    .unwrap();
+    let ids = request.handoff_task_ids().unwrap();
+    assert!(request.commit());
+    let id = ids[0].clone();
+    wait_for_path(&ready).await;
+    let stop = tokio::spawn({
+        let registry = registry.clone();
+        let id = id.clone();
+        async move { registry.kill(&id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), runner.stop_entered.notified())
+        .await
+        .unwrap();
+    std::fs::write(&finish, "go").unwrap();
+    wait_for_path(&done).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let record = TaskRegistryHandle::get(registry.as_ref(), &id)
+                .await
+                .unwrap()
+                .unwrap();
+            if record.status == "completed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runner.stop_release.notify_one();
+    let _stop_result = tokio::time::timeout(Duration::from_secs(20), stop)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        TaskRegistryHandle::get(registry.as_ref(), &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn supervised_owned_background_waits_for_actual_receipts() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let quoted = format!(
+        "'{}'",
+        executable.to_string_lossy().replace('\'', "'\"'\"'")
+    );
+    let wrapper = directory.path().join("supervisor-bootstrap");
+    std::fs::write(&wrapper, format!("#!/bin/sh\nexport LINGXI_SPILL_TEST_ROLE=supervisor\nexport LINGXI_SPILL_TEST_DIR=\"$2\"\nexec {quoted} --exact supervised_spill_process_helper --nocapture\n")).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let status = tokio::time::timeout(
+        Duration::from_secs(50),
+        tokio::process::Command::new(executable)
+            .args(["--exact", "supervised_spill_process_helper", "--nocapture"])
+            .env("LINGXI_SPILL_TEST_ROLE", "host-receipt")
+            .env("LINGXI_SPILL_TEST_DIR", directory.path())
+            .env("LINGXI_SPILL_TEST_WRAPPER", wrapper)
+            .status(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(status.success());
+}
+
+#[tokio::test]
+async fn supervised_host_cancel_reaps_uncommitted_and_preserves_committed_background() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let quoted = format!(
+        "'{}'",
+        executable.to_string_lossy().replace('\'', "'\"'\"'")
+    );
+    let wrapper = directory.path().join("supervisor-bootstrap");
+    std::fs::write(&wrapper, format!(
+        "#!/bin/sh\nexport LINGXI_SPILL_TEST_ROLE=supervisor\nexport LINGXI_SPILL_TEST_DIR=\"$2\"\nexec {quoted} --exact supervised_spill_process_helper --nocapture\n"
+    )).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let status = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(executable)
+            .args(["--exact", "supervised_spill_process_helper", "--nocapture"])
+            .env("LINGXI_SPILL_TEST_ROLE", "host-cancel")
+            .env("LINGXI_SPILL_TEST_DIR", directory.path())
+            .env("LINGXI_SPILL_TEST_WRAPPER", wrapper)
+            .status(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(status.success());
+}
+
 #[tokio::test]
 async fn supervised_real_bash_registry_exports_after_source_exit_and_adopts() {
     use std::os::unix::fs::PermissionsExt;

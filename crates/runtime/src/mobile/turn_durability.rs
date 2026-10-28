@@ -7,7 +7,10 @@
 //! as `WaitingForUser`.
 
 use client::protocol::commands::{ImageRefDto, PromptModeDto};
-use client::protocol::events::{TurnRecoverySnapshotDto, TurnRecoveryStateDto};
+use client::protocol::events::{
+    QueuedTurnStatusDto, TurnRecoverySnapshotDto, TurnRecoveryStateDto,
+};
+use client::protocol::text::ClientTextDto;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ImageSource, MessageId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,8 +18,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 const MAX_RETAINED_EVENTS: usize = 8_192;
 const JOURNAL_COMPACTION_SLACK: usize = 256;
@@ -216,9 +219,8 @@ pub(crate) struct DurableTurnEvent {
 pub(crate) enum QueueDeliveryState {
     Pending,
     CoalescedPending,
-    /// The joined row has crossed the in-turn delivery admission point. It is
-    /// still cold-recoverable by its stable append identity, but cancellation
-    /// must now unwind the owning active turn rather than withdraw one member.
+    /// The joined row crossed in-turn admission. It may have been appended or
+    /// processed, so cold recovery must not automatically dispatch it again.
     CoalescedClaimed,
     Claimed,
     /// A side-effecting queued slash operation was claimed before dispatch.
@@ -273,17 +275,23 @@ pub(crate) struct DurableTurnCheckpoint {
     pub(crate) bash_should_query: Option<bool>,
     pub(crate) original_client_turn_id: Option<u64>,
     pub(crate) queue_delivery: QueueDeliveryState,
+    /// Set only when cancellation atomically won before a private queue claim.
+    pub(crate) cancelled_before_claim: bool,
     pub(crate) coalesced_batch: Option<CoalescedPromptBatch>,
     pub(crate) revision: u64,
     pub(crate) state: Option<TurnRecoveryStateDto>,
     pub(crate) first_sequence: u64,
     pub(crate) last_sequence: u64,
     pub(crate) safe_to_resume: bool,
+    /// True when the live projection may include content not recoverable from
+    /// this journal. This monotonic marker is independent of state/reason.
+    pub(crate) projection_uncertain: bool,
     pub(crate) reason: Option<String>,
     pub(crate) events: Vec<DurableTurnEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredTurnMetadata {
     session_id: String,
     turn_id: u64,
@@ -301,6 +309,8 @@ struct StoredTurnMetadata {
     bash_should_query: Option<bool>,
     original_client_turn_id: Option<u64>,
     queue_delivery: QueueDeliveryState,
+    #[serde(default)]
+    cancelled_before_claim: bool,
     coalesced_batch: Option<CoalescedPromptBatch>,
     #[serde(default)]
     revision: u64,
@@ -311,10 +321,17 @@ struct StoredTurnMetadata {
     last_sequence: u64,
     #[serde(default)]
     safe_to_resume: bool,
+    #[serde(default = "unknown_projection_uncertain")]
+    projection_uncertain: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     events: Vec<DurableTurnEvent>,
+}
+
+// Older metadata cannot prove a complete live projection across a crash.
+fn unknown_projection_uncertain() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -497,6 +514,7 @@ impl DurableTurnCheckpoint {
         TurnRecoverySnapshotDto {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id,
+            revision: self.revision,
             state: self
                 .state
                 .clone()
@@ -504,6 +522,7 @@ impl DurableTurnCheckpoint {
             first_sequence: self.first_sequence,
             last_sequence: self.last_sequence,
             safe_to_resume: self.safe_to_resume,
+            projection_uncertain: self.projection_uncertain,
             reason: self.reason.clone(),
         }
     }
@@ -522,14 +541,28 @@ impl DurableTurnCheckpoint {
     }
 
     pub(crate) fn has_replay_gap(&self, after_sequence: Option<u64>) -> bool {
+        self.replay_gap_reason(after_sequence).is_some()
+    }
+
+    pub(crate) fn replay_gap_reason(&self, after_sequence: Option<u64>) -> Option<&'static str> {
         let after = after_sequence.unwrap_or(0);
-        self.first_sequence != 0 && after.saturating_add(1) < self.first_sequence
+        // A cursor beyond the recovered tail can result from a crash after a
+        // live, unsynced append. It is also a gap; returning an empty replay
+        // would falsely tell the client its higher cursor is authoritative.
+        if after > self.last_sequence {
+            Some("replay_cursor_ahead")
+        } else if self.first_sequence != 0 && after.saturating_add(1) < self.first_sequence {
+            Some("replay_history_truncated")
+        } else {
+            None
+        }
     }
 
     fn can_resume_without_user(&self) -> bool {
         self.state.is_some()
             && self.queue_delivery == QueueDeliveryState::Claimed
             && self.safe_to_resume
+            && !self.projection_uncertain
             && self
                 .events
                 .iter()
@@ -553,12 +586,14 @@ impl DurableTurnCheckpoint {
             bash_should_query: self.bash_should_query,
             original_client_turn_id: self.original_client_turn_id,
             queue_delivery: self.queue_delivery,
+            cancelled_before_claim: self.cancelled_before_claim,
             coalesced_batch: self.coalesced_batch.clone(),
             revision: self.revision,
             state: self.state.clone(),
             first_sequence: self.first_sequence,
             last_sequence: self.last_sequence,
             safe_to_resume: self.safe_to_resume,
+            projection_uncertain: self.projection_uncertain,
             reason: self.reason.clone(),
             events: Vec::new(),
         }
@@ -569,7 +604,6 @@ impl DurableTurnCheckpoint {
         // appends to one of those files, the new journal contains only the
         // post-migration suffix, so recovery must merge both sources instead
         // of silently discarding the legacy prefix.
-        let metadata_last_sequence = metadata.last_sequence;
         let mut events = metadata.events;
         events.extend(journal_events);
         events.sort_unstable_by_key(|event| event.sequence);
@@ -591,12 +625,14 @@ impl DurableTurnCheckpoint {
             bash_should_query: metadata.bash_should_query,
             original_client_turn_id: metadata.original_client_turn_id,
             queue_delivery: metadata.queue_delivery,
+            cancelled_before_claim: metadata.cancelled_before_claim,
             coalesced_batch: metadata.coalesced_batch,
             revision: metadata.revision,
             state: metadata.state,
             first_sequence: metadata.first_sequence,
             last_sequence: metadata.last_sequence,
-            safe_to_resume: metadata.safe_to_resume,
+            safe_to_resume: metadata.safe_to_resume && !metadata.projection_uncertain,
+            projection_uncertain: metadata.projection_uncertain,
             reason: metadata.reason,
             events,
         };
@@ -606,9 +642,14 @@ impl DurableTurnCheckpoint {
         // die after appending a terminal event but before the follow-up
         // metadata transition, leaving a stale `Running` metadata file. On a
         // cold load, the last retained terminal event is therefore
-        // authoritative. An explicit cancel remains stronger than any late
-        // terminal event emitted while the cancelled executor unwinds.
-        if checkpoint.state.is_some() && checkpoint.state != Some(TurnRecoveryStateDto::Cancelled) {
+        // authoritative only until a terminal metadata transition commits.
+        // Once terminal, metadata owns the state and reason; event stop reasons
+        // do not necessarily match the host's persisted recovery reason.
+        if checkpoint
+            .state
+            .as_ref()
+            .is_some_and(|state| !state.is_terminal())
+        {
             if let Some((state, reason)) = checkpoint
                 .events
                 .iter()
@@ -627,15 +668,6 @@ impl DurableTurnCheckpoint {
             }
         }
 
-        // Appends no longer rewrite metadata. Reconstruct the revision for a
-        // fresh process from the journal suffix that was not reflected in the
-        // metadata snapshot. This keeps sequence/revision monotonic without
-        // paying an atomic metadata write for every token.
-        checkpoint.revision = checkpoint.revision.saturating_add(
-            checkpoint
-                .last_sequence
-                .saturating_sub(metadata_last_sequence),
-        );
         checkpoint
     }
 
@@ -671,9 +703,7 @@ struct RetainedEventEnvelope {
     #[serde(default)]
     outcome: Option<RetainedOutcomeEnvelope>,
     #[serde(default)]
-    stop_reason: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
+    message: Option<ClientTextDto>,
 }
 
 #[derive(Deserialize)]
@@ -693,17 +723,17 @@ fn terminal_state_from_event(event_json: &str) -> Option<(TurnRecoveryStateDto, 
     match event.kind.as_str() {
         "turn_ended" => match event.outcome?.kind.as_str() {
             "end_turn" => Some((TurnRecoveryStateDto::Completed, None)),
-            "max_turns" => Some((
-                TurnRecoveryStateDto::Failed,
-                Some(event.stop_reason.unwrap_or_else(|| "max_turns".to_string())),
-            )),
+            "max_turns" => Some((TurnRecoveryStateDto::Failed, Some("max_turns".to_string()))),
             "cancelled" => Some((
                 TurnRecoveryStateDto::Cancelled,
                 Some("cancelled".to_string()),
             )),
             _ => None,
         },
-        "error" => Some((TurnRecoveryStateDto::Failed, event.message)),
+        "error" => Some((
+            TurnRecoveryStateDto::Failed,
+            event.message.map(|message| message.display()),
+        )),
         _ => None,
     }
 }
@@ -756,31 +786,378 @@ pub(crate) enum DurableTurnStoreError {
     Terminal { session_id: String, turn_id: u64 },
     #[error("durable turn {turn_id} in session {session_id} has not been claimed")]
     NotClaimed { session_id: String, turn_id: u64 },
+    #[error("session {session_id} already has a live turn owner (turn {turn_id:?})")]
+    LiveOwner {
+        session_id: String,
+        turn_id: Option<u64>,
+    },
+    #[error("turn {turn_id} in session {session_id} has a pending admission")]
+    PendingAdmission { session_id: String, turn_id: u64 },
+    #[error("queued batch member {turn_id} in session {session_id} has already been claimed")]
+    BatchAlreadyClaimed { session_id: String, turn_id: u64 },
     #[error("durable turn storage failure: {0}")]
     Storage(String),
 }
 
-/// One process owns this store at a time. Metadata stays atomic while retained
-/// events live in a crash-tolerant append journal with bounded compaction.
+#[derive(Default)]
+struct LiveTurnOwners {
+    next_generation: u64,
+    sessions: HashMap<String, (u64, Option<u64>)>,
+    work: HashMap<(String, Option<u64>), u64>,
+}
+
+pub(crate) struct PendingAdmissionLease {
+    store: Arc<DurableTurnStore>,
+    session_id: String,
+    turn_id: u64,
+}
+
+impl Drop for PendingAdmissionLease {
+    fn drop(&mut self) {
+        let mut admissions = self
+            .store
+            .pending_admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = (self.session_id.clone(), self.turn_id);
+        if let Some(count) = admissions.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                admissions.remove(&key);
+            }
+        }
+    }
+}
+
+/// An execution reservation. Blocking work retains a clone until it really
+/// exits, keeping the session slot occupied even after its engine is dropped.
+#[derive(Clone)]
+pub(crate) struct LiveTurnOwnerLease {
+    inner: Arc<LiveTurnOwnerLeaseInner>,
+}
+
+struct LiveTurnOwnerLeaseInner {
+    work: Arc<LiveTurnWorkLeaseInner>,
+}
+
+/// A detached background hook retains only its originating turn identity,
+/// allowing a later turn while preventing recovery of this still-live one.
+#[derive(Clone)]
+pub(crate) struct LiveTurnWorkLease {
+    inner: Arc<LiveTurnWorkLeaseInner>,
+}
+
+struct LiveTurnWorkLeaseInner {
+    store: Arc<DurableTurnStore>,
+    session_id: String,
+    turn_id: Option<u64>,
+    generation: u64,
+}
+
+impl LiveTurnOwnerLease {
+    /// Use only for work which is explicitly allowed to outlive its turn and
+    /// overlap the next turn, such as an asynchronous PostToolBatch hook.
+    pub(crate) fn detached_work_lease(&self) -> LiveTurnWorkLease {
+        LiveTurnWorkLease {
+            inner: self.inner.work.clone(),
+        }
+    }
+}
+
+impl Drop for LiveTurnOwnerLeaseInner {
+    fn drop(&mut self) {
+        let work = &self.work;
+        let mut owners = self
+            .work
+            .store
+            .live_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if owners.sessions.get(&work.session_id).map(|entry| entry.0) == Some(work.generation) {
+            owners.sessions.remove(&work.session_id);
+        }
+        drop(owners);
+    }
+}
+
+impl Drop for LiveTurnWorkLeaseInner {
+    fn drop(&mut self) {
+        let mut owners = self
+            .store
+            .live_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (self.session_id.clone(), self.turn_id);
+        if owners.work.get(&key) == Some(&self.generation) {
+            owners.work.remove(&key);
+        }
+    }
+}
+
+/// All handles in this process for one root share a store, including its cache
+/// and session index. This is not a cross-process lock: callers in another
+/// process must not access the same root concurrently.
 pub(crate) struct DurableTurnStore {
     root: PathBuf,
+    delivery_gates: super::turn_delivery::TurnDeliveryGates,
+    pending_admissions: Mutex<HashMap<(String, u64), usize>>,
+    /// Lock order: live owners, then cache, then session index.
+    live_owners: Mutex<LiveTurnOwners>,
     lock: Mutex<HashMap<PathBuf, CachedTurn>>,
     /// The first scan indexes checkpoint filenames for a session. Store writes
     /// keep an existing index current so later admissions do not rescan disk.
     session_turn_ids: Mutex<HashMap<String, Vec<u64>>>,
     #[cfg(test)]
     journal_sync_count: AtomicUsize,
+    #[cfg(test)]
+    fail_after_metadata_publish: AtomicBool,
+    #[cfg(test)]
+    fail_before_metadata_write: AtomicBool,
+    #[cfg(test)]
+    midturn_ack_barrier: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    #[cfg(test)]
+    fail_before_metadata_sync: AtomicBool,
+    #[cfg(test)]
+    fail_after_journal_flush: AtomicBool,
+    #[cfg(test)]
+    fail_before_journal_write: AtomicBool,
 }
 
 impl DurableTurnStore {
+    /// Return the process-wide store for this directory, even when different
+    /// path spellings name the same existing ancestor. Do not create the store
+    /// directory here: constructing an engine is not itself a durable turn.
+    pub(crate) fn open_shared(root: PathBuf) -> Result<Arc<Self>, DurableTurnStoreError> {
+        static STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<DurableTurnStore>>>> = OnceLock::new();
+        let root = canonical_store_root(&root)?;
+        let mut stores = STORES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(store) = stores.get(&root).and_then(Weak::upgrade) {
+            return Ok(store);
+        }
+        stores.retain(|_, store| store.strong_count() != 0);
+        let store = Arc::new(Self::new_unshared(root.clone()));
+        stores.insert(root, Arc::downgrade(&store));
+        Ok(store)
+    }
+
+    /// Construct an independent store only for cold-recovery test fixtures.
+    #[cfg(test)]
     pub(crate) fn new(root: PathBuf) -> Self {
+        Self::new_unshared(root)
+    }
+
+    // Production engine construction must go through `open_shared`.
+    fn new_unshared(root: PathBuf) -> Self {
         Self {
             root,
+            delivery_gates: super::turn_delivery::TurnDeliveryGates::default(),
+            pending_admissions: Mutex::new(HashMap::new()),
+            live_owners: Mutex::new(LiveTurnOwners::default()),
             lock: Mutex::new(HashMap::new()),
             session_turn_ids: Mutex::new(HashMap::new()),
             #[cfg(test)]
             journal_sync_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            fail_after_metadata_publish: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_before_metadata_write: AtomicBool::new(false),
+            #[cfg(test)]
+            midturn_ack_barrier: Mutex::new(None),
+            #[cfg(test)]
+            fail_before_metadata_sync: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_journal_flush: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_before_journal_write: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn register_pending_admission(
+        self: &Arc<Self>,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<PendingAdmissionLease, DurableTurnStoreError> {
+        let mut admissions = self
+            .pending_admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = (session_id.to_string(), turn_id);
+        if admissions.contains_key(&key) {
+            return Err(DurableTurnStoreError::PendingAdmission {
+                session_id: session_id.to_string(),
+                turn_id,
+            });
+        }
+        admissions.insert(key, 1);
+        Ok(PendingAdmissionLease {
+            store: self.clone(),
+            session_id: session_id.to_string(),
+            turn_id,
+        })
+    }
+
+    pub(crate) fn with_no_pending_admission<T>(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        operation: impl FnOnce() -> Result<T, DurableTurnStoreError>,
+    ) -> Result<T, DurableTurnStoreError> {
+        self.with_no_pending_admissions(session_id, &[turn_id], operation)
+    }
+
+    pub(crate) fn with_no_pending_admissions<T>(
+        &self,
+        session_id: &str,
+        turn_ids: &[u64],
+        operation: impl FnOnce() -> Result<T, DurableTurnStoreError>,
+    ) -> Result<T, DurableTurnStoreError> {
+        let admissions = self
+            .pending_admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(turn_id) = turn_ids
+            .iter()
+            .copied()
+            .find(|id| admissions.contains_key(&(session_id.to_string(), *id)))
+        {
+            return Err(DurableTurnStoreError::PendingAdmission {
+                session_id: session_id.to_string(),
+                turn_id,
+            });
+        }
+        operation()
+    }
+
+    /// Return the shared delivery gate for one durable turn. The caller must
+    /// await its slot outside owner/store locks and revalidate ownership after
+    /// acquisition.
+    pub(crate) fn delivery_gate(
+        self: &Arc<Self>,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<Arc<super::turn_delivery::TurnDeliveryGate>, DurableTurnStoreError> {
+        relative_path(session_id, turn_id)?;
+        Ok(self.delivery_gates.get(self.clone(), session_id, turn_id))
+    }
+
+    /// Reserve this session before admitting an executor. Clones of the
+    /// returned lease must be transferred to any work that can outlive it.
+    pub(crate) fn reserve_live_owner(
+        self: &Arc<Self>,
+        session_id: &str,
+        turn_id: Option<u64>,
+    ) -> Result<LiveTurnOwnerLease, DurableTurnStoreError> {
+        relative_path(session_id, 0)?;
+        let mut owners = self
+            .live_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, active_turn_id)) = owners.sessions.get(session_id) {
+            return Err(DurableTurnStoreError::LiveOwner {
+                session_id: session_id.to_string(),
+                turn_id: *active_turn_id,
+            });
+        }
+        let work_key = (session_id.to_string(), turn_id);
+        if owners.work.contains_key(&work_key) {
+            return Err(DurableTurnStoreError::LiveOwner {
+                session_id: session_id.to_string(),
+                turn_id,
+            });
+        }
+        let generation = owners.next_generation.checked_add(1).ok_or_else(|| {
+            DurableTurnStoreError::Storage("mobile live owner generation exhausted".into())
+        })?;
+        owners.next_generation = generation;
+        owners
+            .sessions
+            .insert(session_id.to_string(), (generation, turn_id));
+        owners.work.insert(work_key, generation);
+        drop(owners);
+        Ok(LiveTurnOwnerLease {
+            inner: Arc::new(LiveTurnOwnerLeaseInner {
+                work: Arc::new(LiveTurnWorkLeaseInner {
+                    store: self.clone(),
+                    session_id: session_id.to_string(),
+                    turn_id,
+                    generation,
+                }),
+            }),
+        })
+    }
+
+    /// Run an inactive-owner decision and its store mutations atomically with
+    /// respect to new reservations. The closure must be synchronous and must
+    /// not call listeners, await, or acquire the live-owner lock recursively.
+    pub(crate) fn with_no_live_owner<T>(
+        &self,
+        session_id: &str,
+        turn_id: Option<u64>,
+        operation: impl FnOnce() -> Result<T, DurableTurnStoreError>,
+    ) -> Result<T, DurableTurnStoreError> {
+        relative_path(session_id, 0)?;
+        let owners = self
+            .live_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, turn_id)) = owners.sessions.get(session_id) {
+            return Err(DurableTurnStoreError::LiveOwner {
+                session_id: session_id.to_string(),
+                turn_id: *turn_id,
+            });
+        }
+        if owners.work.contains_key(&(session_id.to_string(), turn_id)) {
+            return Err(DurableTurnStoreError::LiveOwner {
+                session_id: session_id.to_string(),
+                turn_id,
+            });
+        }
+        let result = operation();
+        drop(owners);
+        result
+    }
+
+    /// Perform an owning executor's synchronous mutation while its exact
+    /// reservation is still current. No await, callbacks, or nested owner
+    /// operations are permitted inside the closure.
+    pub(crate) fn with_live_owner<T>(
+        &self,
+        session_id: &str,
+        lease: &LiveTurnOwnerLease,
+        target_turn_id: Option<u64>,
+        operation: impl FnOnce() -> Result<T, DurableTurnStoreError>,
+    ) -> Result<T, DurableTurnStoreError> {
+        let work = &lease.inner.work;
+        if !std::ptr::eq(self, Arc::as_ptr(&work.store)) || work.session_id != session_id {
+            return Err(DurableTurnStoreError::Storage(
+                "mobile live owner does not match this session".into(),
+            ));
+        }
+        let owners = self
+            .live_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if owners.sessions.get(session_id).map(|entry| entry.0) != Some(work.generation) {
+            return Err(DurableTurnStoreError::Storage(
+                "mobile live owner is no longer current".into(),
+            ));
+        }
+        if owners
+            .work
+            .get(&(session_id.to_string(), target_turn_id))
+            .is_some_and(|generation| *generation != work.generation)
+        {
+            return Err(DurableTurnStoreError::LiveOwner {
+                session_id: session_id.to_string(),
+                turn_id: target_turn_id,
+            });
+        }
+        let result = operation();
+        drop(owners);
+        result
     }
 
     pub(crate) fn begin(
@@ -859,16 +1236,22 @@ impl DurableTurnStore {
             bash_should_query: None,
             original_client_turn_id,
             queue_delivery: QueueDeliveryState::Claimed,
+            cancelled_before_claim: false,
             coalesced_batch: None,
             revision: 1,
             state: Some(TurnRecoveryStateDto::Running),
             first_sequence: 0,
             last_sequence: 0,
             safe_to_resume: true,
+            projection_uncertain: false,
             reason: None,
             events: Vec::new(),
         };
-        self.write_metadata_relative(&relative, &checkpoint)?;
+        if let Err(error) = self.write_metadata_relative(&relative, &checkpoint) {
+            cache.remove(&relative);
+            self.forget_session_index(session_id);
+            return Err(error);
+        }
         cache.insert(
             relative,
             CachedTurn {
@@ -1004,16 +1387,22 @@ impl DurableTurnStore {
             bash_should_query: None,
             original_client_turn_id,
             queue_delivery: QueueDeliveryState::Pending,
+            cancelled_before_claim: false,
             coalesced_batch: None,
             revision: 1,
             state: None,
             first_sequence: 0,
             last_sequence: 0,
             safe_to_resume: false,
+            projection_uncertain: false,
             reason: None,
             events: Vec::new(),
         };
-        self.write_metadata_relative(&relative, &checkpoint)?;
+        if let Err(error) = self.write_metadata_relative(&relative, &checkpoint) {
+            cache.remove(&relative);
+            self.forget_session_index(session_id);
+            return Err(error);
+        }
         cache.insert(
             relative,
             CachedTurn {
@@ -1047,9 +1436,7 @@ impl DurableTurnStore {
                     || checkpoint.coalesced_batch.is_some())
                 && matches!(
                     checkpoint.queue_delivery,
-                    QueueDeliveryState::Pending
-                        | QueueDeliveryState::CoalescedPending
-                        | QueueDeliveryState::CoalescedClaimed
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
                 )
         });
         checkpoints.sort_by_key(|checkpoint| (checkpoint.queue_sequence, checkpoint.turn_id));
@@ -1123,19 +1510,12 @@ impl DurableTurnStore {
             ));
         }
         let owner = first.turn_id;
-        if members.iter().enumerate().any(|(index, member)| {
-            let owner_retry = index == 0
-                && member.queue_delivery == QueueDeliveryState::CoalescedClaimed
-                && member
-                    .coalesced_batch
-                    .as_ref()
-                    .is_some_and(|batch| batch.member_turn_ids == member_turn_ids);
+        if members.iter().any(|member| {
             member.state.is_some()
-                || (!owner_retry
-                    && !matches!(
-                        member.queue_delivery,
-                        QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
-                    ))
+                || !matches!(
+                    member.queue_delivery,
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+                )
         }) {
             return Err(DurableTurnStoreError::Terminal {
                 session_id: session_id.to_string(),
@@ -1175,9 +1555,7 @@ impl DurableTurnStore {
             if checkpoint.state.is_some()
                 || !matches!(
                     checkpoint.queue_delivery,
-                    QueueDeliveryState::Pending
-                        | QueueDeliveryState::CoalescedPending
-                        | QueueDeliveryState::CoalescedClaimed
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
                 )
             {
                 return Err(DurableTurnStoreError::Terminal {
@@ -1196,6 +1574,9 @@ impl DurableTurnStore {
             }
             checkpoint.coalesced_batch = Some(batch.clone());
             checkpoint.queue_delivery = QueueDeliveryState::CoalescedClaimed;
+            checkpoint.safe_to_resume = false;
+            checkpoint.projection_uncertain = true;
+            checkpoint.reason = Some("mid_turn_claim_requires_confirmation".into());
             Ok(Some(()))
         })?;
         Ok(batch)
@@ -1250,13 +1631,34 @@ impl DurableTurnStore {
         session_id: &str,
         turn_id: u64,
     ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
-        let claimed = self.update(session_id, turn_id, |checkpoint| {
+        let mut cache = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if !checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.turn_id == turn_id)
+        {
+            return Err(DurableTurnStoreError::NotFound {
+                session_id: session_id.to_owned(),
+                turn_id,
+            });
+        }
+        if checkpoints.iter().any(|checkpoint| {
+            checkpoint.turn_id != turn_id
+                && checkpoint
+                    .coalesced_batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.member_turn_ids.contains(&turn_id))
+        }) {
+            return Err(DurableTurnStoreError::Terminal {
+                session_id: session_id.to_owned(),
+                turn_id,
+            });
+        }
+        let claimed = self.update_if_locked(&mut cache, session_id, turn_id, |checkpoint| {
             if checkpoint.state.is_some()
                 || !matches!(
                     checkpoint.queue_delivery,
-                    QueueDeliveryState::Pending
-                        | QueueDeliveryState::CoalescedPending
-                        | QueueDeliveryState::CoalescedClaimed
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
                 )
             {
                 return Err(DurableTurnStoreError::Terminal {
@@ -1266,11 +1668,31 @@ impl DurableTurnStore {
             }
             checkpoint.state = Some(TurnRecoveryStateDto::Running);
             checkpoint.queue_delivery = QueueDeliveryState::Claimed;
-            checkpoint.safe_to_resume = true;
+            checkpoint.safe_to_resume = !checkpoint.projection_uncertain;
             checkpoint.reason = None;
-            Ok(checkpoint.clone())
+            Ok(Some(checkpoint.clone()))
         })?;
-        Ok(claimed)
+        Ok(claimed.expect("claim always updates the checkpoint"))
+    }
+
+    /// Recreate a checkpoint produced by an older process for recovery tests.
+    #[cfg(test)]
+    pub(crate) fn claim_legacy_batch_for_test(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<(), DurableTurnStoreError> {
+        self.update(session_id, turn_id, |checkpoint| {
+            if checkpoint.queue_delivery != QueueDeliveryState::CoalescedClaimed {
+                return Err(DurableTurnStoreError::NotClaimed {
+                    session_id: session_id.into(),
+                    turn_id,
+                });
+            }
+            checkpoint.state = Some(TurnRecoveryStateDto::Running);
+            checkpoint.queue_delivery = QueueDeliveryState::Claimed;
+            Ok(())
+        })
     }
 
     /// Atomically cross the exactly-once dispatch boundary for a raw slash
@@ -1369,7 +1791,7 @@ impl DurableTurnStore {
             checkpoint.bash_result = Some(result);
             checkpoint.bash_result_row_id = Some(MessageId::new());
             checkpoint.queue_delivery = QueueDeliveryState::Claimed;
-            checkpoint.safe_to_resume = true;
+            checkpoint.safe_to_resume = !checkpoint.projection_uncertain;
             checkpoint.reason = None;
             Ok(checkpoint.clone())
         })
@@ -1406,7 +1828,7 @@ impl DurableTurnStore {
             checkpoint.prompt_mode = None;
             checkpoint.state = Some(TurnRecoveryStateDto::Running);
             checkpoint.queue_delivery = QueueDeliveryState::Claimed;
-            checkpoint.safe_to_resume = true;
+            checkpoint.safe_to_resume = !checkpoint.projection_uncertain;
             checkpoint.reason = None;
             Ok(checkpoint.clone())
         })
@@ -1515,6 +1937,13 @@ impl DurableTurnStore {
         }
     }
 
+    fn forget_session_index(&self, session_id: &str) {
+        self.session_turn_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
+    }
+
     pub(crate) fn load(
         &self,
         session_id: &str,
@@ -1572,7 +2001,15 @@ impl DurableTurnStore {
                 });
             }
 
-            let sequence = cached.checkpoint.last_sequence.saturating_add(1);
+            let sequence = cached
+                .checkpoint
+                .last_sequence
+                .checked_add(1)
+                .ok_or_else(|| {
+                    DurableTurnStoreError::Storage(
+                        "mobile event sequence space is exhausted".into(),
+                    )
+                })?;
             let event = DurableTurnEvent {
                 sequence,
                 event_json,
@@ -1589,7 +2026,6 @@ impl DurableTurnStore {
                     checkpoint.first_sequence = sequence;
                 }
                 checkpoint.events.push(event.clone());
-                checkpoint.revision = checkpoint.revision.saturating_add(1);
                 checkpoint.reconcile_sequences();
                 let result = self
                     .write_compacted_journal_relative(&relative, &checkpoint.events)
@@ -1619,7 +2055,6 @@ impl DurableTurnStore {
                         cached.checkpoint.first_sequence = sequence;
                     }
                     cached.checkpoint.events.push(event.clone());
-                    cached.checkpoint.revision = cached.checkpoint.revision.saturating_add(1);
                     cached.journal_event_count = journal_event_count;
                 }
                 result
@@ -1662,7 +2097,8 @@ impl DurableTurnStore {
                 });
             }
             checkpoint.state = Some(state.clone());
-            checkpoint.safe_to_resume = safe_to_resume && !state.is_terminal();
+            checkpoint.safe_to_resume =
+                safe_to_resume && !state.is_terminal() && !checkpoint.projection_uncertain;
             checkpoint.reason = reason;
             if state.is_terminal() && state != TurnRecoveryStateDto::Cancelled {
                 checkpoint.queue_delivery = QueueDeliveryState::Delivered;
@@ -1689,12 +2125,66 @@ impl DurableTurnStore {
                 return Ok(None);
             }
             checkpoint.state = Some(state.clone());
-            checkpoint.safe_to_resume = safe_to_resume && !state.is_terminal();
+            checkpoint.safe_to_resume =
+                safe_to_resume && !state.is_terminal() && !checkpoint.projection_uncertain;
             checkpoint.reason = reason;
             if state.is_terminal() && state != TurnRecoveryStateDto::Cancelled {
                 checkpoint.queue_delivery = QueueDeliveryState::Delivered;
             }
             Ok(Some(checkpoint.snapshot()))
+        })
+    }
+
+    /// Persist the tool side-effect boundary before the orchestrator may
+    /// schedule a tool or its hooks. Repeated admissions are idempotent.
+    pub(crate) fn mark_tool_dispatch_unsafe(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<(), DurableTurnStoreError> {
+        self.update_if(session_id, turn_id, |checkpoint| {
+            if !matches!(
+                checkpoint.state.as_ref(),
+                Some(TurnRecoveryStateDto::Running | TurnRecoveryStateDto::WaitingForUser)
+            ) {
+                return Err(DurableTurnStoreError::Terminal {
+                    session_id: session_id.to_owned(),
+                    turn_id,
+                });
+            }
+            if !checkpoint.safe_to_resume {
+                return Ok(None);
+            }
+            checkpoint.safe_to_resume = false;
+            checkpoint.reason = Some("tool_boundary_requires_confirmation".into());
+            Ok(Some(()))
+        })?;
+        Ok(())
+    }
+
+    /// Force the unsafe recovery boundary before exposing the first material
+    /// turn output. Even an acknowledged journal append can be lost on a
+    /// crash before its next fsync, so the decision must precede both retained
+    /// and live-only delivery. Rewrite the metadata even when already unsafe:
+    /// this call must not acknowledge an earlier ambiguous metadata write.
+    pub(crate) fn fence_observed_turn_output(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<(), DurableTurnStoreError> {
+        self.update(session_id, turn_id, |checkpoint| {
+            let Some(state) = checkpoint.state.as_ref() else {
+                return Err(DurableTurnStoreError::NotClaimed {
+                    session_id: session_id.to_owned(),
+                    turn_id,
+                });
+            };
+            if checkpoint.safe_to_resume && !state.is_terminal() {
+                checkpoint.reason = Some("turn_output_requires_confirmation".into());
+            }
+            checkpoint.safe_to_resume = false;
+            checkpoint.projection_uncertain = true;
+            Ok(())
         })
     }
 
@@ -1712,8 +2202,17 @@ impl DurableTurnStore {
             checkpoint.coalesced_batch.as_ref().is_some_and(|batch| {
                 batch.member_turn_ids.contains(&turn_id)
                     && batch.owner_turn_id == checkpoint.turn_id
-                    && checkpoint.state.is_none()
-                    && checkpoint.queue_delivery == QueueDeliveryState::CoalescedClaimed
+                    && ((checkpoint.state.is_none()
+                        && matches!(
+                            checkpoint.queue_delivery,
+                            QueueDeliveryState::CoalescedClaimed
+                        ))
+                        || (turn_id != batch.owner_turn_id
+                            && (checkpoint.state.is_some()
+                                || matches!(
+                                    checkpoint.queue_delivery,
+                                    QueueDeliveryState::Claimed | QueueDeliveryState::Delivered
+                                ))))
             })
         }) {
             return Err(DurableTurnStoreError::Terminal {
@@ -1739,10 +2238,21 @@ impl DurableTurnStore {
             let is_private_queue_entry = checkpoint.state.is_none()
                 && matches!(
                     checkpoint.queue_delivery,
-                    QueueDeliveryState::Pending
-                        | QueueDeliveryState::CoalescedPending
-                        | QueueDeliveryState::SlashClaimed
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
                 );
+            if checkpoint.queue_delivery == QueueDeliveryState::SlashClaimed {
+                // A claimed slash may already have produced effects. Publish a
+                // correlated terminal snapshot, but retain projection uncertainty.
+                checkpoint.projection_uncertain = true;
+            }
+            if checkpoint.state.is_none()
+                && matches!(
+                    checkpoint.queue_delivery,
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+                )
+            {
+                checkpoint.cancelled_before_claim = true;
+            }
             if !is_private_queue_entry {
                 checkpoint.state = Some(TurnRecoveryStateDto::Cancelled);
             }
@@ -1814,11 +2324,14 @@ impl DurableTurnStore {
             checkpoint.coalesced_batch.as_ref().is_some_and(|batch| {
                 batch.member_turn_ids.contains(&turn_id)
                     && batch.owner_turn_id == checkpoint.turn_id
-                    && checkpoint.state.is_none()
             })
         });
         if owner.is_some_and(|checkpoint| {
-            checkpoint.queue_delivery == QueueDeliveryState::CoalescedClaimed
+            checkpoint.state.is_some()
+                || !matches!(
+                    checkpoint.queue_delivery,
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+                )
         }) {
             // The owner envelope is the irreversible admission point. The
             // host routes cancellation through the already-owned active turn.
@@ -1856,12 +2369,36 @@ impl DurableTurnStore {
                     return Ok(None);
                 }
                 checkpoint.queue_delivery = QueueDeliveryState::Cancelled;
+                checkpoint.cancelled_before_claim = true;
                 checkpoint.safe_to_resume = false;
                 checkpoint.reason = Some("explicit_cancel".to_string());
                 Ok(Some(()))
             })?;
         }
         Ok(Some(member_ids))
+    }
+
+    /// Publish an explicitly cancelled private entry as a client-visible
+    /// terminal turn. Its queue cancellation must already be durable.
+    pub(crate) fn expose_cancelled_pending(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<TurnRecoverySnapshotDto, DurableTurnStoreError> {
+        self.update(session_id, turn_id, |checkpoint| {
+            if checkpoint.state.is_some()
+                || checkpoint.queue_delivery != QueueDeliveryState::Cancelled
+            {
+                return Err(DurableTurnStoreError::Terminal {
+                    session_id: session_id.to_string(),
+                    turn_id,
+                });
+            }
+            checkpoint.state = Some(TurnRecoveryStateDto::Cancelled);
+            checkpoint.safe_to_resume = false;
+            checkpoint.reason = Some("explicit_cancel".into());
+            Ok(checkpoint.snapshot())
+        })
     }
 
     pub(crate) fn coalesced_owner_for_member(
@@ -1883,19 +2420,154 @@ impl DurableTurnStore {
         }))
     }
 
+    /// Describe exactly one queued member from a single locked store view.
+    /// The batch owner is its first queued member, not the active model turn.
+    pub(crate) fn queued_turn_status(
+        &self,
+        session_id: &str,
+        member_turn_id: u64,
+    ) -> Result<QueuedTurnStatusDto, DurableTurnStoreError> {
+        let mut cache = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        let target = checkpoints
+            .iter()
+            .find(|item| item.turn_id == member_turn_id)
+            .ok_or_else(|| DurableTurnStoreError::NotFound {
+                session_id: session_id.to_owned(),
+                turn_id: member_turn_id,
+            })?;
+        if target.cancelled_before_claim {
+            if target.queue_delivery != QueueDeliveryState::Cancelled
+                || target
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| *state != TurnRecoveryStateDto::Cancelled)
+            {
+                return Err(DurableTurnStoreError::Storage(
+                    "inconsistent pre-claim cancellation marker".into(),
+                ));
+            }
+            return Ok(QueuedTurnStatusDto::Cancelled);
+        }
+        if let Some(state) = &target.state {
+            return Ok(if state.is_terminal() {
+                QueuedTurnStatusDto::Terminal {
+                    state: state.clone(),
+                }
+            } else if *state == TurnRecoveryStateDto::Running {
+                QueuedTurnStatusDto::Running
+            } else {
+                QueuedTurnStatusDto::ClaimedUncertain
+            });
+        }
+        let mut owners = checkpoints.iter().filter(|item| {
+            item.coalesced_batch
+                .as_ref()
+                .is_some_and(|batch| batch.member_turn_ids.contains(&member_turn_id))
+        });
+        if let Some(owner) = owners.next() {
+            if owners.next().is_some() {
+                return Err(DurableTurnStoreError::Storage(
+                    "queued member belongs to multiple batches".into(),
+                ));
+            }
+            let batch = owner.coalesced_batch.as_ref().expect("matched batch");
+            let unique = batch
+                .member_turn_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            if batch.owner_turn_id != owner.turn_id
+                || batch.member_turn_ids.first() != Some(&owner.turn_id)
+                || unique.len() != batch.member_turn_ids.len()
+                || batch.member_identities.len() != batch.member_turn_ids.len()
+                || !batch
+                    .member_identities
+                    .iter()
+                    .zip(&batch.member_turn_ids)
+                    .all(|(identity, id)| identity.turn_id == *id)
+                || batch
+                    .member_identities
+                    .last()
+                    .is_none_or(|identity| identity.prompt_identity != batch.aggregate_identity)
+            {
+                return Err(DurableTurnStoreError::Storage(
+                    "queued batch identity is inconsistent".into(),
+                ));
+            }
+            if owner.state.is_none() && owner.queue_delivery == QueueDeliveryState::Delivered {
+                // A prior write may have returned an ambiguous error after its
+                // rename. Confirm the file and directory entries are durable
+                // before exposing this batch as a delivered receipt.
+                self.sync_metadata_relative(&relative_path(session_id, owner.turn_id)?)?;
+                return Ok(QueuedTurnStatusDto::Delivered {
+                    batch_owner_turn_id: batch.owner_turn_id,
+                    member_turn_ids: batch.member_turn_ids.clone(),
+                    transcript_uuid: batch.aggregate_identity.message_id.as_uuid().to_string(),
+                });
+            }
+            if owner.queue_delivery == QueueDeliveryState::Cancelled {
+                if owner.cancelled_before_claim {
+                    self.sync_metadata_relative(&relative_path(session_id, owner.turn_id)?)?;
+                    return Ok(QueuedTurnStatusDto::Cancelled);
+                }
+                return Ok(QueuedTurnStatusDto::ClaimedUncertain);
+            }
+            if owner.state.is_some()
+                || matches!(
+                    owner.queue_delivery,
+                    QueueDeliveryState::CoalescedClaimed | QueueDeliveryState::Claimed
+                )
+            {
+                return Ok(QueuedTurnStatusDto::ClaimedUncertain);
+            }
+        }
+        Ok(match target.queue_delivery {
+            QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending => {
+                QueuedTurnStatusDto::Pending
+            }
+            _ => QueuedTurnStatusDto::ClaimedUncertain,
+        })
+    }
+
     pub(crate) fn resume(
         &self,
         session_id: &str,
         turn_id: u64,
     ) -> Result<(ResumeDisposition, Option<TurnRecoverySnapshotDto>), DurableTurnStoreError> {
-        self.update(session_id, turn_id, |checkpoint| {
+        let mut cache = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if !checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.turn_id == turn_id)
+        {
+            return Err(DurableTurnStoreError::NotFound {
+                session_id: session_id.to_owned(),
+                turn_id,
+            });
+        }
+        if checkpoints.iter().any(|checkpoint| {
+            checkpoint.turn_id != turn_id
+                && checkpoint
+                    .coalesced_batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.member_turn_ids.contains(&turn_id))
+                && (checkpoint.state.is_some()
+                    || !matches!(
+                        checkpoint.queue_delivery,
+                        QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+                    ))
+        }) {
+            return Ok((ResumeDisposition::WaitingForUser, None));
+        }
+        self.update_if_locked(&mut cache, session_id, turn_id, |checkpoint| {
             if checkpoint.state.is_none() {
                 return match checkpoint.queue_delivery {
-                    QueueDeliveryState::Pending
-                    | QueueDeliveryState::CoalescedPending
-                    | QueueDeliveryState::CoalescedClaimed => Ok((ResumeDisposition::Queued, None)),
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending => {
+                        Ok((ResumeDisposition::Queued, None))
+                    }
                     QueueDeliveryState::SlashClaimed => Ok((ResumeDisposition::Terminal, None)),
-                    QueueDeliveryState::BashClaimed => {
+                    QueueDeliveryState::BashClaimed | QueueDeliveryState::CoalescedClaimed => {
                         Ok((ResumeDisposition::WaitingForUser, None))
                     }
                     QueueDeliveryState::Delivered | QueueDeliveryState::Cancelled => {
@@ -1905,7 +2577,8 @@ impl DurableTurnStore {
                         session_id: session_id.to_string(),
                         turn_id,
                     }),
-                };
+                }
+                .map(Some);
             }
             let state =
                 checkpoint
@@ -1929,8 +2602,9 @@ impl DurableTurnStore {
                 }
                 ResumeDisposition::WaitingForUser
             };
-            Ok((disposition, Some(checkpoint.snapshot())))
+            Ok(Some((disposition, Some(checkpoint.snapshot()))))
         })
+        .map(|value| value.expect("resume always updates the checkpoint"))
     }
 
     #[cfg(test)]
@@ -1954,7 +2628,12 @@ impl DurableTurnStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let relative = relative_path(session_id, turn_id)?;
         let cached = self.load_cached_turn(&mut cache, &relative)?.clone();
-        self.write_compacted_journal_relative(&relative, &cached.checkpoint.events)?;
+        if let Err(error) =
+            self.write_compacted_journal_relative(&relative, &cached.checkpoint.events)
+        {
+            cache.remove(&relative);
+            return Err(error);
+        }
         cache.insert(
             relative,
             CachedTurn {
@@ -2012,13 +2691,35 @@ impl DurableTurnStore {
 
         let cached = self.load_cached_turn(cache, &relative)?.clone();
         let mut checkpoint = cached.checkpoint.clone();
+        // Mutators may return a snapshot or a checkpoint. Reconcile the
+        // retention window before they create that value so it agrees with
+        // the metadata committed below, even within the compaction slack.
+        checkpoint.reconcile_sequences();
+        // Mutators may return a checkpoint or snapshot. Make the candidate
+        // revision visible to them so their returned value is the committed
+        // revision, not the previous one. A no-op does not consume a version.
+        let next_revision = checkpoint.revision.checked_add(1);
+        if let Some(revision) = next_revision {
+            checkpoint.revision = revision;
+        }
         let Some(value) = mutate(&mut checkpoint)? else {
             return Ok(None);
         };
+        if next_revision.is_none() {
+            return Err(DurableTurnStoreError::Storage(
+                "mobile checkpoint revision space is exhausted".into(),
+            ));
+        }
         checkpoint.reconcile_sequences();
-        checkpoint.revision = checkpoint.revision.saturating_add(1);
-        self.sync_journal_relative(&relative)?;
-        self.write_metadata_relative(&relative, &checkpoint)?;
+        if let Err(error) = self
+            .sync_journal_relative(&relative)
+            .and_then(|()| self.write_metadata_relative(&relative, &checkpoint))
+        {
+            // An atomic rename may have succeeded even when its parent fsync
+            // failed. Never reuse a cache that can predate the on-disk state.
+            cache.remove(&relative);
+            return Err(error);
+        }
         cache.insert(
             relative,
             CachedTurn {
@@ -2030,7 +2731,8 @@ impl DurableTurnStore {
     }
 
     fn sync_journal_relative(&self, relative: &Path) -> Result<(), DurableTurnStoreError> {
-        let journal = self.root.join(journal_relative_path(relative)?);
+        let journal_relative = journal_relative_path(relative)?;
+        let journal = self.root.join(&journal_relative);
         let exists = journal
             .try_exists()
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
@@ -2046,6 +2748,8 @@ impl DurableTurnStore {
         #[cfg(test)]
         self.journal_sync_count.fetch_add(1, Ordering::Relaxed);
         file.sync_data()
+            .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        lingxi_core::host::rooted_fs::sync_parent_pinned(&self.root, &journal_relative, None)
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))
     }
 
@@ -2075,13 +2779,78 @@ impl DurableTurnStore {
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         let metadata = serde_json::from_str::<StoredTurnMetadata>(&body)
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        // A prior rename can be visible despite a failed parent fsync. Before
+        // returning that version, confirm both the final file and its entry.
+        self.sync_metadata_relative(relative)?;
+        let metadata_state = (
+            metadata.state.clone(),
+            metadata.safe_to_resume,
+            metadata.reason.clone(),
+            metadata.queue_delivery,
+        );
         let journal_events = self.read_journal_relative(relative)?;
         let journal_event_count = journal_events.len();
-        let checkpoint = DurableTurnCheckpoint::from_parts(metadata, journal_events);
+        let mut checkpoint = DurableTurnCheckpoint::from_parts(metadata, journal_events);
+        let recovered_state = (
+            checkpoint.state.clone(),
+            checkpoint.safe_to_resume,
+            checkpoint.reason.clone(),
+            checkpoint.queue_delivery,
+        );
+        if recovered_state != metadata_state {
+            // A synced terminal event can precede its metadata transition. Do
+            // not expose the inferred state until its new version is durable.
+            checkpoint.revision = checkpoint.revision.checked_add(1).ok_or_else(|| {
+                DurableTurnStoreError::Storage(
+                    "mobile checkpoint revision space is exhausted".into(),
+                )
+            })?;
+            self.sync_journal_relative(relative)?;
+            self.write_metadata_relative(relative, &checkpoint)?;
+        }
         Ok(CachedTurn {
             checkpoint,
             journal_event_count,
         })
+    }
+
+    fn sync_store_directory_entries(&self, relative: &Path) -> Result<(), DurableTurnStoreError> {
+        let root_parent = self.root.parent().ok_or_else(|| {
+            DurableTurnStoreError::Storage("durable turn root has no parent".into())
+        })?;
+        let root_name = self.root.file_name().ok_or_else(|| {
+            DurableTurnStoreError::Storage("durable turn root has no name".into())
+        })?;
+        // Durability above this root depends on the host establishing its home
+        // directory durably. Sync both directory entries owned by this store
+        // before acknowledging a checkpoint, including after an ambiguous
+        // failure.
+        lingxi_core::host::rooted_fs::sync_parent_pinned(root_parent, Path::new(root_name), None)
+            .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        let session = relative.parent().ok_or_else(|| {
+            DurableTurnStoreError::Storage("durable turn path has no session directory".into())
+        })?;
+        lingxi_core::host::rooted_fs::sync_parent_pinned(&self.root, session, None)
+            .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))
+    }
+
+    fn sync_metadata_relative(&self, relative: &Path) -> Result<(), DurableTurnStoreError> {
+        #[cfg(test)]
+        if self
+            .fail_before_metadata_sync
+            .swap(false, Ordering::Relaxed)
+        {
+            return Err(DurableTurnStoreError::Storage(
+                "injected failure before metadata sync".into(),
+            ));
+        }
+        let file = lingxi_core::host::rooted_fs::open_read_file_pinned(&self.root, relative, None)
+            .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        lingxi_core::host::rooted_fs::sync_parent_pinned(&self.root, relative, None)
+            .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        self.sync_store_directory_entries(relative)
     }
 
     fn write_metadata_relative(
@@ -2089,12 +2858,22 @@ impl DurableTurnStore {
         relative: &Path,
         checkpoint: &DurableTurnCheckpoint,
     ) -> Result<(), DurableTurnStoreError> {
+        #[cfg(test)]
+        if self
+            .fail_before_metadata_write
+            .swap(false, Ordering::Relaxed)
+        {
+            return Err(DurableTurnStoreError::Storage(
+                "injected failure before metadata write".into(),
+            ));
+        }
         std::fs::create_dir_all(&self.root)
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         if let Some(parent) = relative.parent() {
             std::fs::create_dir_all(self.root.join(parent))
                 .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         }
+        self.sync_store_directory_entries(relative)?;
         let mut body = serde_json::to_vec_pretty(&checkpoint.stored_metadata())
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         body.push(b'\n');
@@ -2104,7 +2883,17 @@ impl DurableTurnStore {
             &body,
             lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
         )
-        .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))
+        .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        #[cfg(test)]
+        if self
+            .fail_after_metadata_publish
+            .swap(false, Ordering::Relaxed)
+        {
+            return Err(DurableTurnStoreError::Storage(
+                "injected failure after metadata publication".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn append_journal_relative(
@@ -2113,7 +2902,17 @@ impl DurableTurnStore {
         event: &DurableTurnEvent,
         durable: bool,
     ) -> Result<(), DurableTurnStoreError> {
-        let journal = self.root.join(journal_relative_path(relative)?);
+        #[cfg(test)]
+        if self
+            .fail_before_journal_write
+            .swap(false, Ordering::Relaxed)
+        {
+            return Err(DurableTurnStoreError::Storage(
+                "injected failure before journal write".into(),
+            ));
+        }
+        let journal_relative = journal_relative_path(relative)?;
+        let journal = self.root.join(&journal_relative);
         if let Some(parent) = journal.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
@@ -2129,11 +2928,59 @@ impl DurableTurnStore {
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         file.flush()
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+        #[cfg(test)]
+        if self.fail_after_journal_flush.swap(false, Ordering::Relaxed) {
+            return Err(DurableTurnStoreError::Storage(
+                "injected failure after journal flush".into(),
+            ));
+        }
         if durable {
             file.sync_data()
                 .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
+            // sync_data alone does not persist a newly created journal name.
+            lingxi_core::host::rooted_fs::sync_parent_pinned(&self.root, &journal_relative, None)
+                .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_after_next_journal_flush(&self) {
+        self.fail_after_journal_flush.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_before_next_journal_write(&self) {
+        self.fail_before_journal_write
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_after_next_metadata_publish(&self) {
+        self.fail_after_metadata_publish
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_midturn_ack_barrier(
+        &self,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        *self
+            .midturn_ack_barrier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((entered, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_midturn_ack_barrier(
+        &self,
+    ) -> Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)> {
+        self.midturn_ack_barrier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     fn write_compacted_journal_relative(
@@ -2208,6 +3055,56 @@ fn join_source_prompts(prompts: &[Utf16JsonProjection]) -> Utf16JsonProjection {
         .expect("joined source prompt is a valid root string")
 }
 
+/// Resolve an existing root (including symlinks), or its nearest existing
+/// ancestor when no turn directory exists yet. Preserve path components as
+/// `OsString` rather than merging distinct non-UTF-8 paths via a lossy key.
+fn canonical_store_root(root: &Path) -> Result<PathBuf, DurableTurnStoreError> {
+    let mut ancestor = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?
+            .join(root)
+    };
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::canonicalize(&ancestor) {
+            Ok(mut canonical) => {
+                for component in suffix.into_iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // An existing but dangling symlink is not a missing directory:
+                // silently treating it as one could create two registry keys.
+                match std::fs::symlink_metadata(&ancestor) {
+                    Ok(_) => return Err(DurableTurnStoreError::Storage(error.to_string())),
+                    Err(metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(metadata_error) => {
+                        return Err(DurableTurnStoreError::Storage(metadata_error.to_string()));
+                    }
+                }
+                let name = ancestor.file_name().ok_or_else(|| {
+                    DurableTurnStoreError::Storage(format!(
+                        "cannot resolve durable turn root {}: {error}",
+                        root.display()
+                    ))
+                })?;
+                suffix.push(name.to_os_string());
+                if !ancestor.pop() {
+                    return Err(DurableTurnStoreError::Storage(format!(
+                        "cannot resolve durable turn root {}: {error}",
+                        root.display()
+                    )));
+                }
+            }
+            Err(error) => return Err(DurableTurnStoreError::Storage(error.to_string())),
+        }
+    }
+}
+
 fn relative_path(session_id: &str, turn_id: u64) -> Result<PathBuf, DurableTurnStoreError> {
     let valid = !session_id.is_empty()
         && session_id.len() <= 128
@@ -2263,6 +3160,429 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = DurableTurnStore::new(temp.path().join("turns"));
         (temp, store)
+    }
+
+    #[test]
+    fn metadata_without_projection_marker_is_conservatively_uncertain() {
+        let (temp, store) = store();
+        store
+            .begin("session", 75, "prompt".into(), None, vec![])
+            .unwrap();
+        let path = temp
+            .path()
+            .join("turns")
+            .join(relative_path("session", 75).unwrap());
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(metadata["projection_uncertain"], false);
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("projection_uncertain");
+        let legacy = serde_json::to_vec(&metadata).unwrap();
+        std::fs::write(&path, &legacy).unwrap();
+
+        let reopened = DurableTurnStore::new(temp.path().join("turns"));
+        assert!(
+            reopened
+                .load("session", 75)
+                .unwrap()
+                .snapshot()
+                .projection_uncertain
+        );
+        let migrated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(migrated["prompt"], metadata["prompt"]);
+        assert_eq!(migrated["session_id"], metadata["session_id"]);
+        assert_eq!(migrated["projection_uncertain"], true);
+        assert_eq!(migrated["safe_to_resume"], false);
+        let paused = reopened
+            .transition(
+                "session",
+                75,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("background".into()),
+            )
+            .unwrap();
+        assert!(paused.projection_uncertain);
+        assert!(!paused.safe_to_resume);
+        assert_eq!(
+            reopened.resume("session", 75).unwrap().0,
+            ResumeDisposition::WaitingForUser
+        );
+        assert!(
+            DurableTurnStore::new(temp.path().join("turns"))
+                .load("session", 75)
+                .unwrap()
+                .projection_uncertain
+        );
+    }
+
+    #[test]
+    fn claiming_old_queued_metadata_cannot_restore_safe_recovery() {
+        let (temp, store) = store();
+        let queued = store
+            .admit_queued_prompt("session", None, Some(77), "prompt".into(), None, vec![])
+            .unwrap();
+        let path = temp
+            .path()
+            .join("turns")
+            .join(relative_path("session", queued.turn_id).unwrap());
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("projection_uncertain");
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let reopened = DurableTurnStore::new(temp.path().join("turns"));
+        let claimed = reopened.claim_pending("session", queued.turn_id).unwrap();
+        assert!(claimed.snapshot().projection_uncertain);
+        assert!(!claimed.snapshot().safe_to_resume);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        assert_eq!(
+            cold.resume("session", queued.turn_id).unwrap().0,
+            ResumeDisposition::WaitingForUser
+        );
+
+        let fresh = reopened
+            .admit_queued_prompt("session", None, Some(78), "fresh".into(), None, vec![])
+            .unwrap();
+        let fresh_claimed = reopened.claim_pending("session", fresh.turn_id).unwrap();
+        assert!(fresh_claimed.safe_to_resume);
+        assert!(!fresh_claimed.projection_uncertain);
+    }
+
+    #[test]
+    fn corrupt_metadata_recovery_fails_without_overwriting_the_source() {
+        let (temp, store) = store();
+        store
+            .begin("session", 76, "prompt".into(), None, vec![])
+            .unwrap();
+        let path = temp
+            .path()
+            .join("turns")
+            .join(relative_path("session", 76).unwrap());
+        let damaged = b"{\"session_id\":\"session\",\"projection_uncertain\":";
+        std::fs::write(&path, damaged).unwrap();
+        let reopened = DurableTurnStore::new(temp.path().join("turns"));
+        assert!(matches!(
+            reopened.load("session", 76),
+            Err(DurableTurnStoreError::Storage(_))
+        ));
+        assert!(matches!(
+            reopened.resume("session", 76),
+            Err(DurableTurnStoreError::Storage(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    }
+
+    #[test]
+    fn unknown_metadata_fields_are_preserved_by_refusing_migration() {
+        let (temp, store) = store();
+        store
+            .begin("session", 79, "prompt".into(), None, vec![])
+            .unwrap();
+        let path = temp
+            .path()
+            .join("turns")
+            .join(relative_path("session", 79).unwrap());
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("projection_uncertain");
+        metadata["future_schema_field"] = serde_json::json!({"data": "retain me"});
+        let original = serde_json::to_vec(&metadata).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let reopened = DurableTurnStore::new(temp.path().join("turns"));
+        assert!(matches!(
+            reopened.load("session", 79),
+            Err(DurableTurnStoreError::Storage(_))
+        ));
+        assert!(matches!(
+            reopened.resume("session", 79),
+            Err(DurableTurnStoreError::Storage(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn shared_factory_reuses_cache_and_session_index_for_a_missing_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("turns");
+        let first = DurableTurnStore::open_shared(root.clone()).unwrap();
+        assert!(!root.exists(), "opening a store must not create turn data");
+        assert!(first.scan_pending("session").unwrap().is_empty());
+        let second = DurableTurnStore::open_shared(root).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        let admitted = second
+            .admit_queued_prompt("session", None, None, "first".into(), None, vec![])
+            .unwrap();
+        assert_eq!(admitted.turn_id, 1);
+        assert_eq!(first.scan_pending("session").unwrap().len(), 1);
+        let next = first
+            .admit_queued_prompt("session", None, None, "second".into(), None, vec![])
+            .unwrap();
+        assert_eq!((next.turn_id, next.queue_sequence), (2, 2));
+    }
+
+    #[test]
+    fn concurrent_first_open_publishes_only_one_shared_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("turns");
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let workers = (0..4)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    DurableTurnStore::open_shared(root).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let stores = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(stores.iter().all(|store| Arc::ptr_eq(&stores[0], store)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_factory_normalizes_existing_symlink_ancestors() {
+        let temp = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+        let first = DurableTurnStore::open_shared(temp.path().join("turns")).unwrap();
+        let second = DurableTurnStore::open_shared(alias.join("turns")).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        first
+            .begin("session", 1, "prompt".into(), None, vec![])
+            .unwrap();
+        let after_creation = DurableTurnStore::open_shared(alias.join("turns")).unwrap();
+        assert!(Arc::ptr_eq(&first, &after_creation));
+    }
+
+    #[test]
+    fn shared_factory_serializes_concurrent_events_and_keeps_state_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("turns");
+        let first = DurableTurnStore::open_shared(root.clone()).unwrap();
+        first
+            .begin("session", 1, "prompt".into(), None, vec![])
+            .unwrap();
+        let mut workers = Vec::new();
+        for worker in 0..4 {
+            let root = root.clone();
+            workers.push(std::thread::spawn(move || {
+                let store = DurableTurnStore::open_shared(root).unwrap();
+                for event in 0..25 {
+                    store
+                        .append_event(
+                            "session",
+                            1,
+                            format!(r#"{{"type":"text_delta","text":"{worker}-{event}"}}"#),
+                        )
+                        .unwrap();
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let checkpoint = first.load("session", 1).unwrap();
+        assert_eq!(checkpoint.revision, 1);
+        assert_eq!(checkpoint.last_sequence, 100);
+        assert_eq!(
+            checkpoint
+                .events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            (1..=100).collect::<Vec<_>>()
+        );
+        let snapshot = first
+            .transition(
+                "session",
+                1,
+                TurnRecoveryStateDto::PausedRecoverable,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(snapshot.revision, 2);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let recovered = cold.load("session", 1).unwrap();
+        assert_eq!((recovered.revision, recovered.last_sequence), (2, 100));
+        assert_eq!(recovered.events, checkpoint.events);
+    }
+
+    #[test]
+    fn live_owner_lease_outlives_the_handle_and_rejects_other_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("turns");
+        let store = DurableTurnStore::open_shared(root.clone()).unwrap();
+        store
+            .begin("session", 1, "prompt".into(), None, vec![])
+            .unwrap();
+        let lease = store.reserve_live_owner("session", Some(1)).unwrap();
+        let work = lease.clone();
+        drop(lease);
+        let second = DurableTurnStore::open_shared(root).unwrap();
+        assert!(matches!(
+            second.reserve_live_owner("session", Some(2)),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        assert!(matches!(
+            second.with_no_live_owner("session", Some(1), || second.cancel("session", 1)),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        assert_eq!(
+            second.load("session", 1).unwrap().state,
+            Some(TurnRecoveryStateDto::Running)
+        );
+        second
+            .with_live_owner("session", &work, Some(1), || Ok(()))
+            .unwrap();
+        drop(store);
+        drop(second);
+        let reopened = DurableTurnStore::open_shared(temp.path().join("turns")).unwrap();
+        assert!(matches!(
+            reopened.reserve_live_owner("session", Some(2)),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        drop(work);
+        let new_owner = reopened.reserve_live_owner("session", Some(2)).unwrap();
+        reopened
+            .with_live_owner("session", &new_owner, Some(2), || Ok(()))
+            .unwrap();
+    }
+
+    #[test]
+    fn detached_work_guards_only_its_old_turn_after_execution_slot_is_released() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = DurableTurnStore::open_shared(temp.path().join("turns")).unwrap();
+        let owner = store.reserve_live_owner("session", Some(1)).unwrap();
+        let detached = owner.detached_work_lease();
+        drop(owner);
+        assert!(matches!(
+            store.reserve_live_owner("session", Some(1)),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        assert!(matches!(
+            store.with_no_live_owner("session", Some(1), || Ok(())),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        let next = store.reserve_live_owner("session", Some(2)).unwrap();
+        assert!(matches!(
+            store.with_live_owner("session", &next, Some(1), || Ok(())),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        drop(next);
+        assert!(matches!(
+            store.reserve_live_owner("session", Some(1)),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        let third = store.reserve_live_owner("session", Some(3)).unwrap();
+        drop(detached);
+        assert!(matches!(
+            store.reserve_live_owner("session", Some(1)),
+            Err(DurableTurnStoreError::LiveOwner { .. })
+        ));
+        store
+            .with_live_owner("session", &third, Some(3), || Ok(()))
+            .unwrap();
+        drop(third);
+        assert!(store.reserve_live_owner("session", Some(1)).is_ok());
+    }
+
+    #[test]
+    fn ambiguous_metadata_publish_invalidates_cache_and_requires_sync_on_reload() {
+        let (_temp, store) = store();
+        store
+            .begin("session", 1, "prompt".into(), None, vec![])
+            .unwrap();
+        store
+            .fail_after_metadata_publish
+            .store(true, Ordering::Relaxed);
+        assert!(store
+            .transition(
+                "session",
+                1,
+                TurnRecoveryStateDto::PausedRecoverable,
+                false,
+                None
+            )
+            .is_err());
+        store
+            .fail_before_metadata_sync
+            .store(true, Ordering::Relaxed);
+        assert!(store.load("session", 1).is_err());
+        let recovered = store.load("session", 1).unwrap();
+        assert_eq!(
+            recovered.state,
+            Some(TurnRecoveryStateDto::PausedRecoverable)
+        );
+        assert_eq!(recovered.revision, 2);
+        let (disposition, snapshot) = store.resume("session", 1).unwrap();
+        assert_eq!(disposition, ResumeDisposition::WaitingForUser);
+        assert_eq!(snapshot.unwrap().revision, 3);
+    }
+
+    #[test]
+    fn ambiguous_admission_forgets_session_index() {
+        let (_temp, store) = store();
+        assert!(store.scan_pending("session").unwrap().is_empty());
+        store
+            .fail_after_metadata_publish
+            .store(true, Ordering::Relaxed);
+        assert!(store
+            .admit_queued_prompt("session", None, None, "first".into(), None, vec![])
+            .is_err());
+        let pending = store.scan_pending("session").unwrap();
+        assert_eq!(pending.len(), 1);
+        let next = store
+            .admit_queued_prompt("session", None, None, "second".into(), None, vec![])
+            .unwrap();
+        assert_eq!((next.turn_id, next.queue_sequence), (2, 2));
+    }
+
+    #[test]
+    fn exhausted_revision_and_sequence_fail_without_persisting_a_mutation() {
+        let (temp, store) = store();
+        store
+            .begin("session", 1, "prompt".into(), None, vec![])
+            .unwrap();
+        let relative = relative_path("session", 1).unwrap();
+        let metadata_before = std::fs::read(temp.path().join("turns").join(&relative)).unwrap();
+        {
+            let mut cache = store.lock.lock().unwrap();
+            let checkpoint = &mut cache.get_mut(&relative).unwrap().checkpoint;
+            checkpoint.revision = u64::MAX;
+            checkpoint.last_sequence = u64::MAX;
+        }
+        assert!(store
+            .transition(
+                "session",
+                1,
+                TurnRecoveryStateDto::PausedRecoverable,
+                false,
+                None
+            )
+            .is_err());
+        assert!(store.append_event("session", 1, "{}".into()).is_err());
+        assert_eq!(
+            std::fs::read(temp.path().join("turns").join(relative)).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            store.load("session", 1).unwrap().state,
+            Some(TurnRecoveryStateDto::Running)
+        );
     }
 
     #[test]
@@ -2423,6 +3743,32 @@ mod tests {
     }
 
     #[test]
+    fn tool_dispatch_boundary_survives_pause_and_cold_resume() {
+        let (temp, store) = store();
+        store
+            .begin("session", 98, "prompt".into(), None, Vec::new())
+            .unwrap();
+        store.mark_tool_dispatch_unsafe("session", 98).unwrap();
+        store.mark_tool_dispatch_unsafe("session", 98).unwrap();
+        let checkpoint = store.load("session", 98).unwrap();
+        assert!(!checkpoint.safe_to_resume);
+        store
+            .transition(
+                "session",
+                98,
+                TurnRecoveryStateDto::PausedRecoverable,
+                checkpoint.safe_to_resume,
+                Some("background_time_expired".into()),
+            )
+            .unwrap();
+        drop(store);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let (disposition, snapshot) = cold.resume("session", 98).unwrap();
+        assert_eq!(disposition, ResumeDisposition::WaitingForUser);
+        assert!(!snapshot.unwrap().safe_to_resume);
+    }
+
+    #[test]
     fn claimed_bash_is_at_most_once_and_cold_resume_uses_persisted_result_rows() {
         let (temp, store) = store();
         let admitted = store
@@ -2538,7 +3884,258 @@ mod tests {
     }
 
     #[test]
-    fn coalesced_mobile_batch_replays_last_member_identity_and_ordered_images() {
+    fn queued_turn_status_fences_uncertain_metadata_and_preserves_member_identity() {
+        let (temp, store) = store();
+        for id in [11, 12] {
+            store
+                .admit_queued_prompt(
+                    "session",
+                    Some(id),
+                    Some(id),
+                    format!("prompt {id}").into(),
+                    None,
+                    vec![],
+                )
+                .unwrap();
+            assert_eq!(
+                store.queued_turn_status("session", id).unwrap(),
+                QueuedTurnStatusDto::Pending
+            );
+        }
+        let batch = store.prepare_mid_turn_batch("session", &[11, 12]).unwrap();
+        assert_eq!(
+            store.queued_turn_status("session", 12).unwrap(),
+            QueuedTurnStatusDto::ClaimedUncertain
+        );
+        store
+            .fail_after_metadata_publish
+            .store(true, Ordering::Relaxed);
+        assert!(store
+            .acknowledge_mid_turn_batch("session", 11, &[11, 12])
+            .is_err());
+        // The rename is visible but its failed acknowledgement is not enough
+        // to issue a receipt until the file and directory can be synced again.
+        store
+            .fail_before_metadata_sync
+            .store(true, Ordering::Relaxed);
+        assert!(store.queued_turn_status("session", 12).is_err());
+        let expected = QueuedTurnStatusDto::Delivered {
+            batch_owner_turn_id: 11,
+            member_turn_ids: vec![11, 12],
+            transcript_uuid: batch.aggregate_identity.message_id.as_uuid().to_string(),
+        };
+        assert_eq!(store.queued_turn_status("session", 11).unwrap(), expected);
+        assert_eq!(store.queued_turn_status("session", 12).unwrap(), expected);
+        assert!(matches!(
+            store.queued_turn_status("other", 12),
+            Err(DurableTurnStoreError::NotFound { .. })
+        ));
+        drop(store);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        assert_eq!(cold.queued_turn_status("session", 12).unwrap(), expected);
+
+        cold.admit_queued_prompt(
+            "session",
+            Some(13),
+            Some(13),
+            "private".into(),
+            None,
+            vec![],
+        )
+        .unwrap();
+        cold.cancel_pending("session", 13).unwrap();
+        cold.expose_cancelled_pending("session", 13).unwrap();
+        assert_eq!(
+            cold.queued_turn_status("session", 13).unwrap(),
+            QueuedTurnStatusDto::Cancelled
+        );
+        cold.admit_queued_prompt(
+            "session",
+            Some(15),
+            Some(15),
+            "uncertain cancel".into(),
+            None,
+            vec![],
+        )
+        .unwrap();
+        cold.fail_after_metadata_publish
+            .store(true, Ordering::Relaxed);
+        assert!(cold.cancel_pending("session", 15).is_err());
+        cold.fail_before_metadata_sync
+            .store(true, Ordering::Relaxed);
+        assert!(cold.queued_turn_status("session", 15).is_err());
+        assert_eq!(
+            cold.queued_turn_status("session", 15).unwrap(),
+            QueuedTurnStatusDto::Cancelled
+        );
+        cold.begin("session", 14, "started".into(), None, vec![])
+            .unwrap();
+        cold.cancel("session", 14).unwrap();
+        assert_eq!(
+            cold.queued_turn_status("session", 14).unwrap(),
+            QueuedTurnStatusDto::Terminal {
+                state: TurnRecoveryStateDto::Cancelled
+            }
+        );
+    }
+
+    #[test]
+    fn claimed_batch_member_is_never_relabelled_as_cancelled_before_claim() {
+        for completed in [false, true] {
+            let (temp, store) = store();
+            for id in [11, 12] {
+                store
+                    .admit_queued_prompt(
+                        "session",
+                        Some(id),
+                        Some(id),
+                        "queued".into(),
+                        None,
+                        vec![],
+                    )
+                    .unwrap();
+            }
+            store.prepare_mid_turn_batch("session", &[11, 12]).unwrap();
+            store.claim_legacy_batch_for_test("session", 11).unwrap();
+            assert_eq!(
+                store.queued_turn_status("session", 12).unwrap(),
+                QueuedTurnStatusDto::ClaimedUncertain
+            );
+            if completed {
+                store
+                    .transition("session", 11, TurnRecoveryStateDto::Completed, false, None)
+                    .unwrap();
+            } else {
+                store.cancel("session", 11).unwrap();
+            }
+            drop(store);
+            let cold = DurableTurnStore::new(temp.path().join("turns"));
+            assert!(cold.cancel_pending("session", 12).unwrap().is_none());
+            assert!(matches!(
+                cold.cancel("session", 12),
+                Err(DurableTurnStoreError::Terminal { .. })
+            ));
+            assert!(!cold.load("session", 12).unwrap().cancelled_before_claim);
+            assert_eq!(
+                cold.queued_turn_status("session", 12).unwrap(),
+                QueuedTurnStatusDto::ClaimedUncertain
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_midturn_batch_is_never_requeued_after_reopen() {
+        for acknowledged in [false, true] {
+            let (temp, store) = store();
+            for id in [21, 22] {
+                store
+                    .admit_queued_prompt(
+                        "session",
+                        Some(id),
+                        Some(id),
+                        "queued".into(),
+                        None,
+                        vec![],
+                    )
+                    .unwrap();
+            }
+            let batch = store.prepare_mid_turn_batch("session", &[21, 22]).unwrap();
+            if acknowledged {
+                store
+                    .acknowledge_mid_turn_batch("session", 21, &[21, 22])
+                    .unwrap();
+            }
+            drop(store);
+            let cold = DurableTurnStore::new(temp.path().join("turns"));
+            assert!(cold.scan_pending("session").unwrap().is_empty());
+            for id in [21, 22] {
+                assert!(!cold.load("session", id).unwrap().cancelled_before_claim);
+                assert!(cold.cancel_pending("session", id).unwrap().is_none());
+                let expected = if acknowledged {
+                    QueuedTurnStatusDto::Delivered {
+                        batch_owner_turn_id: 21,
+                        member_turn_ids: vec![21, 22],
+                        transcript_uuid: batch.aggregate_identity.message_id.as_uuid().to_string(),
+                    }
+                } else {
+                    QueuedTurnStatusDto::ClaimedUncertain
+                };
+                assert_eq!(cold.queued_turn_status("session", id).unwrap(), expected);
+                assert!(cold.claim_pending("session", id).is_err());
+            }
+            if !acknowledged {
+                assert!(cold.cancel("session", 21).is_err());
+                assert!(cold.cancel("session", 22).is_err());
+                assert_eq!(
+                    cold.resume("session", 21).unwrap().0,
+                    ResumeDisposition::WaitingForUser
+                );
+                assert_eq!(
+                    cold.resume("session", 22).unwrap().0,
+                    ResumeDisposition::WaitingForUser
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn midturn_claim_write_failure_never_exposes_an_unfenced_batch() {
+        for after_publish in [false, true] {
+            let (temp, store) = store();
+            for id in [31, 32] {
+                store
+                    .admit_queued_prompt(
+                        "session",
+                        Some(id),
+                        Some(id),
+                        format!("input {id}").into(),
+                        None,
+                        vec![],
+                    )
+                    .unwrap();
+            }
+            if after_publish {
+                store
+                    .fail_after_metadata_publish
+                    .store(true, Ordering::Relaxed);
+            } else {
+                store
+                    .fail_before_metadata_write
+                    .store(true, Ordering::Relaxed);
+            }
+            assert!(store.prepare_mid_turn_batch("session", &[31, 32]).is_err());
+            drop(store);
+            let cold = DurableTurnStore::new(temp.path().join("turns"));
+            let ids = cold
+                .scan_pending("session")
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.turn_id)
+                .collect::<Vec<_>>();
+            if after_publish {
+                assert!(ids.is_empty());
+                assert_eq!(
+                    cold.queued_turn_status("session", 32).unwrap(),
+                    QueuedTurnStatusDto::ClaimedUncertain
+                );
+                assert!(cold.prepare_mid_turn_batch("session", &[31, 32]).is_err());
+                assert!(cold.claim_pending("session", 31).is_err());
+            } else {
+                assert_eq!(ids, vec![31, 32]);
+                assert_eq!(
+                    cold.queued_turn_status("session", 32).unwrap(),
+                    QueuedTurnStatusDto::Pending
+                );
+            }
+            assert_eq!(
+                cold.load("session", 32).unwrap().prompt.string_at(""),
+                Some("input 32")
+            );
+        }
+    }
+
+    #[test]
+    fn uncertain_coalesced_batch_retains_last_member_identity_and_ordered_images() {
         let (temp, store) = store();
         let first = store
             .admit_queued_prompt(
@@ -2598,15 +4195,18 @@ mod tests {
         drop(store);
 
         let cold = DurableTurnStore::new(temp.path().join("turns"));
-        let pending = cold.scan_pending("session").expect("restore pending batch");
-        assert_eq!(pending.len(), 1, "member rows do not replay independently");
-        assert_eq!(pending[0].turn_id, first.turn_id);
+        let pending = cold.scan_pending("session").expect("scan after claim");
+        assert!(
+            pending.is_empty(),
+            "claimed inputs are not replayed automatically"
+        );
+        let persisted = cold.load("session", first.turn_id).unwrap();
         assert_eq!(
-            pending[0].queue_delivery,
+            persisted.queue_delivery,
             QueueDeliveryState::CoalescedClaimed
         );
-        assert_eq!(pending[0].coalesced_batch, Some(batch.clone()));
-        let inputs = pending[0]
+        assert_eq!(persisted.coalesced_batch, Some(batch.clone()));
+        let inputs = persisted
             .queued_prompt_inputs(&cold)
             .expect("reconstruct aggregate input");
         assert_eq!(inputs.len(), 1);
@@ -2634,21 +4234,10 @@ mod tests {
                 if media_type == "image/jpeg" && data == "c2Vjb25k"
         ));
 
-        cold.acknowledge_mid_turn_batch("session", first.turn_id, &[first.turn_id, second.turn_id])
-            .expect("acknowledge after append-once writer succeeds");
-        let acknowledged = cold
-            .load("session", first.turn_id)
-            .expect("read aggregate commit marker");
-        assert_eq!(acknowledged.queue_delivery, QueueDeliveryState::Delivered);
         assert_eq!(
-            acknowledged.coalesced_batch,
-            Some(batch),
-            "the ACK keeps the ordered source identities available for audit"
+            cold.queued_turn_status("session", second.turn_id).unwrap(),
+            QueuedTurnStatusDto::ClaimedUncertain
         );
-        assert!(cold
-            .scan_pending("session")
-            .expect("batch is terminal after acknowledgment")
-            .is_empty());
     }
 
     #[test]
@@ -2802,11 +4391,11 @@ mod tests {
         drop(store);
 
         let cold = DurableTurnStore::new(temp.path().join("turns"));
+        assert!(cold.scan_pending("session").unwrap().is_empty());
         let restored = cold
-            .scan_pending("session")
-            .expect("restore aggregate owner");
-        assert_eq!(restored.len(), 1);
-        let inputs = restored[0].queued_prompt_inputs(&cold).unwrap();
+            .load("session", ids[0])
+            .expect("retain aggregate owner");
+        let inputs = restored.queued_prompt_inputs(&cold).unwrap();
         assert_eq!(
             inputs.len(),
             1,
@@ -2822,7 +4411,7 @@ mod tests {
         );
         assert_eq!(inputs[0].transcript_row_token.as_deref(), Some("client-turn:7,102,8"), "the token retains each admitted correlator in order, independent of duplicate prompt text");
         assert_eq!(
-            restored[0].queued_prompt_inputs(&cold).unwrap()[0].transcript_row_token,
+            restored.queued_prompt_inputs(&cold).unwrap()[0].transcript_row_token,
             inputs[0].transcript_row_token,
             "repeated reconstruction keeps the exact same correlation token"
         );
@@ -2935,12 +4524,10 @@ mod tests {
                     None,
                     "claim admission wins atomically; cancellation must route to the active turn"
                 );
-                let pending = store.scan_pending("session").expect("scan claimed group");
-                assert_eq!(pending.len(), 1);
-                assert_eq!(pending[0].turn_id, first_id);
+                assert!(store.scan_pending("session").unwrap().is_empty());
                 assert_eq!(
-                    pending[0].queue_delivery,
-                    QueueDeliveryState::CoalescedClaimed
+                    store.queued_turn_status("session", second_id).unwrap(),
+                    QueuedTurnStatusDto::ClaimedUncertain
                 );
             }
             Err(DurableTurnStoreError::Terminal { .. }) => {
@@ -3029,14 +4616,10 @@ mod tests {
             None,
             "admitted batches are canceled by unwinding the active turn"
         );
-        let pending = store
-            .scan_pending("session")
-            .expect("claimed batch remains recoverable");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].turn_id, first.turn_id);
+        assert!(store.scan_pending("session").unwrap().is_empty());
         assert_eq!(
-            pending[0].queue_delivery,
-            QueueDeliveryState::CoalescedClaimed
+            store.queued_turn_status("session", second.turn_id).unwrap(),
+            QueuedTurnStatusDto::ClaimedUncertain
         );
     }
 
@@ -3346,12 +4929,14 @@ mod tests {
             bash_should_query: None,
             original_client_turn_id: Some(6),
             queue_delivery: QueueDeliveryState::Claimed,
+            cancelled_before_claim: false,
             coalesced_batch: None,
             revision: 2,
             state: Some(TurnRecoveryStateDto::Running),
             first_sequence: 1,
             last_sequence: 1,
             safe_to_resume: true,
+            projection_uncertain: false,
             reason: None,
             events: vec![DurableTurnEvent {
                 sequence: 1,
@@ -3467,7 +5052,39 @@ mod tests {
         let metadata = serde_json::from_str::<StoredTurnMetadata>(&metadata_body)
             .expect("parse transitioned metadata");
         assert_eq!(metadata.last_sequence, 2);
-        assert_eq!(metadata.revision, 4);
+        assert_eq!(metadata.revision, 2);
+        assert_eq!(transitioned.revision, metadata.revision);
+    }
+
+    #[test]
+    fn transition_returns_the_committed_retention_window_inside_compaction_slack() {
+        let (temp, store) = store();
+        store
+            .begin("session", 75, "prompt".into(), None, Vec::new())
+            .unwrap();
+        for _ in 0..=MAX_RETAINED_EVENTS {
+            store
+                .append_event("session", 75, r#"{"type":"text_delta","text":"x"}"#.into())
+                .unwrap();
+        }
+        let snapshot = store
+            .transition(
+                "session",
+                75,
+                TurnRecoveryStateDto::PausedRecoverable,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(snapshot.first_sequence, 2);
+        assert_eq!(snapshot.last_sequence, (MAX_RETAINED_EVENTS + 1) as u64);
+        let warm = store.load("session", 75).unwrap().snapshot();
+        let cold = DurableTurnStore::new(temp.path().join("turns"))
+            .load("session", 75)
+            .unwrap()
+            .snapshot();
+        assert_eq!(snapshot, warm);
+        assert_eq!(snapshot, cold);
     }
 
     #[test]
@@ -3528,7 +5145,15 @@ mod tests {
         let recovered_store = DurableTurnStore::new(temp.path().join("turns"));
         let recovered = recovered_store.load("session-a", 72).expect("cold load");
         assert_eq!(recovered.state, Some(TurnRecoveryStateDto::Completed));
+        assert_eq!(recovered.revision, 2);
         assert!(!recovered.safe_to_resume);
+        let metadata: StoredTurnMetadata = serde_json::from_slice(
+            &std::fs::read(temp.path().join("turns/session-a/72.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata.revision, 2);
+        let second_cold = DurableTurnStore::new(temp.path().join("turns"));
+        assert_eq!(second_cold.load("session-a", 72).unwrap().revision, 2);
         assert_eq!(
             recovered_store
                 .resume("session-a", 72)
@@ -3536,6 +5161,70 @@ mod tests {
                 .0,
             ResumeDisposition::Terminal
         );
+    }
+
+    #[test]
+    fn committed_terminal_metadata_is_not_rewritten_from_event_stop_reason() {
+        let (temp, store) = store();
+        store
+            .begin("session", 73, "prompt".into(), None, Vec::new())
+            .unwrap();
+        store
+            .append_event(
+                "session",
+                73,
+                r#"{"type":"turn_ended","outcome":{"type":"max_turns"},"stop_reason":"max_tokens"}"#.into(),
+            )
+            .unwrap();
+        let saved = store
+            .transition(
+                "session",
+                73,
+                TurnRecoveryStateDto::Failed,
+                false,
+                Some("host_specific_reason".into()),
+            )
+            .unwrap();
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let recovered = cold.load("session", 73).unwrap();
+        assert_eq!(recovered.revision, saved.revision);
+        assert_eq!(recovered.reason.as_deref(), Some("host_specific_reason"));
+    }
+
+    #[test]
+    fn journal_only_max_turns_uses_the_same_reason_as_the_live_transition() {
+        let (temp, store) = store();
+        store
+            .begin("session", 731, "prompt".into(), None, Vec::new())
+            .unwrap();
+        store
+            .append_event(
+                "session",
+                731,
+                r#"{"type":"turn_ended","outcome":{"type":"max_turns"},"stop_reason":"max_tokens"}"#.into(),
+            )
+            .unwrap();
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let recovered = cold.load("session", 731).unwrap();
+        assert_eq!(recovered.state, Some(TurnRecoveryStateDto::Failed));
+        assert_eq!(recovered.reason.as_deref(), Some("max_turns"));
+        assert_eq!(recovered.revision, 2);
+    }
+
+    #[test]
+    fn error_with_an_isolated_utf16_surrogate_is_durable_and_recovers_terminal() {
+        let (temp, store) = store();
+        store
+            .begin("session", 74, "prompt".into(), None, Vec::new())
+            .unwrap();
+        let event = r#"{"type":"error","message":"fail \ud800"}"#;
+        assert!(event_requires_durable_flush(event));
+        store.append_event("session", 74, event.into()).unwrap();
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let recovered = cold.load("session", 74).unwrap();
+        assert_eq!(recovered.state, Some(TurnRecoveryStateDto::Failed));
+        assert_eq!(recovered.reason.as_deref(), Some("fail �"));
+        assert_eq!(recovered.revision, 2);
     }
 
     #[test]
@@ -3752,12 +5441,14 @@ mod tests {
             bash_should_query: None,
             original_client_turn_id: Some(13),
             queue_delivery: QueueDeliveryState::Claimed,
+            cancelled_before_claim: false,
             coalesced_batch: None,
             revision: 1,
             state: Some(TurnRecoveryStateDto::Running),
             first_sequence: events.first().expect("retained event").sequence,
             last_sequence: events.last().expect("retained event").sequence,
             safe_to_resume: true,
+            projection_uncertain: false,
             reason: None,
             events,
         };
@@ -3766,6 +5457,11 @@ mod tests {
         assert!(checkpoint.has_replay_gap(None));
         assert!(checkpoint.has_replay_gap(Some(0)));
         assert!(!checkpoint.has_replay_gap(Some(1)));
+        assert!(checkpoint.has_replay_gap(Some(checkpoint.last_sequence + 1)));
+        assert_eq!(
+            checkpoint.replay_gap_reason(Some(checkpoint.last_sequence + 1)),
+            Some("replay_cursor_ahead")
+        );
         assert_eq!(
             checkpoint
                 .replay_after(Some(1))

@@ -118,9 +118,10 @@ fn mobile_tool_list_snapshot() {
             "mobile tool set must not include `{forbidden}`"
         );
     }
-    // Only wired native tools are advertised. LSP is part of the
+    // All supported media operations are enabled. LSP is part of the
     // production UniFFI profile; the default host-only test build intentionally
     // omits its optional runtime dependency.
+    let available = reg.available_tools(&Default::default());
     for required in [
         "media_sources",
         "media_status",
@@ -140,9 +141,15 @@ fn mobile_tool_list_snapshot() {
             names.iter().any(|n| n == required),
             "mobile tool set must include `{required}`"
         );
+        assert!(
+            available.iter().any(|tool| tool.name() == required),
+            "supported mobile media operation must be enabled: `{required}`"
+        );
     }
     for unavailable in [
         "camera",
+        "speech",
+        "voice",
         "notification",
         "clipboard",
         "share",

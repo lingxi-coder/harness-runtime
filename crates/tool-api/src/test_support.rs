@@ -295,6 +295,7 @@ pub static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 #[must_use]
 pub fn fresh_ctx() -> ToolUseContext {
     ToolUseContext {
+        session_origin: None,
         is_scheduled_turn: false,
         available_tool_names: None,
         agent_spawn_provenance: Default::default(),
@@ -328,6 +329,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         session: None,
         subagent_registry: None,
         cancel: None,
+        host_tool_cancellation: crate::context::HostToolCancellation::Ordinary,
         fork_parent_system_prompt: None,
         cwd: None,
         depth: 0,

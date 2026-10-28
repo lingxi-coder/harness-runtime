@@ -1,4 +1,5 @@
 use crate::conversation::ConversationOrchestrator;
+use crate::error::OrchestratorError;
 use hooks::attachment::HookPublicationGuard;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
@@ -15,6 +16,7 @@ use tool_api::ContextModifier;
 pub(crate) struct PostToolBatchDispatch {
     pub(crate) tool_calls: Vec<hooks::events::PostToolBatchCall>,
     pub(crate) publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+    pub(crate) async_work_lease: Option<Arc<dyn Send + Sync>>,
 }
 
 impl PostToolBatchDispatch {
@@ -22,6 +24,7 @@ impl PostToolBatchDispatch {
         Self {
             tool_calls,
             publication_guard: None,
+            async_work_lease: None,
         }
     }
 }
@@ -42,7 +45,28 @@ pub(crate) async fn run_post_tool_batch_hooks(
     orch: &ConversationOrchestrator,
     dispatch: PostToolBatchDispatch,
 ) -> PostToolBatchOutcome {
-    run_post_tool_batch_hooks_inner(orch, dispatch, false).await
+    run_post_tool_batch_hooks_inner(
+        orch,
+        dispatch,
+        false,
+        tool_api::context::HostToolCancellation::Ordinary,
+    )
+    .await
+    .expect("ordinary hook execution does not reject hooks")
+}
+
+/// Preserve host process ownership through the batch hook's actual snapshot.
+pub(crate) async fn run_post_tool_batch_hooks_for_host(
+    orch: &ConversationOrchestrator,
+    dispatch: PostToolBatchDispatch,
+) -> Result<PostToolBatchOutcome, OrchestratorError> {
+    run_post_tool_batch_hooks_inner(
+        orch,
+        dispatch,
+        false,
+        tool_api::context::host_tool_cancellation(),
+    )
+    .await
 }
 
 /// Forced-end twin of [`run_post_tool_batch_hooks`]. Claude still executes the
@@ -52,20 +76,28 @@ pub(crate) async fn run_post_tool_batch_hooks_after_turn_end(
     orch: &ConversationOrchestrator,
     dispatch: PostToolBatchDispatch,
 ) -> PostToolBatchOutcome {
-    run_post_tool_batch_hooks_inner(orch, dispatch, true).await
+    run_post_tool_batch_hooks_inner(
+        orch,
+        dispatch,
+        true,
+        tool_api::context::HostToolCancellation::Ordinary,
+    )
+    .await
+    .expect("ordinary hook execution does not reject hooks")
 }
 
 pub(super) async fn run_post_tool_batch_hooks_inner(
     orch: &ConversationOrchestrator,
     dispatch: PostToolBatchDispatch,
     turn_already_ended: bool,
-) -> PostToolBatchOutcome {
+    cancellation: tool_api::context::HostToolCancellation,
+) -> Result<PostToolBatchOutcome, OrchestratorError> {
     if dispatch.tool_calls.is_empty() {
-        return PostToolBatchOutcome {
+        return Ok(PostToolBatchOutcome {
             prevent_continuation: false,
             injected_messages: Vec::new(),
             publication_guard: dispatch.publication_guard,
-        };
+        });
     }
     // Direct tracked-dispatch/recovery/host paths have no W1 child executor.
     // Capture the current session generation at this host-only dispatch
@@ -78,12 +110,17 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
         Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(root, lock))
             as Arc<dyn HookPublicationGuard>
     });
+    let publication_guard = super::tool_dispatch::host_request_publication_guard(
+        &cancellation,
+        Some(publication_guard),
+    )
+    .expect("batch dispatch always has a session publication guard");
     if !publication_guard.is_current() {
-        return PostToolBatchOutcome {
+        return Ok(PostToolBatchOutcome {
             prevent_continuation: false,
             injected_messages: Vec::new(),
             publication_guard: Some(publication_guard),
-        };
+        });
     }
     // Populate `transcript_path` + `permission_mode` from the same live
     // sources as the per-tool hook contexts.
@@ -119,27 +156,28 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
                 .unwrap_or_else(|| "default".to_string())
         }),
         publication_guard: Some(Arc::clone(&publication_guard)),
+        async_work_lease: dispatch.async_work_lease,
         ..Default::default()
     };
-    let batch_agg = orch
-        .hooks
-        .execute(
-            HookEvent::PostToolBatch {
-                tool_calls: dispatch.tool_calls,
-            },
-            batch_ctx,
-        )
-        .await;
+    let batch_agg = super::tool_dispatch::execute_tool_hook(
+        orch,
+        HookEvent::PostToolBatch {
+            tool_calls: dispatch.tool_calls,
+        },
+        batch_ctx,
+        &cancellation,
+    )
+    .await?;
     let mut injected_messages = Vec::new();
     let identity = post_tool_batch_identity();
     let batch_id = lingxi_core::types::ToolUseId::from(identity.tool_use_id.clone());
 
     if !publication_guard.is_current() {
-        return PostToolBatchOutcome {
+        return Ok(PostToolBatchOutcome {
             prevent_continuation: false,
             injected_messages,
             publication_guard: Some(publication_guard),
-        };
+        });
     }
 
     if turn_already_ended {
@@ -159,11 +197,11 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
                 "PostToolBatch disposition discarded because a tool result ended the turn"
             );
         }
-        return PostToolBatchOutcome {
+        return Ok(PostToolBatchOutcome {
             prevent_continuation: false,
             injected_messages: Vec::new(),
             publication_guard: Some(publication_guard),
-        };
+        });
     }
 
     // `additionalContext` is yielded inside the per-hook loop; the stopped
@@ -242,11 +280,11 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
             injected_messages.push((message, batch_id));
         }
     }
-    PostToolBatchOutcome {
+    Ok(PostToolBatchOutcome {
         prevent_continuation: stop_reason.is_some() && publication_guard.is_current(),
         injected_messages,
         publication_guard: Some(publication_guard),
-    }
+    })
 }
 
 /// Identity for the once-per-batch `PostToolBatch` records.

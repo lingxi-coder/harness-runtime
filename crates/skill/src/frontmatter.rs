@@ -54,20 +54,20 @@ pub fn parse_skill_markdown(
     })
 }
 
-fn parse_frontmatter_yaml(yaml: &str) -> Result<SkillFrontmatter, serde_yaml::Error> {
+fn parse_frontmatter_yaml(yaml: &str) -> Result<SkillFrontmatter, yaml_serde::Error> {
     // The reusable SkillFrontmatter DTO uses raw JSON serde for its source
     // description. YAML skill files are UTF-8 text, so extract that one scalar
     // at the file boundary, deserialize the remaining YAML fields normally,
     // and install the scalar directly into the source carrier.
-    let mut value = serde_yaml::from_str::<serde_yaml::Value>(yaml)?;
+    let mut value = yaml_serde::from_str::<yaml_serde::Value>(yaml)?;
     let description = match &mut value {
-        serde_yaml::Value::Mapping(mapping) => mapping
-            .remove(serde_yaml::Value::String("description".to_owned()))
-            .map(serde_yaml::from_value::<String>)
+        yaml_serde::Value::Mapping(mapping) => mapping
+            .remove(yaml_serde::Value::String("description".to_owned()))
+            .map(yaml_serde::from_value::<String>)
             .transpose()?,
         _ => None,
     };
-    let mut frontmatter: SkillFrontmatter = serde_yaml::from_value(value)?;
+    let mut frontmatter: SkillFrontmatter = yaml_serde::from_value(value)?;
     if let Some(description) = description {
         frontmatter.description = description.into();
     }
@@ -88,6 +88,35 @@ mod tests {
             LoadedFrom::Skills,
         )
         .expect("parse ok")
+    }
+
+    #[test]
+    fn yaml_frontmatter_preserves_block_text_and_resolves_aliases() {
+        let skill = parse(
+            "name: unicode\ndescription: |-\n  检查输入\n  Keep the second line.\nshared-tools: &readers [Read, Grep]\nallowed-tools: *readers",
+            "body",
+        );
+
+        assert_eq!(
+            skill.frontmatter.description.string_at(""),
+            Some("检查输入\nKeep the second line.")
+        );
+        assert_eq!(
+            skill.frontmatter.allowed_tools.as_deref(),
+            Some(&["Read".to_string(), "Grep".to_string()][..])
+        );
+        assert_eq!(skill.content.string_at(""), Some("body"));
+    }
+
+    #[test]
+    fn yaml_frontmatter_rejects_unresolved_aliases() {
+        let result = parse_skill_markdown(
+            "---\nname: x\nallowed-tools: *missing\n---\nbody",
+            "/tmp/x.md".into(),
+            SkillSource::Settings(lingxi_core::types::SettingsScope::User),
+            LoadedFrom::Skills,
+        );
+        assert!(matches!(result, Err(SkillLoadError::Parse(_))));
     }
 
     // ---- disable-model-invocation (P1 gap #2) --------------------------------

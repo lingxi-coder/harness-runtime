@@ -220,6 +220,7 @@ mod tests {
     fn orchestrator(hooks: Arc<hooks::HookExecutorImpl>) -> Arc<ConversationOrchestrator> {
         let tools = Arc::new(tool_api::ToolRegistry::new());
         let inheritance = lingxi_core::host::SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(tool_api::RegistryToolInvoker::new(tools.clone())),
             budget: Arc::new(Budget),
         };

@@ -632,6 +632,7 @@ async fn post_tool_batch_executor_receives_and_honors_generation_guard() {
                 ))),
             }],
             publication_guard: Some(Arc::new(fence)),
+            async_work_lease: None,
         },
     )
     .await;

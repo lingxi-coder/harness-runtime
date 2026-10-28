@@ -50,7 +50,7 @@ schemars = "0.8"
 figment = { version = "0.10", features = ["env", "json", "toml"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "net"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "0.38", features = ["fs", "net", "process"] }

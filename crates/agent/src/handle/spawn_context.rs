@@ -716,6 +716,8 @@ impl PoolSubagentSpawner {
             agent_mcp_tools,
             None,
             crate::tool_resolver::HandbackToolGates::default(),
+            None,
+            false,
         )
         .await
         .map(|(schemas, allowed, _)| (schemas, allowed))
@@ -736,6 +738,8 @@ impl PoolSubagentSpawner {
         agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
         supplied: Option<&Arc<dyn tool_api::Tool>>,
         gates: crate::tool_resolver::HandbackToolGates,
+        session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+        require_session_origin: bool,
     ) -> Result<
         (
             Vec<lingxi_core::host::SourceToolWireDefinition>,
@@ -770,6 +774,8 @@ impl PoolSubagentSpawner {
             agent_mcp_tools,
             supplied,
             gates,
+            session_origin,
+            require_session_origin,
         )
         .await
         .map_err(|e| SubagentSpawnError::Internal(e.to_string()))
@@ -888,6 +894,7 @@ impl PoolSubagentSpawner {
             // Filled by `build_subagent_context` from the owning spawner.
             session_interactive: None,
             origin_session_id: None,
+            session_origin: None,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
@@ -1325,6 +1332,13 @@ impl PoolSubagentSpawner {
         };
         ctx.session_interactive = self.session_interactive;
         ctx.origin_session_id = origin_session_id;
+        // Never relabel an inherited capability with a different transcript
+        // owner, including a restored child whose request was reconstructed.
+        ctx.session_origin = inherit.session_origin.as_ref().and_then(|capability| {
+            origin_session_id
+                .is_none_or(|session_id| capability.session_id() == session_id)
+                .then(|| capability.clone())
+        });
         // Hand the child the refusal-fallback chain. Upstream's subagents share
         // the main thread's cascade because they share its query generator;
         // here the loops are separate, so it is passed down.
@@ -1532,6 +1546,8 @@ impl PoolSubagentSpawner {
                 &agent_mcp.tools,
                 handback_tool.as_ref(),
                 handback_gates,
+                ctx.session_origin.clone(),
+                ctx.origin_session_id.is_some(),
             )
             .await?;
         // Preserve potential eligibility across a live mode switch. Aliases and

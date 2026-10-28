@@ -1,4 +1,4 @@
-use super::batch_hooks::run_post_tool_batch_hooks;
+use super::batch_hooks::{run_post_tool_batch_hooks, run_post_tool_batch_hooks_for_host};
 use super::tool_results::{
     apply_tool_result_persistence_with_process_output, process_output_file_from_source,
 };
@@ -31,6 +31,123 @@ use tool_api::ContextModifier;
 
 #[path = "mod_agent_api.rs"]
 mod mod_agent_api;
+
+tokio::task_local! {
+    static DISPATCH_WORK_LEASE: Option<std::sync::Arc<dyn Send + Sync>>;
+    static DISPATCH_EXECUTION_LEASE: Option<std::sync::Arc<dyn Send + Sync>>;
+}
+
+pub(crate) async fn with_dispatch_execution_lease<F: std::future::Future>(
+    lease: Option<std::sync::Arc<dyn Send + Sync>>,
+    future: F,
+) -> F::Output {
+    DISPATCH_EXECUTION_LEASE.scope(lease, future).await
+}
+
+pub(crate) async fn with_dispatch_work_lease<F: std::future::Future>(
+    lease: Option<std::sync::Arc<dyn Send + Sync>>,
+    future: F,
+) -> F::Output {
+    DISPATCH_WORK_LEASE.scope(lease, future).await
+}
+
+fn current_dispatch_work_lease() -> Option<std::sync::Arc<dyn Send + Sync>> {
+    DISPATCH_WORK_LEASE.try_with(Clone::clone).ok().flatten()
+}
+
+pub(super) async fn execute_tool_hook(
+    orch: &ConversationOrchestrator,
+    event: HookEvent,
+    mut hook_ctx: HookContext,
+    cancellation: &tool_api::context::HostToolCancellation,
+) -> Result<hooks::AggregateHookResult, OrchestratorError> {
+    if hook_ctx.async_work_lease.is_none() {
+        hook_ctx.async_work_lease = current_dispatch_work_lease();
+    }
+    if hook_ctx.recovery_execution_lease.is_none() {
+        hook_ctx.recovery_execution_lease = DISPATCH_EXECUTION_LEASE
+            .try_with(Clone::clone)
+            .ok()
+            .flatten();
+    }
+    if matches!(
+        cancellation,
+        tool_api::context::HostToolCancellation::TerminateOwnedProcess(_)
+    ) {
+        let after_tool = matches!(
+            &event,
+            HookEvent::PostToolUse { .. }
+                | HookEvent::PostToolUseFailure { .. }
+                | HookEvent::PostToolBatch { .. }
+        );
+        orch.hooks
+            .execute_for_owned_host_request(event, hook_ctx)
+            .await
+            .map_err(|error| {
+                OrchestratorError::Internal(if after_tool {
+                    format!("{error}; the tool has already run")
+                } else {
+                    error
+                })
+            })
+    } else {
+        if hook_ctx.async_work_lease.is_some() {
+            orch.hooks
+                .execute_recovery_checked(event, hook_ctx)
+                .await
+                .map_err(|error| match error {
+                    hooks::RecoveryAdmissionError::Interrupted => {
+                        OrchestratorError::RecoveryInterrupted
+                    }
+                    hooks::RecoveryAdmissionError::Failure(error) => {
+                        OrchestratorError::Internal(error)
+                    }
+                })
+        } else {
+            Ok(orch.hooks.execute(event, hook_ctx).await)
+        }
+    }
+}
+
+async fn tool_dispatch_mod_host(
+    orch: &ConversationOrchestrator,
+) -> Option<std::sync::Arc<hooks::mods::ModHost>> {
+    if let Some(snapshot) = hooks::executor::current_owned_host_hook_snapshot() {
+        snapshot.mod_host()
+    } else if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
+        registry.read().await.mod_host()
+    } else {
+        None
+    }
+}
+
+async fn emit_dispatch_tool_call(
+    orch: &ConversationOrchestrator,
+    id: &ToolUseId,
+    name: &str,
+    input: &Utf16JsonProjection,
+    fence: Option<&dyn HookPublicationGuard>,
+) -> Result<(), OrchestratorError> {
+    if matches!(
+        tool_api::context::host_tool_cancellation(),
+        tool_api::context::HostToolCancellation::TerminateOwnedProcess(_)
+    ) {
+        let fence = fence.ok_or_else(|| {
+            OrchestratorError::Internal("owned host publication guard is missing".into())
+        })?;
+        if !fence
+            .publish_if_current(Box::pin(orch.output.emit_tool_call(id, name, input)))
+            .await
+        {
+            return Err(OrchestratorError::Internal(
+                "owned host request ended before tool call publication".into(),
+            ));
+        }
+    } else {
+        orch.output.emit_tool_call(id, name, input).await;
+    }
+    Ok(())
+}
 
 fn mod_tool_call_arguments(
     input: &Utf16JsonProjection,
@@ -1515,6 +1632,17 @@ struct ModCoreRun {
 }
 
 impl ConversationOrchestrator {
+    pub(crate) async fn capture_session_origin_capability(
+        &self,
+    ) -> Result<
+        Option<std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+        hooks::mods::ModError,
+    > {
+        Ok(capture_mod_session_dispatch_context(self)
+            .await?
+            .and_then(|context| context.session_origin_capability()))
+    }
+
     /// Add a remote UI client before notifying Mods so
     /// `$.session.surfaces()` already contains the attached surface.
     pub async fn mod_ui_attach(
@@ -1631,6 +1759,45 @@ impl ConversationOrchestrator {
 
 #[async_trait::async_trait]
 impl hooks::mods::ModSessionContext for ConversationOrchestrator {
+    fn bind_session_origin(
+        &self,
+        capability: std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>,
+    ) -> Result<Option<std::sync::Arc<dyn hooks::mods::ModSessionContext>>, hooks::mods::ModError>
+    {
+        if capability.owner_id() != self as *const Self as usize {
+            return Err(hooks::mods::ModError::Unavailable(
+                "session capability belongs to another host".into(),
+            ));
+        }
+        let inner = self
+            .upgrade_streaming_tool_dispatch_owner()
+            .ok_or_else(|| {
+                hooks::mods::ModError::Unavailable("originating session owner has ended".into())
+            })?;
+        let output = self.mod_session_event_output(crate::conversation::ModSessionEventOrigin {
+            session_id: capability.session_id().as_uuid().to_string(),
+            mod_turn_id: None,
+        });
+        Ok(Some(std::sync::Arc::new(
+            GenerationBoundModSessionContext {
+                inner,
+                publication_guard: std::sync::Arc::new(ModSessionEventPublicationGuard),
+                host_request: None,
+                host_hook_snapshot: None,
+                event_origin: Some(capability),
+                event_output: Some(output.clone()),
+                event_detached_output: Some(output),
+            },
+        )))
+    }
+
+    async fn capture_dispatch_context(
+        &self,
+    ) -> Result<Option<std::sync::Arc<dyn hooks::mods::ModSessionContext>>, hooks::mods::ModError>
+    {
+        capture_mod_session_dispatch_context(self).await
+    }
+
     fn cwd(&self) -> std::path::PathBuf {
         self.current_cwd()
     }
@@ -1857,7 +2024,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         input: Utf16JsonProjection,
         context: &hooks::mods::ModToolCallContext,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
-        dispatch_mod_session_tool_call(self, None, plugin, input, context).await
+        dispatch_mod_session_tool_call(self, None, None, plugin, input, context).await
     }
 
     async fn project_tool_call_api_result(
@@ -2339,6 +2506,11 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             agent_name: None,
             team_name: None,
             origin_session_id: None,
+            session_origin: self
+                .capture_session_origin_capability()
+                .await
+                .ok()
+                .flatten(),
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             trusted_effective_permission_mode: None,
             classifier_only_review: None,
@@ -2348,6 +2520,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             observer_pairings: self.model_runtime.observer_pairings.clone(),
             subagent_registry: Some(self.tools.clone()),
             cancel: None,
+            host_tool_cancellation: tool_api::context::HostToolCancellation::Ordinary,
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,
@@ -2410,6 +2583,9 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
 async fn dispatch_mod_session_tool_call(
     orch: &ConversationOrchestrator,
     publication_guard: Option<std::sync::Arc<dyn HookPublicationGuard>>,
+    session_origin: Option<
+        std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>,
+    >,
     plugin: &str,
     input: Utf16JsonProjection,
     context: &hooks::mods::ModToolCallContext,
@@ -2469,6 +2645,9 @@ async fn dispatch_mod_session_tool_call(
         })?;
     let history = { orch.session.lock().await.history.clone() };
     let mut inherited = streaming_tool_context_base(orch, history).await;
+    if session_origin.is_some() {
+        inherited.session_origin = session_origin;
+    }
     inherited.tool_use_id = Some(tool_use_id.clone());
     inherited.assistant_message_id = Some(assistant_message_id);
     inherited.agent_spawn_provenance = context.agent_spawn_provenance.clone();
@@ -2539,6 +2718,158 @@ else {
         .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
 }
 
+// A host request's Mod APIs can be dispatched on a separate Tokio task.
+// Keep its trusted request identity in the owned session view, not task-local state.
+struct HostModPublicationGuard {
+    request: std::sync::Weak<tool_api::context::HostToolRequest>,
+    upstream: Option<std::sync::Arc<dyn HookPublicationGuard>>,
+}
+
+pub(crate) fn host_request_publication_guard(
+    cancellation: &tool_api::context::HostToolCancellation,
+    upstream: Option<std::sync::Arc<dyn HookPublicationGuard>>,
+) -> Option<std::sync::Arc<dyn HookPublicationGuard>> {
+    match cancellation {
+        tool_api::context::HostToolCancellation::TerminateOwnedProcess(request) => {
+            Some(std::sync::Arc::new(HostModPublicationGuard {
+                request: std::sync::Arc::downgrade(request),
+                upstream,
+            }))
+        }
+        tool_api::context::HostToolCancellation::Ordinary => upstream,
+    }
+}
+impl HookPublicationGuard for HostModPublicationGuard {
+    fn is_current(&self) -> bool {
+        self.request
+            .upgrade()
+            .is_some_and(|request| request.is_active())
+            && self
+                .upstream
+                .as_ref()
+                .is_none_or(|guard| guard.is_current())
+    }
+    fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+        let Some(request) = self.request.upgrade() else {
+            let cancelled = lingxi_core::host::CancellationToken::new();
+            cancelled.cancel();
+            return Some(cancelled);
+        };
+        let lifecycle = request.lifecycle_token();
+        let Some(upstream) = self
+            .upstream
+            .as_ref()
+            .and_then(|guard| guard.generation_cancellation_token())
+        else {
+            return Some(lifecycle);
+        };
+        let combined = lingxi_core::host::CancellationToken::new();
+        let result = combined.clone();
+        tokio::spawn(async move {
+            tokio::select! { () = lifecycle.cancelled() => {}, () = upstream.cancelled() => {} }
+            combined.cancel();
+        });
+        Some(result)
+    }
+    fn publish_if_current<'a>(
+        &'a self,
+        publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(request) = self.request.upgrade() else {
+                return false;
+            };
+            if !request.is_active()
+                || self
+                    .upstream
+                    .as_ref()
+                    .is_some_and(|guard| !guard.is_current())
+            {
+                return false;
+            }
+            let lifecycle = request.lifecycle_token();
+            if let Some(upstream) = &self.upstream {
+                tokio::select! { biased; () = lifecycle.cancelled() => false, result = upstream.publish_if_current(publication) => result }
+            } else {
+                tokio::select! { biased; () = lifecycle.cancelled() => false, () = publication => true }
+            }
+        })
+    }
+    fn commit_if_current<'a>(
+        &'a self,
+        mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(request) = self.request.upgrade() else {
+                return false;
+            };
+            if self
+                .upstream
+                .as_ref()
+                .is_some_and(|guard| !guard.is_current())
+            {
+                return false;
+            }
+            let Some(lease) = request.try_admit_mutation() else {
+                return false;
+            };
+            let result = if let Some(upstream) = &self.upstream {
+                upstream.commit_if_current(mutation).await
+            } else {
+                mutation.await;
+                true
+            };
+            lease.complete();
+            result
+        })
+    }
+}
+
+fn scoped_mod_session(
+    orch: &ConversationOrchestrator,
+    upstream: Option<std::sync::Arc<dyn HookPublicationGuard>>,
+    origin: Option<std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+) -> Option<GenerationBoundModSessionContext> {
+    let request = match tool_api::context::host_tool_cancellation() {
+        tool_api::context::HostToolCancellation::TerminateOwnedProcess(request) => Some(request),
+        tool_api::context::HostToolCancellation::Ordinary => None,
+    };
+    if request.is_none() && upstream.is_none() && origin.is_none() {
+        return None;
+    }
+    let inner = match orch.upgrade_streaming_tool_dispatch_owner() {
+        Some(inner) => inner,
+        None if upstream.is_some() => {
+            panic!("generation-bound Mod session requires an orchestrator owner")
+        }
+        None => return None,
+    };
+    let publication_guard: std::sync::Arc<dyn HookPublicationGuard> = match &request {
+        Some(request) => std::sync::Arc::new(HostModPublicationGuard {
+            request: std::sync::Arc::downgrade(request),
+            upstream,
+        }),
+        None => upstream.unwrap_or_else(|| std::sync::Arc::new(ModSessionEventPublicationGuard)),
+    };
+    let event_detached_output = origin.as_ref().map(|origin| {
+        orch.mod_session_event_output(crate::conversation::ModSessionEventOrigin {
+            session_id: origin.session_id().as_uuid().to_string(),
+            mod_turn_id: None,
+        })
+    });
+    Some(GenerationBoundModSessionContext {
+        inner,
+        publication_guard,
+        event_origin: origin,
+        event_output: None,
+        event_detached_output,
+        host_hook_snapshot: request
+            .as_ref()
+            .and_then(|_| hooks::executor::current_owned_host_hook_snapshot_arc()),
+        host_request: request,
+    })
+}
+
 /// Per-W1 Mod session view. A Mod worker can issue session-backed UI operations
 /// in addition to the per-dispatch log/toast/status callbacks, so the session
 /// itself must carry the owning generation fence as well.
@@ -2546,6 +2877,183 @@ else {
 struct GenerationBoundModSessionContext {
     inner: std::sync::Arc<ConversationOrchestrator>,
     publication_guard: std::sync::Arc<dyn HookPublicationGuard>,
+    host_request: Option<std::sync::Arc<tool_api::context::HostToolRequest>>,
+    host_hook_snapshot: Option<std::sync::Arc<hooks::executor::OwnedHostHookSnapshot>>,
+    event_origin:
+        Option<std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+    event_output: Option<std::sync::Arc<dyn lingxi_core::host::OutputStream>>,
+    event_detached_output: Option<std::sync::Arc<dyn lingxi_core::host::OutputStream>>,
+}
+
+struct ModSessionWorkOrigin {
+    owner: std::sync::Weak<ConversationOrchestrator>,
+    session_id: lingxi_core::types::SessionId,
+    generation: u64,
+    cwd: PathBuf,
+    root: PathBuf,
+    switch_writer: Option<std::sync::Weak<tokio::sync::OwnedRwLockWriteGuard<()>>>,
+}
+
+impl std::fmt::Debug for ModSessionWorkOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModSessionWorkOrigin")
+            .field("session_id", &self.session_id)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl lingxi_core::host::subagent_spawn::SessionOriginCapability for ModSessionWorkOrigin {
+    fn owner_id(&self) -> usize {
+        self.owner.as_ptr() as usize
+    }
+
+    fn session_id(&self) -> lingxi_core::types::SessionId {
+        self.session_id
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    async fn admit(
+        &self,
+    ) -> Result<
+        std::sync::Arc<dyn Send + Sync>,
+        lingxi_core::host::subagent_spawn::SessionOriginError,
+    > {
+        use lingxi_core::host::subagent_spawn::SessionOriginError;
+        let owner = self.owner.upgrade().ok_or(SessionOriginError::OwnerEnded)?;
+        let writer = self
+            .switch_writer
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        let reader = if writer.is_none() {
+            Some(
+                owner
+                    .mod_session_work_gate
+                    .clone()
+                    .try_read_owned()
+                    .map_err(|_| SessionOriginError::Switching)?,
+            )
+        } else {
+            None
+        };
+        let session = owner.session.lock().await;
+        if session.session_id != self.session_id
+            || owner.mod_session_generation.load(Ordering::Acquire) != self.generation
+        {
+            return Err(SessionOriginError::SessionChanged);
+        }
+        drop(session);
+        Ok(match writer {
+            Some(writer) => writer,
+            None => std::sync::Arc::new(reader.expect("reader is held without a writer")),
+        })
+    }
+}
+
+/// Queued Mod events are already admitted to their own origin-bound output.
+/// Unlike a tool-generation fence, their origin survives the originating turn.
+struct ModSessionEventPublicationGuard;
+
+/// Cancel the physical call if its API waiter goes away, but leave the task
+/// owning the session until a non-cooperative tool actually returns.
+struct CancelModToolWaiterOnDrop(Option<lingxi_core::host::CancellationToken>);
+
+impl Drop for CancelModToolWaiterOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.0.take() {
+            cancellation.cancel();
+        }
+    }
+}
+
+pub(crate) async fn run_owned_mod_session_tool_work<F, T>(
+    lease: std::sync::Arc<dyn Send + Sync>,
+    cancellation: lingxi_core::host::CancellationToken,
+    work: F,
+) -> Result<T, hooks::mods::ModError>
+where
+    F: std::future::Future<Output = Result<T, hooks::mods::ModError>> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut cancel_on_drop = CancelModToolWaiterOnDrop(Some(cancellation));
+    let result = tokio::spawn(async move {
+        let _lease = lease;
+        work.await
+    })
+    .await;
+    cancel_on_drop.0.take();
+    result.map_err(|error| {
+        hooks::mods::ModError::Unavailable(format!("Mod tool dispatch failed: {error}"))
+    })?
+}
+
+impl HookPublicationGuard for ModSessionEventPublicationGuard {
+    fn is_current(&self) -> bool {
+        true
+    }
+
+    fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+        None
+    }
+
+    fn publish_if_current<'a>(
+        &'a self,
+        publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            publication.await;
+            true
+        })
+    }
+
+    fn commit_if_current<'a>(
+        &'a self,
+        mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        self.publish_if_current(mutation)
+    }
+}
+
+impl GenerationBoundModSessionContext {
+    fn owned_denial(&self, reason: String) -> hooks::mods::ModError {
+        if let Some(snapshot) = &self.host_hook_snapshot {
+            snapshot.note_ownership_denial(&reason);
+        }
+        hooks::mods::ModError::Unavailable(reason)
+    }
+    fn permits_owned_tool(&self, prepared: &hooks::mods::PreparedModToolCall) -> bool {
+        prepared
+            .resolved_tool::<PreparedToolHandle>()
+            .is_some_and(|PreparedToolHandle(actual)| {
+                ["Bash", "PowerShell"].iter().any(|name| {
+                    self.inner
+                        .tools
+                        .find_registered_builtin(name)
+                        .is_some_and(|builtin| std::sync::Arc::ptr_eq(actual, &builtin))
+                })
+            })
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_mod_session_for_test(
+    orch: &ConversationOrchestrator,
+) -> Option<std::sync::Arc<dyn hooks::mods::ModSessionContext>> {
+    scoped_mod_session(orch, None, None).map(|session| {
+        std::sync::Arc::new(session) as std::sync::Arc<dyn hooks::mods::ModSessionContext>
+    })
 }
 
 pub(crate) fn generation_bound_mod_session_context(
@@ -2556,17 +3064,211 @@ pub(crate) fn generation_bound_mod_session_context(
     Some(std::sync::Arc::new(GenerationBoundModSessionContext {
         inner,
         publication_guard,
+        host_request: None,
+        host_hook_snapshot: None,
+        event_origin: None,
+        event_output: None,
+        event_detached_output: None,
     }))
+}
+
+/// Bind detached session events to the orchestrator generation captured while
+/// the caller holds its session-work read gate. The wrapper itself does not
+/// hold a read lease: idle timers can outlive a session switch, but each real
+/// host operation must acquire a fresh lease and validate this identity.
+pub(crate) fn origin_bound_mod_session_context(
+    orch: &ConversationOrchestrator,
+    session: std::sync::Arc<dyn hooks::mods::ModSessionContext>,
+    session_id: lingxi_core::types::SessionId,
+    generation: u64,
+    output: std::sync::Arc<dyn lingxi_core::host::OutputStream>,
+) -> Result<std::sync::Arc<dyn hooks::mods::ModSessionContext>, hooks::mods::ModError> {
+    origin_bound_mod_session_context_with_outputs(
+        orch,
+        session,
+        session_id,
+        generation,
+        output.clone(),
+        output,
+    )
+}
+
+pub(crate) fn origin_bound_mod_session_context_with_outputs(
+    orch: &ConversationOrchestrator,
+    session: std::sync::Arc<dyn hooks::mods::ModSessionContext>,
+    session_id: lingxi_core::types::SessionId,
+    generation: u64,
+    output: std::sync::Arc<dyn lingxi_core::host::OutputStream>,
+    detached_output: std::sync::Arc<dyn lingxi_core::host::OutputStream>,
+) -> Result<std::sync::Arc<dyn hooks::mods::ModSessionContext>, hooks::mods::ModError> {
+    let bound = std::sync::Arc::as_ptr(&session) as *const ();
+    let current = orch as *const ConversationOrchestrator as *const ();
+    if bound != current {
+        // Embedded hosts may supply a separate, already-owned session view.
+        return Ok(session);
+    }
+    let inner = orch
+        .upgrade_streaming_tool_dispatch_owner()
+        .ok_or_else(|| {
+            hooks::mods::ModError::Unavailable(
+                "queued Mod session events require an owned orchestrator".into(),
+            )
+        })?;
+    let origin = ModSessionWorkOrigin {
+        owner: std::sync::Arc::downgrade(&inner),
+        session_id,
+        generation,
+        cwd: hooks::mods::ModSessionContext::cwd(inner.as_ref()),
+        root: hooks::mods::ModSessionContext::root(inner.as_ref()),
+        switch_writer: orch
+            .current_mod_session_switch_writer()
+            .as_ref()
+            .map(std::sync::Arc::downgrade),
+    };
+    Ok(std::sync::Arc::new(GenerationBoundModSessionContext {
+        inner,
+        publication_guard: std::sync::Arc::new(ModSessionEventPublicationGuard),
+        host_request: None,
+        host_hook_snapshot: None,
+        event_origin: Some(std::sync::Arc::new(origin)),
+        event_output: Some(output),
+        event_detached_output: Some(detached_output),
+    }))
+}
+
+/// Capture the current identity once for a foreground Mod dispatch. Its
+/// detached context routes subsequent callbacks through the origin output.
+pub(crate) async fn capture_mod_session_dispatch_context(
+    orch: &ConversationOrchestrator,
+) -> Result<Option<std::sync::Arc<dyn hooks::mods::ModSessionContext>>, hooks::mods::ModError> {
+    let Some(owner) = orch.upgrade_streaming_tool_dispatch_owner() else {
+        return Ok(None);
+    };
+    let writer = orch.current_mod_session_switch_writer();
+    let _reader = if writer.is_none() {
+        Some(
+            orch.mod_session_work_gate
+                .clone()
+                .try_read_owned()
+                .map_err(|_| {
+                    hooks::mods::ModError::Unavailable("session is being switched".into())
+                })?,
+        )
+    } else {
+        None
+    };
+    let session_id = orch.session.lock().await.session_id;
+    let generation = orch.mod_session_generation.load(Ordering::Acquire);
+    let detached_output =
+        orch.mod_session_event_output(crate::conversation::ModSessionEventOrigin {
+            session_id: session_id.as_uuid().to_string(),
+            // A generic dispatch may be session-scoped even while a turn runs.
+            // Do not infer turn ownership from the mutable current turn slot.
+            mod_turn_id: None,
+        });
+    let session: std::sync::Arc<dyn hooks::mods::ModSessionContext> = owner;
+    origin_bound_mod_session_context_with_outputs(
+        orch,
+        session,
+        session_id,
+        generation,
+        orch.output.clone(),
+        detached_output,
+    )
+    .map(Some)
 }
 
 #[async_trait::async_trait]
 impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
+    fn session_origin_capability(
+        &self,
+    ) -> Option<std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>
+    {
+        self.event_origin.clone()
+    }
+
+    fn bind_session_origin(
+        &self,
+        capability: std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>,
+    ) -> Result<Option<std::sync::Arc<dyn hooks::mods::ModSessionContext>>, hooks::mods::ModError>
+    {
+        // A bound view must never be rebound to a different generation.
+        if let Some(origin) = &self.event_origin {
+            if origin.owner_id() != capability.owner_id()
+                || origin.session_id() != capability.session_id()
+                || origin.generation() != capability.generation()
+            {
+                return Err(hooks::mods::ModError::Unavailable(
+                    "session capability does not match the bound session".into(),
+                ));
+            }
+            return Ok(Some(std::sync::Arc::new(self.clone())));
+        }
+        hooks::mods::ModSessionContext::bind_session_origin(self.inner.as_ref(), capability)
+    }
+
+    async fn capture_dispatch_context(
+        &self,
+    ) -> Result<Option<std::sync::Arc<dyn hooks::mods::ModSessionContext>>, hooks::mods::ModError>
+    {
+        // Keep the original identity and publication fence when Mod dispatch
+        // re-enters from an already-bound foreground or background session.
+        let mut bound = self.clone();
+        if bound.event_origin.is_none() {
+            if let Some(origin) = self.inner.capture_session_origin_capability().await? {
+                bound.event_detached_output = Some(self.inner.mod_session_event_output(
+                    crate::conversation::ModSessionEventOrigin {
+                        session_id: origin.session_id().as_uuid().to_string(),
+                        mod_turn_id: None,
+                    },
+                ));
+                bound.event_origin = Some(origin);
+            }
+        }
+        Ok(Some(std::sync::Arc::new(bound)))
+    }
+
+    async fn acquire_session_work_lease(
+        &self,
+    ) -> Result<Option<std::sync::Arc<dyn Send + Sync>>, hooks::mods::ModError> {
+        let Some(origin) = &self.event_origin else {
+            return Ok(None);
+        };
+        origin
+            .admit()
+            .await
+            .map(Some)
+            .map_err(|error| hooks::mods::ModError::Unavailable(error.to_string()))
+    }
+
+    fn is_host_owned_request(&self) -> bool {
+        self.host_request.is_some()
+    }
+
+    fn owned_mod_registration(&self) -> Option<hooks::mods::OwnedModRegistration> {
+        self.host_hook_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.mod_registration())
+    }
+
+    fn note_owned_denial(&self, reason: &str) {
+        if let Some(snapshot) = &self.host_hook_snapshot {
+            snapshot.note_ownership_denial(reason);
+        }
+    }
+
     fn cwd(&self) -> std::path::PathBuf {
-        hooks::mods::ModSessionContext::cwd(self.inner.as_ref())
+        self.event_origin.as_ref().map_or_else(
+            || hooks::mods::ModSessionContext::cwd(self.inner.as_ref()),
+            |origin| origin.cwd().to_path_buf(),
+        )
     }
 
     fn root(&self) -> std::path::PathBuf {
-        hooks::mods::ModSessionContext::root(self.inner.as_ref())
+        self.event_origin.as_ref().map_or_else(
+            || hooks::mods::ModSessionContext::root(self.inner.as_ref()),
+            |origin| origin.root().to_path_buf(),
+        )
     }
 
     async fn projects_consent_facts(&self) -> hooks::mods::ProjectsConsentFacts {
@@ -2612,6 +3314,11 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         plugin_storage_id: &str,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        if self.host_request.is_some() {
+            return Err(
+                self.owned_denial("mcp.connect cannot be owned by this host request".into())
+            );
+        }
         if !self.publication_guard.is_current() {
             return Err(hooks::mods::ModError::Unavailable(
                 "MCP connect generation was discarded".into(),
@@ -2633,7 +3340,59 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
     fn ui_invalidation_context(
         &self,
     ) -> Option<std::sync::Arc<dyn hooks::mods::ModSessionContext>> {
-        Some(std::sync::Arc::new(self.clone()))
+        // A timer ticket may outlive the whole engine. Its factory stores only
+        // weak references to the owner and host snapshot: keeping either
+        // strong would form host -> ticket -> host/owner cycles. Every actual
+        // API operation creates a short-lived bound view and separately admits
+        // the original session generation.
+        let origin = self.event_origin.clone()?;
+        let owner = std::sync::Arc::downgrade(&self.inner);
+        let host_hook_snapshot = self
+            .host_hook_snapshot
+            .as_ref()
+            .map(std::sync::Arc::downgrade);
+        let publication_guard = self.publication_guard.clone();
+        let host_request = self.host_request.as_ref().map(std::sync::Arc::downgrade);
+        let event_output = self
+            .event_detached_output
+            .clone()
+            .or_else(|| self.event_output.clone());
+        Some(hooks::mods::weak_mod_session_factory(std::sync::Arc::new(
+            move || {
+                let inner = owner.upgrade().ok_or_else(|| {
+                    hooks::mods::ModError::Unavailable("originating session owner has ended".into())
+                })?;
+                let host_hook_snapshot = host_hook_snapshot
+                    .as_ref()
+                    .map(|snapshot| {
+                        snapshot.upgrade().ok_or_else(|| {
+                            hooks::mods::ModError::Unavailable(
+                                "originating host hook snapshot has ended".into(),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let host_request = host_request
+                    .as_ref()
+                    .map(|request| {
+                        request.upgrade().ok_or_else(|| {
+                            hooks::mods::ModError::Unavailable(
+                                "originating host request has ended".into(),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                Ok(std::sync::Arc::new(GenerationBoundModSessionContext {
+                    inner,
+                    publication_guard: publication_guard.clone(),
+                    host_request,
+                    host_hook_snapshot,
+                    event_origin: Some(origin.clone()),
+                    event_output: event_output.clone(),
+                    event_detached_output: event_output.clone(),
+                }))
+            },
+        )))
     }
 
     fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
@@ -2787,6 +3546,11 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         input: hooks::mods::ModAgentSpawnInput,
         context: hooks::mods::ModAgentSpawnContext,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        if self.host_request.is_some() {
+            return Err(
+                self.owned_denial("agent.spawn cannot be owned by this host request".into())
+            );
+        }
         hooks::mods::ModSessionContext::agent_spawn_api(self.inner.as_ref(), input, context).await
     }
 
@@ -2797,7 +3561,16 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         consent: Option<String>,
         cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<hooks::mods::PreparedModToolCall, hooks::mods::ModError> {
-        hooks::mods::ModSessionContext::prepare_tool_call(
+        if self
+            .host_request
+            .as_ref()
+            .is_some_and(|request| !request.is_active())
+        {
+            return Err(hooks::mods::ModError::Unavailable(
+                "host request has already completed".into(),
+            ));
+        }
+        let prepared = hooks::mods::ModSessionContext::prepare_tool_call(
             self.inner.as_ref(),
             plugin,
             requested_tool_name,
@@ -2805,6 +3578,31 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
             cancellation,
         )
         .await
+        .map_err(|error| {
+            if self.host_request.is_some() {
+                self.owned_denial(format!("nested tool admission failed: {error}"))
+            } else {
+                error
+            }
+        })?;
+        if self.host_request.is_some() && !self.permits_owned_tool(&prepared) {
+            return Err(self.owned_denial(format!(
+                "nested {} cannot be owned by this host request",
+                prepared.canonical_tool_name()
+            )));
+        }
+        if self.host_request.is_some()
+            && !self
+                .host_hook_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.includes_tool(prepared.canonical_tool_name()))
+        {
+            return Err(self.owned_denial(format!(
+                "nested {} was not included in host hook preflight",
+                prepared.canonical_tool_name()
+            )));
+        }
+        Ok(prepared)
     }
 
     async fn tool_call(
@@ -2813,14 +3611,72 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         input: Utf16JsonProjection,
         context: &hooks::mods::ModToolCallContext,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
-        dispatch_mod_session_tool_call(
+        let host_scope = if let Some(request) = &self.host_request {
+            if !request.is_active() || !self.permits_owned_tool(context.prepared.as_ref()) {
+                return Err(hooks::mods::ModError::Unavailable(
+                    "nested tool call is not owned by an active host request".into(),
+                ));
+            }
+            let snapshot = self.host_hook_snapshot.clone().ok_or_else(|| {
+                hooks::mods::ModError::Unavailable("host request hook snapshot is missing".into())
+            })?;
+            Some((request.clone(), snapshot))
+        } else {
+            None
+        };
+        if self.event_origin.is_some() {
+            // The caller may stop waiting after cancellation while the tool
+            // itself is still running. Move the transaction's session lease
+            // into the physical dispatch task, not its output envelope.
+            let lease = context.session_work_lease().ok_or_else(|| {
+                hooks::mods::ModError::Unavailable(
+                    "originating Mod tool call has no session-work lease".into(),
+                )
+            })?;
+            let owner = self.inner.clone();
+            let publication_guard = self.publication_guard.clone();
+            let plugin = plugin.to_owned();
+            let context = context.clone();
+            let session_origin = self.event_origin.clone();
+            let cancellation = context.cancellation.clone();
+            return run_owned_mod_session_tool_work(lease, cancellation, async move {
+                let dispatch = dispatch_mod_session_tool_call(
+                    owner.as_ref(),
+                    Some(publication_guard),
+                    session_origin,
+                    &plugin,
+                    input,
+                    &context,
+                );
+                if let Some((request, snapshot)) = host_scope {
+                    tool_api::context::with_host_tool_cancellation(
+                        tool_api::context::HostToolCancellation::TerminateOwnedProcess(request),
+                        hooks::executor::with_owned_host_hook_snapshot_arc(snapshot, dispatch),
+                    )
+                    .await
+                } else {
+                    dispatch.await
+                }
+            })
+            .await;
+        }
+        let dispatch = dispatch_mod_session_tool_call(
             self.inner.as_ref(),
             Some(std::sync::Arc::clone(&self.publication_guard)),
+            self.event_origin.clone(),
             plugin,
             input,
             context,
-        )
-        .await
+        );
+        if let Some((request, snapshot)) = host_scope {
+            tool_api::context::with_host_tool_cancellation(
+                tool_api::context::HostToolCancellation::TerminateOwnedProcess(request),
+                hooks::executor::with_owned_host_hook_snapshot_arc(snapshot, dispatch),
+            )
+            .await
+        } else {
+            dispatch.await
+        }
     }
 
     async fn project_tool_call_api_result(
@@ -2871,6 +3727,11 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         command: Utf16JsonProjection,
         args: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        if self.host_request.is_some() {
+            return Err(
+                self.owned_denial("command.run cannot be owned by this host request".into())
+            );
+        }
         hooks::mods::ModSessionContext::command_run(self.inner.as_ref(), plugin, command, args)
             .await
     }
@@ -2881,6 +3742,11 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         text: Utf16JsonProjection,
         as_user: bool,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        if self.host_request.is_some() {
+            return Err(
+                self.owned_denial("prompt.submit cannot be owned by this host request".into())
+            );
+        }
         hooks::mods::ModSessionContext::prompt_submit(self.inner.as_ref(), plugin, text, as_user)
             .await
     }
@@ -2926,26 +3792,30 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
     }
 
     async fn emit_mod_log(&self, plugin: &str, text: Utf16JsonProjection) {
+        let output = self.event_output.as_ref().unwrap_or(&self.inner.output);
         self.publication_guard
-            .publish_if_current(self.inner.output.emit_mod_log(plugin, &text))
+            .publish_if_current(output.emit_mod_log(plugin, &text))
             .await;
     }
 
     async fn emit_mod_toast(&self, plugin: &str, text: Utf16JsonProjection, timeout_ms: u64) {
+        let output = self.event_output.as_ref().unwrap_or(&self.inner.output);
         self.publication_guard
-            .publish_if_current(self.inner.output.emit_mod_toast(plugin, &text, timeout_ms))
+            .publish_if_current(output.emit_mod_toast(plugin, &text, timeout_ms))
             .await;
     }
 
     async fn emit_mod_notify(&self, plugin: &str, text: Utf16JsonProjection) {
+        let output = self.event_output.as_ref().unwrap_or(&self.inner.output);
         self.publication_guard
-            .publish_if_current(self.inner.output.emit_mod_notify(plugin, &text))
+            .publish_if_current(output.emit_mod_notify(plugin, &text))
             .await;
     }
 
     async fn emit_mod_status(&self, plugin: &str, text: Option<Utf16JsonProjection>) {
+        let output = self.event_output.as_ref().unwrap_or(&self.inner.output);
         self.publication_guard
-            .publish_if_current(self.inner.output.emit_mod_status(plugin, text.as_ref()))
+            .publish_if_current(output.emit_mod_status(plugin, text.as_ref()))
             .await;
     }
 }
@@ -2962,11 +3832,11 @@ async fn apply_mod_tool_check(
     agent_id: Option<String>,
     tool_check_ceiling: Option<lingxi_core::host::McpPermissionCeiling>,
     publication_fence: Option<std::sync::Arc<dyn HookPublicationGuard>>,
+    session_origin: Option<
+        std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>,
+    >,
 ) -> PermissionResolution {
-    let Some(registry) = &orch.lifecycle_runtime.hook_registry else {
-        return resolution;
-    };
-    let Some(host) = registry.read().await.mod_host() else {
+    let Some(host) = tool_dispatch_mod_host(orch).await else {
         return resolution;
     };
     let original_decision = match resolution {
@@ -3032,14 +3902,7 @@ async fn apply_mod_tool_check(
     let mod_toast_fence = publication_fence.clone();
     let mod_status_fence = publication_fence.clone();
     let generation_bound_session =
-        publication_fence
-            .clone()
-            .map(|publication_guard| GenerationBoundModSessionContext {
-                inner: orch
-                    .upgrade_streaming_tool_dispatch_owner()
-                    .expect("streaming tool.check uses its bound orchestrator owner"),
-                publication_guard,
-            });
+        scoped_mod_session(orch, publication_fence.clone(), session_origin);
     let session: &dyn hooks::mods::ModSessionContext = generation_bound_session
         .as_ref()
         .map_or(orch, |session| session);
@@ -3104,9 +3967,33 @@ async fn apply_mod_tool_check(
             },
         )
         .await;
+    if let Some(reason) = hooks::executor::current_owned_host_hook_snapshot()
+        .and_then(|snapshot| snapshot.ownership_denial())
+    {
+        return PermissionResolution::Deny {
+            reason: reason.into(),
+            source: PermissionDecisionSource::Unspecified,
+            rule_source: None,
+            decision_reason_type: None,
+            decision_reason: None,
+            behavior_ask: false,
+            content_blocks: Vec::new(),
+        };
+    }
     let checked = match checked {
         Ok(value) => value,
         Err(error) => {
+            if hooks::executor::current_owned_host_hook_snapshot().is_some() {
+                return PermissionResolution::Deny {
+                    reason: format!("owned Mod tool.check failed: {error}").into(),
+                    source: PermissionDecisionSource::Unspecified,
+                    rule_source: None,
+                    decision_reason_type: None,
+                    decision_reason: None,
+                    behavior_ask: false,
+                    content_blocks: Vec::new(),
+                };
+            }
             tracing::warn!(tool = name, %error, "mod tool.check failed; keeping core permission decision");
             return resolution;
         }
@@ -3391,11 +4278,7 @@ async fn apply_mod_tool_check_lazy_normal(
     OrchestratorError,
 > {
     let agent_id = tool_ctx.agent_id.as_ref().map(ToString::to_string);
-    let host = if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
-        registry.read().await.mod_host()
-    } else {
-        None
-    };
+    let host = tool_dispatch_mod_host(orch).await;
     let Some(host) = host else {
         let core = resolve_normal_tool_check_core(
             orch,
@@ -3438,15 +4321,11 @@ async fn apply_mod_tool_check_lazy_normal(
     let mod_log_fence = publication_fence.clone();
     let mod_toast_fence = publication_fence.clone();
     let mod_status_fence = publication_fence.clone();
-    let generation_bound_session =
-        publication_fence
-            .clone()
-            .map(|publication_guard| GenerationBoundModSessionContext {
-                inner: orch
-                    .upgrade_streaming_tool_dispatch_owner()
-                    .expect("streaming tool.check uses its bound orchestrator owner"),
-                publication_guard,
-            });
+    let generation_bound_session = scoped_mod_session(
+        orch,
+        publication_fence.clone(),
+        tool_ctx.session_origin.clone(),
+    );
     let session: &dyn hooks::mods::ModSessionContext = generation_bound_session
         .as_ref()
         .map_or(orch, |session| session);
@@ -3546,9 +4425,19 @@ async fn apply_mod_tool_check_lazy_normal(
     if let Some(error) = abort_slot.lock().await.take() {
         return Err(error);
     }
+    if let Some(reason) = hooks::executor::current_owned_host_hook_snapshot()
+        .and_then(|snapshot| snapshot.ownership_denial())
+    {
+        return Err(OrchestratorError::Internal(reason));
+    }
     let checked = match checked {
         Ok(checked) => checked,
         Err(error) => {
+            if hooks::executor::current_owned_host_hook_snapshot().is_some() {
+                return Err(OrchestratorError::Internal(format!(
+                    "owned Mod tool.check failed: {error}"
+                )));
+            }
             tracing::warn!(tool = name, %error, "mod tool.check failed; evaluating core permission");
             let core = resolve_normal_tool_check_core(
                 orch,
@@ -3851,6 +4740,16 @@ pub(crate) async fn streaming_tool_context_base(
     orch: &ConversationOrchestrator,
     messages: Vec<ConversationMessage>,
 ) -> ToolUseContext {
+    // The capability is captured before this context enters the scheduler or
+    // any child-launch queue. If capture is unavailable, children with a
+    // trusted session id use their fail-closed Mod view.
+    let session_origin = match orch.capture_session_origin_capability().await {
+        Ok(origin) => origin,
+        Err(error) => {
+            tracing::warn!(%error, "could not capture tool session origin");
+            None
+        }
+    };
     let (main_loop_model, selected_model_profile) = {
         let session = orch.session.lock().await;
         (session.model.clone(), session.model_profile.clone())
@@ -3893,6 +4792,7 @@ pub(crate) async fn streaming_tool_context_base(
         agent_name: None,
         team_name: None,
         origin_session_id: None,
+        session_origin,
         instruction_context: Some(orch.instruction_context_snapshot().await),
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         trusted_effective_permission_mode: None,
@@ -3902,6 +4802,7 @@ pub(crate) async fn streaming_tool_context_base(
         observer_pairings: orch.model_runtime.observer_pairings.clone(),
         subagent_registry: Some(orch.tools.clone()),
         cancel: None,
+        host_tool_cancellation: tool_api::context::host_tool_cancellation(),
         fork_parent_system_prompt: orch.current_turn_system_prompt().await,
         cwd: None,
         depth: 0,
@@ -3966,6 +4867,37 @@ pub(crate) async fn dispatch_streaming_tool_use_owned(
     .await
 }
 
+fn lifecycle_pause_cancelled(
+    orch: &ConversationOrchestrator,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> bool {
+    cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        && orch.cancel_reason_now() == crate::prompt::mid_turn_input::CancelReason::LifecyclePause
+}
+
+fn lifecycle_pause_result(
+    id: &ToolUseId,
+    name: &str,
+    provider_id: &Option<String>,
+) -> (ContentBlock, ToolResultPublication) {
+    let text = crate::streaming_executor::LIFECYCLE_INTERRUPTED_MESSAGE;
+    let result = ContentBlock::ToolResult {
+        tool_use_id: id.clone(),
+        content: text.into(),
+        is_error: Some(true),
+        provider_tool_use_id: provider_id.clone(),
+        content_blocks: None,
+    };
+    let mut publication = ToolResultPublication::frame_only(
+        id,
+        name,
+        text,
+        source_from_value(&serde_json::json!({ "error": text })),
+    );
+    publication.tool_use_result = Some(text.into());
+    (result, publication)
+}
+
 pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
     orch: &'a ConversationOrchestrator,
     tool_uses: &'a [(ToolUseId, String, Utf16JsonProjection, Option<String>)],
@@ -3978,6 +4910,35 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
     publication_fence: Option<std::sync::Arc<dyn HookPublicationGuard>>,
 ) -> futures::future::BoxFuture<'a, Result<DeferredToolDispatch, OrchestratorError>> {
     Box::pin(async move {
+        let streaming_admission = dispatch_started.is_some();
+        // Streamed calls cross this boundary before scheduler admission. Other
+        // callers must persist it here, before Mods or hooks can do work.
+        let _recovery_lease = if !streaming_admission
+            && !tool_uses.is_empty()
+            && !lifecycle_pause_cancelled(orch, cancel.as_ref())
+        {
+            orch.mark_tool_dispatch_unsafe()?
+        } else {
+            None
+        };
+        let work_lease = _recovery_lease
+            .as_ref()
+            .map(|leases| std::sync::Arc::clone(&leases.turn_work))
+            .or_else(current_dispatch_work_lease);
+        let execution_lease = _recovery_lease
+            .as_ref()
+            .map(|leases| leases.execution.clone())
+            .or_else(|| {
+                DISPATCH_EXECUTION_LEASE
+                    .try_with(Clone::clone)
+                    .ok()
+                    .flatten()
+            });
+        // The Mod dispatch state machine is large. Box it before passing it
+        // through the task-local scopes, so each scope carries a pointer rather
+        // than copying the entire future on its polling stack. Construction
+        // does not poll it; both leases are still installed when it runs.
+        with_dispatch_execution_lease(execution_lease, with_dispatch_work_lease(work_lease, super::boxed_turn_future(|| async move {
         // This is the real streaming dispatch entry: after executor admission but
         // before hook lookup, permission waits, or any tool-call completion. The
         // scheduler Add barrier matches Native W1 at this point.
@@ -3990,11 +4951,22 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
         {
             return Ok(DeferredToolDispatch::default());
         }
-        let mod_host = if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
-            registry.read().await.mod_host()
-        } else {
-            None
-        };
+        if lifecycle_pause_cancelled(orch, cancel.as_ref()) {
+            let mut dispatch = DeferredToolDispatch::default();
+            for (id, name, _, provider_id) in tool_uses {
+                let (result, publication) = lifecycle_pause_result(id, name, provider_id);
+                publish_or_defer_tool_result(
+                    orch,
+                    publication_fence.as_deref(),
+                    &mut dispatch.publications,
+                    publication,
+                )
+                .await;
+                dispatch.results.push(result);
+            }
+            return Ok(dispatch);
+        }
+        let mod_host = tool_dispatch_mod_host(orch).await;
         let Some(mod_host) = mod_host else {
             return dispatch_tool_uses_tracked_deferred_core(
                 orch,
@@ -4011,6 +4983,15 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             )
             .await;
         };
+        if matches!(
+            tool_api::context::host_tool_cancellation(),
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(_)
+        ) && orch.upgrade_streaming_tool_dispatch_owner().is_none()
+        {
+            return Err(OrchestratorError::Internal(
+                "owned host dispatch with Mods requires a bound orchestrator".into(),
+            ));
+        }
         let mut all = DeferredToolDispatch {
             results: Vec::with_capacity(tool_uses.len()),
             publications: Vec::with_capacity(tool_uses.len()),
@@ -4022,23 +5003,26 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
         for (tool_index, (id, name, input, provider_id)) in tool_uses.iter().enumerate() {
             let per_tool_facts =
                 dispatch_facts_for_tool_index(tool_uses, dispatch_facts.as_ref(), tool_index);
-            let managed_pre_hook = if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
-                let event = HookEvent::PreToolUse {
-                    tool_name: name.clone(),
-                    tool_input: input.clone(),
-                    tool_use_id: id.clone(),
-                };
-                let context = HookContext {
-                    cwd: orch.current_cwd(),
-                    ..Default::default()
-                };
-                registry
-                    .read()
-                    .await
-                    .has_managed_pre_tool_use_match(&event, &context)
-            } else {
-                false
+            let event = HookEvent::PreToolUse {
+                tool_name: name.clone(),
+                tool_input: input.clone(),
+                tool_use_id: id.clone(),
             };
+            let context = HookContext {
+                cwd: orch.current_cwd(),
+                ..Default::default()
+            };
+            let managed_pre_hook =
+                if let Some(snapshot) = hooks::executor::current_owned_host_hook_snapshot() {
+                    snapshot.has_managed_pre_tool_use_match(&event, &context)
+                } else if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
+                    registry
+                        .read()
+                        .await
+                        .has_managed_pre_tool_use_match(&event, &context)
+                } else {
+                    false
+                };
             if managed_pre_hook {
                 // Managed PreToolUse must run before a Mod can short-circuit the
                 // call. Until the two hook phases are split, run the core path so
@@ -4085,6 +5069,12 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             let name_for_core = name.clone();
             let provider_for_core = provider_id.clone();
             let cancel_for_core = cancel.clone();
+            // A Mod may forward `next` across an asynchronous boundary.
+            // Capture the trusted host policy and re-enter it for the physical
+            // tool call instead of relying on task-local inheritance.
+            let host_cancellation_for_core = tool_api::context::host_tool_cancellation();
+            let host_hook_snapshot_for_core = hooks::executor::current_owned_host_hook_snapshot_arc();
+            let work_lease_for_core = current_dispatch_work_lease();
             let batch_tool_count = tool_uses.len();
             let dispatch_facts_for_core = per_tool_facts.clone();
             let prepared_tool_for_core = prepared_tool.clone();
@@ -4096,14 +5086,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             let mod_log_fence = publication_fence.clone();
             let mod_toast_fence = publication_fence.clone();
             let mod_status_fence = publication_fence.clone();
-            let generation_bound_session = publication_fence.clone().map(|publication_guard| {
-                GenerationBoundModSessionContext {
-                    inner: orch
-                        .upgrade_streaming_tool_dispatch_owner()
-                        .expect("streaming tool.call uses its bound orchestrator owner"),
-                    publication_guard,
-                }
-            });
+            let generation_bound_session = scoped_mod_session(
+                orch,
+                publication_fence.clone(),
+                inherited_context.as_ref().and_then(|context| context.session_origin.clone()),
+            );
             let session: &dyn hooks::mods::ModSessionContext = generation_bound_session
                 .as_ref()
                 .map_or(orch, |session| session);
@@ -4125,12 +5112,23 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                         let name = name_for_core.clone();
                         let provider_id = provider_for_core.clone();
                         let cancel = cancel_for_core.clone();
+                        let host_cancellation = host_cancellation_for_core.clone();
+                        let host_hook_snapshot = host_hook_snapshot_for_core.clone();
+                        let work_lease = work_lease_for_core.clone();
                         let assistant_message_id = assistant_message_id;
                         let dispatch_facts = dispatch_facts_for_core.clone();
                         let prepared_tool = prepared_tool_for_core.clone();
                         let inherited_context = inherited_context_for_core.clone();
                         let publication_fence = publication_fence_for_core.clone();
                         async move {
+                            if let Some(reason) = host_hook_snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.ownership_denial())
+                            {
+                                *core_error.lock().await =
+                                    Some(OrchestratorError::Internal(reason.clone()));
+                                return Err(hooks::mods::ModError::Unavailable(reason));
+                            }
                             let Some(next_event) = next_event else {
                                 return Err(hooks::mods::ModError::Hook(
                                     "tool.call needs a forwarded event".into(),
@@ -4154,23 +5152,38 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                 let _ = args.remove_field(field);
                             }
                             let single = vec![(id, name, args, provider_id)];
-                            let (dispatched, mut stage) = with_mod_result_stage(
-                                &single[0].0,
-                                dispatch_tool_uses_tracked_deferred_core(
-                                    orch,
-                                    &single,
-                                    cancel,
-                                    assistant_message_id,
-                                    dispatch_facts,
-                                    batch_tool_count,
-                                    None,
-                                    None,
-                                    prepared_tool,
-                                    inherited_context,
-                                    publication_fence,
-                                ),
-                            )
-                            .await;
+                            let (dispatched, mut stage) =
+                                with_dispatch_work_lease(work_lease,
+                                tool_api::context::with_host_tool_cancellation(
+                                    host_cancellation,
+                                    async {
+                                        let dispatch = with_mod_result_stage(
+                                            &single[0].0,
+                                            dispatch_tool_uses_tracked_deferred_core(
+                                                orch,
+                                                &single,
+                                                cancel,
+                                                assistant_message_id,
+                                                dispatch_facts,
+                                                batch_tool_count,
+                                                None,
+                                                None,
+                                                prepared_tool,
+                                                inherited_context,
+                                                publication_fence,
+                                            ),
+                                        );
+                                        if let Some(snapshot) = host_hook_snapshot {
+                                            hooks::executor::with_owned_host_hook_snapshot_arc(
+                                                snapshot, dispatch,
+                                            )
+                                            .await
+                                        } else {
+                                            dispatch.await
+                                        }
+                                    },
+                                ))
+                                .await;
                             let mut dispatched = match dispatched {
                                 Ok(dispatched) => dispatched,
                                 Err(error) => {
@@ -4290,6 +5303,13 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             {
                 return Ok(all);
             }
+            if let Some(reason) = hooks::executor::current_owned_host_hook_snapshot()
+                .and_then(|snapshot| snapshot.ownership_denial())
+            {
+                if completed.lock().await.is_empty() {
+                    return Err(OrchestratorError::Internal(reason));
+                }
+            }
             let answer = match answer {
                 Ok(answer) => answer.result_projection,
                 Err(error) => {
@@ -4311,6 +5331,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                         .await;
                         append_mod_dispatch(&mut all, core.dispatched);
                         continue;
+                    }
+                    if hooks::executor::current_owned_host_hook_snapshot().is_some() {
+                        return Err(OrchestratorError::Internal(format!(
+                            "owned Mod tool.call failed before tool execution: {error}"
+                        )));
                     }
                     let single =
                         vec![(id.clone(), name.clone(), input.clone(), provider_id.clone())];
@@ -4415,7 +5440,8 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     message.clone()
                 };
                 if completed.lock().await.is_empty() {
-                    orch.output.emit_tool_call(id, name, input).await;
+                    emit_dispatch_tool_call(orch, id, name, input, publication_fence.as_deref())
+                        .await?;
                 }
                 let mut publication = ToolResultPublication::frame_only(
                     id,
@@ -4594,7 +5620,8 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 continue;
             };
             if completed.lock().await.is_empty() {
-                orch.output.emit_tool_call(id, name, input).await;
+                emit_dispatch_tool_call(orch, id, name, input, publication_fence.as_deref())
+                    .await?;
             }
             let publication = ToolResultPublication {
                 tool_use_id: id.clone(),
@@ -4636,6 +5663,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 });
         }
         Ok(all)
+        }))).await
     })
 }
 
@@ -4964,7 +5992,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             dispatch_facts_for_tool_index(tool_uses, dispatch_facts.as_ref(), tool_index);
         let suppress_virtual_output = active_mod_result_stage_is_virtual().await;
         if !suppress_virtual_output {
-            orch.output.emit_tool_call(tool_use_id, name, input).await;
+            emit_dispatch_tool_call(orch, tool_use_id, name, input, publication_fence.as_deref())
+                .await?;
         }
 
         // claude-code order (`toolExecution.ts` runToolUse ~401 +
@@ -5150,12 +6179,16 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             inherited.assistant_message = ctx.assistant_message;
             inherited.same_turn_tool_uses = ctx.same_turn_tool_uses;
             inherited.cancel = ctx.cancel;
+            inherited.host_tool_cancellation = ctx.host_tool_cancellation;
             inherited.agent_spawn_provenance = ctx.agent_spawn_provenance;
             ctx = inherited;
         }
         ctx.native_query_depth = tool_dispatch_facts
             .as_ref()
             .map(|facts| facts.native_query_depth);
+        // The tool consumes its context; hooks before and after that call must
+        // retain the same trusted host cancellation identity.
+        let hook_cancellation = ctx.host_tool_cancellation.clone();
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a
         // `validateInput` failure wraps the message in `<tool_use_error>` and
@@ -5200,6 +6233,18 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // and `continue` without pushing to `post_tool_batch_calls` (tool
         // didn't run). A `None` cancel token → guard never fires.
         if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+            if lifecycle_pause_cancelled(orch, cancel.as_ref()) {
+                let (result, publication) = lifecycle_pause_result(tool_use_id, name, provider_id);
+                publish_or_defer_tool_result(
+                    orch,
+                    publication_fence.as_deref(),
+                    &mut publications,
+                    publication,
+                )
+                .await;
+                results.push(result);
+                continue;
+            }
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
                 content: CANCEL_MESSAGE.into(),
@@ -5280,7 +6325,13 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 model: ctx.options.main_loop_model.clone(),
                 model_profile: ctx.options.model_profile.clone(),
             }),
-            inherit: orch.hook_agent_inheritance.clone(),
+            inherit: orch.hook_agent_inheritance.clone().map(|mut inheritance| {
+                inheritance.session_origin = ctx
+                    .session_origin
+                    .clone()
+                    .filter(|origin| origin.session_id() == session_id);
+                inheritance
+            }),
             agent_depth: Some(ctx.depth),
             session_id,
             cwd: orch.current_cwd(),
@@ -5302,8 +6353,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             tool_name = %name,
         );
         telemetry::otel::emit_hook_lifecycle("pre", "started", name, None);
-        let pre_agg =
-            super::boxed_turn_future(|| orch.hooks.execute(pre_event, hook_ctx.clone())).await;
+        let pre_agg = super::boxed_turn_future(|| {
+            execute_tool_hook(orch, pre_event, hook_ctx.clone(), &hook_cancellation)
+        })
+        .await?;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let pre_dur_ms = pre_started.elapsed().as_millis() as u64;
@@ -5695,6 +6748,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // and stays correct for every arm that carries no classifier reason
         // (hook Block, plan-mode, unknown).
         let mut denial_kind: &'static str = "permission-rule";
+        // Unlike a Deny, a closed prompt transport carries no decision from
+        // the user. Keep that provenance until the common result boundary.
+        let mut permission_transport_closed = false;
         let plan_mode = orch.session.lock().await.plan_mode;
         // ORPHAN RECOVERY: a re-dispatched orphaned tool carries a forced
         // permission decision (its recovered `control_response`) that REPLACES the
@@ -5856,11 +6912,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             // no Mod host exists, the outcome arm below consumes the captured
             // terminal Allow/Deny rather than querying live policy again after
             // the tool-owned check. Captured Ask uses the full pipeline above.
-            let has_mod_host = if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
-                registry.read().await.mod_host().is_some()
-            } else {
-                false
-            };
+            let has_mod_host = tool_dispatch_mod_host(orch).await.is_some();
             let mod_override = if has_mod_host {
                 let preflight = hook_preflight
                     .as_ref()
@@ -5901,6 +6953,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     ctx.agent_id.as_ref().map(ToString::to_string),
                     tool_check_ceiling,
                     publication_fence.clone(),
+                    ctx.session_origin.clone(),
                 )
                 .await;
                 let mod_changed = checked != core;
@@ -6025,6 +7078,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     PermissionDecision::Allow
                 }
                 lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
+                    PermissionDecision::Deny { reason }
+                }
+                lingxi_core::host::permission_gate::PermissionOutcome::TransportClosed {
+                    reason,
+                } => {
+                    permission_transport_closed = true;
                     PermissionDecision::Deny { reason }
                 }
             };
@@ -6167,9 +7226,14 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                             reason: reason.clone(),
                         };
                         let denied_agg = super::boxed_turn_future(|| {
-                            orch.hooks.execute(denied_event, hook_ctx.clone())
+                            execute_tool_hook(
+                                orch,
+                                denied_event,
+                                hook_ctx.clone(),
+                                &hook_cancellation,
+                            )
                         })
-                        .await;
+                        .await?;
                         // `{retry: true}` reply (`toolExecution.ts:1080-1091`): a
                         // PermissionDenied hook can signal the auto-mode classifier
                         // deny is now approved. We honour it when classifier
@@ -6216,9 +7280,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         reason: format!("Tool {name} requires permission"),
                     };
                     let req_agg = super::boxed_turn_future(|| {
-                        orch.hooks.execute(req_event, hook_ctx.clone())
+                        execute_tool_hook(orch, req_event, hook_ctx.clone(), &hook_cancellation)
                     })
-                    .await;
+                    .await?;
                     match req_agg.decision {
                         Some(HookDecision::Approve | HookDecision::Allow)
                             if !tool_ask_blocks_hook_rescue =>
@@ -6444,6 +7508,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                             };
                                         PermissionDecision::Deny { reason }
                                     }
+                                    lingxi_core::host::permission_gate::PermissionOutcome::TransportClosed { reason } => {
+                                        permission_transport_closed = true;
+                                        PermissionDecision::Deny { reason }
+                                    }
                                 }
                             }
                         }
@@ -6522,12 +7590,33 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                             lingxi_core::host::permission_gate::PermissionOutcome::Deny {
                                 reason,
                             } => PermissionDecision::Deny { reason },
+                            lingxi_core::host::permission_gate::PermissionOutcome::TransportClosed {
+                                reason,
+                            } => {
+                                permission_transport_closed = true;
+                                PermissionDecision::Deny { reason }
+                            }
                         }
                     }
                 }
                 _ => decision,
             }
         };
+        if permission_transport_closed
+            && orch.cancel_reason_now()
+                == crate::prompt::mid_turn_input::CancelReason::LifecyclePause
+        {
+            let (result, publication) = lifecycle_pause_result(tool_use_id, name, provider_id);
+            publish_or_defer_tool_result(
+                orch,
+                publication_fence.as_deref(),
+                &mut publications,
+                publication,
+            )
+            .await;
+            results.push(result);
+            continue;
+        }
         // OTEL: record the RESOLVED tool-permission decision — the CC
         // `XNr()?.add(1, await ICs(...))` counter (Edit/Write/NotebookEdit
         // only, gated inside) + the paired `tool_decision` `claude_code.events`
@@ -7079,7 +8168,13 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // equivalent, so every LingXi abort takes the `interrupted`
                 // branch.
                 let is_abort = matches!(err, tool_api::ToolError::Aborted);
-                let bare = err.model_facing_message();
+                let lifecycle_interrupted =
+                    is_abort && lifecycle_pause_cancelled(orch, cancel.as_ref());
+                let bare = if lifecycle_interrupted {
+                    crate::streaming_executor::LIFECYCLE_INTERRUPTED_MESSAGE.into()
+                } else {
+                    err.model_facing_message()
+                };
                 let mut display_units = "Error: ".encode_utf16().collect::<Vec<_>>();
                 display_units.extend(
                     bare.string_units("")
@@ -7098,7 +8193,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     true,
                     Utf16JsonProjection::object(vec![("error".into(), bare.into())])
                         .expect("tool error payload is a JSON object"),
-                    is_abort,
+                    is_abort && !lifecycle_interrupted,
                     Some(display_text),
                     None,
                     None,
@@ -7196,8 +8291,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             tool_name = %name,
         );
         telemetry::otel::emit_hook_lifecycle("post", "started", name, None);
-        let post_agg =
-            super::boxed_turn_future(|| orch.hooks.execute(post_event, hook_ctx.clone())).await;
+        let post_agg = super::boxed_turn_future(|| {
+            execute_tool_hook(orch, post_event, hook_ctx.clone(), &hook_cancellation)
+        })
+        .await?;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
@@ -7563,8 +8660,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             };
             let wt_started = std::time::Instant::now();
             // Reuse the same hook context (session_id / cwd) the pre/post hooks used.
-            let _wt_agg =
-                super::boxed_turn_future(|| orch.hooks.execute(wt_event, hook_ctx.clone())).await;
+            let _wt_agg = super::boxed_turn_future(|| {
+                execute_tool_hook(orch, wt_event, hook_ctx.clone(), &hook_cancellation)
+            })
+            .await?;
             // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
             #[allow(clippy::cast_possible_truncation)]
             let wt_dur_ms = wt_started.elapsed().as_millis() as u64;
@@ -7639,9 +8738,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         parent_agent_id: None,
                     };
                     let _start_agg = super::boxed_turn_future(|| {
-                        orch.hooks.execute(start_event, sa_ctx.clone())
+                        execute_tool_hook(orch, start_event, sa_ctx.clone(), &hook_cancellation)
                     })
-                    .await;
+                    .await?;
                 }
 
                 let status = if is_error { "failed" } else { "completed" };
@@ -7885,12 +8984,56 @@ pub(crate) async fn finish_direct_tool_dispatch(
     ),
     OrchestratorError,
 > {
+    // Strict host dispatch carries a lifecycle fence, so its tool publications
+    // were deferred just like W1. Commit them before the batch hook instead of
+    // silently dropping the direct caller's metadata and result frame.
+    let cancellation = tool_api::context::host_tool_cancellation();
+    if let Some(guard) = host_request_publication_guard(&cancellation, None) {
+        for publication in std::mem::take(&mut dispatched.publications) {
+            if !guard
+                .commit_if_current(Box::pin(publication.commit_metadata(orch)))
+                .await
+            {
+                return Err(OrchestratorError::Internal(
+                    "owned host request ended before result publication".into(),
+                ));
+            }
+            if let Some(frame) = &publication.frame {
+                if !guard
+                    .publish_if_current(Box::pin(orch.emit_tool_result_frame(
+                        &publication.tool_use_id,
+                        &frame.tool,
+                        &frame.model_text,
+                        &frame.result,
+                        frame.denial_kind.as_deref(),
+                    )))
+                    .await
+                {
+                    return Err(OrchestratorError::Internal(
+                        "owned host request ended before result publication".into(),
+                    ));
+                }
+            }
+        }
+    }
     if !dispatched.prevent_continuation {
-        let batch_outcome = run_post_tool_batch_hooks(
-            orch,
-            super::PostToolBatchDispatch::unguarded(dispatched.post_tool_batch_calls),
-        )
-        .await;
+        let batch_leases = if dispatched.post_tool_batch_calls.is_empty() {
+            None
+        } else {
+            orch.mark_tool_dispatch_unsafe()?
+        };
+        let mut batch = super::PostToolBatchDispatch::unguarded(dispatched.post_tool_batch_calls);
+        batch.async_work_lease = batch_leases
+            .as_ref()
+            .map(|leases| std::sync::Arc::clone(&leases.turn_work));
+        let batch_outcome = if matches!(
+            tool_api::context::host_tool_cancellation(),
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(_)
+        ) {
+            run_post_tool_batch_hooks_for_host(orch, batch).await?
+        } else {
+            run_post_tool_batch_hooks(orch, batch).await
+        };
         dispatched.prevent_continuation |= batch_outcome.prevent_continuation;
         dispatched
             .injected_messages
@@ -8393,6 +9536,7 @@ mod native_tool_check_metadata_tests {
             None,
             preflight.evaluation.as_ref(),
             false,
+            None,
             None,
             None,
             None,

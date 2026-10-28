@@ -1563,6 +1563,12 @@ fn native_node_path_is_absolute(units: &[u16]) -> bool {
 
 #[cfg(windows)]
 fn native_node_path_is_absolute(units: &[u16]) -> bool {
+    native_windows_path_is_absolute(units)
+}
+
+// Keep the Windows rules testable on other hosts as well as on Windows.
+#[cfg(any(windows, test))]
+fn native_windows_path_is_absolute(units: &[u16]) -> bool {
     let slash = u16::from(b'/');
     let backslash = u16::from(b'\\');
     if units
@@ -1572,7 +1578,7 @@ fn native_node_path_is_absolute(units: &[u16]) -> bool {
         return true;
     }
     units.len() >= 3
-        && units[0].is_ascii_alphabetic()
+        && matches!(units[0], 0x41..=0x5a | 0x61..=0x7a)
         && units[1] == u16::from(b':')
         && (units[2] == slash || units[2] == backslash)
 }
@@ -3066,6 +3072,28 @@ mod tests {
     ) -> super::NativeStrictSettingsResult {
         let semantics = NativePolicyJsSemanticsRegistry::from_rows(Vec::new(), Vec::new()).unwrap();
         super::validate_native_strict_settings(source, rows, &semantics)
+    }
+
+    #[test]
+    fn windows_absolute_paths_require_ascii_drive_letters() {
+        let is_absolute = |path: &str| {
+            super::native_windows_path_is_absolute(&path.encode_utf16().collect::<Vec<_>>())
+        };
+        for path in [
+            "C:\\work",
+            "z:/work",
+            "\\rooted",
+            "/rooted",
+            "\\\\host\\share",
+        ] {
+            assert!(is_absolute(path), "{path:?} should be absolute");
+        }
+        for path in ["", "C:", "C:relative", "1:\\work", "é:\\work", "K:\\work"] {
+            assert!(!is_absolute(path), "{path:?} should not be absolute");
+        }
+        assert!(!super::native_windows_path_is_absolute(&[
+            0xd800, 0x3a, 0x5c
+        ]));
     }
 
     #[test]

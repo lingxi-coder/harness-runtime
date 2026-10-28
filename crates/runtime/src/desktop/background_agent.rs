@@ -452,15 +452,25 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         self.inner.agent_listing().await
     }
 
-    async fn agent_listing_for_model(&self) -> Vec<SubagentListingEntry> {
+    async fn agent_listing_for_model(
+        &self,
+        session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+        require_origin: bool,
+    ) -> Vec<SubagentListingEntry> {
         let candidates = self.inner.agent_offer_candidates().await;
         let host = if let Some(registry) = &self.mod_hooks {
             registry.read().await.mod_host()
         } else {
             None
         };
-        agent::filter_agent_offer_candidates(candidates, host, agent::AgentOfferContext::default())
-            .await
+        agent::filter_agent_offer_candidates_with_origin(
+            candidates,
+            host,
+            agent::AgentOfferContext::default(),
+            session_origin,
+            require_origin,
+        )
+        .await
     }
 
     async fn resolve_required_mcp_servers(&self, subagent_type: &str) -> Vec<String> {
@@ -1060,6 +1070,7 @@ mod tests {
             subagents_dir: None,
         };
         let inherit = SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(MockInvoker),
             budget: Arc::new(MockBudget),
         };
@@ -1141,6 +1152,7 @@ mod tests {
             .spawn_async(
                 request,
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: Arc::new(MockInvoker),
                     budget: Arc::new(MockBudget),
                 },
@@ -1355,6 +1367,7 @@ export function register(on) {
                     ..Default::default()
                 },
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: Arc::new(RecordingToolInvoker {
                         inputs: core_inputs.clone(),
                     }),
@@ -1371,6 +1384,7 @@ export function register(on) {
             .clone()
             .expect("the teammate spawn seam receives the decorated invoker");
         let invocation = SubagentInvocationContext {
+            session_origin: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
@@ -1468,6 +1482,7 @@ export function register(on) {
             .spawn_workflow_with_observer(
                 request(None),
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: Arc::new(MockInvoker),
                     budget: Arc::new(MockBudget),
                 },
@@ -1523,6 +1538,7 @@ export function register(on) {
             subagents_dir: None,
         };
         let inherit = || SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(MockInvoker),
             budget: Arc::new(MockBudget),
         };
@@ -1615,6 +1631,7 @@ export function register(on) {
             .spawn_async(
                 req,
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: Arc::new(MockInvoker),
                     budget: Arc::new(MockBudget),
                 },
@@ -1684,6 +1701,7 @@ export function register(on) {
             .spawn_async(
                 request(None),
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: Arc::new(MockInvoker),
                     budget: Arc::new(MockBudget),
                 },
@@ -1741,6 +1759,7 @@ export function register(on) {
             subagents_dir: None,
         };
         let inherit = SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(MockInvoker),
             budget: Arc::new(MockBudget),
         };
@@ -1829,6 +1848,7 @@ export function register(on) {
             subagents_dir: None,
         };
         let inherit = SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(MockInvoker),
             budget: Arc::new(MockBudget),
         };

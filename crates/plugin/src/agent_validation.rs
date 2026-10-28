@@ -91,7 +91,7 @@ pub enum AgentValidationError {
 pub fn scan_plugin_agent_privileged_fields(
     yaml: &str,
 ) -> Result<Vec<PrivilegedField>, AgentValidationError> {
-    let value: serde_yaml::Value = serde_yaml::from_str(yaml)
+    let value: yaml_serde::Value = yaml_serde::from_str(yaml)
         .map_err(|error| AgentValidationError::InvalidFrontmatter(error.to_string()))?;
     let Some(mapping) = value.as_mapping() else {
         return Err(AgentValidationError::InvalidFrontmatter(
@@ -100,7 +100,7 @@ pub fn scan_plugin_agent_privileged_fields(
     };
 
     let mut found = Vec::new();
-    for key in mapping.keys().filter_map(serde_yaml::Value::as_str) {
+    for key in mapping.keys().filter_map(yaml_serde::Value::as_str) {
         match key {
             "permissionMode" | "permission_mode" => found.push(PrivilegedField::PermissionMode),
             "mcpServers" | "mcp_servers" => found.push(PrivilegedField::McpServers),

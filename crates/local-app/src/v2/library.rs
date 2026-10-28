@@ -16,6 +16,7 @@ const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RELEASE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
+/// Persistent local app library.
 #[derive(Debug, Clone)]
 pub struct AppLibrary {
     config_home: PathBuf,
@@ -385,6 +386,7 @@ fn upgrade_desktop_manifest(mut value: serde_json::Value) -> Result<Manifest, Ap
     Manifest::parse(&value.to_string())
 }
 impl AppLibrary {
+    /// Open the persistent store at the supplied root.
     pub fn open(config_home: impl AsRef<Path>) -> Result<Self, AppError> {
         let supplied = config_home.as_ref();
         if !supplied.is_absolute() {
@@ -399,6 +401,7 @@ impl AppLibrary {
         ensure_directory(&root.join("pending-authoring"))?;
         Ok(Self { config_home, root })
     }
+    /// Return the library root path.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -450,6 +453,7 @@ impl AppLibrary {
             acquired_at_ms,
         })
     }
+    /// Return the default authoring workspace root.
     pub fn default_authoring_root(&self) -> PathBuf {
         self.config_home.join(".apps")
     }
@@ -489,6 +493,7 @@ impl AppLibrary {
         }
         Ok(record)
     }
+    /// Load the requested record.
     pub fn get(&self, app_id: &str) -> Result<AppRecord, AppError> {
         let record = self.get_any(app_id)?;
         if record.removed {
@@ -496,6 +501,7 @@ impl AppLibrary {
         }
         Ok(record)
     }
+    /// List non-removed apps in last-updated order.
     pub fn list(&self) -> Result<Vec<AppRecord>, AppError> {
         let mut result = vec![];
         for entry in fs::read_dir(self.root.join("apps"))? {
@@ -558,6 +564,7 @@ impl AppLibrary {
         )?;
         Ok(authoring)
     }
+    /// Return the source path for a release.
     pub fn source_path(&self, app_id: &str, revision: u64) -> Result<PathBuf, AppError> {
         if revision == 0 {
             return Err(AppError::Invalid("revision must be positive".into()));
@@ -568,10 +575,12 @@ impl AppLibrary {
             .join(revision.to_string())
             .join("source"))
     }
+    /// Return the app data directory path.
     pub fn data_path(&self, app_id: &str) -> Result<PathBuf, AppError> {
         self.get(app_id)?;
         Ok(self.app_path(app_id)?.join("data"))
     }
+    /// Load an app release.
     pub fn release(&self, app_id: &str, revision: u64) -> Result<AppRelease, AppError> {
         let record = self.get(app_id)?;
         if revision == 0 || revision > record.latest_revision {
@@ -590,12 +599,14 @@ impl AppLibrary {
         release.manifest.validate()?;
         Ok(release)
     }
+    /// List app releases.
     pub fn releases(&self, app_id: &str) -> Result<Vec<AppRelease>, AppError> {
         let record = self.get(app_id)?;
         (1..=record.latest_revision)
             .map(|revision| self.release(app_id, revision))
             .collect()
     }
+    /// Return filesystem paths for an app release.
     pub fn layout(&self, app_id: &str, revision: u64) -> Result<AppLayout, AppError> {
         self.release(app_id, revision)?;
         let app = self.app_path(app_id)?;
@@ -606,6 +617,7 @@ impl AppLibrary {
             runs_path: app.join("runs").to_string_lossy().into(),
         })
     }
+    /// Publish an app release.
     pub fn publish(&self, request: PublishRequest) -> Result<PublishResult, AppError> {
         self.publish_inner(request, None)
     }
@@ -872,6 +884,7 @@ impl AppLibrary {
         }
         Ok(PublishResult { record, release })
     }
+    /// Verify and load a release.
     pub fn verify_release(&self, app_id: &str, revision: u64) -> Result<AppRelease, AppError> {
         let release = self.release(app_id, revision)?;
         let root = self.source_path(app_id, revision)?;
@@ -905,6 +918,7 @@ impl AppLibrary {
         }
         Ok(release)
     }
+    /// Activate a published release for the app.
     pub fn activate_release(&self, app_id: &str, revision: u64) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -933,6 +947,7 @@ impl AppLibrary {
         self.save(&record)?;
         Ok(record)
     }
+    /// Grant execution consent for a release digest.
     pub fn grant_execution(&self, app_id: &str, digest_value: &str) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -949,6 +964,7 @@ impl AppLibrary {
         self.save(&record)?;
         Ok(record)
     }
+    /// Revoke the app execution grants.
     pub fn revoke_execution(&self, app_id: &str) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -957,6 +973,7 @@ impl AppLibrary {
         self.save(&record)?;
         Ok(record)
     }
+    /// Require execution consent for a release.
     pub fn require_execution_grant(&self, app_id: &str, revision: u64) -> Result<(), AppError> {
         let record = self.get(app_id)?;
         let release = self.verify_release(app_id, revision)?;
@@ -967,9 +984,11 @@ impl AppLibrary {
         }
         Ok(())
     }
+    /// Prepare a release to run.
     pub fn prepare_run(&self, app_id: &str, revision: u64) -> Result<RunPreparation, AppError> {
         self.prepare_run_with_options(app_id, revision, false)
     }
+    /// Prepare a release to run with explicit options.
     pub fn prepare_run_with_options(
         &self,
         app_id: &str,
@@ -1072,6 +1091,7 @@ impl AppLibrary {
         valid_id(run_id)?;
         Ok(self.app_path(app_id)?.join("runs").join(run_id))
     }
+    /// List runs for an app.
     pub fn runs(&self, app_id: &str) -> Result<Vec<AppRun>, AppError> {
         self.get(app_id)?;
         let root = self.app_path(app_id)?.join("runs");
@@ -1096,6 +1116,7 @@ impl AppLibrary {
         runs.sort_by_key(|r| r.started_at_ms);
         Ok(runs)
     }
+    /// Persist an updated run record.
     pub fn update_run(&self, mut run: AppRun) -> Result<(), AppError> {
         let _lock = self.lock()?;
         self.get(&run.app_id)?;
@@ -1155,6 +1176,7 @@ impl AppLibrary {
         }
         Ok(())
     }
+    /// Append text to a run log.
     pub fn append_log(&self, app_id: &str, run_id: &str, text: &str) -> Result<(), AppError> {
         let _lock = self.lock()?;
         self.get(app_id)?;
@@ -1168,6 +1190,7 @@ impl AppLibrary {
         }
         atomic_bytes(&log, &old)
     }
+    /// Read a run log.
     pub fn logs(&self, app_id: &str, run_id: &str) -> Result<String, AppError> {
         self.get(app_id)?;
         let path = self.run_path(app_id, run_id)?;
@@ -1196,6 +1219,7 @@ impl AppLibrary {
         }
         Ok(count)
     }
+    /// Mark an app removed.
     pub fn remove(&self, app_id: &str) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -1208,6 +1232,7 @@ impl AppLibrary {
         self.save(&record)?;
         Ok(record)
     }
+    /// Bind an app to an authoring workspace.
     pub fn bind_authoring(
         &self,
         app_id: &str,
@@ -1292,6 +1317,7 @@ impl AppLibrary {
             authoring_session_id: session_id,
         })
     }
+    /// Export a release to a destination.
     pub fn export(
         &self,
         app_id: &str,
@@ -1338,6 +1364,7 @@ impl AppLibrary {
         }
         result
     }
+    /// List legacy app archives.
     pub fn legacy_archives(&self) -> Result<Vec<LegacyArchive>, AppError> {
         let legacy = self.config_home.join("local-apps");
         let mut result = vec![];
@@ -1360,6 +1387,7 @@ impl AppLibrary {
         result.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(result)
     }
+    /// List legacy app entries.
     pub fn legacy_entries(&self) -> Result<Vec<LegacyEntry>, AppError> {
         let root = self.config_home.join("local-apps");
         let mut result = vec![];
@@ -1579,6 +1607,7 @@ impl AppLibrary {
         }
         Ok(release)
     }
+    /// Restore an app authoring workspace.
     pub fn restore_authoring(
         &self,
         app_id: &str,
@@ -1608,6 +1637,7 @@ impl AppLibrary {
             self.store_authoring_pointer(app_id, authoring)
         }
     }
+    /// Create a new authoring workspace from an app release.
     pub fn remix(
         &self,
         app_id: &str,
@@ -1649,10 +1679,12 @@ impl AppLibrary {
             market_origin: origin,
         })
     }
+    /// Parse and execute a JSON library request.
     pub fn request_json(&self, request: &str) -> Result<serde_json::Value, AppError> {
         let request: LibraryRequest = serde_json::from_str(request)?;
         self.dispatch(request)
     }
+    /// Execute a library request.
     pub fn dispatch(&self, request: LibraryRequest) -> Result<serde_json::Value, AppError> {
         use LibraryRequest::*;
         Ok(match request {

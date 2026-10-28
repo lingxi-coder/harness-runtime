@@ -36,6 +36,19 @@ use loop_state::{StepExit, TurnEndVerdict};
 use projected_content::ProjectedUserContent;
 use streaming::StreamingTurnDriver;
 
+fn map_mid_turn_consumption_error(
+    error: crate::prompt::mid_turn_input::MidTurnConsumptionError,
+) -> OrchestratorError {
+    match error {
+        crate::prompt::mid_turn_input::MidTurnConsumptionError::Interrupted => {
+            OrchestratorError::RecoveryInterrupted
+        }
+        crate::prompt::mid_turn_input::MidTurnConsumptionError::Failure(message) => {
+            OrchestratorError::Internal(message)
+        }
+    }
+}
+
 /// One queued prompt, retaining its own transcript identity and origin class.
 #[derive(Clone, Debug)]
 pub struct QueuedPromptInput {
@@ -403,7 +416,7 @@ impl ConversationOrchestrator {
     /// Read the active turn's [`crate::prompt::mid_turn_input::CancelReason`] from
     /// the wired flag, defaulting to `UserInterrupt` when no flag is wired (so an
     /// un-wired turn always takes the user-interrupt branch — today's behavior).
-    fn cancel_reason_now(&self) -> crate::prompt::mid_turn_input::CancelReason {
+    pub(crate) fn cancel_reason_now(&self) -> crate::prompt::mid_turn_input::CancelReason {
         self.cancel_reason.get().map_or(
             crate::prompt::mid_turn_input::CancelReason::UserInterrupt,
             |f| f.get(),
@@ -480,7 +493,7 @@ impl ConversationOrchestrator {
                         source
                             .input_consumed(&batch)
                             .await
-                            .map_err(OrchestratorError::Internal)?;
+                            .map_err(map_mid_turn_consumption_error)?;
                         continue;
                     }
                     self.reset_goal_interruption();
@@ -507,7 +520,7 @@ impl ConversationOrchestrator {
                     source
                         .input_consumed(&batch)
                         .await
-                        .map_err(OrchestratorError::Internal)?;
+                        .map_err(map_mid_turn_consumption_error)?;
                     injected = true;
                 }
                 None => break,
@@ -571,7 +584,7 @@ impl ConversationOrchestrator {
         source
             .input_consumed(&batch)
             .await
-            .map_err(OrchestratorError::Internal)?;
+            .map_err(map_mid_turn_consumption_error)?;
         Ok(())
     }
 
@@ -616,6 +629,12 @@ impl ConversationOrchestrator {
     /// Inject and record Native's typed query interruption event. Both source
     /// variants are ordinary user rows and contribute one yielded-user count.
     pub(super) async fn inject_query_user_interruption(&self, kind: QueryUserInterruptionKind) {
+        // Queue-driven cancellation and lifecycle pause are not user
+        // interruptions. Gate at the persistence boundary so all cancellation
+        // checkpoints follow the same rule.
+        if !self.cancel_reason_now().records_user_interruption() {
+            return;
+        }
         let message = match kind {
             QueryUserInterruptionKind::Streaming => INTERRUPT_MESSAGE,
             QueryUserInterruptionKind::Tools => INTERRUPT_MESSAGE_FOR_TOOL_USE,
@@ -1917,6 +1936,7 @@ impl ConversationOrchestrator {
             crate::turn_loop::PostToolBatchDispatch {
                 tool_calls: ordered_batch_calls,
                 publication_guard: settlement.publication_guard.clone(),
+                async_work_lease: exec.batch_recovery_work_lease(),
             },
         ))
     }
@@ -3603,18 +3623,10 @@ impl ConversationOrchestrator {
         let mut state = TurnLoopState::new(self, turn_message_id, Some(cancel.clone()));
         loop {
             if cancel.is_cancelled() {
-                // claude-code `query.ts:1046-1050`: inject the non-tool-use
-                // interrupt message on a loop-top pre-cancel (ESC fired before
-                // we even called the model this iteration). NOW-ABORT
-                // disambiguation: skip the message when the cancel was a
-                // `Now`-command (the urgent command runs next); default behavior
-                // (no reason flag wired) is byte-identical to before.
-                if self.cancel_reason_now()
-                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                {
-                    self.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
-                        .await;
-                }
+                // The persistence boundary distinguishes an actual user
+                // interruption from a queued command or lifecycle pause.
+                self.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                    .await;
                 return Ok(TurnOutcome::Cancelled);
             }
             match self
@@ -3663,11 +3675,7 @@ impl ConversationOrchestrator {
                 } else {
                     None
                 };
-                // NOW-ABORT disambiguation: skip the marker for a `Now` command.
-                if let Some(kind) = interruption_kind.filter(|_| {
-                    self.cancel_reason_now()
-                        != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                }) {
+                if let Some(kind) = interruption_kind {
                     self.inject_query_user_interruption(kind).await;
                 }
                 return Ok(TurnOutcome::Cancelled);

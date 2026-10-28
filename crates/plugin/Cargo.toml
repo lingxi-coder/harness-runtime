@@ -26,7 +26,7 @@ secret = { path = "../secret" }
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
-serde_yaml = "0.9"
+yaml_serde = "0.10.7"
 thiserror.workspace = true
 async-trait.workspace = true
 url = "2"
@@ -38,7 +38,7 @@ tracing.workspace = true
 git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2", "https", "ssh"] }
 # .mcpb bundle install (Stage 3): pure-Rust zip extract + SHA-256 integrity +
 # a temp extract dir.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 tempfile = "3"
 # syntaxHighlighting.hljsLanguages `remote`/`integrity` shape validation
@@ -57,7 +57,7 @@ tool-mcp = { path = "../tools/mcp" }
 # Build local git fixtures for the Stage-1 git-install-arm test (file:// clone).
 git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2"] }
 # Build .mcpb zip fixtures for the Stage-3 tests.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 futures-util.workspace = true
 tracing-subscriber = { version = "0.3", features = ["registry"] }

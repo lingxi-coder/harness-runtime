@@ -38,6 +38,26 @@ use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
 use tool_api::ToolRegistryView as _;
 
+/// Ownership retained by real tool execution and by detached work that may
+/// outlive a completed turn. Hosts may use different lifetimes for each.
+#[derive(Clone)]
+pub struct ToolDispatchRecoveryLeases {
+    pub execution: Arc<dyn Send + Sync>,
+    pub turn_work: Arc<dyn Send + Sync>,
+}
+/// Synchronous pre-dispatch durability and ownership admission.
+pub type ToolDispatchRecoveryGuard = Arc<
+    dyn Fn() -> Result<Option<ToolDispatchRecoveryLeases>, hooks::RecoveryAdmissionError>
+        + Send
+        + Sync,
+>;
+
+tokio::task_local! {
+    // Scoped to the orchestrator that created this turn. Never consult another
+    // turn's mutable current-owner slot from a delayed task.
+    static SCOPED_TOOL_DISPATCH_RECOVERY_GUARD: (usize, ToolDispatchRecoveryGuard);
+}
+
 /// Current owned request for the conversation API. Each implementation must
 /// explicitly execute the selected policy and every main-request option.
 #[derive(Debug, Clone)]
@@ -969,6 +989,9 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
                 | LlmError::SettingsSource { .. } => (Some("unknown"), None),
             }
         }
+        // Lifecycle admission cancellation is not a provider error. Normal
+        // turn paths propagate it before reaching model-error presentation.
+        OrchestratorError::RecoveryInterrupted => (None, None),
         // Generic-Error fallthrough (`Flp`: `if(e instanceof $o)→"unknown"`;
         // generic Error → "unknown"). These orchestrator-internal variants never
         // carry a status. Turn/budget/structured-output retry limits are handled
@@ -1552,6 +1575,8 @@ pub(crate) struct GitStatusSnapshot {
 /// added to model history or serialized with the session.
 pub(crate) struct ModTurnFacts {
     pub(crate) id: String,
+    /// Session captured when the turn started; it cannot follow later switches.
+    pub(crate) session_id: String,
     pub(crate) started_at: std::time::Instant,
     pub(crate) answer: lingxi_core::types::utf16_json::Utf16JsonProjection,
     pub(crate) usage: Option<ModTurnUsage>,
@@ -1562,6 +1587,27 @@ pub(crate) struct ModTurnFacts {
 pub(crate) struct ModTurnUsage {
     pub(crate) tokens: lingxi_core::token::Usage,
     pub(crate) model: String,
+}
+
+/// Immutable origin of a Mod callback queued beyond its originating turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModSessionEventOrigin {
+    /// Session selected when the work was queued.
+    pub session_id: String,
+    /// Mod's turn identity, when the work originated from a turn.
+    pub mod_turn_id: Option<String>,
+}
+
+/// Create an output bound to the origin of detached Mod work.
+pub type ModSessionEventOutputFactory =
+    Arc<dyn Fn(ModSessionEventOrigin) -> Arc<dyn OutputStream> + Send + Sync>;
+
+/// Exclusive session-switch access shared only with work admitted by that
+/// switch. Background views retain a weak reference, not an idle writer.
+pub(crate) type ModSessionSwitchWriter = Arc<tokio::sync::OwnedRwLockWriteGuard<()>>;
+
+tokio::task_local! {
+    static SCOPED_MOD_SESSION_SWITCH_WRITER: (usize, ModSessionSwitchWriter);
 }
 
 /// Shared context for ordered main-loop Mod session events.
@@ -1578,11 +1624,6 @@ pub(crate) enum ModSessionEventWork {
         context: ModSessionEventContext,
         input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         original_answer: lingxi_core::types::utf16_json::Utf16JsonProjection,
-    },
-    Measure {
-        context: ModSessionEventContext,
-        sampler: Arc<mod_session_measure_sampler::ModSessionMeasureSampler>,
-        request: mod_session_measure_sampler::ModSessionMeasureRequest,
     },
     MeasureRequest {
         context: ModSessionEventContext,
@@ -1693,6 +1734,14 @@ pub struct ConversationOrchestrator {
     /// shutdown path waits for a slow Mod while holding this queue's lock.
     pub(crate) mod_session_event_sender:
         std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModSessionEventWork>>>,
+    /// Hosts may route detached Mod output with its captured origin instead of
+    /// attributing it to whichever conversation turn is currently active.
+    pub(crate) mod_session_event_output_factory: std::sync::OnceLock<ModSessionEventOutputFactory>,
+    /// A switch holds the write side; actual Mod session operations hold the
+    /// read side and validate their captured generation before using state.
+    pub(crate) mod_session_work_gate: Arc<tokio::sync::RwLock<()>>,
+    /// Advances for every admitted switch, including one which later fails.
+    pub(crate) mod_session_generation: std::sync::atomic::AtomicU64,
     /// Coalesces rate-limit and settled-turn samples for `session.measure`.
     pub(crate) mod_session_measure_sampler:
         Arc<mod_session_measure_sampler::ModSessionMeasureSampler>,
@@ -1928,6 +1977,8 @@ pub struct ConversationOrchestrator {
     /// (today's behavior). Wired alongside [`Self::mid_turn_input`] at the
     /// composition root. See [`crate::prompt::mid_turn_input::CancelReasonFlag`].
     pub(crate) cancel_reason: std::sync::OnceLock<crate::prompt::mid_turn_input::CancelReasonFlag>,
+    /// Optional host-owned durable admission boundary before tool dispatch.
+    pub(crate) tool_dispatch_recovery_guard: std::sync::OnceLock<ToolDispatchRecoveryGuard>,
     /// EndConversation (2.1.206) end-request slot, shared with the
     /// [`crate::end_conversation_tool::EndConversationTool`]: raised by the
     /// tool's 2nd consecutive call, read (and consumed) by the turn loop after
@@ -1956,6 +2007,8 @@ pub struct ConversationOrchestrator {
         std::sync::RwLock<lingxi_core::host::permission_gate::NativeMcpDenyContext>,
     /// Main-agent policy names from the current tool assembly, before coordinator filtering.
     pub(crate) main_agent_tool_names: std::sync::RwLock<Option<std::collections::HashSet<String>>>,
+    pub(crate) main_agent_host_tool_names:
+        std::sync::RwLock<Option<std::collections::HashSet<String>>>,
     /// Live coordinator-mode flag (`Ci()`). `None` is an ordinary session, so
     /// unknown-tool `Ldt` never takes the coordinator `Y7e` arm.
     pub(crate) coordinator_mode:
@@ -2086,6 +2139,7 @@ mod prompt_ingress_environment;
 mod reminders_impl;
 #[path = "conversation/tooling.rs"]
 mod tooling_impl;
+pub use tooling_impl::PreparedHostToolCall;
 #[path = "conversation/transcript.rs"]
 mod transcript_impl;
 pub use transcript_impl::ScheduledLoopFire;

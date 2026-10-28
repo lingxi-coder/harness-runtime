@@ -243,6 +243,7 @@ async fn registered_attempts_all_stages_and_repair_keep_authoritative_settlement
         let legacy_budget = RecordingBudget::new();
         let parent = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: legacy_budget.clone(),
             },
@@ -743,6 +744,7 @@ impl AnalyticsSink for BlockingStartedSink {
 fn inherit() -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(InertBudget),
         },
@@ -753,6 +755,7 @@ fn inherit() -> FusionInheritance {
 fn inherit_cancel(cancel: CancellationToken) -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(InertBudget),
         },
@@ -1181,10 +1184,15 @@ enum FakePanel {
     MalformedReport,
     Fail,
     Hang,
+    /// Hold a scripted outcome until each participating panel has reached
+    /// this barrier. Hanging panels emit their allocation receipt first.
+    FailAfterBarrier(Arc<tokio::sync::Barrier>),
+    HangAfterBarrier(Arc<tokio::sync::Barrier>),
     /// Fails at the SPAWN layer (`Err(SubagentSpawnError)`), distinct from
     /// `Fail` which is a terminal `SubagentResult::Failed` — used to exercise
     /// the pool-admission early-abort path (G004).
     SpawnErr,
+    SpawnErrAfterBarrier(Arc<tokio::sync::Barrier>),
     /// [Finding 25] Mirrors `runner.rs`'s `!terminated_cleanly` arm: the
     /// subagent loop ran out of `max_turns` without ever capturing a valid
     /// `StructuredOutput`, so it reports `Completed` (not `Failed`) with
@@ -1313,7 +1321,9 @@ impl FakeSpawner {
         let script = self.by_model.lock().unwrap().remove(&model);
         if !matches!(
             script,
-            Some(FakePanel::SpawnErr) | Some(FakePanel::SlowSpawnErr)
+            Some(FakePanel::SpawnErr)
+                | Some(FakePanel::SpawnErrAfterBarrier(_))
+                | Some(FakePanel::SlowSpawnErr)
         ) {
             Self::emit_allocated(&observer, &request).await;
         }
@@ -1329,12 +1339,29 @@ impl FakeSpawner {
                 std::future::pending::<()>().await;
                 unreachable!()
             }
+            Some(FakePanel::HangAfterBarrier(barrier)) => {
+                barrier.wait().await;
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+            Some(FakePanel::FailAfterBarrier(barrier)) => {
+                barrier.wait().await;
+                Ok(SubagentResult::Failed {
+                    agent_id: AgentId::new(),
+                    reason: "panel failed".into(),
+                    usage: SubagentUsage::default(),
+                })
+            }
             Some(FakePanel::Fail) | None => Ok(SubagentResult::Failed {
                 agent_id: AgentId::new(),
                 reason: "panel failed".into(),
                 usage: SubagentUsage::default(),
             }),
             Some(FakePanel::SpawnErr) => Err(SubagentSpawnError::PoolFull),
+            Some(FakePanel::SpawnErrAfterBarrier(barrier)) => {
+                barrier.wait().await;
+                Err(SubagentSpawnError::PoolFull)
+            }
             Some(FakePanel::FailedWithUsage { input, output }) => Ok(SubagentResult::Failed {
                 agent_id: AgentId::new(),
                 reason: "provider error after billed turns".into(),
@@ -2799,6 +2826,7 @@ async fn commit_failure_emits_exactly_one_failed_terminal_event() {
     let orch = orch.with_price_book(Arc::new(priced_book()));
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(FailingCommitBudget),
         },
@@ -3169,6 +3197,7 @@ async fn injected_system_reminder_in_evidence_id_and_refs_is_sanitized_before_an
 fn inherit_capped() -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(DenyReserveBudget),
         },
@@ -3373,6 +3402,7 @@ impl BudgetEnforcerHandle for RecordingBudget {
 fn inherit_recording(budget: Arc<RecordingBudget>) -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -3386,6 +3416,7 @@ fn inherit_recording_cancel(
 ) -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -4210,6 +4241,7 @@ async fn cancel_landing_mid_finalize_commit_does_not_discard_a_completed_run() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -4295,6 +4327,7 @@ async fn cancel_mid_panel_bar_commit_keeps_known_spend_and_releases_no_hold() {
     let cancel = CancellationToken::new();
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -4916,6 +4949,7 @@ async fn prepared_run_reserves_the_captured_quote_after_prices_change() {
     let budget = Arc::new(QuoteRecordingBudget::default());
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5021,6 +5055,7 @@ async fn prepared_identity_requires_and_uses_its_scoped_budget_view() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -5088,6 +5123,7 @@ async fn prepared_cancel_before_allocation_seals_exact_zero_facts() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5229,6 +5265,7 @@ async fn prepared_cancel_interrupts_a_blocked_budget_reservation() {
     let cancel = CancellationToken::new();
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -5279,6 +5316,7 @@ async fn prepared_deadline_interrupts_a_blocked_budget_reservation() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -5578,6 +5616,7 @@ async fn prepared_run_uses_captured_prices_after_live_source_becomes_unreadable(
     let budget = Arc::new(QuoteRecordingBudget::default());
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5623,6 +5662,7 @@ async fn production_run_compatibility_shim_contains_runner_panics() {
     let budget = Arc::new(QuoteRecordingBudget::default());
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5656,6 +5696,7 @@ async fn prepared_runner_panic_waits_for_commit_before_terminal_publication() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5716,6 +5757,7 @@ async fn captured_prices_keep_analyst_facts_and_commit_barrier_after_source_revo
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5829,6 +5871,7 @@ async fn captured_prices_keep_lease_owned_until_commit_ack_after_source_revocati
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5901,6 +5944,7 @@ async fn prepared_finalizing_claim_outlives_cancel_and_seals_after_commit() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -6309,9 +6353,19 @@ async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
     let mut config = test_config();
     config.min_successful_panels = 2;
     config.panel_total_timeout_ms = 5_000;
+    // The rejection must occur after the sibling's allocation receipt, not
+    // merely after both tasks were scheduled. Otherwise not_dispatched is the
+    // correct classification for a sibling still waiting for pool admission.
+    let allocated = Arc::new(tokio::sync::Barrier::new(2));
     let map = HashMap::from([
-        ("claude-sonnet-5".into(), FakePanel::SpawnErr),
-        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::SpawnErrAfterBarrier(allocated.clone()),
+        ),
+        (
+            "gpt-5.6-terra".into(),
+            FakePanel::HangAfterBarrier(allocated),
+        ),
     ]);
     let spawner = FakeSpawner::new(map);
     let wall_started = std::time::Instant::now();
@@ -6408,10 +6462,20 @@ async fn early_abort_seals_on_the_callers_effective_partial_ok_not_just_config()
         "the settings-level default must stay true so this scenario is only \
          reachable through the caller-supplied effective value"
     );
+    let allocated = Arc::new(tokio::sync::Barrier::new(3));
     let map = HashMap::from([
-        ("claude-sonnet-5".into(), FakePanel::Fail),
-        ("gpt-5.6-terra".into(), FakePanel::Hang),
-        ("deepseek-v4-pro".into(), FakePanel::Hang),
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::FailAfterBarrier(allocated.clone()),
+        ),
+        (
+            "gpt-5.6-terra".into(),
+            FakePanel::HangAfterBarrier(allocated.clone()),
+        ),
+        (
+            "deepseek-v4-pro".into(),
+            FakePanel::HangAfterBarrier(allocated),
+        ),
     ]);
     let spawner = FakeSpawner::new(map);
     let wall_started = std::time::Instant::now();
@@ -6502,10 +6566,20 @@ async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_par
         "config.partial_ok must stay at its default true so the seal below \
          can only be coming from the request-level opt-out"
     );
+    let allocated = Arc::new(tokio::sync::Barrier::new(3));
     let map = HashMap::from([
-        ("claude-sonnet-5".into(), FakePanel::Fail),
-        ("gpt-5.6-terra".into(), FakePanel::Hang),
-        ("deepseek-v4-pro".into(), FakePanel::Hang),
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::FailAfterBarrier(allocated.clone()),
+        ),
+        (
+            "gpt-5.6-terra".into(),
+            FakePanel::HangAfterBarrier(allocated.clone()),
+        ),
+        (
+            "deepseek-v4-pro".into(),
+            FakePanel::HangAfterBarrier(allocated),
+        ),
     ]);
     let spawner = FakeSpawner::new(map);
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
@@ -7035,6 +7109,7 @@ async fn a_cancel_before_any_panel_is_dispatched_commits_exactly_zero() {
     let orch = orch_scripted(spawner.clone(), side).with_price_book(Arc::new(priced_book()));
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -7294,6 +7369,7 @@ async fn evidence_checks_reach_the_analyst_the_material_and_telemetry() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: grep.clone(),
             budget: Arc::new(InertBudget),
         },

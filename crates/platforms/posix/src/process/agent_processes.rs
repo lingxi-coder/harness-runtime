@@ -1,5 +1,7 @@
 //! Per-agent live process groups (`Dbr`/`YOe`), independent of task records.
-pub(super) use lingxi_core::host::agent_processes::register;
+#[cfg(test)]
+use lingxi_core::host::agent_processes::register;
+pub(super) use lingxi_core::host::agent_processes::register_with_capability_requirement;
 
 #[cfg(test)]
 mod tests {

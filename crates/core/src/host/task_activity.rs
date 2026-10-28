@@ -3,7 +3,7 @@
 use crate::host::task_registry::TaskRecord;
 
 fn is_terminal(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "killed")
+    matches!(status, "completed" | "failed" | "killed" | "exited_unknown")
 }
 
 /// Work that can still produce a delegated result. An idle persistent teammate
@@ -49,6 +49,7 @@ mod tests {
                 "completed",
                 "failed",
                 "killed",
+                "exited_unknown",
             ] {
                 for idle in [false, true] {
                     let task = TaskRecord {

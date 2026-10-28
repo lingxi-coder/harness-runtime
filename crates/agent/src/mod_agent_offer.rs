@@ -37,6 +37,18 @@ pub async fn filter_agent_offer_candidates(
     host: Option<Arc<ModHost>>,
     context: AgentOfferContext,
 ) -> Vec<SubagentListingEntry> {
+    filter_agent_offer_candidates_with_origin(candidates, host, context, None, false).await
+}
+
+/// Filter with the caller's already captured session origin. A child whose
+/// origin cannot be recovered must not run Mod APIs against the current host.
+pub async fn filter_agent_offer_candidates_with_origin(
+    candidates: Vec<AgentOfferCandidate>,
+    host: Option<Arc<ModHost>>,
+    context: AgentOfferContext,
+    origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+    require_origin: bool,
+) -> Vec<SubagentListingEntry> {
     let Some(host) = host.filter(|host| host.has_event("agent.offer")) else {
         return candidates
             .into_iter()
@@ -50,8 +62,26 @@ pub async fn filter_agent_offer_candidates(
             .collect();
     }
 
+    let cwd = origin
+        .as_ref()
+        .map_or_else(std::path::PathBuf::new, |origin| origin.cwd().to_path_buf());
+    let session = match host
+        .bind_child_turn_step_session(origin, require_origin, &cwd)
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!(%error, "agent.offer session binding failed; using core offers");
+            return candidates
+                .into_iter()
+                .map(|candidate| candidate.listing)
+                .collect();
+        }
+    };
+
     join_all(candidates.into_iter().map(|candidate| {
         let host = Arc::clone(&host);
+        let session = session.clone();
         async move {
             let offered = match agent_offer_input(&candidate) {
                 None => {
@@ -62,7 +92,7 @@ pub async fn filter_agent_offer_candidates(
                     );
                     true
                 }
-                Some(input) => match dispatch_agent_offer(&host, input).await {
+                Some(input) => match dispatch_agent_offer(&host, session, input).await {
                     Ok(result) => successful_offer_result(&result),
                     Err(error) => {
                         tracing::warn!(
@@ -102,6 +132,7 @@ fn successful_offer_result(result: &Utf16JsonProjection) -> bool {
 
 async fn dispatch_agent_offer(
     host: &ModHost,
+    session: Option<Arc<dyn ModSessionContext>>,
     input: Utf16JsonProjection,
 ) -> Result<Utf16JsonProjection, ModError> {
     let pinned_agent = input.subprojection("/agent").ok();
@@ -130,7 +161,7 @@ async fn dispatch_agent_offer(
         }
     };
 
-    let Some(session) = host.bound_session() else {
+    let Some(session) = session else {
         return host.dispatch("agent.offer", input, core).await;
     };
     let log_session: Arc<dyn ModSessionContext> = Arc::clone(&session);
@@ -160,7 +191,11 @@ async fn dispatch_agent_offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mod_turn_step::tests::{Origin, Session};
+    use lingxi_core::types::SessionId;
     use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     fn source(value: &Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(value).expect("test JSON value is valid")
@@ -177,6 +212,68 @@ mod tests {
             source: "built-in".into(),
             provider,
         }
+    }
+
+    #[tokio::test]
+    async fn child_agent_offer_uses_launch_origin_after_switch() {
+        let directory = tempfile::tempdir().unwrap();
+        let module = directory.path().join("child-offer.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+          on('agent.offer', async ($) => {
+            try { await $.session.model(); return {isOffered:false}; }
+            catch (_) { return {isOffered:true}; }
+          });
+        }"#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load("child-offer", directory.path(), &module, source(&json!({})))
+            .await
+            .unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let session: Arc<dyn ModSessionContext> = Arc::new(Session {
+            root: directory.path().to_path_buf(),
+            origin: None,
+            model_reads: reads.clone(),
+        });
+        host.attach_background_context(Arc::downgrade(&session));
+        let original = SessionId::new();
+        let other = SessionId::new();
+        let active = Arc::new(Mutex::new((original, 1)));
+        let origin: Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability> =
+            Arc::new(Origin {
+                id: original,
+                generation: 1,
+                active: active.clone(),
+                root: directory.path().to_path_buf(),
+            });
+        for (current, generation, capability, expected_visible) in [
+            (original, 1, Some(origin.clone()), false),
+            (other, 2, Some(origin.clone()), true),
+            (original, 3, Some(origin.clone()), true),
+            (original, 3, None, true),
+        ] {
+            *active.lock().unwrap() = (current, generation);
+            let visible = filter_agent_offer_candidates_with_origin(
+                vec![candidate(
+                    "Explore",
+                    Some(json!({"plugin":"engine","tier":"core"})),
+                )],
+                Some(host.clone()),
+                AgentOfferContext::default(),
+                capability,
+                true,
+            )
+            .await;
+            assert_eq!(!visible.is_empty(), expected_visible);
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "only the live origin may read"
+        );
     }
 
     #[test]

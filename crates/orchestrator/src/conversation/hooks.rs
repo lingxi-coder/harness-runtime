@@ -6,6 +6,7 @@ use super::mod_session_measure_sampler::{
 use super::*;
 
 use hooks::ExactHookText;
+use std::sync::atomic::Ordering;
 
 fn is_native_js_whitespace(unit: u16) -> bool {
     matches!(
@@ -320,13 +321,6 @@ async fn dispatch_queued_mod_session_event(work: ModSessionEventWork) {
             )
             .await;
         }
-        ModSessionEventWork::Measure {
-            context,
-            sampler,
-            request,
-        } => {
-            dispatch_mod_session_measure(context, sampler, request).await;
-        }
         ModSessionEventWork::MeasureRequest {
             context,
             sampler,
@@ -460,13 +454,21 @@ async fn dispatch_mod_session_measure_inline(
     }
 }
 
-async fn dispatch_mod_session_measure_once(
+pub(super) async fn dispatch_mod_session_measure_once(
     host: Arc<hooks::mods::ModHost>,
     session: &dyn hooks::mods::ModSessionContext,
     output: Arc<dyn OutputStream>,
     input: serde_json::Value,
 ) {
+    let session_lease = match session.acquire_session_work_lease().await {
+        Ok(lease) => lease,
+        Err(error) => {
+            tracing::debug!(%error, "discarded session.measure for an expired Mod session");
+            return;
+        }
+    };
     let session_id = session.id().await;
+    drop(session_lease);
     let input = generated_json_projection(&input);
     let log_output = output.clone();
     let toast_output = output.clone();
@@ -556,11 +558,13 @@ impl ConversationOrchestrator {
         text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         turn_id: &str,
     ) {
+        let session_id = self.session.lock().await.session_id;
         *self
             .mod_turn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ModTurnFacts {
             id: turn_id.to_owned(),
+            session_id: session_id.as_uuid().to_string(),
             started_at: std::time::Instant::now(),
             answer: source_string_projection(""),
             usage: None,
@@ -573,6 +577,45 @@ impl ConversationOrchestrator {
         let Some(host) = registry.read().await.mod_host() else {
             return;
         };
+        // A turn.start handler can schedule timers that outlive this turn.
+        // Keep their host APIs and output bound to this session generation,
+        // while the immediate hook callbacks retain the ordinary turn sink.
+        let scoped_session = if let Some(owner) = self.upgrade_streaming_tool_dispatch_owner() {
+            let Ok(_session_guard) = self.mod_session_work_gate.clone().try_read_owned() else {
+                tracing::warn!("could not bind turn.start while the session is switching");
+                return;
+            };
+            if self.session.lock().await.session_id != session_id {
+                tracing::warn!("discarded turn.start for a replaced session");
+                return;
+            }
+            let generation = self.mod_session_generation.load(Ordering::Acquire);
+            let output = self.mod_session_event_output(ModSessionEventOrigin {
+                session_id: session_id.as_uuid().to_string(),
+                mod_turn_id: Some(turn_id.to_owned()),
+            });
+            let session: Arc<dyn hooks::mods::ModSessionContext> = owner;
+            match crate::turn_loop::tool_dispatch::origin_bound_mod_session_context_with_outputs(
+                self,
+                session,
+                session_id,
+                generation,
+                self.output.clone(),
+                output,
+            ) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    tracing::warn!(%error, "could not bind turn.start to its origin");
+                    return;
+                }
+            }
+        } else {
+            // Embedded callers that have not supplied an owning Arc retain
+            // their existing request-scoped behavior.
+            None
+        };
+        let session: &dyn hooks::mods::ModSessionContext =
+            scoped_session.as_deref().unwrap_or(self);
         let mut input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
             &serde_json::json!({"turnId":turn_id}),
         )
@@ -588,7 +631,7 @@ impl ConversationOrchestrator {
             .dispatch_with_ui_at_session(
                 "turn.start",
                 input,
-                self,
+                session,
                 move |_| {
                     let turn_id = turn_id.clone();
                     async move {
@@ -701,22 +744,45 @@ impl ConversationOrchestrator {
             return;
         }
 
-        let snapshot = self.mod_session_measure_snapshot().await;
-        let sampler = self.mod_session_measure_sampler.clone();
-        let Some(request) = sampler.enqueue(ModSessionMeasureReason::Limits, snapshot) else {
+        // A limits update can be triggered by a switch hook. Do not wait on
+        // the switch's write side from that same task.
+        let Ok(_session_guard) = self.mod_session_work_gate.clone().try_read_owned() else {
+            tracing::debug!("skipped Mod session.measure while the session is switching");
             return;
         };
+        let session_id = self.session.lock().await.session_id;
+        let generation = self.mod_session_generation.load(Ordering::Acquire);
+        let snapshot = self.mod_session_measure_snapshot().await;
+        let sampler = self.mod_session_measure_sampler.clone();
         if let Some(session) = host.bound_session() {
-            self.enqueue_mod_session_events(vec![ModSessionEventWork::Measure {
+            let output = self.mod_session_event_output(ModSessionEventOrigin {
+                session_id: session_id.as_uuid().to_string(),
+                mod_turn_id: None,
+            });
+            let session = match crate::turn_loop::tool_dispatch::origin_bound_mod_session_context(
+                self,
+                session,
+                session_id,
+                generation,
+                output.clone(),
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(%error, "could not bind Mod session.measure to its origin");
+                    return;
+                }
+            };
+            self.enqueue_mod_session_events(vec![ModSessionEventWork::MeasureRequest {
                 context: ModSessionEventContext {
                     host,
                     session,
-                    output: self.output.clone(),
+                    output,
                 },
                 sampler,
-                request,
+                reason: ModSessionMeasureReason::Limits,
+                snapshot,
             }]);
-        } else {
+        } else if let Some(request) = sampler.enqueue(ModSessionMeasureReason::Limits, snapshot) {
             dispatch_mod_session_measure_inline(host, self, self.output.clone(), sampler, request)
                 .await;
         }
@@ -741,6 +807,20 @@ impl ConversationOrchestrator {
             .take();
         let Some(facts) = facts else { return };
         let Some(host) = host else { return };
+        let Ok(_session_guard) = self.mod_session_work_gate.clone().try_read_owned() else {
+            tracing::warn!("could not bind turn.complete while the session is switching");
+            return;
+        };
+        let session_id = self.session.lock().await.session_id;
+        if session_id.as_uuid().to_string() != facts.session_id {
+            tracing::warn!("discarded turn.complete for a replaced session");
+            return;
+        }
+        let generation = self.mod_session_generation.load(Ordering::Acquire);
+        let origin = ModSessionEventOrigin {
+            session_id: facts.session_id.clone(),
+            mod_turn_id: Some(facts.id.clone()),
+        };
         let reason = if is_aborted {
             "aborted"
         } else if facts.refusal.is_some() {
@@ -792,10 +872,24 @@ impl ConversationOrchestrator {
         };
         let sampler = self.mod_session_measure_sampler.clone();
         if let Some(session) = session {
+            let output = self.mod_session_event_output(origin);
+            let session = match crate::turn_loop::tool_dispatch::origin_bound_mod_session_context(
+                self,
+                session,
+                session_id,
+                generation,
+                output.clone(),
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(%error, "could not bind turn.complete to its origin");
+                    return;
+                }
+            };
             let context = ModSessionEventContext {
                 host,
                 session,
-                output: self.output.clone(),
+                output,
             };
             let mut work = vec![ModSessionEventWork::TurnComplete {
                 context: context.clone(),
@@ -1646,11 +1740,21 @@ impl ConversationOrchestrator {
         // on the OTel `prompt.id` attribute — and is `undefined` until the first
         // user input, which `current_prompt_id` reproduces exactly.
         let prompt_id = self.prompt_runtime.current_prompt_id.lock().await.clone();
+        let session_origin = match self.capture_session_origin_capability().await {
+            Ok(origin) => origin.filter(|origin| origin.session_id() == session_id),
+            Err(error) => {
+                tracing::warn!(%error, "could not capture lifecycle hook session origin");
+                None
+            }
+        };
         HookContext {
             model_safety_observer: self.model_safety_observer().await,
             prompt_transcript: Some(self.prompt_hook_transcript().await),
             model_selection: Some(model_selection),
-            inherit: self.hook_agent_inheritance.clone(),
+            inherit: self.hook_agent_inheritance.clone().map(|mut inheritance| {
+                inheritance.session_origin = session_origin;
+                inheritance
+            }),
             agent_depth: Some(0),
             session_id,
             cwd: self.current_cwd(),
@@ -1763,10 +1867,21 @@ impl ConversationOrchestrator {
         prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         message_id: MessageId,
     ) -> bool {
+        self.fire_user_prompt_submit_inner(prompt, message_id, false)
+            .await
+            .expect("ordinary prompt submission has no recovery admission")
+    }
+
+    async fn fire_user_prompt_submit_inner(
+        &self,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        message_id: MessageId,
+        recovery_managed: bool,
+    ) -> Result<bool, crate::OrchestratorError> {
         // A side chat is an isolated child context. It does not publish
         // session hooks, telemetry, or derived host facilities.
         if self.side_chat {
-            return false;
+            return Ok(false);
         }
         let prompt_display = prompt.string_at("").unwrap_or_default();
         // The JSONL append immediately before this seam minted the stable
@@ -1786,15 +1901,30 @@ impl ConversationOrchestrator {
         );
         self.append_ultracode_attachments(prompt_display).await;
         let ctx = self.lifecycle_hook_ctx(false).await;
-        let agg = self
-            .hooks
-            .execute(
-                HookEvent::UserPromptSubmit {
-                    prompt: prompt.clone(),
-                },
-                ctx,
-            )
-            .await;
+        let event = HookEvent::UserPromptSubmit {
+            prompt: prompt.clone(),
+        };
+        let agg = if recovery_managed {
+            let admission = self.capture_tool_dispatch_recovery_guard();
+            self.hooks
+                .execute_with_recovery_admission(event, ctx, move || {
+                    admission
+                        .as_ref()
+                        .map_or(Ok(None), |guard| guard())
+                        .map(|leases| leases.map(|lease| (lease.execution, lease.turn_work)))
+                })
+                .await
+                .map_err(|error| match error {
+                    hooks::RecoveryAdmissionError::Interrupted => {
+                        crate::OrchestratorError::RecoveryInterrupted
+                    }
+                    hooks::RecoveryAdmissionError::Failure(error) => {
+                        crate::OrchestratorError::Internal(error)
+                    }
+                })?
+        } else {
+            self.hooks.execute(event, ctx).await
+        };
 
         // `hookSpecificOutput.sessionTitle` — rename the session (claude
         // applies it regardless of the block outcome). Best-effort: no writer
@@ -1840,15 +1970,16 @@ impl ConversationOrchestrator {
             }
             self.output.emit_text(&warning.into_projection()).await;
         }
-        blocked
+        Ok(blocked)
     }
 
     pub(super) async fn fire_user_prompt_submit_projected(
         &self,
         prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         message_id: MessageId,
-    ) -> bool {
-        self.fire_user_prompt_submit(prompt, message_id).await
+    ) -> Result<bool, crate::OrchestratorError> {
+        self.fire_user_prompt_submit_inner(prompt, message_id, true)
+            .await
     }
 
     /// Fire the `MessageDisplay` hooks at the BEGIN of an assistant-message

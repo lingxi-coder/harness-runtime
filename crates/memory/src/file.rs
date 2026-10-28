@@ -74,7 +74,7 @@ pub fn parse_markdown_with_frontmatter(
     let yaml = &rest[..end];
     let body = &rest[end + 5..];
     let fm: MemoryFrontmatter =
-        serde_yaml::from_str(yaml).map_err(|e| MemoryError::Parse(e.to_string()))?;
+        yaml_serde::from_str(yaml).map_err(|e| MemoryError::Parse(e.to_string()))?;
     Ok((fm, body.trim_start().to_string()))
 }
 

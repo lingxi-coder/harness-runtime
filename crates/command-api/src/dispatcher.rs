@@ -1837,9 +1837,9 @@ mod tests {
     use super::*;
     use crate::builtin_support::names::{core_description, BUILTIN_COMMAND_NAMES};
     use crate::builtin_support::unimplemented::UnimplementedCommandHandler;
-    use crate::model::{
-        BuiltinCommandHandler, CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
-    };
+    #[cfg(feature = "builtin-handlers")]
+    use crate::model::BuiltinCommandHandler;
+    use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use crate::registry::CommandRegistry;
     use std::path::PathBuf;
 

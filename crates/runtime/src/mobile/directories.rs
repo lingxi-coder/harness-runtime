@@ -204,10 +204,7 @@ mod tests {
         assert_eq!(dirs.brand_id, profile.brand_id);
         assert_eq!(dirs.linux_user, profile.linux_user);
         assert_eq!(dirs.config_dir_name, profile.config_dir_name);
-        assert_eq!(
-            dirs.guest_home,
-            profile.guest_home().display().to_string()
-        );
+        assert_eq!(dirs.guest_home, profile.guest_home().display().to_string());
         assert_eq!(
             dirs.config_guest_path,
             profile.config_guest_path().display().to_string()

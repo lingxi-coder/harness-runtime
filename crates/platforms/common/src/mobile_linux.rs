@@ -1551,13 +1551,11 @@ mod tests {
                 .await,
             Err(ProcessError::Unsupported)
         ));
-        assert!(
-            runtime
-                .raw_stdio_requests
-                .lock()
-                .expect("raw requests")
-                .is_empty()
-        );
+        assert!(runtime
+            .raw_stdio_requests
+            .lock()
+            .expect("raw requests")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2012,11 +2010,9 @@ mod tests {
             .kill(&foreign)
             .await
             .expect_err("unknown handles must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("unknown background process handle")
-        );
+        assert!(error
+            .to_string()
+            .contains("unknown background process handle"));
         assert!(runtime_impl.killed.lock().expect("kill mutex").is_empty());
     }
 

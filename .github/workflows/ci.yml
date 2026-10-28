@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+
 jobs:
   script-gates:
     runs-on: ubuntu-latest
@@ -16,6 +22,8 @@ jobs:
         run: |
           python3 scripts/checks/check_brand_leaks.py --selftest
           python3 scripts/tests/test_dependency_rules.py
+          python3 third_party/xcap-macos/test-audit-upstream.py
+          python3 packages/webrtc/vendor/test-audit-nix-upstream.py
       - name: Verify every gate and the trigger chain
         run: python3 scripts/tests/test_gate_triggers.py
 
@@ -73,16 +81,44 @@ jobs:
         run: cargo test --locked -p client --features uniffi --test uniffi_metadata_budget_test
 
   unit-tests:
-    runs-on: ubuntu-latest
-    env:
-      # Debug async state machines exceed libtest's 2 MiB default thread stack.
-      RUST_MIN_STACK: "16777216"
+    # The AppArmor user-namespace setting below is specific to Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
       - name: Install runtime integration test dependencies
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap socat
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap libcap2-bin socat
+      - name: Enable unprivileged user namespaces on the hosted runner
+        shell: bash
+        run: |
+          # Ubuntu 24.04 restricts capabilities in unprivileged user namespaces
+          # through AppArmor. This is a temporary system-wide change, so it is
+          # allowed only on GitHub's disposable per-job VM, not a self-hosted runner.
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sysctl kernel.apparmor_restrict_unprivileged_userns
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 0
+      - name: Verify real bubblewrap filesystem isolation
+        shell: bash
+        run: |
+          # Exercise the distribution's unprivileged binary as the runner user.
+          test "$(id -u)" -ne 0
+          bwrap_bin="$(command -v bwrap)"
+          test "$bwrap_bin" = /usr/bin/bwrap
+          test ! -u "$bwrap_bin"
+          test ! -g "$bwrap_bin"
+          bwrap_capabilities="$(getcap "$bwrap_bin")"
+          test -z "$bwrap_capabilities"
+          bwrap --version
+          bwrap --ro-bind / / --unshare-user --unshare-pid --proc /proc -- /bin/true
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --proc /proc -- /bin/true
+          test_name='linux::tests::bwrap_missing_directory_is_empty_readonly_and_user_files_are_preserved'
+          cargo test --locked -p sandbox-runtime --all-features --lib "$test_name" -- --ignored --exact | tee "$RUNNER_TEMP/bubblewrap-regression.log"
+          grep -Fx "test $test_name ... ok" "$RUNNER_TEMP/bubblewrap-regression.log"
       - name: cargo test
         # `--no-fail-fast` is load-bearing, not tidiness. Without it cargo stops
         # at the first failing test BINARY and never runs the rest, so one red
@@ -91,6 +127,83 @@ jobs:
         # d7215d659 (2026-07-13) and stayed invisible for over a month behind an
         # earlier failure for exactly this reason.
         run: cargo test --locked --workspace --all-features --no-fail-fast
+
+  webrtc-source-review:
+    # The embedded workspace has its own lock and vet store, independent of
+    # the root workspace's source-review result.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked --version '^0.10'
+      - name: Check embedded WebRTC source reviews
+        working-directory: packages/webrtc
+        run: cargo vet check --locked
+
+  webrtc-tests:
+    # packages/webrtc is a separate workspace, so root --workspace tests do
+    # not run its transport, media, mobile or test-server unit tests.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      RUST_TEST_THREADS: "1"
+    defaults:
+      run:
+        working-directory: packages/webrtc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install native media and relay test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            coturn gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            libasound2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libopus-dev pkg-config
+          pkg-config --atleast-version=1.28 gstreamer-1.0
+          sudo systemctl stop coturn.service
+      - name: Fetch the locked embedded workspace dependencies
+        run: cargo fetch --locked
+      - name: Test the embedded WebRTC workspace
+        # The helper limits GStreamer to the nine required plugins and sets
+        # the mobile test's plugin directory before running Cargo offline.
+        run: python3 scripts/test-media.py --workspace
+      - name: Exercise relay-only transport with local Coturn
+        shell: bash
+        run: |
+          if ss -H -lntu 'sport = :3478' | grep -q .; then
+            echo 'TURN test port 3478 is already occupied'
+            ss -H -lntup 'sport = :3478'
+            exit 1
+          fi
+          turnserver -n --no-cli --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
+            --external-ip=127.0.0.1 --listening-port=3478 --min-port=50100 --max-port=50115 \
+            --realm=lingxi-local-test --lt-cred-mech --user=lingxi-test:local-turn-test-password \
+            --fingerprint --no-tls --no-tcp --no-tcp-relay --no-multicast-peers \
+            --allow-loopback-peers --relay-threads=1 --log-file=stdout \
+            --pidfile="$RUNNER_TEMP/webrtc-turn.pid" > "$RUNNER_TEMP/webrtc-turn.log" 2>&1 &
+          turn_pid=$!
+          trap 'status=$?; trap - EXIT; kill "$turn_pid" 2>/dev/null || true; wait "$turn_pid" 2>/dev/null || true; if [ "$status" -ne 0 ]; then cat "$RUNNER_TEMP/webrtc-turn.log"; fi; exit "$status"' EXIT
+          for _ in {1..80}; do
+            kill -0 "$turn_pid"
+            if test -f "$RUNNER_TEMP/webrtc-turn.pid" &&
+               test "$(cat "$RUNNER_TEMP/webrtc-turn.pid")" = "$turn_pid" &&
+               ss -H -lunp 'sport = :3478' | grep -F "pid=$turn_pid," | grep -qF '127.0.0.1:3478'; then
+              break
+            fi
+            sleep 0.25
+          done
+          test "$(cat "$RUNNER_TEMP/webrtc-turn.pid")" = "$turn_pid"
+          ss -H -lunp 'sport = :3478' | grep -F "pid=$turn_pid," | grep -qF '127.0.0.1:3478'
+          cargo test --locked -p lingxi-webrtc-core --lib \
+            transport::tests::forced_turn_exchanges_binary_audio_and_two_video_tracks_without_host_fallback \
+            -- --ignored --exact --nocapture | tee "$RUNNER_TEMP/webrtc-turn-media.log"
+          grep -qE '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/webrtc-turn-media.log"
+          LINGXI_TURN_TEST_BIND_IP=127.0.0.1 cargo test --locked -p lingxi-webrtc-core --lib \
+            transport::tests::turn_close_releases_allocation_before_reusing_source_port \
+            -- --ignored --exact --nocapture | tee "$RUNNER_TEMP/webrtc-turn-release.log"
+          grep -qE '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/webrtc-turn-release.log"
 
   lint:
     runs-on: ubuntu-latest
@@ -121,6 +234,10 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
     steps:
+      - name: Enable long paths for Windows checkout
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@1.94.0
@@ -176,8 +293,18 @@ jobs:
         # pass can parse the edition2024 WASI manifest. The architectural
         # dependency-graph rules (design §8.1) are a separate step below.
         run: cargo deny check
+      - name: Check the embedded WebRTC dependency policy
+        working-directory: packages/webrtc
+        run: cargo deny --locked check --config ../../deny.toml --hide-inclusion-graph
       - name: cargo audit
         run: cargo audit --deny warnings
+      - name: Audit the embedded WebRTC workspace
+        run: cargo audit --deny warnings --file packages/webrtc/Cargo.lock
+      - name: Audit the original nix dependency
+        working-directory: packages/webrtc
+        run: python3 vendor/audit-nix-upstream.py
+      - name: Audit vendored xcap's upstream registry identity
+        run: python3 third_party/xcap-macos/audit-upstream.py
       - name: cargo vet
         # Source reviews are required; the checked-in audit store has no exemptions.
         run: cargo vet check --locked
@@ -249,6 +376,10 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
+      - name: Enable long paths for Windows checkout
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@1.94.0
@@ -263,6 +394,80 @@ jobs:
           }
       - name: Check desktop runtime against the native platform
         run: cargo check --locked -p harness-runtime --no-default-features --features desktop
+      - name: Test Windows volume identity and junction targets
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p tool-skill --lib native_path_device -- --nocapture
+      - name: Test the complete Windows platform library
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'platform-windows-lib-tests.log'
+          cargo test --locked -p platform-windows --lib 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # A successful Cargo invocation must have run the full library and
+          # the native capability/stdio regressions, not an empty test binary.
+          $summary = Select-String -Path $log -Quiet -Pattern '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;'
+          if (-not $summary) { throw 'Windows platform tests did not complete unfiltered with zero ignored tests' }
+          $required = @(
+            'process::owned_job::tests::owned_job_native_regressions_in_dedicated_helpers',
+            'process::owned_job::tests::outer_job_kills_descendant_after_helper_crash',
+            'process::owned_job::tests::payload_does_not_inherit_helper_standard_control_handles',
+            'process::supervisor_gate::tests::armed_payload_job_drop_still_terminates_its_child',
+            'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
+            'process::supervisor::integration_tests::real_supervisor_strict_cancel_reaps_the_payload_tree',
+            'process::background::native_background_stop_tests::supervised_leader_and_group_proofs_follow_actual_job_cleanup',
+            'process::background::native_background_stop_tests::supervised_stop_after_leader_exit_verifies_descendant_job',
+            'stdio_cancel::tests::full_stdout_and_empty_stdin_are_cancelled_and_joined',
+            'stdio_cancel::tests::cancellation_retries_when_the_first_request_precedes_readfile',
+            'stdio_cancel::tests::unverified_timeout_is_an_error_and_preserves_the_worker_for_retry'
+          )
+          foreach ($test in $required) {
+            $pattern = '^test ' + [regex]::Escape($test) + ' \.\.\. ok$'
+            if (-not (Select-String -Path $log -Quiet -Pattern $pattern)) {
+              throw "Required native Windows test did not pass: $test"
+            }
+          }
+      - name: Test Windows task output directory security
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'windows-task-output-directory-tests.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop --lib desktop::assembly::task_output_directory_tests 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $required = @(
+            'desktop::assembly::task_output_directory_tests::task_output_directory_is_private_on_first_creation_and_preserves_existing_acl',
+            'desktop::assembly::task_output_directory_tests::task_output_directory_does_not_rewrite_an_existing_public_acl'
+          )
+          foreach ($test in $required) {
+            $pattern = '^test ' + [regex]::Escape($test) + ' \.\.\. ok$'
+            if (-not (Select-String -Path $log -Quiet -Pattern $pattern)) {
+              throw "Required Windows task directory test did not pass: $test"
+            }
+          }
+          if (-not (Select-String -Path $log -Quiet -Pattern '^test result: ok\. 2 passed; 0 failed; 0 ignored;')) {
+            throw 'Windows task directory tests did not complete with two passing tests'
+          }
+          $pathLog = Join-Path $env:RUNNER_TEMP 'windows-task-output-path-tests.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop --lib desktop::tests::task_output_ 2>&1 | Tee-Object -FilePath $pathLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in @(
+            'desktop::tests::task_output_dir_defaults_to_the_platform_temp_root',
+            'desktop::tests::task_output_temp_root_preserves_explicit_override'
+          )) {
+            $pattern = '^test ' + [regex]::Escape($test) + ' \.\.\. ok$'
+            if (-not (Select-String -Path $pathLog -Quiet -Pattern $pattern)) {
+              throw "Required Windows task output path test did not pass: $test"
+            }
+          }
+          # The third case is the helper invoked in isolated subprocesses.
+          if (-not (Select-String -Path $pathLog -Quiet -Pattern '^test result: ok\. 3 passed; 0 failed; 0 ignored;')) {
+            throw 'Windows task output path tests did not complete with three passing cases'
+          }
 
   harness-ios:
     name: Harness iOS (${{ matrix.target }})

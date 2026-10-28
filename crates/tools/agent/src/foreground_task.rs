@@ -23,6 +23,8 @@ pub(super) enum ForegroundResult {
         Option<(String, String)>,
         bool,
     ),
+    /// The unfinished task lifecycle was handed off. The model step may have
+    /// ended already while its stop hook or worktree finalization is running.
     Backgrounded(AsyncLaunch, String),
 }
 
@@ -32,29 +34,87 @@ struct Control {
     request: SubagentSpawnRequest,
     inheritance: SubagentInheritance,
     handle: tokio::sync::Mutex<Option<ForegroundAgentHandle>>,
+    row_lease: Mutex<Option<lingxi_core::host::task_registry::ForegroundTaskLease>>,
     abort: Mutex<Option<tokio::task::AbortHandle>>,
     stop_requested: Arc<std::sync::atomic::AtomicBool>,
     allocated_agent_id: Mutex<Option<lingxi_core::types::AgentId>>,
     allocated_agent_type: Mutex<Option<String>>,
     signal: watch::Sender<bool>,
+    handoff_outcome: watch::Sender<Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>>,
     hint_progress: tool_api::ToolProgressSender,
     tool_use_id: Option<lingxi_core::types::ToolUseId>,
     start_receipt: Mutex<Option<oneshot::Sender<StartReceipt>>>,
 }
 
-struct TaskControl(std::sync::Weak<Control>);
+struct TaskControl {
+    control: std::sync::Weak<Control>,
+    receipt: watch::Receiver<Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>>,
+}
 #[async_trait]
 impl TaskBackgrounder for TaskControl {
+    fn outcome_wait_is_cancellation_safe(&self) -> bool {
+        true
+    }
+
     async fn background(&self) {
-        if let Some(control) = self.0.upgrade() {
+        if let Some(control) = self.control.upgrade() {
             control.signal.send_replace(true);
         }
+    }
+
+    async fn background_with_outcome(
+        &self,
+        _reason: lingxi_core::host::task_registry::TaskBackgroundReason,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+        let mut outcome = self.receipt.clone();
+        if let Some(receipt) = *outcome.borrow_and_update() {
+            return receipt;
+        }
+        if let Some(control) = self.control.upgrade() {
+            control.signal.send_replace(true);
+        }
+        loop {
+            if let Some(receipt) = *outcome.borrow_and_update() {
+                return receipt;
+            }
+            if outcome.changed().await.is_err() {
+                return TaskBackgroundOutcome::Unknown;
+            }
+        }
+    }
+}
+
+/// The run owns the decision receipt. Its cancellation or panic must not turn
+/// a delivered signal into a claimed handoff.
+struct HandoffReceiptGuard(
+    watch::Sender<Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>>,
+);
+impl HandoffReceiptGuard {
+    fn publish(&self, outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome) {
+        self.0.send_replace(Some(outcome));
+    }
+
+    fn publish_if_unset(&self, outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome) {
+        self.0.send_if_modified(|current| {
+            if current.is_some() {
+                false
+            } else {
+                *current = Some(outcome);
+                true
+            }
+        });
+    }
+}
+impl Drop for HandoffReceiptGuard {
+    fn drop(&mut self) {
+        self.publish_if_unset(lingxi_core::host::task_registry::TaskBackgroundOutcome::Unknown);
     }
 }
 #[async_trait]
 impl TaskKiller for TaskControl {
     async fn kill(&self) {
-        if let Some(control) = self.0.upgrade() {
+        if let Some(control) = self.control.upgrade() {
             control
                 .stop_requested
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -73,7 +133,7 @@ impl lingxi_core::host::task_registry::TaskMessageReceiver for TaskControl {
         use lingxi_core::host::handback::HandbackRecipient;
         use lingxi_core::host::task_registry::TaskRegistryError;
         let control = self
-            .0
+            .control
             .upgrade()
             .ok_or_else(|| TaskRegistryError::Internal("agent loop ended".into()))?;
         let id = (*control.allocated_agent_id.lock().unwrap())
@@ -111,7 +171,7 @@ impl lingxi_core::host::task_registry::TaskMessageReceiver for TaskControl {
         &self,
         message: Utf16JsonProjection,
     ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
-        let control = self.0.upgrade().ok_or_else(|| {
+        let control = self.control.upgrade().ok_or_else(|| {
             lingxi_core::host::task_registry::TaskRegistryError::Internal("agent loop ended".into())
         })?;
         let id = (*control.allocated_agent_id.lock().unwrap()).ok_or_else(|| {
@@ -208,10 +268,11 @@ impl SubagentSpawnObserver for Observer {
             match self
                 .0
                 .registry
-                .register_foreground_agent(registration)
+                .register_foreground_agent_owned(registration)
                 .await
             {
-                Ok(handle) => {
+                Ok((handle, lease)) => {
+                    *self.0.row_lease.lock().unwrap() = Some(lease.clone());
                     let id = handle.task_id.clone();
                     if let Some(token) = request.agent_spawn_token.clone() {
                         self.0.registry.bind_agent_spawn_token(&id, token);
@@ -243,7 +304,10 @@ impl SubagentSpawnObserver for Observer {
                     if let Some(path) = self.0.spawner.transcript_path(agent_id) {
                         let _ = self.0.registry.link_agent_output(&id, &path).await;
                     }
-                    let task_control = Arc::new(TaskControl(Arc::downgrade(&self.0)));
+                    let task_control = Arc::new(TaskControl {
+                        control: Arc::downgrade(&self.0),
+                        receipt: self.0.handoff_outcome.subscribe(),
+                    });
                     self.0
                         .registry
                         .bind_background_killer(&id, task_control.clone())
@@ -251,7 +315,7 @@ impl SubagentSpawnObserver for Observer {
                         .map_err(|error| SubagentSpawnError::Internal(error.to_string()))?;
                     self.0
                         .registry
-                        .bind_background_requester(&id, task_control.clone())
+                        .bind_background_requester_owned(&lease, task_control.clone())
                         .await
                         .map_err(|error| SubagentSpawnError::Internal(error.to_string()))?;
                     self.0
@@ -364,17 +428,21 @@ pub(super) async fn run(
         });
     let terminal_hooks_owned = spawner_owns_stop || stop_firer.is_some();
     let (signal, mut changed) = watch::channel(false);
+    let (handoff_outcome, _) = watch::channel(None);
+    let handoff_receipt = HandoffReceiptGuard(handoff_outcome.clone());
     let control = Arc::new(Control {
         registry: registry.clone(),
         spawner: spawner.clone(),
         request: request.clone(),
         inheritance: inherit.clone(),
         handle: Default::default(),
+        row_lease: Default::default(),
         abort: Default::default(),
         stop_requested: Default::default(),
         allocated_agent_id: Default::default(),
         allocated_agent_type: Default::default(),
         signal,
+        handoff_outcome,
         hint_progress,
         tool_use_id,
         start_receipt: Mutex::new(start_receipt),
@@ -452,7 +520,10 @@ pub(super) async fn run(
         if let Some(handle) = completion_control.handle.lock().await.as_ref() {
             // Removal and a Ctrl+B request serialize at the registry write
             // lock. A retained row belongs to the background lifecycle.
-            registry.unregister_foreground_agent(&handle.task_id).await;
+            let lease = completion_control.row_lease.lock().unwrap().clone();
+            if let Some(lease) = lease {
+                registry.unregister_foreground_agent_owned(&lease).await;
+            }
             if matches!(registry.get(&handle.task_id).await, Ok(Some(_))) {
                 let allocated = *completion_control.allocated_agent_id.lock().unwrap();
                 if let Some(path) =
@@ -536,21 +607,33 @@ pub(super) async fn run(
         biased;
         result = changed.changed() => {
             if result.is_ok() && *changed.borrow() {
-                let handle = control.handle.lock().await;
-                if let Some(handle) = handle.as_ref() {
-                    guard.0 = None;
-                    let agent_id = *control.allocated_agent_id.lock().unwrap();
-                    if let Some(agent_id) = agent_id {
-                        return ForegroundResult::Backgrounded(AsyncLaunch {agent_id, output_file: handle.output_path.clone()}, handle.task_id.clone());
+                let handle = control.handle.lock().await.clone();
+                let agent_id = *control.allocated_agent_id.lock().unwrap();
+                let lease = control.row_lease.lock().unwrap().clone();
+                if let (Some(handle), Some(agent_id), Some(lease)) = (handle, agent_id, lease) {
+                    match control.registry.commit_foreground_agent_background_owned(&lease).await {
+                        Ok(true) => {
+                            // The instance was claimed against completion's
+                            // withdrawal under the same registry row lock.
+                            guard.0 = None;
+                            handoff_receipt.publish(lingxi_core::host::task_registry::TaskBackgroundOutcome::Backgrounded);
+                            return ForegroundResult::Backgrounded(AsyncLaunch {agent_id, output_file: handle.output_path}, handle.task_id);
+                        }
+                        Ok(false) => {}
+                        Err(_) => handoff_receipt.publish(lingxi_core::host::task_registry::TaskBackgroundOutcome::Unknown),
                     }
                 }
             }
             let (outcome, worktree, hooks_owned) = completion.await.expect("foreground supervisor remains alive");
+            // A normal completion must not be reported as caller cancellation.
+            guard.0 = None;
+            handoff_receipt.publish_if_unset(lingxi_core::host::task_registry::TaskBackgroundOutcome::NotBackgrounded);
             ForegroundResult::Finished(outcome, worktree, hooks_owned)
         }
         result = &mut completion => {
             guard.0 = None;
             let (outcome, worktree, hooks_owned) = result.expect("foreground supervisor remains alive");
+            handoff_receipt.publish(lingxi_core::host::task_registry::TaskBackgroundOutcome::NotBackgrounded);
             ForegroundResult::Finished(outcome, worktree, hooks_owned)
         }
     }
@@ -640,6 +723,7 @@ mod tests {
             vec!["/tmp".into()],
         );
         let inherit = SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(tool_api::tool_invoker_impl::RegistryToolInvoker::new(
                 Arc::new(tool_api::ToolRegistry::new()),
             )),
@@ -647,6 +731,70 @@ mod tests {
         };
         (spawner, registry, ctx, inherit)
     }
+
+    #[tokio::test]
+    async fn foreground_agent_background_outcome_tracks_live_control() {
+        use lingxi_core::host::task_registry::{TaskBackgroundOutcome, TaskBackgroundReason};
+
+        let (spawner, registry, _, inheritance) = setup();
+        let control = Arc::new(Control {
+            registry,
+            spawner,
+            request: SubagentSpawnRequest::default(),
+            inheritance,
+            handle: Default::default(),
+            row_lease: Default::default(),
+            abort: Default::default(),
+            stop_requested: Default::default(),
+            allocated_agent_id: Default::default(),
+            allocated_agent_type: Default::default(),
+            signal: watch::channel(false).0,
+            handoff_outcome: watch::channel(None).0,
+            hint_progress: tool_api::test_support::fresh_tx(),
+            tool_use_id: None,
+            start_receipt: Default::default(),
+        });
+        let requester = Arc::new(TaskControl {
+            control: Arc::downgrade(&control),
+            receipt: control.handoff_outcome.subscribe(),
+        });
+        assert!(requester.outcome_wait_is_cancellation_safe());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            requester.background_with_outcome(TaskBackgroundReason::User)
+        )
+        .await
+        .is_err());
+        assert!(*control.signal.borrow());
+        control
+            .handoff_outcome
+            .send_replace(Some(TaskBackgroundOutcome::Backgrounded));
+        assert_eq!(
+            requester
+                .background_with_outcome(TaskBackgroundReason::User)
+                .await,
+            TaskBackgroundOutcome::Backgrounded
+        );
+        drop(control);
+        assert_eq!(
+            requester
+                .background_with_outcome(TaskBackgroundReason::User)
+                .await,
+            TaskBackgroundOutcome::Backgrounded
+        );
+        let (lost_sender, lost_receipt) = watch::channel(None);
+        drop(lost_sender);
+        let lost = TaskControl {
+            control: std::sync::Weak::new(),
+            receipt: lost_receipt,
+        };
+        assert_eq!(
+            lost.background_with_outcome(TaskBackgroundReason::User)
+                .await,
+            TaskBackgroundOutcome::Unknown
+        );
+    }
+
     #[tokio::test]
     async fn foreground_startup_preserves_exact_resume_request_and_inherited_capabilities() {
         let (spawner, registry, ctx, inherit) = setup();
@@ -850,6 +998,215 @@ mod tests {
             )]
         );
     }
+
+    #[tokio::test]
+    async fn foreground_agent_completion_wins_before_handoff_commit() {
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+
+        let (spawner, registry, ctx, inherit) = setup();
+        let statistics =
+            Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+        let token = statistics.prepare_spawn("test".into(), Some(false), false, 1);
+        token.started();
+        registry.block_foreground_handoff();
+        let (progress, _rx) = mpsc::channel(8);
+        let call = tokio::spawn(run(
+            spawner.clone(),
+            SubagentSpawnRequest {
+                agent_spawn_token: Some(token.clone()),
+                ..Default::default()
+            },
+            inherit,
+            progress,
+            tool_api::test_support::fresh_tx(),
+            None,
+            registry.clone(),
+            ctx,
+            None,
+        ));
+        spawner.ready.notified().await;
+        let id = registry.list(TaskListFilter::default()).await.unwrap()[0]
+            .task_id
+            .clone();
+        let requested = tokio::spawn({
+            let registry = registry.clone();
+            let id = id.clone();
+            async move { registry.foreground_background_outcome(&id).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            registry.wait_for_foreground_handoff(),
+        )
+        .await
+        .expect("handoff must reach the commit boundary");
+        spawner.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while registry.get(&id).await.unwrap().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion must withdraw the original row");
+        // In production the child owner publishes this receipt as it finishes.
+        token.completed();
+        registry.release_foreground_handoff();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), requested)
+                .await
+                .unwrap()
+                .unwrap(),
+            TaskBackgroundOutcome::NotBackgrounded
+        );
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), call)
+                .await
+                .unwrap()
+                .unwrap(),
+            ForegroundResult::Finished(..)
+        ));
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.completed, 1);
+        assert_eq!(snapshot.killed.user, 0);
+    }
+
+    #[tokio::test]
+    async fn foreground_agent_cancelled_during_handoff_reports_unknown() {
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+
+        let (spawner, registry, ctx, inherit) = setup();
+        registry.block_foreground_handoff();
+        let (progress, _rx) = mpsc::channel(8);
+        let call = tokio::spawn(run(
+            spawner.clone(),
+            SubagentSpawnRequest::default(),
+            inherit,
+            progress,
+            tool_api::test_support::fresh_tx(),
+            None,
+            registry.clone(),
+            ctx,
+            None,
+        ));
+        spawner.ready.notified().await;
+        let id = registry.list(TaskListFilter::default()).await.unwrap()[0]
+            .task_id
+            .clone();
+        let requested = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.foreground_background_outcome(&id).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            registry.wait_for_foreground_handoff(),
+        )
+        .await
+        .expect("handoff must reach the commit boundary");
+        call.abort();
+        assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), requested)
+                .await
+                .unwrap()
+                .unwrap(),
+            TaskBackgroundOutcome::Unknown
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn foreground_agent_timeout_keeps_instance_bound_handoff_receipt() {
+        use lingxi_core::host::task_registry::{TaskBackgroundOutcome, TaskBackgroundReason};
+
+        for abort_run in [false, true] {
+            let (spawner, registry, ctx, inherit) = setup();
+            registry.block_foreground_handoff();
+            let (progress, _rx) = mpsc::channel(8);
+            let call = tokio::spawn(run(
+                spawner.clone(),
+                SubagentSpawnRequest::default(),
+                inherit,
+                progress,
+                tool_api::test_support::fresh_tx(),
+                None,
+                registry.clone(),
+                ctx,
+                None,
+            ));
+            spawner.ready.notified().await;
+            let id = registry.list(TaskListFilter::default()).await.unwrap()[0]
+                .task_id
+                .clone();
+            let requester = registry.foreground_background_requester(&id).unwrap();
+            assert!(requester.outcome_wait_is_cancellation_safe());
+            let timed_out = tokio::task::spawn_blocking({
+                let requester = requester.clone();
+                move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    runtime.block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            requester.background_with_outcome(TaskBackgroundReason::TurnAbort),
+                        )
+                        .await
+                        .is_err()
+                    })
+                }
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                registry.wait_for_foreground_handoff(),
+            )
+            .await
+            .expect("the engine must independently own the pending handoff");
+            assert!(
+                timed_out.await.unwrap(),
+                "the temporary runtime must time out"
+            );
+            if abort_run {
+                call.abort();
+                assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+                assert_eq!(
+                    requester
+                        .background_with_outcome(TaskBackgroundReason::User)
+                        .await,
+                    TaskBackgroundOutcome::Unknown
+                );
+            } else {
+                registry.release_foreground_handoff();
+                assert!(matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), call)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    ForegroundResult::Backgrounded(..)
+                ));
+                spawner.release.notify_one();
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if registry
+                            .get(&id)
+                            .await
+                            .unwrap()
+                            .is_some_and(|row| row.status == "failed")
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the retained worker must eventually publish its terminal result");
+                assert_eq!(
+                    requester
+                        .background_with_outcome(TaskBackgroundReason::User)
+                        .await,
+                    TaskBackgroundOutcome::Backgrounded
+                );
+            }
+        }
+    }
     #[tokio::test]
     async fn stopped_backgrounded_foreground_worker_publishes_killed_not_crashed() {
         let (spawner, registry, mut ctx, inherit) = setup();
@@ -968,7 +1325,7 @@ mod tests {
     }
     struct StopCapability {
         session: lingxi_core::types::SessionId,
-        firer: Arc<RecordingStopOwner>,
+        firer: Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>,
     }
     #[async_trait]
     impl tool_api::TaskLifecycleHookFirer for StopCapability {
@@ -976,10 +1333,7 @@ mod tests {
             &self,
             session: lingxi_core::types::SessionId,
         ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>> {
-            (session == self.session).then(|| {
-                self.firer.clone()
-                    as Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>
-            })
+            (session == self.session).then(|| self.firer.clone())
         }
     }
     fn bind_stop_owner(
@@ -1014,6 +1368,106 @@ mod tests {
             last_request_id: None,
         }
     }
+
+    #[tokio::test]
+    async fn foreground_agent_can_handoff_unfinished_stop_finalization() {
+        use lingxi_core::host::subagent_spawn::SubagentStopHookFirer;
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+
+        struct BlockingStopFirer {
+            epoch: lingxi_core::types::MessageId,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl SubagentStopHookFirer for BlockingStopFirer {
+            fn epoch_id(&self) -> lingxi_core::types::MessageId {
+                self.epoch
+            }
+            fn retire(&self) {}
+            fn is_current(&self) -> bool {
+                true
+            }
+            async fn fire(
+                &self,
+                _: lingxi_core::types::AgentId,
+                _: &str,
+                _: lingxi_core::host::subagent_spawn::SubagentStopStatus,
+            ) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        }
+
+        let (spawner, registry, mut ctx, inherit) = setup();
+        *spawner.terminal.lock().unwrap() = Some(completed(spawner.id));
+        let session = lingxi_core::types::SessionId::new();
+        let firer = Arc::new(BlockingStopFirer {
+            epoch: lingxi_core::types::MessageId::new(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        ctx.task_lifecycle_hooks = Some(Arc::new(StopCapability {
+            session,
+            firer: firer.clone(),
+        }));
+        let (progress, _rx) = mpsc::channel(8);
+        let call = tokio::spawn(run(
+            spawner.clone(),
+            SubagentSpawnRequest {
+                origin_session_id: Some(session),
+                stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+                ..Default::default()
+            },
+            inherit,
+            progress,
+            tool_api::test_support::fresh_tx(),
+            None,
+            registry.clone(),
+            ctx,
+            None,
+        ));
+        spawner.ready.notified().await;
+        let id = registry.list(TaskListFilter::default()).await.unwrap()[0]
+            .task_id
+            .clone();
+        spawner.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), firer.entered.notified())
+            .await
+            .expect("the worker has finished and its stop hook must be pending");
+        assert_eq!(
+            registry.foreground_background_outcome(&id).await,
+            TaskBackgroundOutcome::Backgrounded
+        );
+        assert!(matches!(
+            call.await.unwrap(),
+            ForegroundResult::Backgrounded(_, ref task_id) if task_id == &id
+        ));
+        let row = registry
+            .get(&id)
+            .await
+            .unwrap()
+            .expect("background row remains visible");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.is_backgrounded, Some(true));
+        firer.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if registry
+                    .get(&id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|row| row.status == "completed")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the background finalization must publish its terminal status");
+    }
+
     #[tokio::test]
     async fn bound_foreground_completion_and_failure_each_fire_once_and_return_owned_receipt() {
         for success in [true, false] {

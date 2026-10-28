@@ -111,7 +111,7 @@ fn de_lenient_bool_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = serde_yaml::Value::deserialize(deserializer)?;
+    let value = yaml_serde::Value::deserialize(deserializer)?;
     Ok(coerce_r0e_bool(&value).unwrap_or(false))
 }
 
@@ -123,19 +123,19 @@ fn de_lenient_bool_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = serde_yaml::Value::deserialize(deserializer)?;
+    let value = yaml_serde::Value::deserialize(deserializer)?;
     Ok(coerce_r0e_bool(&value).unwrap_or(true))
 }
 
 /// `r0e(e)`: native bool as-is; string/number via truthy/defined-falsy; else
 /// `None` (undefined).
-fn coerce_r0e_bool(value: &serde_yaml::Value) -> Option<bool> {
+fn coerce_r0e_bool(value: &yaml_serde::Value) -> Option<bool> {
     match value {
-        serde_yaml::Value::Bool(b) => Some(*b),
+        yaml_serde::Value::Bool(b) => Some(*b),
         // `r0e` stringifies a number and token-matches it (NOT nonzero-is-true),
         // so only `1`/`0` map to true/false; every other number → None (default).
-        serde_yaml::Value::Number(n) => coerce_r0e_bool(&serde_yaml::Value::String(n.to_string())),
-        serde_yaml::Value::String(s) => {
+        yaml_serde::Value::Number(n) => coerce_r0e_bool(&yaml_serde::Value::String(n.to_string())),
+        yaml_serde::Value::String(s) => {
             let t = s.trim().to_lowercase();
             if matches!(t.as_str(), "1" | "true" | "yes" | "on") {
                 Some(true)
@@ -160,7 +160,7 @@ fn coerce_r0e_bool(value: &serde_yaml::Value) -> Option<bool> {
 pub fn parse_output_style(raw: &str, stem: &str) -> DiskOutputStyle {
     let (fm, body) = if let Some(rest) = raw.strip_prefix("---") {
         if let Some(end) = rest.find("\n---\n") {
-            let fm: DiskFrontmatter = serde_yaml::from_str(&rest[..end]).unwrap_or_default();
+            let fm: DiskFrontmatter = yaml_serde::from_str(&rest[..end]).unwrap_or_default();
             (fm, rest[end + 5..].trim().to_string())
         } else {
             (DiskFrontmatter::default(), raw.trim().to_string())

@@ -185,7 +185,11 @@ async fn real_hook_stream_has_no_connection_recovery_and_main_resends_v2p() {
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["stream"], true);
         assert!(body.get("tool_choice").is_none());
-        assert!(body.get("thinking").is_none());
+        assert_eq!(
+            body.get("thinking"),
+            Some(&serde_json::json!({"type": "disabled"})),
+            "hook evaluation must explicitly disable thinking"
+        );
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(
             body["output_config"]["format"]["schema"]["required"],
@@ -220,7 +224,11 @@ async fn real_hook_stream_has_no_connection_recovery_and_main_resends_v2p() {
             "disable={disabled}: {body}"
         );
         assert!(body.get("tools").is_none());
-        assert!(body.get("thinking").is_none());
+        assert_eq!(
+            body.get("thinking"),
+            Some(&serde_json::json!({"type": "disabled"})),
+            "disable={disabled}: hook evaluation must explicitly disable thinking"
+        );
         assert_eq!(dispatch(&requests[0]), None);
     }
     for enabled in ["0", "false", "FALSE", "wat", ""] {
@@ -245,6 +253,11 @@ async fn real_hook_stream_has_no_connection_recovery_and_main_resends_v2p() {
         assert_eq!(
             body["output_config"]["format"]["type"], "json_schema",
             "enable={enabled}"
+        );
+        assert_eq!(
+            body.get("thinking"),
+            Some(&serde_json::json!({"type": "disabled"})),
+            "enable={enabled}: hook evaluation must explicitly disable thinking"
         );
     }
     std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");

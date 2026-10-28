@@ -6046,9 +6046,9 @@ mod app_invocation_policy_tests {
         let parent = PermissionPolicy::from_rules(
             PermissionMode::BypassPermissions,
             [
-                rule("WebSearch", managed.clone(), PermissionBehavior::Deny),
-                rule("Read", user.clone(), PermissionBehavior::Allow),
-                rule("WebFetch", user.clone(), PermissionBehavior::Deny),
+                rule("WebSearch", managed, PermissionBehavior::Deny),
+                rule("Read", user, PermissionBehavior::Allow),
+                rule("WebFetch", user, PermissionBehavior::Deny),
             ],
         );
         let child = parent.fork_app_invocation(FsRoots {

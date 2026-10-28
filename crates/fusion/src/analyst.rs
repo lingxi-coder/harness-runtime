@@ -355,6 +355,7 @@ where
     let inheritance = lingxi_core::host::subagent_spawn::SubagentInheritance {
         tool_invoker: Arc::clone(&inherit.subagent.tool_invoker),
         budget: inherit.subagent.budget.clone(),
+        session_origin: inherit.subagent.session_origin.clone(),
     };
     let run = spawner.spawn_workflow_with_observer(spawn, inheritance, None, None, watchdog);
     let outcome = timeout(Duration::from_millis(config.analyst_timeout_ms), run).await;

@@ -31,6 +31,10 @@ const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool us
 /// normalized into the generic empty-result sentinel.
 const MCP_INTERRUPTED_MESSAGE: &str = "The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed.";
 
+/// A lifecycle pause is not a user denial. The operation may already have
+/// crossed a side-effect boundary, including on an MCP server.
+pub(crate) const LIFECYCLE_INTERRUPTED_MESSAGE: &str = "The tool call was interrupted because the app paused. It may have partially or fully completed; verify its outcome before retrying.";
+
 /// Result of one `dispatch_tool_uses_tracked` call routed through the executor:
 /// the single result block + the tool's injected messages + context modifiers.
 type DispatchOutcome = Result<
@@ -54,6 +58,8 @@ pub(crate) enum AbortReason {
     /// queued tool whose `interrupt_behavior()==Cancel` (TS `getAbortReason`
     /// 'user_interrupted'). The synthetic result is the bare `REJECT_MESSAGE`.
     UserInterrupted,
+    /// A host lifecycle pause interrupted the call; its outcome is uncertain.
+    LifecyclePaused,
     /// Production fallback resets the whole generation. This variant remains
     /// only for the synthetic-result unit oracle, not as evidence of a live
     /// Native streaming-fallback completion route.
@@ -74,6 +80,7 @@ pub(crate) enum AbortReason {
 pub(crate) fn synthetic_tool_use_result(reason: AbortReason) -> Utf16JsonProjection {
     Utf16JsonProjection::from(match reason {
         AbortReason::UserInterrupted => "User rejected tool use",
+        AbortReason::LifecyclePaused => LIFECYCLE_INTERRUPTED_MESSAGE,
         #[cfg(test)]
         AbortReason::StreamingFallback => "Streaming fallback - tool execution discarded",
     })
@@ -118,6 +125,7 @@ fn synthetic_error_block_for_tool(
         // the user-ESC / per-tool cancellation path is wired in a later sub-task.
         AbortReason::UserInterrupted if is_mcp => format!("Error: {MCP_INTERRUPTED_MESSAGE}"),
         AbortReason::UserInterrupted => REJECT_MESSAGE.to_string(),
+        AbortReason::LifecyclePaused => LIFECYCLE_INTERRUPTED_MESSAGE.to_owned(),
     };
     ContentBlock::ToolResult {
         tool_use_id,
@@ -234,6 +242,9 @@ pub(crate) struct StreamingToolExecutor<'a> {
     /// Outstanding ids survive completion until the result is handed to the
     /// driver, and are removed explicitly when the host sweeps this executor.
     tool_use_lifecycle: ToolUseLifecycleTracker,
+    /// Unknown-tool batch hooks can run after their ready result is admitted.
+    /// Keep their turn owner through the executor lifetime.
+    recovery_leases: Vec<Arc<dyn Send + Sync>>,
     #[cfg(test)]
     next_dispatch_finished_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -307,6 +318,8 @@ impl<'a> StreamingToolExecutor<'a> {
         let dispatch: ToolDispatch = Arc::new(move |mut call| {
             let orch = Arc::clone(&dispatch_owner);
             Box::pin(async move {
+                let recovery_lease = call.recovery_lease.take();
+                let recovery_work_lease = call.recovery_work_lease.take();
                 let tool_use = (
                     call.id.clone(),
                     call.presented_name.clone(),
@@ -323,18 +336,28 @@ impl<'a> StreamingToolExecutor<'a> {
                     .as_ref()
                     .and_then(|state| state.downcast_arc::<ToolUseContext>().ok())
                     .map(|context| context.as_ref().clone());
-                let mut dispatched = crate::turn_loop::dispatch_streaming_tool_use_owned(
-                    &orch,
-                    &tool_use,
-                    Some(call.cancellation.clone()),
-                    call.assistant_id,
-                    call.facts,
-                    Arc::clone(&call.resolved_tool),
-                    inherited_context,
-                    dispatch_started,
-                    publication_fence,
+                let dispatched = crate::turn_loop::tool_dispatch::with_dispatch_execution_lease(
+                    recovery_lease.clone(),
+                    crate::turn_loop::tool_dispatch::with_dispatch_work_lease(
+                        recovery_work_lease,
+                        crate::turn_loop::dispatch_streaming_tool_use_owned(
+                            &orch,
+                            &tool_use,
+                            Some(call.cancellation.clone()),
+                            call.assistant_id,
+                            call.facts,
+                            Arc::clone(&call.resolved_tool),
+                            inherited_context,
+                            dispatch_started,
+                            publication_fence,
+                        ),
+                    ),
                 )
-                .await?;
+                .await;
+                // This task can outlive its actor. Retain the old turn's
+                // owner until all work inside the physical dispatch finishes.
+                drop(recovery_lease);
+                let mut dispatched = dispatched?;
                 // ToolApi's FnOnce is moved into Core's opaque one-shot wrapper
                 // exactly once. The old DeferredToolDispatch field is emptied,
                 // so the final model fold cannot apply this closure a second time.
@@ -366,7 +389,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     model_provider.as_deref(),
                 )
             });
-        let scheduler = ToolScheduler::spawn(
+        let scheduler = ToolScheduler::spawn_with_cancel_reason(
             dispatch,
             max_tool_use_concurrency(),
             user_cancel.clone(),
@@ -378,6 +401,7 @@ impl<'a> StreamingToolExecutor<'a> {
             session_root,
             publication_commit_lock,
             Some(model_context_resolver),
+            orch.cancel_reason.get().cloned(),
         );
         let publication_fence = scheduler.current_publication_fence();
         Ok(Self {
@@ -391,6 +415,7 @@ impl<'a> StreamingToolExecutor<'a> {
             scheduler_failed: AtomicBool::new(false),
             user_cancel,
             tool_use_lifecycle: ToolUseLifecycleTracker::default(),
+            recovery_leases: Vec::new(),
             #[cfg(test)]
             next_dispatch_finished_tx: None,
         })
@@ -423,6 +448,13 @@ impl<'a> StreamingToolExecutor<'a> {
         let is_agent = tool.as_ref().is_some_and(|tool| tool.name() == "Agent");
         self.tool_use_lifecycle
             .observe_assistant_row([(id.clone(), is_agent)]);
+        // Even an unknown tool is reported to PostToolBatch hooks, which may
+        // have side effects. Persist this boundary before registering either
+        // an immediately-ready result or a queued/running call with the actor.
+        let recovery_lease = self.orch.mark_tool_dispatch_unsafe()?;
+        if let Some(lease) = recovery_lease.as_ref() {
+            self.recovery_leases.push(Arc::clone(&lease.turn_work));
+        }
         match tool {
             None => {
                 let suffix = unknown_tool_suffix_for(&name, self.orch);
@@ -521,6 +553,10 @@ impl<'a> StreamingToolExecutor<'a> {
                         #[cfg(test)]
                         dispatch_finished_tx: self.next_dispatch_finished_tx.take(),
                         tool_context_state: None,
+                        recovery_lease: recovery_lease
+                            .as_ref()
+                            .map(|lease| Arc::clone(&lease.execution)),
+                        recovery_work_lease: recovery_lease.map(|lease| lease.turn_work),
                     })
                     .await
                     .map_err(|error| scheduler_error(error, "admitting a streamed tool"))?;
@@ -669,6 +705,10 @@ impl<'a> StreamingToolExecutor<'a> {
         self.publication_fence.clone()
     }
 
+    pub(crate) fn batch_recovery_work_lease(&self) -> Option<Arc<dyn Send + Sync>> {
+        self.recovery_leases.first().cloned()
+    }
+
     /// `getAbortReason` for user interruption. Streaming fallback and host
     /// abandonment reset the whole scheduler generation instead of
     /// manufacturing per-call completions.
@@ -687,7 +727,15 @@ impl<'a> StreamingToolExecutor<'a> {
             behavior,
             Some(tool_api::tool_trait::InterruptBehavior::Cancel)
         )
-        .then_some(AbortReason::UserInterrupted)
+        .then(|| {
+            if self.orch.cancel_reason_now()
+                == crate::prompt::mid_turn_input::CancelReason::LifecyclePause
+            {
+                AbortReason::LifecyclePaused
+            } else {
+                AbortReason::UserInterrupted
+            }
+        })
     }
 
     /// Wait for autonomous task progress until Native Tn has ready data or the
@@ -944,7 +992,18 @@ impl<'a> StreamingToolExecutor<'a> {
     async fn record_completion(&mut self, i: usize, outcome: DispatchOutcome) {
         // Compute the abort reason from PRIOR state (discard / user-interrupt). A
         // cancelled in-flight tool's real outcome is discarded for the synthetic.
-        let abort_reason = self.abort_reason_for(i);
+        let mut abort_reason = self.abort_reason_for(i);
+        if abort_reason == Some(AbortReason::LifecyclePaused)
+            && outcome.as_ref().is_ok_and(|(_, _, _, _, _, publications)| {
+                publications
+                    .iter()
+                    .any(|publication| publication.permission_denial.is_some())
+            })
+        {
+            // The user or policy already denied this call. Preserve that
+            // decision even if pause raced result acceptance.
+            abort_reason = None;
+        }
         // Cancelled in-flight tool: discard its real outcome for the synthetic.
         if let Some(reason) = abort_reason {
             // A completed real MCP result may already have recorded `_meta`
@@ -977,6 +1036,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 } else {
                     "user-rejected".to_owned()
                 }),
+                AbortReason::LifecyclePaused => None,
                 #[cfg(test)]
                 AbortReason::StreamingFallback => None,
             };

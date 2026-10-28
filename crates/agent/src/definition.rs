@@ -283,13 +283,13 @@ pub const EFFORT_LEVELS: [&str; 7] = ["none", "minimal", "low", "medium", "high"
 /// - string whose lowercased form is in [`EFFORT_LEVELS`] -> `Level`
 /// - else `parseInt(str, 10)`; if an integer -> `Numeric`, else `None`
 #[must_use]
-pub fn parse_effort_value(value: &serde_yaml::Value) -> Option<AgentEffort> {
+pub fn parse_effort_value(value: &yaml_serde::Value) -> Option<AgentEffort> {
     match value {
         // value === undefined / null
-        serde_yaml::Value::Null => None,
+        yaml_serde::Value::Null => None,
         // typeof value === 'number' && isValidNumericEffort(value)
         // (isValidNumericEffort = Number.isInteger)
-        serde_yaml::Value::Number(n) => {
+        yaml_serde::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Some(AgentEffort::Numeric(i))
             } else {
@@ -300,14 +300,14 @@ pub fn parse_effort_value(value: &serde_yaml::Value) -> Option<AgentEffort> {
                 parse_effort_from_string(&s)
             }
         }
-        serde_yaml::Value::String(s) => {
+        yaml_serde::Value::String(s) => {
             // value === '' -> undefined
             if s.is_empty() {
                 return None;
             }
             parse_effort_from_string(s)
         }
-        serde_yaml::Value::Bool(b) => {
+        yaml_serde::Value::Bool(b) => {
             // String(true)='true' / String(false)='false' -> not a level,
             // parseInt -> NaN -> None.
             let s = if *b { "true" } else { "false" };

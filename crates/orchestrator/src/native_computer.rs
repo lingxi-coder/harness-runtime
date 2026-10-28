@@ -1074,6 +1074,10 @@ pub(crate) async fn dispatch_tools(
         .expect("native member")
         .tool
         .clone();
+    // Sequence setup itself can perform external work, before any individual
+    // call enters the common dispatch wrapper. Persist the turn's unsafe
+    // boundary before beginning the sequence.
+    let _recovery_lease = orch.mark_tool_dispatch_unsafe()?;
     tool.begin_computer_sequence(&ctx).await.map_err(internal)?;
     let result = async {
         let mut aggregate = crate::turn_loop::DeferredToolDispatch::default();

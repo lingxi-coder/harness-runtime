@@ -35,6 +35,18 @@ struct ExtendedLimits {
 }
 #[repr(C)]
 #[derive(Default)]
+struct BasicAccounting {
+    total_user_time: i64,
+    total_kernel_time: i64,
+    period_user_time: i64,
+    period_kernel_time: i64,
+    page_faults: u32,
+    total_processes: u32,
+    active_processes: u32,
+    terminated_processes: u32,
+}
+#[repr(C)]
+#[derive(Default)]
 struct ThreadEntry {
     size: u32,
     usage: u32,
@@ -50,8 +62,17 @@ extern "system" {
     fn SetInformationJobObject(job: Handle, class: u32, info: *const c_void, len: u32) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
     fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
+    fn QueryInformationJobObject(
+        job: Handle,
+        class: u32,
+        info: *mut c_void,
+        len: u32,
+        returned: *mut u32,
+    ) -> i32;
     fn GetCurrentProcess() -> Handle;
+    fn GetStdHandle(which: u32) -> Handle;
     fn GetHandleInformation(handle: Handle, flags: *mut u32) -> i32;
+    fn SetHandleInformation(handle: Handle, mask: u32, flags: u32) -> i32;
     fn IsProcessInJob(process: Handle, job: Handle, result: *mut i32) -> i32;
     fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
     fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry) -> i32;
@@ -59,6 +80,12 @@ extern "system" {
     fn OpenThread(access: u32, inherit: i32, id: u32) -> Handle;
     fn GetProcessIdOfThread(thread: Handle) -> u32;
     fn ResumeThread(thread: Handle) -> u32;
+    #[cfg(test)]
+    fn OpenProcess(access: u32, inherit: i32, id: u32) -> Handle;
+    #[cfg(test)]
+    fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    #[cfg(test)]
+    fn CloseHandle(handle: Handle) -> i32;
 }
 
 // Static handles are intentionally never dropped during normal Rust shutdown.
@@ -68,6 +95,79 @@ static JOB: OnceLock<OwnedHandle> = OnceLock::new();
 static INITIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn error(context: &str) -> ProcessError {
     ProcessError::Io(format!("{context}: {}", std::io::Error::last_os_error()))
+}
+
+#[cfg(test)]
+pub(super) fn hold_process_for_membership_test(pid: u32) -> Result<OwnedHandle, ProcessError> {
+    // IsProcessInJob requires PROCESS_QUERY_LIMITED_INFORMATION in addition
+    // to the SYNCHRONIZE access needed to wait on this same process object.
+    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
+    if raw.is_null() {
+        return Err(error("open test process for membership and wait"));
+    }
+    // SAFETY: successful OpenProcess returns a uniquely owned handle.
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
+/// Stop Rust's Windows CreateProcess call (which allows handle inheritance)
+/// from forwarding this dedicated helper's control streams to the payload.
+/// The payload's own separate piped stdio is created after this operation.
+pub(super) fn protect_standard_handles() -> Result<(), ProcessError> {
+    for which in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
+        // SAFETY: GetStdHandle returns a borrowed process handle, not owned here.
+        let handle = unsafe { GetStdHandle(which) };
+        if handle.is_null() || handle == -1isize as Handle {
+            continue;
+        }
+        // SAFETY: handle belongs to this process; mask only changes inheritance.
+        if unsafe { SetHandleInformation(handle, 1, 0) } == 0 {
+            return Err(error("clear helper standard-handle inheritance"));
+        }
+        let mut flags = 0;
+        if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
+            return Err(error("query helper standard-handle inheritance"));
+        }
+        if flags & 1 != 0 {
+            return Err(ProcessError::Io(
+                "helper standard handle remains inheritable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn make_standard_handles_inheritable_for_test() -> Result<(), ProcessError> {
+    for which in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
+        // SAFETY: these are borrowed stdio handles from the isolated test helper.
+        let handle = unsafe { GetStdHandle(which) };
+        if handle.is_null() || handle == -1isize as Handle {
+            return Err(ProcessError::Io(
+                "test helper has no standard handle".into(),
+            ));
+        }
+        if unsafe { SetHandleInformation(handle, 1, 1) } == 0 {
+            return Err(error("make test standard handle inheritable"));
+        }
+        let mut flags = 0;
+        if unsafe { GetHandleInformation(handle, &mut flags) } == 0 || flags & 1 == 0 {
+            return Err(error("test standard handle was not made inheritable"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn close_standard_handles_for_test() -> Result<(), ProcessError> {
+    for which in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
+        // SAFETY: the isolated helper uses three distinct piped std handles;
+        // it performs no further standard I/O and is terminated by its parent.
+        let handle = unsafe { GetStdHandle(which) };
+        if handle.is_null() || handle == -1isize as Handle || unsafe { CloseHandle(handle) } == 0 {
+            return Err(error("close test standard handle"));
+        }
+    }
+    Ok(())
 }
 
 /// A payload-only job stays authoritative after the shell leader exits.
@@ -86,6 +186,16 @@ impl CommandJob {
             return Err(error("create payload job"));
         }
         let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut flags = 0;
+        // SAFETY: the just-created owned Job handle and flags pointer are valid.
+        if unsafe { GetHandleInformation(job.as_raw_handle(), &mut flags) } == 0 {
+            return Err(error("query payload job handle inheritance"));
+        }
+        if flags & 1 != 0 {
+            return Err(ProcessError::Io(
+                "payload job handle must not be inherited".into(),
+            ));
+        }
         let mut limits = ExtendedLimits::default();
         // KILL_ON_JOB_CLOSE, no breakaway.
         limits.basic.flags = 0x2000;
@@ -118,6 +228,47 @@ impl CommandJob {
         Ok(())
     }
 
+    /// Wait until the Job's accounting reports no remaining active processes.
+    /// TerminateJobObject itself only initiates termination and is not a
+    /// job-wide completion barrier.
+    pub(super) async fn wait_empty(&self) -> Result<(), ProcessError> {
+        wait_until_empty(std::time::Duration::from_secs(5), || {
+            self.active_processes()
+        })
+        .await
+    }
+
+    pub(super) fn active_processes(&self) -> Result<u32, ProcessError> {
+        let mut accounting = BasicAccounting::default();
+        // SAFETY: the held job handle has query access; the C-compatible
+        // accounting buffer is valid and has exactly the advertised size.
+        let queried = unsafe {
+            QueryInformationJobObject(
+                self.0.as_raw_handle(),
+                1, // JobObjectBasicAccountingInformation
+                (&mut accounting as *mut BasicAccounting).cast(),
+                std::mem::size_of::<BasicAccounting>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            return Err(error("query payload job active processes"));
+        }
+        Ok(accounting.active_processes)
+    }
+
+    #[cfg(test)]
+    pub(super) fn contains_process(&self, process: &OwnedHandle) -> Result<bool, ProcessError> {
+        let mut member = 0;
+        // SAFETY: both handles remain owned for the duration of the query.
+        if unsafe { IsProcessInJob(process.as_raw_handle(), self.0.as_raw_handle(), &mut member) }
+            == 0
+        {
+            return Err(error("query test process job membership"));
+        }
+        Ok(member != 0)
+    }
+
     /// A normally completed foreground shell may have deliberately detached
     /// descendants. Release our cancellation ownership without killing them.
     pub(super) fn disarm_on_close(&self) -> Result<(), ProcessError> {
@@ -136,6 +287,26 @@ impl CommandJob {
             return Err(error("disarm completed foreground payload job"));
         }
         Ok(())
+    }
+}
+
+async fn wait_until_empty<F>(limit: std::time::Duration, mut query: F) -> Result<(), ProcessError>
+where
+    F: FnMut() -> Result<u32, ProcessError>,
+{
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let active = query()?;
+        if active == 0 {
+            return Ok(());
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(ProcessError::Io(format!(
+                "payload job did not become empty before the deadline ({active} active processes)"
+            )));
+        }
+        tokio::time::sleep_until((now + std::time::Duration::from_millis(10)).min(deadline)).await;
     }
 }
 
@@ -182,9 +353,77 @@ pub(super) fn initialize() -> Result<(), ProcessError> {
     Ok(())
 }
 
+pub(super) fn initialized() -> bool {
+    JOB.get().is_some()
+}
+
+/// A dedicated helper has no running payload left only when its held outer
+/// Job reports exactly one member: the helper process itself. This does not
+/// recover a missing child handle or prove that no child was ever created.
+pub(super) fn outer_job_has_only_current_process() -> Result<bool, ProcessError> {
+    let job = JOB
+        .get()
+        .ok_or_else(|| ProcessError::Io("helper Job is not initialized".into()))?;
+    let mut accounting = BasicAccounting::default();
+    // SAFETY: the held Job handle and correctly sized accounting buffer are valid.
+    let queried = unsafe {
+        QueryInformationJobObject(
+            job.as_raw_handle(),
+            1,
+            (&mut accounting as *mut BasicAccounting).cast(),
+            std::mem::size_of::<BasicAccounting>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if queried == 0 {
+        return Err(error("query helper Job active processes"));
+    }
+    Ok(accounting.active_processes == 1)
+}
+
+/// The supervisor has committed an ordinary foreground completion. Its
+/// payload Job is already disarmed, so releasing the outer kill-on-close flag
+/// lets intentionally detached descendants outlive this supervisor as well.
+pub(super) fn disarm_supervisor_on_close() -> Result<(), ProcessError> {
+    let job = JOB
+        .get()
+        .ok_or_else(|| ProcessError::Io("supervisor job was not initialized".into()))?;
+    let limits = ExtendedLimits::default();
+    // SAFETY: this process retains the original non-inheritable Job handle;
+    // the configuration has no other limits to preserve.
+    if unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            9,
+            (&limits as *const ExtendedLimits).cast(),
+            std::mem::size_of::<ExtendedLimits>() as u32,
+        )
+    } == 0
+    {
+        return Err(error("disarm completed foreground supervisor job"));
+    }
+    Ok(())
+}
+
 /// Hold the sole suspended initial thread before publishing the child's PID.
 /// The live Child process handle prevents PID recycling during enumeration.
 /// Unexpected extra threads are rejected; never guess which thread to resume.
+fn checked_single_suspended_thread(ids: &[u32], end: std::io::Error) -> Result<u32, ProcessError> {
+    const ERROR_NO_MORE_FILES: i32 = 18;
+    if end.raw_os_error() != Some(ERROR_NO_MORE_FILES) {
+        return Err(ProcessError::Io(format!(
+            "suspended child thread enumeration failed: {end}"
+        )));
+    }
+    if ids.len() != 1 {
+        return Err(ProcessError::Io(format!(
+            "suspended child must have exactly one initial thread, found {}",
+            ids.len()
+        )));
+    }
+    Ok(ids[0])
+}
+
 pub(super) fn suspended_thread(child: &tokio::process::Child) -> Result<OwnedHandle, ProcessError> {
     let process = child
         .raw_handle()
@@ -217,14 +456,11 @@ pub(super) fn suspended_thread(child: &tokio::process::Child) -> Result<OwnedHan
         entry.size = std::mem::size_of::<ThreadEntry>() as u32;
         available = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) } != 0;
     }
-    if ids.len() != 1 {
-        return Err(ProcessError::Io(format!(
-            "suspended child must have exactly one initial thread, found {}",
-            ids.len()
-        )));
-    }
+    // FALSE means either end-of-snapshot or failure. A partial enumeration is
+    // not evidence that the one thread already found is the only candidate.
+    let thread_id = checked_single_suspended_thread(&ids, std::io::Error::last_os_error())?;
     // THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION, non-inheritable.
-    let raw = unsafe { OpenThread(2 | 0x0800, 0, ids[0]) };
+    let raw = unsafe { OpenThread(2 | 0x0800, 0, thread_id) };
     if raw.is_null() {
         return Err(error("open suspended initial thread"));
     }
@@ -257,9 +493,94 @@ mod tests {
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
+    #[test]
+    fn suspended_thread_enumeration_rejects_partial_results() {
+        let complete = std::io::Error::from_raw_os_error(18); // ERROR_NO_MORE_FILES
+        assert_eq!(
+            checked_single_suspended_thread(&[42], complete).unwrap(),
+            42
+        );
+        let partial = std::io::Error::from_raw_os_error(5); // ERROR_ACCESS_DENIED
+        let error = checked_single_suspended_thread(&[42], partial).unwrap_err();
+        assert!(error.to_string().contains("enumeration failed"));
+        assert!(
+            checked_single_suspended_thread(&[], std::io::Error::from_raw_os_error(18)).is_err()
+        );
+        assert!(
+            checked_single_suspended_thread(&[42, 43], std::io::Error::from_raw_os_error(18))
+                .is_err()
+        );
+    }
+
     const HELPER: &str = "process::supervisor_gate::tests::windows_job_gate_helper";
     const DETACHED_HELPER: &str =
         "process::supervisor_gate::tests::windows_foreground_detached_helper";
+    const JOB_LIFECYCLE_HELPER: &str =
+        "process::supervisor_gate::tests::windows_job_lifecycle_fixture";
+
+    #[tokio::test]
+    async fn payload_job_empty_wait_preserves_query_failure_and_timeout() {
+        let mut active: u32 = 2;
+        wait_until_empty(Duration::from_secs(1), || {
+            let result = active;
+            active = active.saturating_sub(1);
+            Ok(result)
+        })
+        .await
+        .unwrap();
+
+        let failure = wait_until_empty(Duration::from_secs(1), || {
+            Err(ProcessError::Io("injected job query failure".into()))
+        })
+        .await
+        .unwrap_err();
+        assert!(failure.to_string().contains("injected job query failure"));
+        let timeout = wait_until_empty(Duration::from_millis(20), || Ok(3))
+            .await
+            .unwrap_err();
+        assert!(timeout.to_string().contains("3 active processes"));
+    }
+
+    #[tokio::test]
+    async fn payload_job_empty_wait_tracks_a_live_process() {
+        let mut command = tokio::process::Command::new("cmd.exe");
+        command
+            .args(["/D", "/S", "/C", "more"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x4)
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let job = CommandJob::assign_suspended(&child).unwrap();
+        // SAFETY: successful OpenProcess returns a new handle owned by the test.
+        let raw = unsafe { OpenProcess(0x0010_0000, 0, pid) }; // SYNCHRONIZE
+        assert!(!raw.is_null());
+        let held_process = unsafe { OwnedHandle::from_raw_handle(raw) };
+        release(suspended_thread(&child).unwrap()).unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(held_process.as_raw_handle(), 0) },
+            258
+        );
+        // A genuinely live member, rather than a handle to an exited process,
+        // must prevent a zero-accounting result.
+        let timeout = wait_until_empty(Duration::from_millis(50), || job.active_processes())
+            .await
+            .unwrap_err();
+        assert!(timeout.to_string().contains("active processes"));
+        job.terminate().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(held_process.as_raw_handle(), 0) },
+            0
+        );
+        drop(held_process);
+        job.wait_empty().await.unwrap();
+    }
 
     #[test]
     fn windows_foreground_detached_helper() {
@@ -348,12 +669,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn windows_job_lifecycle_fixture() {
+        let Some(role) = std::env::var_os("LINGXI_JOB_LIFECYCLE_ROLE") else {
+            return;
+        };
+        let directory = PathBuf::from(std::env::var_os("LINGXI_JOB_LIFECYCLE_DIR").unwrap());
+        if role == "descendant" {
+            std::fs::write(directory.join("descendant.ready"), "ready").unwrap();
+        } else {
+            assert_eq!(role, "leader");
+            let mut descendant = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([JOB_LIFECYCLE_HELPER, "--exact", "--nocapture"])
+                .env("LINGXI_JOB_LIFECYCLE_ROLE", "descendant")
+                .env("LINGXI_JOB_LIFECYCLE_DIR", &directory)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            std::fs::write(
+                directory.join("descendant.pid"),
+                descendant.id().to_string(),
+            )
+            .unwrap();
+            let until = std::time::Instant::now() + Duration::from_secs(20);
+            while !directory.join("descendant.ready").exists() {
+                assert!(
+                    descendant.try_wait().unwrap().is_none(),
+                    "descendant exited before readiness"
+                );
+                assert!(
+                    std::time::Instant::now() < until,
+                    "descendant did not become ready"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::write(directory.join("leader.ready"), "ready").unwrap();
+        }
+        // A failed test releases the fixture; the deadline also bounds any
+        // accidentally orphaned process if release cannot be observed.
+        let until = std::time::Instant::now() + Duration::from_secs(120);
+        while !directory.join("release").exists() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(
+            directory.join(format!("{}.completed", role.to_string_lossy())),
+            "finished",
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn armed_payload_job_drop_still_terminates_its_child() {
-        let mut command = tokio::process::Command::new("cmd.exe");
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, "release");
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(directory.path().join("release"));
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
         command
-            .args(["/D", "/S", "/C", "more"])
-            .stdin(Stdio::piped())
+            .args([JOB_LIFECYCLE_HELPER, "--exact", "--nocapture"])
+            .env("LINGXI_JOB_LIFECYCLE_ROLE", "leader")
+            .env("LINGXI_JOB_LIFECYCLE_DIR", directory.path())
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .creation_flags(0x4)
@@ -361,12 +744,69 @@ mod tests {
         let mut child = command.spawn().unwrap();
         let job = CommandJob::assign_suspended(&child).unwrap();
         release(suspended_thread(&child).unwrap()).unwrap();
-        drop(job);
-        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !directory.path().join("leader.ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("payload did not report a ready descendant");
+        assert!(directory.path().join("descendant.ready").exists());
+        let descendant: u32 = std::fs::read_to_string(directory.path().join("descendant.pid"))
             .unwrap()
+            .trim()
+            .parse()
             .unwrap();
-        assert!(!status.success());
+        // Open a stable process handle before closing the Job. PID-only probes
+        // after termination cannot distinguish exit from PID reuse.
+        // SAFETY: OpenProcess returns a new owned handle on success.
+        let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, descendant) };
+        assert!(!raw.is_null(), "could not open descendant process");
+        let descendant = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut member = 0;
+        assert_ne!(
+            unsafe {
+                IsProcessInJob(
+                    descendant.as_raw_handle(),
+                    job.0.as_raw_handle(),
+                    &mut member,
+                )
+            },
+            0,
+            "could not query descendant job membership"
+        );
+        assert_eq!(member, 1, "descendant escaped its payload job");
+        assert_eq!(
+            unsafe { WaitForSingleObject(descendant.as_raw_handle(), 0) },
+            258
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "payload exited before job close"
+        );
+
+        drop(job);
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("payload survived closing the job")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match unsafe { WaitForSingleObject(descendant.as_raw_handle(), 0) } {
+                    0 => break,
+                    258 => tokio::time::sleep(Duration::from_millis(10)).await,
+                    state => panic!("descendant wait failed with state {state}"),
+                }
+            }
+        })
+        .await
+        .expect("descendant survived closing the job");
+        // Kill-on-close may record exit code 0. The held process handles,
+        // readiness barrier and absent natural-completion marker are evidence
+        // of actual termination; the exit code is not.
+        assert!(!directory.path().join("leader.completed").exists());
+        assert!(!directory.path().join("descendant.completed").exists());
     }
 
     #[tokio::test]
@@ -416,6 +856,8 @@ mod tests {
         command
             .args([HELPER, "--exact", "--nocapture"])
             .env("LINGXI_GATE_TEST_DIR", directory)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .kill_on_drop(true);
         command.spawn().unwrap()
     }

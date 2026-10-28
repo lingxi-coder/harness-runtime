@@ -15,7 +15,7 @@ use crate::types::{AgentId, ConversationMessage, SessionId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -1093,6 +1093,42 @@ pub struct SubagentInheritance {
     /// Parent's budget enforcer. The child inherits this `Arc` so budget
     /// charges aggregate across the whole agent tree.
     pub budget: Arc<dyn BudgetEnforcerHandle>,
+    /// Process-local capability captured at the originating session's
+    /// admission boundary. It is carried through queues and recursive spawns,
+    /// never reconstructed from a session id supplied by a request.
+    pub session_origin: Option<Arc<dyn SessionOriginCapability>>,
+}
+
+/// The immutable identity and generation of a child agent's originating
+/// session. Keeping this capability while work is queued does not hold the
+/// session open; each operation that uses mutable session state must obtain
+/// and retain a work lease through `admit` for its actual lifetime.
+///
+/// This capability is runtime-only and must not be serialized or populated
+/// from model-controlled data.
+#[async_trait]
+pub trait SessionOriginCapability: std::fmt::Debug + Send + Sync {
+    /// Identity of the originating host instance within this process.
+    fn owner_id(&self) -> usize;
+    fn session_id(&self) -> SessionId;
+    fn generation(&self) -> u64;
+    fn cwd(&self) -> &Path;
+    fn root(&self) -> &Path;
+
+    /// Admit work against this exact origin, retaining the returned lease
+    /// until the physical work that can access the session actually exits.
+    async fn admit(&self) -> Result<Arc<dyn Send + Sync>, SessionOriginError>;
+}
+
+/// A runtime session capability can no longer admit work against its origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SessionOriginError {
+    #[error("originating session owner has ended")]
+    OwnerEnded,
+    #[error("originating session or generation has changed")]
+    SessionChanged,
+    #[error("the originating session is being switched")]
+    Switching,
 }
 
 impl std::fmt::Debug for SubagentInheritance {
@@ -1530,7 +1566,11 @@ pub trait SubagentSpawner: Send + Sync {
 
     /// The catalog after model-facing `agent.offer` filtering. Execution and
     /// lookup callers must continue using [`Self::agent_listing`].
-    async fn agent_listing_for_model(&self) -> Vec<SubagentListingEntry> {
+    async fn agent_listing_for_model(
+        &self,
+        _session_origin: Option<Arc<dyn SessionOriginCapability>>,
+        _require_origin: bool,
+    ) -> Vec<SubagentListingEntry> {
         self.agent_listing().await
     }
 

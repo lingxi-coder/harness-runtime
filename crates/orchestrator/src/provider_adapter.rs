@@ -2116,12 +2116,24 @@ mod tests {
                     "capture must observe the authenticated, sealed request"
                 );
                 if scheduled {
-                    assert!(body.get("thinking").is_none());
+                    assert_eq!(
+                        body.get("thinking"),
+                        Some(&serde_json::json!({"type": "disabled"})),
+                        "the scheduled request must explicitly disable thinking"
+                    );
                     // The native 4.0 model rejects effort even when scheduled
                     // settings select a level; context-hint policy still applies.
                     assert!(body.pointer("/output_config/effort").is_none());
                 } else {
-                    assert_eq!(body["thinking"]["budget_tokens"], 2048);
+                    assert_eq!(
+                        body.pointer("/thinking/type"),
+                        Some(&serde_json::json!("enabled")),
+                        "the ordinary main request retains its thinking policy"
+                    );
+                    assert_eq!(
+                        body.pointer("/thinking/budget_tokens"),
+                        Some(&serde_json::json!(2048))
+                    );
                 }
             }
         }
@@ -2142,8 +2154,13 @@ mod tests {
         let wire = requests.last().unwrap();
         let body: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
         assert_eq!(
-            body["thinking"]["budget_tokens"], 2048,
+            body.pointer("/thinking/type"),
+            Some(&serde_json::json!("enabled")),
             "scheduled settings must not change the main thinking policy"
+        );
+        assert_eq!(
+            body.pointer("/thinking/budget_tokens"),
+            Some(&serde_json::json!(2048))
         );
         assert!(body.get("context_hint").is_none());
         assert!(
@@ -2548,7 +2565,11 @@ mod tests {
         );
         let hook: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
         assert!(hook.get("tool_choice").is_none());
-        assert!(hook.get("thinking").is_none());
+        assert_eq!(
+            hook.get("thinking"),
+            Some(&serde_json::json!({"type": "disabled"})),
+            "hook evaluation must explicitly disable thinking"
+        );
         assert_eq!(hook["output_config"]["format"]["type"], "json_schema");
         assert_eq!(
             hook["output_config"]["format"]["schema"]["required"],

@@ -35,6 +35,7 @@ impl BudgetEnforcerHandle for Budget {
 
 fn inherit() -> SubagentInheritance {
     SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(Invoker),
         budget: Arc::new(Budget),
     }
