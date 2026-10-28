@@ -27,7 +27,7 @@ jobs:
           $log = Join-Path $env:RUNNER_TEMP 'jobtime-probe.log'
           & "$env:RUNNER_TEMP/jobtime-probe.exe" 2>&1 | Tee-Object -FilePath $log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'jobtime-probe all-rounds-passed=48')) { throw 'probe did not complete all rounds' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'jobtime-probe all-rounds-passed=64')) { throw 'probe did not complete all rounds' }
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@v4

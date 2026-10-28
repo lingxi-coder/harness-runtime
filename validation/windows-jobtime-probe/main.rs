@@ -38,6 +38,18 @@ struct ExtendedLimits {
     peak_process_memory: usize,
     peak_job_memory: usize,
 }
+#[repr(C)]
+#[derive(Default)]
+struct BasicAccounting {
+    total_user_time: i64,
+    total_kernel_time: i64,
+    period_user_time: i64,
+    period_kernel_time: i64,
+    page_faults: u32,
+    total_processes: u32,
+    active_processes: u32,
+    terminated_processes: u32,
+}
 #[allow(dead_code)] // Fields are consumed by the Win32 ABI.
 #[repr(C)]
 struct StartupInfo {
@@ -72,6 +84,13 @@ struct ProcessInfo {
 extern "system" {
     fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
     fn SetInformationJobObject(job: Handle, class: u32, info: *const c_void, len: u32) -> i32;
+    fn QueryInformationJobObject(
+        job: Handle,
+        class: u32,
+        info: *mut c_void,
+        len: u32,
+        returned: *mut u32,
+    ) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
     fn TerminateJobObject(job: Handle, code: u32) -> i32;
     fn IsProcessInJob(process: Handle, job: Handle, result: *mut i32) -> i32;
@@ -120,7 +139,7 @@ fn job() -> OwnedHandle {
     }
     job
 }
-fn set_job_time(job: &OwnedHandle) {
+fn set_job_time(job: &OwnedHandle, limit: i64) {
     let action: u32 = 0; // JOB_OBJECT_TERMINATE_AT_END_OF_JOB
     if unsafe { SetInformationJobObject(job.as_raw_handle(), 6, (&action as *const u32).cast(), 4) }
         == 0
@@ -129,7 +148,7 @@ fn set_job_time(job: &OwnedHandle) {
     }
     let mut limits = ExtendedLimits::default();
     limits.basic.flags = 0x2000 | 0x4; // kill on close + JOB_OBJECT_LIMIT_JOB_TIME
-    limits.basic.job_time = 1; // 100 ns of user time after setting the limit
+    limits.basic.job_time = limit; // 100 ns units after setting the limit
     if unsafe {
         SetInformationJobObject(
             job.as_raw_handle(),
@@ -141,6 +160,22 @@ fn set_job_time(job: &OwnedHandle) {
     {
         fail("set end-of-job time limit");
     }
+}
+fn job_accounting(job: &OwnedHandle) -> BasicAccounting {
+    let mut accounting = BasicAccounting::default();
+    if unsafe {
+        QueryInformationJobObject(
+            job.as_raw_handle(),
+            1,
+            (&mut accounting as *mut BasicAccounting).cast(),
+            std::mem::size_of::<BasicAccounting>() as u32,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        fail("query Job accounting for signal provenance");
+    }
+    accounting
 }
 fn create_suspended(role: &str, directory: &Path, mode: &str) -> (OwnedHandle, OwnedHandle, u32) {
     let exe = std::env::current_exe().unwrap();
@@ -281,7 +316,8 @@ fn probe(round: u32, root: &Path) {
     let job = job();
     let mode = if round % 2 == 0 { "live" } else { "exit" };
     let no_time_limit = round < 32;
-    let terminated_first = !no_time_limit && round % 4 >= 2;
+    let long_time_limit = (32..48).contains(&round);
+    let terminated_first = !no_time_limit && !long_time_limit && round % 4 >= 2;
     let (leader, leader_pid) = spawn_member(&job, "leader", &directory, mode);
     wait_file(&directory.join("leader-ready"));
     let mut children = Vec::new();
@@ -340,6 +376,34 @@ fn probe(round: u32, root: &Path) {
         std::fs::remove_dir_all(&directory).unwrap();
         return;
     }
+    if long_time_limit {
+        const ONE_HOUR_TICKS: i64 = 36_000_000_000;
+        set_job_time(&job, ONE_HOUR_TICKS);
+        if unsafe { TerminateJobObject(job.as_raw_handle(), 143) } == 0 {
+            fail("TerminateJobObject with long time limit");
+        }
+        for (_, held) in &children {
+            assert_eq!(wait(held, 15000), WAIT_OBJECT_0, "held child did not exit");
+        }
+        assert_eq!(
+            wait(&leader, 15000),
+            WAIT_OBJECT_0,
+            "held leader did not exit"
+        );
+        let accounting = job_accounting(&job);
+        let job_state = wait(&job, 0);
+        println!("jobtime-long-limit-negative round={round} job_wait={job_state} period_user_ticks={} limit_ticks={ONE_HOUR_TICKS} limit_terminations={}", accounting.period_user_time, accounting.terminated_processes);
+        assert!(
+            (0..ONE_HOUR_TICKS).contains(&accounting.period_user_time),
+            "long limit unexpectedly consumed"
+        );
+        assert_eq!(
+            job_state, WAIT_TIMEOUT,
+            "Job signaled without exceeding its long time limit"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
     let (burner, burner_thread, burner_pid) = create_suspended("pulse", &directory, "unused");
     if !terminated_first
         && unsafe { AssignProcessToJobObject(job.as_raw_handle(), burner.as_raw_handle()) } == 0
@@ -351,7 +415,7 @@ fn probe(round: u32, root: &Path) {
         }
         panic!("assign suspended pulse: {error}");
     }
-    set_job_time(&job);
+    set_job_time(&job, 1);
     let mut burner_is_member = true;
     if terminated_first {
         // Stop current payload members immediately, then start a trusted pulse
@@ -454,11 +518,11 @@ fn main() {
             let root: PathBuf =
                 std::env::temp_dir().join(format!("lingxi-jobtime-probe-{}", std::process::id()));
             std::fs::create_dir(&root).unwrap();
-            for round in 0..48 {
+            for round in 0..64 {
                 probe(round, &root);
             }
             std::fs::remove_dir(&root).unwrap();
-            println!("jobtime-probe all-rounds-passed=48");
+            println!("jobtime-probe all-rounds-passed=64");
         }
         other => panic!("unexpected role: {other:?}"),
     }
