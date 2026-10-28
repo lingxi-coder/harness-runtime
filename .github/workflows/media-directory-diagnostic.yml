@@ -1,0 +1,43 @@
+name: Media plugin directory diagnostic
+on:
+  push:
+    branches: [codex/media-plugin-directory-diagnostic-20261028]
+permissions:
+  contents: read
+jobs:
+  directory-contract:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      RUST_TEST_THREADS: '1'
+      GST_REGISTRY_DISABLE: 'yes'
+      GST_PLUGIN_PATH_1_0: ''
+      GST_PLUGIN_SYSTEM_PATH_1_0: ''
+    defaults:
+      run:
+        working-directory: packages/webrtc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install GStreamer and codec dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gstreamer1.0-plugins-base gstreamer1.0-plugins-good libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libopus-dev pkg-config
+          pkg-config --atleast-version=1.28 gstreamer-1.0
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Check dynamic media library
+        run: cargo check --locked -p lingxi-webrtc-media --features gstreamer-media
+      - name: Test real dynamic plugin directory contract
+        run: cargo test --locked -p lingxi-webrtc-media --features gstreamer-media runtime::tests -- --test-threads=1
+      - name: Check static feature types with metadata stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          pc_dir="$RUNNER_TEMP/lingxi-static-plugin-pc"
+          mkdir "$pc_dir"
+          for name in gstapp gstaudioconvert gstaudioresample gstcoreelements gstopus gstrtp gstrtpmanager gstvpx gstvideoconvertscale; do
+            printf 'Name: %s\nDescription: static typecheck metadata only\nVersion: 1.28.0\nLibs: -l%s\n' "$name" "$name" > "$pc_dir/$name.pc"
+          done
+          PKG_CONFIG_PATH="$pc_dir" cargo check --locked -p lingxi-webrtc-media --features static-plugins
+          echo 'Static feature typechecked with stub metadata; native static linking was not tested.'
