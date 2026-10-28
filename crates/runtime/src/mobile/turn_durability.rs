@@ -793,6 +793,8 @@ pub(crate) enum DurableTurnStoreError {
     },
     #[error("turn {turn_id} in session {session_id} has a pending admission")]
     PendingAdmission { session_id: String, turn_id: u64 },
+    #[error("queued turn {turn_id} in session {session_id} needs user confirmation after recovery")]
+    UncertainQueuedTurn { session_id: String, turn_id: u64 },
     #[error("queued batch member {turn_id} in session {session_id} has already been claimed")]
     BatchAlreadyClaimed { session_id: String, turn_id: u64 },
     #[error("durable turn storage failure: {0}")]
@@ -924,6 +926,10 @@ pub(crate) struct DurableTurnStore {
     // Keep only a weak reference: the submitting command owns the admission,
     // while every handle for this store can find the same cancellation target.
     pending_admissions: Mutex<HashMap<(String, u64), PendingAdmissionEntry>>,
+    // Positive evidence is scoped to this store's lifetime. A pending record
+    // from an older store may have received a Stop whose first write failed.
+    // Only access this while holding `lock`, after the pending-admission lock.
+    trusted_queued: Mutex<std::collections::HashSet<(String, u64)>>,
     /// Lock order: live owners, then cache, then session index.
     live_owners: Mutex<LiveTurnOwners>,
     lock: Mutex<HashMap<PathBuf, CachedTurn>>,
@@ -978,6 +984,7 @@ impl DurableTurnStore {
             root,
             delivery_gates: super::turn_delivery::TurnDeliveryGates::default(),
             pending_admissions: Mutex::new(HashMap::new()),
+            trusted_queued: Mutex::new(std::collections::HashSet::new()),
             live_owners: Mutex::new(LiveTurnOwners::default()),
             lock: Mutex::new(HashMap::new()),
             session_turn_ids: Mutex::new(HashMap::new()),
@@ -1108,6 +1115,7 @@ impl DurableTurnStore {
         }
 
         let mut cache = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.forget_trusted_queued(session_id, turn_id);
         let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
         let Some(target) = checkpoints
             .iter()
@@ -1144,6 +1152,110 @@ impl DurableTurnStore {
             checkpoint.reason = Some("explicit_cancel".into());
             Ok(Some(checkpoint.snapshot()))
         })
+    }
+
+    // Call with the cache lock held. A restart has no proof that an old
+    // pending entry did not receive a Stop whose first durable write failed.
+    fn is_trusted_queued(&self, session_id: &str, turn_id: u64) -> bool {
+        self.trusted_queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&(session_id.to_owned(), turn_id))
+    }
+
+    fn forget_trusted_queued(&self, session_id: &str, turn_id: u64) {
+        self.trusted_queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&(session_id.to_owned(), turn_id));
+    }
+
+    fn untrusted_queued_member(
+        &self,
+        checkpoints: &[DurableTurnCheckpoint],
+        turn_id: u64,
+    ) -> Option<u64> {
+        let target = checkpoints.iter().find(|item| item.turn_id == turn_id)?;
+        if target.state.is_some()
+            || !matches!(
+                target.queue_delivery,
+                QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+            )
+        {
+            return None;
+        }
+        let owner = checkpoints.iter().find(|item| {
+            item.coalesced_batch
+                .as_ref()
+                .is_some_and(|batch| batch.member_turn_ids.contains(&turn_id))
+        });
+        if let Some(owner) = owner {
+            if owner.state.is_some()
+                || !matches!(
+                    owner.queue_delivery,
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+                )
+            {
+                return None;
+            }
+            let batch = owner.coalesced_batch.as_ref().expect("matched batch");
+            return batch
+                .member_turn_ids
+                .iter()
+                .copied()
+                .find(|id| !self.is_trusted_queued(&target.session_id, *id));
+        }
+        (!self.is_trusted_queued(&target.session_id, turn_id)).then_some(turn_id)
+    }
+
+    fn first_untrusted_queued(&self, checkpoints: &[DurableTurnCheckpoint]) -> Option<u64> {
+        let members: std::collections::HashSet<_> = checkpoints
+            .iter()
+            .filter_map(|checkpoint| checkpoint.coalesced_batch.as_ref())
+            .flat_map(|batch| batch.member_turn_ids.iter().copied())
+            .collect();
+        let trusted = self
+            .trusted_queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for checkpoint in checkpoints {
+            if checkpoint.state.is_some()
+                || !matches!(
+                    checkpoint.queue_delivery,
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+                )
+                || (members.contains(&checkpoint.turn_id) && checkpoint.coalesced_batch.is_none())
+            {
+                continue;
+            }
+            if let Some(batch) = checkpoint.coalesced_batch.as_ref() {
+                if let Some(id) = batch
+                    .member_turn_ids
+                    .iter()
+                    .copied()
+                    .find(|id| !trusted.contains(&(checkpoint.session_id.clone(), *id)))
+                {
+                    return Some(id);
+                }
+            } else if !trusted.contains(&(checkpoint.session_id.clone(), checkpoint.turn_id)) {
+                return Some(checkpoint.turn_id);
+            }
+        }
+        None
+    }
+
+    fn uncertain_queue_error(session_id: &str, turn_id: u64) -> DurableTurnStoreError {
+        DurableTurnStoreError::UncertainQueuedTurn {
+            session_id: session_id.to_owned(),
+            turn_id,
+        }
+    }
+
+    /// Fence an explicit Stop before any fallible checkpoint read. This only
+    /// revokes this store's positive evidence; it does not claim cancellation.
+    pub(crate) fn fence_queued_stop(&self, session_id: &str, turn_id: u64) {
+        let _cache = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        self.forget_trusted_queued(session_id, turn_id);
     }
 
     /// Return the shared delivery gate for one durable turn. The caller must
@@ -1320,6 +1432,10 @@ impl DurableTurnStore {
             .lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if let Some(uncertain) = self.first_untrusted_queued(&checkpoints) {
+            return Err(Self::uncertain_queue_error(session_id, uncertain));
+        }
         let relative = relative_path(session_id, turn_id)?;
         let exists = self
             .root
@@ -1435,6 +1551,9 @@ impl DurableTurnStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if let Some(uncertain) = self.first_untrusted_queued(&checkpoints) {
+            return Err(Self::uncertain_queue_error(session_id, uncertain));
+        }
         let turn_id = match turn_id {
             Some(turn_id) => turn_id,
             None => checkpoints
@@ -1526,6 +1645,10 @@ impl DurableTurnStore {
             },
         );
         self.remember_turn_id(session_id, turn_id);
+        self.trusted_queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert((session_id.to_owned(), turn_id));
         Ok(checkpoint)
     }
 
@@ -1540,6 +1663,9 @@ impl DurableTurnStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if let Some(uncertain) = self.first_untrusted_queued(&checkpoints) {
+            return Err(Self::uncertain_queue_error(session_id, uncertain));
+        }
         let coalesced_members = checkpoints
             .iter()
             .filter_map(|checkpoint| checkpoint.coalesced_batch.as_ref())
@@ -1571,6 +1697,14 @@ impl DurableTurnStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if let Some(uncertain) = self.first_untrusted_queued(&checkpoints) {
+            return Err(Self::uncertain_queue_error(session_id, uncertain));
+        }
+        for turn_id in member_turn_ids {
+            if let Some(uncertain) = self.untrusted_queued_member(&checkpoints, *turn_id) {
+                return Err(Self::uncertain_queue_error(session_id, uncertain));
+            }
+        }
         let members = member_turn_ids
             .iter()
             .map(|turn_id| {
@@ -1748,6 +1882,12 @@ impl DurableTurnStore {
     ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
         let mut cache = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if let Some(uncertain) = self.first_untrusted_queued(&checkpoints) {
+            return Err(Self::uncertain_queue_error(session_id, uncertain));
+        }
+        if let Some(uncertain) = self.untrusted_queued_member(&checkpoints, turn_id) {
+            return Err(Self::uncertain_queue_error(session_id, uncertain));
+        }
         if !checkpoints
             .iter()
             .any(|checkpoint| checkpoint.turn_id == turn_id)
@@ -1818,7 +1958,13 @@ impl DurableTurnStore {
         session_id: &str,
         turn_id: u64,
     ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
-        self.update(session_id, turn_id, |checkpoint| {
+        self.update_trusted_queue(session_id, turn_id, |checkpoint| {
+            if checkpoint.state.is_none()
+                && matches!(checkpoint.queue_delivery, QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending)
+                && !self.is_trusted_queued(session_id, turn_id)
+            {
+                return Err(Self::uncertain_queue_error(session_id, turn_id));
+            }
             if checkpoint.queue_operation != QueueOperationKind::Slash
                 || checkpoint.state.is_some()
                 || checkpoint.queue_delivery != QueueDeliveryState::Pending
@@ -1844,7 +1990,13 @@ impl DurableTurnStore {
         turn_id: u64,
         should_query: bool,
     ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
-        self.update(session_id, turn_id, |checkpoint| {
+        self.update_trusted_queue(session_id, turn_id, |checkpoint| {
+            if checkpoint.state.is_none()
+                && matches!(checkpoint.queue_delivery, QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending)
+                && !self.is_trusted_queued(session_id, turn_id)
+            {
+                return Err(Self::uncertain_queue_error(session_id, turn_id));
+            }
             if checkpoint.queue_operation != QueueOperationKind::Prompt
                 || checkpoint.prompt_mode != Some(PromptModeDto::Bash)
                 || checkpoint.state.is_some()
@@ -2080,8 +2232,18 @@ impl DurableTurnStore {
                 turn_id,
             });
         }
-        self.load_cached_turn(&mut cache, &relative)
-            .map(|cached| cached.checkpoint.clone())
+        let mut checkpoint = self.load_cached_turn(&mut cache, &relative)?.checkpoint.clone();
+        if checkpoint.state.is_none()
+            && matches!(checkpoint.queue_delivery, QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending)
+        {
+            let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+            if self.untrusted_queued_member(&checkpoints, turn_id).is_some() {
+                checkpoint.state = Some(TurnRecoveryStateDto::WaitingForUser);
+                checkpoint.safe_to_resume = false;
+                checkpoint.reason = Some("queued_cancellation_unconfirmed_after_recovery".into());
+            }
+        }
+        Ok(checkpoint)
     }
 
     pub(crate) fn append_event(
@@ -2425,6 +2587,7 @@ impl DurableTurnStore {
             .lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.forget_trusted_queued(session_id, turn_id);
         let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
         let Some(target) = checkpoints
             .iter()
@@ -2465,6 +2628,9 @@ impl DurableTurnStore {
             .map(|batch| batch.member_turn_ids.clone())
             .unwrap_or_else(|| vec![turn_id]);
         let owner_id = owner.map(|checkpoint| checkpoint.turn_id);
+        for member_id in &member_ids {
+            self.forget_trusted_queued(session_id, *member_id);
+        }
         // Mark the batch owner first. Its envelope is the cold-recovery commit
         // marker, so a write failure while cancelling later members cannot
         // resurrect any prompt from the group.
@@ -2637,6 +2803,9 @@ impl DurableTurnStore {
                 return Ok(QueuedTurnStatusDto::ClaimedUncertain);
             }
         }
+        if self.untrusted_queued_member(&checkpoints, member_turn_id).is_some() {
+            return Ok(QueuedTurnStatusDto::ClaimedUncertain);
+        }
         Ok(match target.queue_delivery {
             QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending => {
                 QueuedTurnStatusDto::Pending
@@ -2652,6 +2821,13 @@ impl DurableTurnStore {
     ) -> Result<(ResumeDisposition, Option<TurnRecoverySnapshotDto>), DurableTurnStoreError> {
         let mut cache = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if self.untrusted_queued_member(&checkpoints, turn_id).is_some() {
+            let mut checkpoint = checkpoints.iter().find(|item| item.turn_id == turn_id).expect("uncertain member exists").clone();
+            checkpoint.state = Some(TurnRecoveryStateDto::WaitingForUser);
+            checkpoint.safe_to_resume = false;
+            checkpoint.reason = Some("queued_cancellation_unconfirmed_after_recovery".into());
+            return Ok((ResumeDisposition::WaitingForUser, Some(checkpoint.snapshot())));
+        }
         if !checkpoints
             .iter()
             .any(|checkpoint| checkpoint.turn_id == turn_id)
@@ -2759,6 +2935,21 @@ impl DurableTurnStore {
         Ok(())
     }
 
+    fn update_trusted_queue<T>(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        mutate: impl FnOnce(&mut DurableTurnCheckpoint) -> Result<T, DurableTurnStoreError>,
+    ) -> Result<T, DurableTurnStoreError> {
+        let mut cache = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        if let Some(uncertain) = self.first_untrusted_queued(&checkpoints) {
+            return Err(Self::uncertain_queue_error(session_id, uncertain));
+        }
+        self.update_if_locked(&mut cache, session_id, turn_id, |checkpoint| mutate(checkpoint).map(Some))
+            .map(|value| value.expect("queue claim always returns a value"))
+    }
+
     fn update<T>(
         &self,
         session_id: &str,
@@ -2833,7 +3024,22 @@ impl DurableTurnStore {
             // An atomic rename may have succeeded even when its parent fsync
             // failed. Never reuse a cache that can predate the on-disk state.
             cache.remove(&relative);
+            if cached.checkpoint.state.is_none()
+                && matches!(cached.checkpoint.queue_delivery, QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending)
+            {
+                self.forget_trusted_queued(session_id, turn_id);
+            }
             return Err(error);
+        }
+        if checkpoint.state.is_some()
+            || !matches!(checkpoint.queue_delivery, QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending)
+        {
+            self.forget_trusted_queued(session_id, turn_id);
+            if let Some(batch) = checkpoint.coalesced_batch.as_ref() {
+                for member_id in &batch.member_turn_ids {
+                    self.forget_trusted_queued(session_id, *member_id);
+                }
+            }
         }
         cache.insert(
             relative,
@@ -3071,6 +3277,11 @@ impl DurableTurnStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_before_next_metadata_write(&self) {
+        self.fail_before_metadata_write.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_after_next_metadata_publish(&self) {
         self.fail_after_metadata_publish
             .store(true, Ordering::Relaxed);
@@ -3278,6 +3489,191 @@ mod tests {
     }
 
     #[test]
+    fn cold_queue_probe_child() {
+        let Some(root) = std::env::var_os("LINGXI_STOP_COLD_PROBE_ROOT") else {
+            return;
+        };
+        let expected = std::env::var("LINGXI_STOP_COLD_PROBE_EXPECTED").unwrap();
+        let receipt = std::env::var_os("LINGXI_STOP_COLD_PROBE_RECEIPT").unwrap();
+        let cold = DurableTurnStore::new(PathBuf::from(root));
+        let status = cold.queued_turn_status("session", 7).unwrap();
+        match expected.as_str() {
+            "uncertain" => {
+                assert_eq!(status, QueuedTurnStatusDto::ClaimedUncertain);
+                let checkpoint = cold.load("session", 7).unwrap();
+                assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::WaitingForUser));
+                assert_eq!(
+                    checkpoint.reason.as_deref(),
+                    Some("queued_cancellation_unconfirmed_after_recovery")
+                );
+                assert_eq!(checkpoint.prompt.string_at(""), Some("preserved source"));
+                assert!(!checkpoint.safe_to_resume);
+                assert!(matches!(
+                    cold.scan_pending("session"),
+                    Err(DurableTurnStoreError::UncertainQueuedTurn { turn_id: 7, .. })
+                ));
+                assert!(cold.claim_pending("session", 7).is_err());
+            }
+            "cancelled" => {
+                assert_eq!(status, QueuedTurnStatusDto::Cancelled);
+                assert!(cold.scan_pending("session").unwrap().is_empty());
+                assert!(cold.claim_pending("session", 7).is_err());
+            }
+            _ => panic!("unexpected child probe mode"),
+        }
+        std::fs::write(receipt, expected).unwrap();
+    }
+
+    #[test]
+    fn stopped_pending_write_failure_is_safe_across_an_independent_process() {
+        for after_publish in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("turns");
+            let store = DurableTurnStore::new(root.clone());
+            store
+                .admit_queued_prompt(
+                    "session",
+                    Some(7),
+                    Some(7),
+                    "preserved source".into(),
+                    None,
+                    vec![],
+                )
+                .unwrap();
+            assert_eq!(
+                store.queued_turn_status("session", 7).unwrap(),
+                QueuedTurnStatusDto::Pending
+            );
+            if after_publish {
+                store.fail_after_next_metadata_publish();
+            } else {
+                store.fail_before_next_metadata_write();
+            }
+            assert!(store.cancel_pending("session", 7).is_err());
+            if !after_publish {
+                assert_eq!(
+                    store.queued_turn_status("session", 7).unwrap(),
+                    QueuedTurnStatusDto::ClaimedUncertain
+                );
+                assert!(store.claim_pending("session", 7).is_err());
+            }
+            drop(store);
+            let expected = if after_publish {
+                "cancelled"
+            } else {
+                "uncertain"
+            };
+            let receipt = temp.path().join("child-completed");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("mobile::turn_durability::tests::cold_queue_probe_child")
+                .arg("--nocapture")
+                .env("LINGXI_STOP_COLD_PROBE_ROOT", &root)
+                .env("LINGXI_STOP_COLD_PROBE_EXPECTED", expected)
+                .env("LINGXI_STOP_COLD_PROBE_RECEIPT", &receipt)
+                .status()
+                .unwrap();
+            assert!(status.success(), "independent recovery process failed");
+            assert_eq!(
+                std::fs::read_to_string(receipt).unwrap(),
+                expected,
+                "the child actually ran the exact probe"
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_pending_requires_confirmation_but_fresh_work_remains_usable() {
+        let (temp, store) = store();
+        store
+            .admit_queued_prompt(
+                "session",
+                Some(70),
+                Some(70),
+                "ordinary pending".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(store.scan_pending("session").unwrap().len(), 1);
+        drop(store);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        assert_eq!(
+            cold.queued_turn_status("session", 70).unwrap(),
+            QueuedTurnStatusDto::ClaimedUncertain
+        );
+        let (disposition, snapshot) = cold.resume("session", 70).unwrap();
+        assert_eq!(disposition, ResumeDisposition::WaitingForUser);
+        assert_eq!(
+            snapshot.unwrap().reason.as_deref(),
+            Some("queued_cancellation_unconfirmed_after_recovery")
+        );
+        assert!(matches!(
+            cold.admit_queued_prompt("session", Some(71), Some(71), "new".into(), None, vec![]),
+            Err(DurableTurnStoreError::UncertainQueuedTurn { turn_id: 70, .. })
+        ));
+        assert_eq!(cold.cancel_pending("session", 70).unwrap(), Some(vec![70]));
+        let fresh = cold
+            .admit_queued_prompt("session", Some(71), Some(71), "new".into(), None, vec![])
+            .unwrap();
+        assert_eq!(
+            cold.claim_pending("session", fresh.turn_id).unwrap().state,
+            Some(TurnRecoveryStateDto::Running)
+        );
+        assert!(cold.scan_pending("session").unwrap().is_empty());
+        let another_session = cold
+            .admit_queued_prompt(
+                "other-session",
+                Some(1),
+                Some(1),
+                "other".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(
+            cold.claim_pending("other-session", another_session.turn_id)
+                .unwrap()
+                .state,
+            Some(TurnRecoveryStateDto::Running)
+        );
+    }
+
+    #[test]
+    fn failed_queue_admission_publication_is_never_automatically_replayed() {
+        for after_publish in [false, true] {
+            let (temp, store) = store();
+            if after_publish {
+                store.fail_after_next_metadata_publish();
+            } else {
+                store.fail_before_next_metadata_write();
+            }
+            assert!(store
+                .admit_queued_prompt("session", Some(81), Some(81), "source".into(), None, vec![])
+                .is_err());
+            drop(store);
+            let cold = DurableTurnStore::new(temp.path().join("turns"));
+            if after_publish {
+                assert_eq!(
+                    cold.queued_turn_status("session", 81).unwrap(),
+                    QueuedTurnStatusDto::ClaimedUncertain
+                );
+                assert!(matches!(
+                    cold.scan_pending("session"),
+                    Err(DurableTurnStoreError::UncertainQueuedTurn { turn_id: 81, .. })
+                ));
+                assert!(cold.claim_pending("session", 81).is_err());
+            } else {
+                assert!(matches!(
+                    cold.load("session", 81),
+                    Err(DurableTurnStoreError::NotFound { .. })
+                ));
+                assert!(cold.scan_pending("session").unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn metadata_without_projection_marker_is_conservatively_uncertain() {
         let (temp, store) = store();
         store
@@ -3340,6 +3736,7 @@ mod tests {
         let queued = store
             .admit_queued_prompt("session", None, Some(77), "prompt".into(), None, vec![])
             .unwrap();
+        store.claim_pending("session", queued.turn_id).unwrap();
         let path = temp
             .path()
             .join("turns")
@@ -3352,7 +3749,7 @@ mod tests {
             .remove("projection_uncertain");
         std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let reopened = DurableTurnStore::new(temp.path().join("turns"));
-        let claimed = reopened.claim_pending("session", queued.turn_id).unwrap();
+        let claimed = reopened.load("session", queued.turn_id).unwrap();
         assert!(claimed.snapshot().projection_uncertain);
         assert!(!claimed.snapshot().safe_to_resume);
         let cold = DurableTurnStore::new(temp.path().join("turns"));
@@ -3658,8 +4055,9 @@ mod tests {
         assert!(store
             .admit_queued_prompt("session", None, None, "first".into(), None, vec![])
             .is_err());
-        let pending = store.scan_pending("session").unwrap();
-        assert_eq!(pending.len(), 1);
+        assert!(matches!(store.scan_pending("session"), Err(DurableTurnStoreError::UncertainQueuedTurn { turn_id: 1, .. })));
+        assert_eq!(store.queued_turn_status("session", 1).unwrap(), QueuedTurnStatusDto::ClaimedUncertain);
+        assert_eq!(store.cancel_pending("session", 1).unwrap(), Some(vec![1]));
         let next = store
             .admit_queued_prompt("session", None, None, "second".into(), None, vec![])
             .unwrap();
@@ -3772,34 +4170,21 @@ mod tests {
         drop(store);
 
         let cold = DurableTurnStore::new(temp.path().join("turns"));
-        let pending = cold.scan_pending("session").expect("scan cold queue");
-        assert_eq!(
-            pending
-                .iter()
-                .map(|entry| entry.turn_id)
-                .collect::<Vec<_>>(),
-            vec![1, 41],
-            "scanner preserves durable admission sequence"
-        );
-        assert_eq!(pending[0].images[0].media_type, "image/png");
-        assert_eq!(pending[0].original_client_turn_id, None);
-        assert_eq!(pending[0].prompt_identity, first.prompt_identity);
-        assert_eq!(pending[1].prompt_mode, Some(PromptModeDto::Bash));
-        assert!(pending.iter().all(|entry| entry.state.is_none()));
-
-        let claimed = cold
-            .claim_pending("session", first.turn_id)
-            .expect("claim only at dispatch");
-        assert_eq!(claimed.state, Some(TurnRecoveryStateDto::Running));
-        assert_eq!(claimed.queue_delivery, QueueDeliveryState::Claimed);
-        assert_eq!(
-            cold.scan_pending("session")
-                .expect("remaining pending")
-                .iter()
-                .map(|entry| entry.turn_id)
-                .collect::<Vec<_>>(),
-            vec![41]
-        );
+        assert!(matches!(cold.scan_pending("session"), Err(DurableTurnStoreError::UncertainQueuedTurn { .. })));
+        let recovered_first = cold.load("session", first.turn_id).unwrap();
+        let recovered_second = cold.load("session", second.turn_id).unwrap();
+        assert_eq!(recovered_first.images[0].media_type, "image/png");
+        assert_eq!(recovered_first.original_client_turn_id, None);
+        assert_eq!(recovered_first.prompt_identity, first.prompt_identity);
+        assert_eq!(recovered_second.prompt_mode, Some(PromptModeDto::Bash));
+        assert_eq!(recovered_first.state, Some(TurnRecoveryStateDto::WaitingForUser));
+        assert!(cold.claim_pending("session", first.turn_id).is_err());
+        assert!(cold.claim_queued_bash("session", second.turn_id, false).is_err());
+        assert_eq!(cold.cancel_pending("session", first.turn_id).unwrap(), Some(vec![first.turn_id]));
+        assert_eq!(cold.cancel_pending("session", second.turn_id).unwrap(), Some(vec![second.turn_id]));
+        assert!(cold.scan_pending("session").unwrap().is_empty());
+        let fresh = cold.admit_queued_prompt("session", Some(42), Some(42), "fresh".into(), None, vec![]).unwrap();
+        assert_eq!(cold.claim_pending("session", fresh.turn_id).unwrap().state, Some(TurnRecoveryStateDto::Running));
     }
 
     #[test]
@@ -4221,14 +4606,8 @@ mod tests {
             assert!(store.prepare_mid_turn_batch("session", &[31, 32]).is_err());
             drop(store);
             let cold = DurableTurnStore::new(temp.path().join("turns"));
-            let ids = cold
-                .scan_pending("session")
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.turn_id)
-                .collect::<Vec<_>>();
             if after_publish {
-                assert!(ids.is_empty());
+                assert!(cold.scan_pending("session").unwrap().is_empty());
                 assert_eq!(
                     cold.queued_turn_status("session", 32).unwrap(),
                     QueuedTurnStatusDto::ClaimedUncertain
@@ -4236,11 +4615,9 @@ mod tests {
                 assert!(cold.prepare_mid_turn_batch("session", &[31, 32]).is_err());
                 assert!(cold.claim_pending("session", 31).is_err());
             } else {
-                assert_eq!(ids, vec![31, 32]);
-                assert_eq!(
-                    cold.queued_turn_status("session", 32).unwrap(),
-                    QueuedTurnStatusDto::Pending
-                );
+                assert!(matches!(cold.scan_pending("session"), Err(DurableTurnStoreError::UncertainQueuedTurn { .. })));
+                assert_eq!(cold.queued_turn_status("session", 32).unwrap(), QueuedTurnStatusDto::ClaimedUncertain);
+                assert!(cold.claim_pending("session", 31).is_err());
             }
             assert_eq!(
                 cold.load("session", 32).unwrap().prompt.string_at(""),

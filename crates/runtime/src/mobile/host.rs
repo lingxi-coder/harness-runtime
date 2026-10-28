@@ -2940,12 +2940,12 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 }
                 Err(error) => return Err(error.to_string()),
             };
-            let is_dispatch_pending = self
-                .durable_turns
-                .scan_pending(&session_id)
-                .map_err(|error| error.to_string())?
-                .iter()
-                .any(|checkpoint| checkpoint.turn_id == owner_id);
+            let pending = match self.durable_turns.scan_pending(&session_id) {
+                Ok(pending) => pending,
+                Err(DurableTurnStoreError::UncertainQueuedTurn { .. }) => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            };
+            let is_dispatch_pending = pending.iter().any(|checkpoint| checkpoint.turn_id == owner_id);
             if is_dispatch_pending
                 && owner.state.is_none()
                 && matches!(
@@ -3056,10 +3056,12 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                     // A cancellation can win before the owner envelope is
                     // committed. Retire only those stale dispatch markers;
                     // survivors remain queued and form the next ordered batch.
-                    let pending_member_ids = self
-                        .durable_turns
-                        .scan_pending(&session_id)
-                        .map_err(|error| error.to_string())?
+                    let pending = match self.durable_turns.scan_pending(&session_id) {
+                        Ok(pending) => pending,
+                        Err(DurableTurnStoreError::UncertainQueuedTurn { .. }) => return Ok(None),
+                        Err(error) => return Err(error.to_string()),
+                    };
+                    let pending_member_ids = pending
                         .into_iter()
                         .flat_map(|checkpoint| {
                             let mut members = vec![checkpoint.turn_id];
@@ -3405,7 +3407,14 @@ pub(super) async fn rebuild_mobile_prompt_dispatch_cache(
     queue
         .remove(&stale_ids, "rebuild durable mobile prompt dispatch cache")
         .await;
-    for checkpoint in durable_turns.scan_pending(session_id)? {
+    let pending = match durable_turns.scan_pending(session_id) {
+        Ok(pending) => pending,
+        // Restore the session, but do not silently replay a queue whose Stop
+        // outcome was lost. Query/attach exposes the uncertain turn.
+        Err(DurableTurnStoreError::UncertainQueuedTurn { .. }) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for checkpoint in pending {
         match checkpoint.queue_operation {
             QueueOperationKind::Prompt => {
                 enqueue_mobile_prompt_dispatch(queue, session_id, &checkpoint).await
@@ -5448,6 +5457,9 @@ impl MobileEngineHandle {
                 });
             }
             let cancel = || -> Result<_, DurableTurnStoreError> {
+                // A failed first checkpoint read cannot leave this queue item
+                // dispatchable in the current store after a received Stop.
+                self.durable_turns.fence_queued_stop(session_id, turn_id);
                 if let Some(owner_id) = self
                     .durable_turns
                     .coalesced_owner_for_member(session_id, turn_id)?
@@ -5461,7 +5473,10 @@ impl MobileEngineHandle {
                                     | TurnRecoveryStateDto::WaitingForUser
                             )
                         );
-                    if !own_paused
+                    let unconfirmed_private = checkpoint.reason.as_deref()
+                        == Some("queued_cancellation_unconfirmed_after_recovery")
+                        && matches!(checkpoint.queue_delivery, QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending);
+                    if !own_paused && !unconfirmed_private
                         && (checkpoint.state.is_some()
                             || !matches!(
                                 checkpoint.queue_delivery,
@@ -8321,6 +8336,10 @@ impl MobileEngineHandle {
                 message: "cancel request belongs to a different session".into(),
             });
         }
+
+        // Once a turn-specific Stop is received, revoke this store's positive
+        // queue-dispatch evidence before any fallible gate or owner lookup.
+        self.durable_turns.fence_queued_stop(session_id, turn_id);
 
         // A store-scoped admission can belong to another handle. Record Stop
         // before waiting for the submitting handle's owner or delivery gate:

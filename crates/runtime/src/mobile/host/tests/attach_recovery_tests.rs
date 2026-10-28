@@ -1504,9 +1504,12 @@ fn queued_prompt_slash_and_bash_cancel_before_dispatch_after_recording_blocks() 
             }
         }
     }
-    for (slash, bash, cancel_write_fails) in [
-        (false, false, false), (true, false, false), (false, true, false),
-        (false, false, true), (true, false, true), (false, true, true),
+    // 0: normal cancellation, 1: write failed before publication,
+    // 2: write returned an error after publication.
+    for (slash, bash, failure_stage) in [
+        (false, false, 0), (true, false, 0), (false, true, 0),
+        (false, false, 1), (true, false, 1), (false, true, 1),
+        (false, false, 2), (true, false, 2), (false, true, 2),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -1560,18 +1563,35 @@ fn queued_prompt_slash_and_bash_cancel_before_dispatch_after_recording_blocks() 
             }
             assert!(pending.cancel_requested.load(Ordering::Acquire));
             assert!(!cancel.is_finished());
-            if cancel_write_fails {
-                handle.durable_turns.fail_after_next_metadata_publish();
+            match failure_stage {
+                1 => handle.durable_turns.fail_before_next_metadata_write(),
+                2 => handle.durable_turns.fail_after_next_metadata_publish(),
+                _ => {}
             }
             drop(owner_lock);
             recorder.release.notify_one();
             let submitted = tokio::time::timeout(std::time::Duration::from_secs(5), submission).await.unwrap().unwrap();
             let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), cancel).await.unwrap().unwrap();
-            if cancel_write_fails {
+            if failure_stage != 0 {
                 assert!(submitted.is_err());
                 assert!(stopped.is_err());
                 assert!(matches!(handle.durable_turns.with_no_pending_admission(&session, 301, || Ok(())), Err(DurableTurnStoreError::PendingAdmission { .. })));
                 assert!(!listener.received.lock().await.iter().any(|event| matches!(event, ClientEvent::TurnRecoveryState { snapshot } if snapshot.session_id == session && snapshot.turn_id == 301 && snapshot.state == TurnRecoveryStateDto::Cancelled)));
+                let cold = crate::mobile::turn_durability::DurableTurnStore::new(handle.lingxi_home.join("mobile-turns"));
+                if failure_stage == 1 {
+                    assert_eq!(cold.queued_turn_status(&session, 301).unwrap(), client::protocol::events::QueuedTurnStatusDto::ClaimedUncertain);
+                    let recovered = cold.load(&session, 301).unwrap();
+                    assert_eq!(recovered.state, Some(TurnRecoveryStateDto::WaitingForUser));
+                    assert_eq!(recovered.reason.as_deref(), Some("queued_cancellation_unconfirmed_after_recovery"));
+                    assert!(!recovered.safe_to_resume);
+                    assert!(matches!(cold.scan_pending(&session), Err(DurableTurnStoreError::UncertainQueuedTurn { turn_id: 301, .. })));
+                    assert!(cold.claim_pending(&session, 301).is_err());
+                    if slash { assert!(cold.claim_queued_slash(&session, 301).is_err()); }
+                    if bash { assert!(cold.claim_queued_bash(&session, 301, false).is_err()); }
+                } else {
+                    assert_eq!(cold.queued_turn_status(&session, 301).unwrap(), client::protocol::events::QueuedTurnStatusDto::Cancelled);
+                    assert!(cold.scan_pending(&session).unwrap().is_empty());
+                }
             } else {
                 submitted.unwrap();
                 stopped.unwrap();
@@ -1583,6 +1603,89 @@ fn queued_prompt_slash_and_bash_cancel_before_dispatch_after_recording_blocks() 
             handle.submit(ClientCommand::Cancel { session_id: Some(session), turn_id: Some(300) }).await.unwrap();
         });
     }
+}
+
+#[test]
+fn cold_queue_uncertainty_is_visible_and_explicit_cancel_unblocks_new_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let first = engine(tmp.path(), Arc::new(AttachBarrierListener::default()));
+    let session = first.runtime().block_on(async {
+        let session = first.active_session_id();
+        first
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session, "uncertain queue", &first.session_cwd())
+            .await
+            .unwrap();
+        first
+            .inner
+            .session_writer
+            .append_session_mode(first.inner.session_mode.as_str())
+            .await
+            .unwrap();
+        first
+            .ensure_reserved_session_identity(&session)
+            .await
+            .unwrap();
+        first
+            .durable_turns
+            .admit_queued_prompt(
+                &session,
+                Some(500),
+                Some(500),
+                "preserved source".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        first.durable_turns.fail_before_next_metadata_write();
+        assert!(first.durable_turns.cancel_pending(&session, 500).is_err());
+        session
+    });
+    drop(first);
+
+    let listener = Arc::new(FakeListener::default());
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let provider = Arc::new(PendingPromptStreamClient::new(started_tx));
+    let second = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(provider.clone()),
+    )
+    .unwrap();
+    second.runtime().block_on(async {
+        second.submit(ClientCommand::ResumeSession { session_id: session.clone(), cwd: None }).await.unwrap();
+        second.submit(ClientCommand::QueryQueuedTurn { session_id: session.clone(), turn_id: 500, request_id: "cold-query".into() }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if listener.received.lock().await.iter().any(|event| matches!(event,
+                    ClientEvent::QueuedTurnStatus { session_id, turn_id: 500, request_id, status: client::protocol::events::QueuedTurnStatusDto::ClaimedUncertain }
+                        if session_id == &session && request_id == "cold-query")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        second.submit(ClientCommand::AttachTurn { session_id: session.clone(), turn_id: 500, after_sequence: None, request_id: "cold-attach".into() }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if listener.received.lock().await.iter().any(|event| matches!(event,
+                    ClientEvent::TurnAttachStarted { snapshot, request_id, .. }
+                        if request_id == "cold-attach" && snapshot.state == TurnRecoveryStateDto::WaitingForUser
+                            && !snapshot.safe_to_resume && snapshot.reason.as_deref() == Some("queued_cancellation_unconfirmed_after_recovery"))) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let error = second.submit(ClientCommand::SendPrompt { session_id: Some(session.clone()), text: "new".into(), prompt_mode: None, images: vec![], turn_id: Some(501), visualization_context: None }).await;
+        assert!(matches!(error, Err(ClientError::Rejected { .. })));
+        assert!(provider.captured_calls().is_empty());
+        assert_eq!(second.durable_turns.load(&session, 500).unwrap().prompt.string_at(""), Some("preserved source"));
+        second.submit(ClientCommand::Cancel { session_id: Some(session.clone()), turn_id: Some(500) }).await.unwrap();
+        second.submit(ClientCommand::SendPrompt { session_id: Some(session.clone()), text: "new".into(), prompt_mode: None, images: vec![], turn_id: Some(502), visualization_context: None }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx).await.unwrap().unwrap();
+        assert_eq!(provider.captured_calls().len(), 1);
+        second.submit(ClientCommand::Cancel { session_id: Some(session), turn_id: Some(502) }).await.unwrap();
+    });
 }
 
 #[test]

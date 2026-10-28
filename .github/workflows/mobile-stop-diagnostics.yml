@@ -1,7 +1,7 @@
 name: Mobile stop diagnostics
 on:
   push:
-    branches: [codex/media-stop-v2-ff076]
+    branches: [codex/media-stop-cold-ff076]
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -47,6 +47,14 @@ jobs:
           test_name='linux::tests::bwrap_missing_directory_is_empty_readonly_and_user_files_are_preserved'
           cargo test --locked -p sandbox-runtime --all-features --lib "$test_name" -- --ignored --exact | tee "$RUNNER_TEMP/bubblewrap-regression.log"
           grep -Fx "test $test_name ... ok" "$RUNNER_TEMP/bubblewrap-regression.log"
+      - name: Test cold pending recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p harness-runtime --features mobile --lib mobile::turn_durability::tests -- --nocapture | tee "$RUNNER_TEMP/cold.log"
+          grep -E '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/cold.log"
+          grep -F 'stopped_pending_write_failure_is_safe_across_an_independent_process ... ok' "$RUNNER_TEMP/cold.log"
+          grep -F 'recovered_pending_requires_confirmation_but_fresh_work_remains_usable ... ok' "$RUNNER_TEMP/cold.log"
       - name: Test mobile queued cancellation
         shell: bash
         run: |
