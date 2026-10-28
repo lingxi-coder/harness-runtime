@@ -4876,8 +4876,10 @@ mod tests {
 
     struct UiLifecycleFrameGate {
         runtime_id: String,
+        expected_text: &'static str,
         entered: std::sync::Arc<tokio::sync::Notify>,
         release: std::sync::Arc<tokio::sync::Notify>,
+        delivered: std::sync::Arc<tokio::sync::Notify>,
     }
 
     #[async_trait::async_trait]
@@ -4911,16 +4913,16 @@ mod tests {
         async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
             let gate = {
                 let mut gate = lock(&self.frame_gate);
-                if gate
-                    .as_ref()
-                    .is_some_and(|gate| gate.runtime_id == runtime_id)
-                {
+                if gate.as_ref().is_some_and(|gate| {
+                    gate.runtime_id == runtime_id
+                        && projection_tree_contains_text(frame, gate.expected_text)
+                }) {
                     gate.take()
                 } else {
                     None
                 }
             };
-            if let Some(gate) = gate {
+            if let Some(gate) = gate.as_ref() {
                 gate.entered.notify_one();
                 gate.release.notified().await;
             }
@@ -4934,6 +4936,9 @@ mod tests {
                     self.allow_non_scalar_frames,
                     "test frame must be a serde_json Value: {error}"
                 ),
+            }
+            if let Some(gate) = gate {
+                gate.delivered.notify_one();
             }
         }
 
@@ -6521,7 +6526,10 @@ mod tests {
             .iter()
             .any(|(frame_runtime, frame)| {
                 frame_runtime == &runtime_id
-                    && tree_contains_text(&frame["tree"], "rejected handle ran")
+                    && tree_contains_text(
+                        &frame["tree"],
+                        "Input changed (change): rejected handle ran",
+                    )
             }));
         assert!(tree_press_handle_for_key(&changed_input_frame["tree"], "query").is_some());
         // The background `ui.message` frame above is an intermediate frame.
@@ -6532,10 +6540,13 @@ mod tests {
             tree_press_handle_for_key(&test_value(&changed_callback)["tree"], "query").unwrap();
         let entered = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let delivered = std::sync::Arc::new(tokio::sync::Notify::new());
         *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
             runtime_id: runtime_id.clone(),
+            expected_text: "BARRIER UPPERCASE",
             entered: entered.clone(),
             release: release.clone(),
+            delivered: delivered.clone(),
         });
         let barrier_operation = host_generated_json(json!({
             "type":"runHeld",
@@ -6559,6 +6570,9 @@ mod tests {
             "runHeld waits while synchronous post props are being applied and emitted"
         );
         release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), delivered.notified())
+            .await
+            .expect("the intermediate post frame was delivered after release");
         let barrier_callback = barrier_task.await.unwrap().unwrap();
         let barrier_value = test_value(&barrier_callback);
         let barrier_tree = &barrier_value["tree"];
@@ -7025,10 +7039,20 @@ mod tests {
         let race_handle = tree_press_handle_for_key(&recovered_posted["tree"], "query").unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        let race_frame_text = "Input changed (change): accepted before unmount";
+        assert!(!lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &recovered_runtime
+                    && tree_contains_text(&frame["tree"], race_frame_text)
+            }));
         *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
             runtime_id: recovered_runtime.clone(),
+            expected_text: race_frame_text,
             entered: entered.clone(),
             release: release.clone(),
+            delivered: delivered.clone(),
         });
         let race_operation = host_generated_json(json!({
             "type":"runHeld",
@@ -7046,7 +7070,13 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(2), entered.notified())
             .await
-            .expect("the accepted callback's post reached frame emission");
+            .expect("the accepted callback's unique post reached frame emission");
+        assert!(!lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &recovered_runtime
+                    && tree_contains_text(&frame["tree"], race_frame_text)
+            }));
         assert!(!race_task.is_finished());
         let worker_generation = lock(&host.client_ui.data).instances[&recovered_runtime]
             .worker_generation
@@ -7061,7 +7091,20 @@ mod tests {
             .map_err(ModError::from)
             .unwrap();
         assert_eq!(test_value(&worker_unmount)["unmounted"], true);
+        assert!(
+            !race_task.is_finished(),
+            "the callback's post remains unsettled until its frame is delivered"
+        );
         release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), delivered.notified())
+            .await
+            .expect("the accepted callback's frame was delivered after release");
+        assert!(lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &recovered_runtime
+                    && tree_contains_text(&frame["tree"], race_frame_text)
+            }));
         let race_error = tokio::time::timeout(Duration::from_secs(2), race_task)
             .await
             .expect("the accepted action resolves after post settlement")
@@ -7070,12 +7113,6 @@ mod tests {
         assert!(race_error
             .to_string()
             .contains("accepted but its follow-up frame is stale"));
-        assert!(lock(&session_impl.frames)
-            .iter()
-            .any(|(frame_runtime, frame)| {
-                frame_runtime == &recovered_runtime
-                    && tree_contains_text(&frame["tree"], "accepted before unmount")
-            }));
 
         // Timer failures have no operation result. The Host emits a local
         // fault snapshot immediately, even though this plugin has no

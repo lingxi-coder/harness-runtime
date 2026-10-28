@@ -1,7 +1,7 @@
 name: Mod held callback contract diagnostic
 on:
   push:
-    branches: [codex/media-run-held-contract-ff076]
+    branches: [codex/media-run-held-contract-v2-ff076]
 env:
   CARGO_BUILD_JOBS: "2"
   CARGO_INCREMENTAL: "0"
