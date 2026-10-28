@@ -1,7 +1,7 @@
 //! Shared `/media` workflow for the host media tools on desktop and mobile.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use command_api::{BundledPromptFn, CommandRegistry, CommandSource, SlashCommandKind};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -12,21 +12,21 @@ const LOADED_FROM: &str = "cross-platform-media-skill";
 struct MediaPrompt {
     body: String,
     fallback_tool_names: Vec<String>,
-    live_tools: Option<Arc<ToolRegistry>>,
+    live_tools: Option<Weak<ToolRegistry>>,
 }
 
 impl BundledPromptFn for MediaPrompt {
     fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
-        let available_tool_names = self.live_tools.as_ref().map_or_else(
-            || self.fallback_tool_names.clone(),
-            |tools| {
+        let available_tool_names = match &self.live_tools {
+            None => self.fallback_tool_names.clone(),
+            Some(tools) => tools.upgrade().map_or_else(Vec::new, |tools| {
                 tools
                     .available_tools(&ToolStaticContext::default())
                     .into_iter()
                     .map(|tool| tool.name().to_owned())
                     .collect()
-            },
-        );
+            }),
+        };
         let body = supported_sections(&self.body, &available_tool_names);
         let args = args
             .string_units("")
@@ -137,7 +137,7 @@ fn register_media_skill_inner(
         prompt_fn: Some(Arc::new(MediaPrompt {
             body: parsed.content.clone(),
             fallback_tool_names: available_tool_names.to_vec(),
-            live_tools,
+            live_tools: live_tools.as_ref().map(Arc::downgrade),
         })),
     };
     command.loaded_from = Some(LOADED_FROM.into());
@@ -329,5 +329,34 @@ mod tests {
         assert!(!skill_body(&registry)
             .unwrap()
             .contains("## media_capture\n"));
+    }
+
+    #[test]
+    fn live_media_prompt_does_not_retain_tools_and_fails_closed_after_drop() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(ToggleMediaTool {
+            enabled: Arc::new(AtomicBool::new(true)),
+            schema: Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                "type":"object"
+            }))
+            .unwrap(),
+        }));
+        let tools = Arc::new(tools);
+        let weak_tools = Arc::downgrade(&tools);
+        let mut registry = CommandRegistry::new();
+        register_media_skill_for_tools(&mut registry, tools.clone());
+
+        assert!(skill_body(&registry)
+            .unwrap()
+            .contains("## media_capture\n"));
+        drop(tools);
+
+        assert!(
+            weak_tools.upgrade().is_none(),
+            "the retained command must not keep the tool registry alive"
+        );
+        let body = skill_body(&registry).unwrap();
+        assert!(!body.contains("## media_capture\n"));
+        assert!(body.contains("do not invent references"));
     }
 }
