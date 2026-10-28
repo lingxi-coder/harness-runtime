@@ -254,9 +254,8 @@ struct DrainDeadline {
 }
 
 async fn verify_stopped_job(deadline: &DrainDeadline) -> Result<(), ProcessError> {
-    if !deadline.strict_host && !deadline.verify_lease {
-        return Ok(());
-    }
+    // Even legacy/non-strict callers may later publish a cleanup receipt.
+    // No caller may turn an unchecked group into a successful proof.
     #[cfg(all(test, windows))]
     if deadline
         .test_job_verification_blocked
@@ -270,7 +269,7 @@ async fn verify_stopped_job(deadline: &DrainDeadline) -> Result<(), ProcessError
     #[cfg(windows)]
     {
         match deadline.job.as_ref() {
-            Some(job) => job.wait_empty().await,
+            Some(job) => job.verify_complete_descendant_termination(),
             None => Err(ProcessError::Io(
                 "host shell has no held payload job".into(),
             )),
@@ -396,6 +395,14 @@ fn retain_until_reaped(
     )>,
 ) {
     tokio::spawn(async move {
+        #[cfg(windows)]
+        if deadline.job.is_some() {
+            // There is currently no way to upgrade an arbitrary resumed Job
+            // to a complete held-descendant proof. Keep the exact owner and
+            // lease instead of repeatedly treating zero accounting as proof.
+            // Runtime/process loss remains a separate durability boundary.
+            std::future::pending::<()>().await;
+        }
         loop {
             if terminate_and_reap(&deadline, &mut child, &mut guard)
                 .await
@@ -487,7 +494,7 @@ fn suspended_cleanup_result(
 async fn terminate_suspended_and_verify(
     child: &mut tokio::process::Child,
     guard: &mut StreamingProcessTreeGuard,
-    deadline: &DrainDeadline,
+    _deadline: &DrainDeadline,
 ) -> Result<(), ProcessError> {
     let limit = std::time::Duration::from_secs(5);
     let termination = tokio::time::timeout(limit, child.kill())
@@ -502,9 +509,8 @@ async fn terminate_suspended_and_verify(
         guard.0 = None;
     }
     suspended_cleanup_result(termination, waited)?;
-    if let Some(job) = &deadline.job {
-        job.wait_empty().await?;
-    }
+    // No ResumeThread call has been attempted on this path. The wait above
+    // proves the sole suspended payload exited; Job accounting is unnecessary.
     Ok(())
 }
 
@@ -2010,6 +2016,44 @@ mod native_background_stop_tests {
                 assert!(dir.path().join("descendant.completed").exists());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn stopped_resumed_job_reports_unknown_without_cleanup_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(dir.path().to_path_buf());
+        let sink = Arc::new(Sink::default());
+        let command = redirected_descendant_command(dir.path(), sink.clone(), true);
+        let ForegroundOutcome::MovedToBackground(_) =
+            run(&command, None, true).await.unwrap().outcome
+        else {
+            panic!("explicit background command was not handed off");
+        };
+        let descendant = descendant_pid(dir.path()).await;
+        let held = super::super::supervisor_native::hold_process_handle_for_test(descendant)
+            .expect("open original descendant process");
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held),
+            Some(true)
+        );
+        sink.stop.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(20), sink.terminal.notified())
+            .await
+            .expect("unknown cleanup result was not reported");
+        let failures = sink.failures.lock().unwrap().clone();
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("no complete descendant handle proof")),
+            "{failures:?}"
+        );
+        assert!(sink.exits.lock().unwrap().is_empty());
+        assert!(sink.proofs.lock().unwrap().is_empty());
+        assert_eq!(sink.cleanups.load(Ordering::SeqCst), 0);
+        held_exited(&held).await;
+        // This test happens to hold one descendant, but production still has
+        // no proof that all possible descendants were captured.
+        assert_eq!(sink.cleanups.load(Ordering::SeqCst), 0);
     }
 
     // The leader must exit before the inherited-pipe child is stopped.

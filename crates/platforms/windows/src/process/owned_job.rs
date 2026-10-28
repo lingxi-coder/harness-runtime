@@ -26,15 +26,15 @@ pub fn initialize_helper_job() -> Result<(), ProcessError> {
     Ok(())
 }
 
-/// Recheck the dedicated helper's held outer Job after a synchronous spawn
-/// returned without an owner. Call only after that spawn has settled and
-/// before any other payload startup. `true` proves no active payload remains,
-/// but neither proves no child was created nor supplies a leader wait status.
+/// Recheck whether the helper has a proof that all uncertain startup work
+/// ended. The current Windows Job API cannot provide that proof without the
+/// original process handles, so an initialized helper conservatively returns
+/// `false`. This can keep a failed startup isolated indefinitely.
 pub fn startup_group_empty_verified() -> Result<bool, ProcessError> {
     if !HELPER_INITIALIZED.load(Ordering::Acquire) || !supervisor_gate::initialized() {
         return Err(ProcessError::Io("helper Job is not initialized".into()));
     }
-    supervisor_gate::outer_job_has_only_current_process()
+    Ok(false)
 }
 
 #[derive(Default)]
@@ -85,6 +85,10 @@ impl StartupGate {
 pub struct OwnedProcess {
     child: Child,
     job: Option<CommandJob>,
+    // Set before the first ResumeThread attempt. A failed call cannot prove
+    // that no payload instruction ran. Only false establishes that this
+    // held, suspended leader could not have created a descendant.
+    payload_may_have_run: bool,
 }
 
 impl std::fmt::Debug for OwnedProcess {
@@ -112,7 +116,9 @@ impl OwnedProcess {
         self.child.wait().await.map_err(io_error)
     }
 
-    /// Request termination and prove both leader reaping and an empty Job.
+    /// Request termination and prove cleanup only when a suspended leader
+    /// was never resumed. A resumed payload may have untracked descendants,
+    /// so even zero Job accounting and a reaped leader remain unverified.
     /// A cancelled future or an error leaves ownership in `self` for retry.
     /// Each attempt has bounded waits; successful return is cleanup proof, not
     /// proof that this particular signal caused an exit.
@@ -136,16 +142,21 @@ impl OwnedProcess {
             .await
             .map_err(|_| ProcessError::Io("owned child wait timed out".into()))
             .and_then(|result| result.map_err(io_error));
-        let empty = match &self.job {
-            Some(job) => job.wait_empty().await,
-            None => Ok(()),
+        let group_proof = if self.payload_may_have_run {
+            Err(ProcessError::Io(
+                "owned cleanup unverified: no complete descendant handle proof".into(),
+            ))
+        } else {
+            // Before any resume attempt the held leader is the only payload
+            // process that could have run; its actual wait is checked below.
+            Ok(())
         };
-        match (waited, empty) {
+        match (waited, group_proof) {
             // A failed termination request does not defeat independent proof
-            // that both the held child and Job have already become empty.
+            // that the never-resumed held child has actually exited.
             (Ok(status), Ok(())) => Ok(status),
-            (waited, empty) => Err(ProcessError::Io(format!(
-                "owned cleanup unverified: terminate={signal:?}; wait={waited:?}; job_empty={empty:?}"
+            (waited, group_proof) => Err(ProcessError::Io(format!(
+                "owned cleanup unverified: terminate={signal:?}; wait={waited:?}; group_proof={group_proof:?}"
             ))),
         }
     }
@@ -165,9 +176,7 @@ pub struct OwnedSpawnError {
     /// Whether an OS child may have been created. In particular, Tokio's
     /// spawn API does not promise that every error precedes child creation.
     pub may_have_spawned_child: bool,
-    /// The attempted startup has no remaining active payload in the outer
-    /// helper Job. This is separate from proving no child was ever created or
-    /// from having a waitable leader/exit status.
+    /// True only when startup has proven that no payload was created.
     pub spawn_group_empty_verified: bool,
 }
 
@@ -246,7 +255,11 @@ fn spawn_owned_inner(
         may_have_spawned_child: true,
         spawn_group_empty_verified: startup_group_empty_verified().unwrap_or(false),
     })?;
-    let mut owner = OwnedProcess { child, job: None };
+    let mut owner = OwnedProcess {
+        child,
+        job: None,
+        payload_may_have_run: false,
+    };
     owner.job = match check_stage(StartupStage::AssignJob)
         .and_then(|()| CommandJob::assign_suspended(&owner.child))
     {
@@ -273,6 +286,7 @@ fn spawn_owned_inner(
     // Record before calling Windows: even an error return cannot prove that
     // the initial thread never ran, and an unwind must preserve this fact.
     state.may_have_resumed = true;
+    owner.payload_may_have_run = true;
     if let Err(error) = supervisor_gate::release(thread) {
         return Err(startup_error(error, false, Some(owner)));
     }
@@ -671,6 +685,48 @@ mod tests {
         );
     }
 
+    async fn resumed_job_remains_unverified_even_after_accounting_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!startup_group_empty_verified().unwrap());
+        let mut owner =
+            spawn_owned(payload("leader", dir.path()), &StartupGate::default()).unwrap();
+        assert!(owner.wait_leader().await.unwrap().success());
+        let pid: u32 = std::fs::read_to_string(dir.path().join("descendant.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let descendant = super::super::supervisor_gate::hold_process_for_membership_test(pid)
+            .expect("open original descendant process");
+        let job = owner.job.as_ref().expect("held payload job");
+        assert!(job.contains_process(&descendant).unwrap());
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&descendant),
+            Some(true)
+        );
+        let error = owner.terminate_and_reap().await.unwrap_err().to_string();
+        assert!(
+            error.contains("no complete descendant handle proof"),
+            "{error}"
+        );
+        // The counter is deliberately queried only as a negative control. It
+        // is not a receipt, even after this particular held handle signals.
+        owner.job.as_ref().unwrap().wait_empty().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match super::super::supervisor_native::process_handle_is_alive_for_test(&descendant)
+                {
+                    Some(false) => break,
+                    Some(true) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    None => panic!("failed to inspect original descendant handle"),
+                }
+            }
+        })
+        .await
+        .expect("held descendant never signaled");
+        assert!(owner.terminate_and_reap().await.is_err());
+        assert!(!startup_group_empty_verified().unwrap());
+    }
+
     async fn cancelled_cleanup_can_be_retried() {
         let dir = tempfile::tempdir().unwrap();
         let gate = StartupGate::default();
@@ -764,12 +820,39 @@ mod tests {
                 "unwind" => unwind_preserves_resume_provenance().await,
                 "io" => independent_streams_and_environment().await,
                 "descendant" => leader_exit_does_not_release_descendants().await,
+                "unverified_descendant" => {
+                    resumed_job_remains_unverified_even_after_accounting_zero().await
+                }
                 "retry" => cancelled_cleanup_can_be_retried().await,
                 "crash" => helper_crash_fixture().await,
                 "stdio" | "stdio_leak_control" => standard_handle_isolation_fixture().await,
                 _ => panic!("unknown owned job helper case"),
             }
         });
+    }
+
+    #[tokio::test]
+    async fn job_unknown_and_suspended_start_are_proven_in_dedicated_helpers() {
+        for case in ["unverified_descendant", "cancel"] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([HELPER_TEST, "--exact", "--nocapture"])
+                .env("OWNED_JOB_HELPER_CASE", case)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(45), command.output())
+                .await
+                .unwrap_or_else(|_| panic!("helper timed out: {case}"))
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "helper {case} failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[tokio::test]

@@ -35,6 +35,7 @@ struct ExtendedLimits {
 }
 #[repr(C)]
 #[derive(Default)]
+#[cfg(test)]
 struct BasicAccounting {
     total_user_time: i64,
     total_kernel_time: i64,
@@ -62,6 +63,7 @@ extern "system" {
     fn SetInformationJobObject(job: Handle, class: u32, info: *const c_void, len: u32) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
     fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
+    #[cfg(test)]
     fn QueryInformationJobObject(
         job: Handle,
         class: u32,
@@ -228,9 +230,19 @@ impl CommandJob {
         Ok(())
     }
 
+    /// No completion proof is available for an arbitrary resumed payload:
+    /// Job accounting can reach zero before a member's process handle signals,
+    /// and notifications alone cannot prove every descendant was observed.
+    pub(super) fn verify_complete_descendant_termination(&self) -> Result<(), ProcessError> {
+        Err(ProcessError::Io(
+            "payload cleanup unverified: no complete descendant handle proof".into(),
+        ))
+    }
+
     /// Wait until the Job's accounting reports no remaining active processes.
     /// TerminateJobObject itself only initiates termination and is not a
-    /// job-wide completion barrier.
+    /// job-wide completion barrier. This helper is for diagnostics only.
+    #[cfg(test)]
     pub(super) async fn wait_empty(&self) -> Result<(), ProcessError> {
         wait_until_empty(std::time::Duration::from_secs(5), || {
             self.active_processes()
@@ -238,6 +250,7 @@ impl CommandJob {
         .await
     }
 
+    #[cfg(test)]
     pub(super) fn active_processes(&self) -> Result<u32, ProcessError> {
         let mut accounting = BasicAccounting::default();
         // SAFETY: the held job handle has query access; the C-compatible
@@ -290,6 +303,7 @@ impl CommandJob {
     }
 }
 
+#[cfg(test)]
 async fn wait_until_empty<F>(limit: std::time::Duration, mut query: F) -> Result<(), ProcessError>
 where
     F: FnMut() -> Result<u32, ProcessError>,
@@ -355,30 +369,6 @@ pub(super) fn initialize() -> Result<(), ProcessError> {
 
 pub(super) fn initialized() -> bool {
     JOB.get().is_some()
-}
-
-/// A dedicated helper has no running payload left only when its held outer
-/// Job reports exactly one member: the helper process itself. This does not
-/// recover a missing child handle or prove that no child was ever created.
-pub(super) fn outer_job_has_only_current_process() -> Result<bool, ProcessError> {
-    let job = JOB
-        .get()
-        .ok_or_else(|| ProcessError::Io("helper Job is not initialized".into()))?;
-    let mut accounting = BasicAccounting::default();
-    // SAFETY: the held Job handle and correctly sized accounting buffer are valid.
-    let queried = unsafe {
-        QueryInformationJobObject(
-            job.as_raw_handle(),
-            1,
-            (&mut accounting as *mut BasicAccounting).cast(),
-            std::mem::size_of::<BasicAccounting>() as u32,
-            std::ptr::null_mut(),
-        )
-    };
-    if queried == 0 {
-        return Err(error("query helper Job active processes"));
-    }
-    Ok(accounting.active_processes == 1)
 }
 
 /// The supervisor has committed an ordinary foreground completion. Its

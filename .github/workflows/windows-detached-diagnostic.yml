@@ -1,7 +1,7 @@
 name: Windows detached supervisor diagnostic
 on:
   push:
-    branches: [codex/media-harness-detached-probe-20261028]
+    branches: [codex/media-windows-production-contract-20261028]
 
 permissions:
   contents: read
@@ -56,7 +56,9 @@ jobs:
             'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
             'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe',
             'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants',
-            'process::supervisor::integration_tests::real_supervisor_diagnostic_inherited_writer_blocks_shutdown'
+            'process::supervisor::integration_tests::real_supervisor_diagnostic_inherited_writer_blocks_shutdown',
+            'process::owned_job::tests::job_unknown_and_suspended_start_are_proven_in_dedicated_helpers',
+            'process::background::native_background_stop_tests::stopped_resumed_job_reports_unknown_without_cleanup_receipt'
           )
           foreach ($test in $tests) {
             $log = Join-Path $env:RUNNER_TEMP (($test -replace '::','-') + '.log')
