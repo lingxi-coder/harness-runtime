@@ -557,6 +557,7 @@ function createEnvironment(manager, key, options) {
   });
   const environment = {
     key,
+    instanceId: randomUUID(),
     plugin: options.plugin,
     environmentId: options.environmentId,
     manifestHash: options.manifestHash,
@@ -700,7 +701,7 @@ export class ClientSurfaceManager {
   emit(instance, action, fields = {}) {
     if (instance.destroyed || this.disposed || (instance.failure && action !== 'fault')) return;
     const held = this.heldContext.getStore();
-    if (held?.instance === instance && held.cancelled) return;
+    if (action !== 'fault' && held?.instance === instance && held.cancelled) return;
     const postAction = action === 'post' && held?.instance === instance && held.active
       && typeof held.id === 'string' ? held : undefined;
     const postCorrelation = postAction
@@ -739,6 +740,20 @@ export class ClientSurfaceManager {
     instance.component = undefined;
     this.emit(instance, 'fault', { phase, reason });
     return true;
+  }
+
+  invalidateHeldEnvironment(instance, error) {
+    const environment = instance.environment;
+    if (environment.disposed) return;
+    // Modules and module-level variables are shared by every surface in this
+    // environment. A non-cancellable continuation could still mutate them, so
+    // fence every member and never reuse this VM for a fresh mount.
+    for (const member of [...environment.instances.values()]) this.emitFault(member, 'run', error);
+    environment.disposed = true;
+    environment.instances.clear();
+    environment.moduleCache.clear();
+    environment.modules.clear();
+    if (this.environments.get(environment.key) === environment) this.environments.delete(environment.key);
   }
 
   async mount(input) {
@@ -803,7 +818,7 @@ export class ClientSurfaceManager {
       throw clientError('load', error);
     }
     try {
-      return this.render(identity.runtimeId);
+      return { ...this.render(identity.runtimeId), environmentInstanceId: environment.instanceId };
     } catch (error) {
       // The Host removes a Client whose initial frame failed, so there is no
       // owner left to send an explicit unmount for this VM entry.
@@ -923,10 +938,9 @@ export class ClientSurfaceManager {
       action.active = false;
       return { accepted: true, postIds: action.postIds };
     } catch (error) {
-      const cancelled = action.controller.signal.aborted;
       action.cancelled = true;
       action.controller.abort();
-      if (!cancelled) this.emitFault(instance, 'run', error);
+      this.invalidateHeldEnvironment(instance, error);
       const failure = clientError('run', error);
       failure.outcomeUnknown = true;
       throw failure;

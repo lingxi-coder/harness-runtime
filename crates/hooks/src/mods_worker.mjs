@@ -4696,8 +4696,9 @@ input.on('line', line => {
         const input = message.input;
         return identity && input && message.pluginScope === identity.plugin
           && input.surface === identity.parent.surface && input.component === identity.parent.component
-          && input.requestId === identity.parent.requestId && input.element === identity.key
-          && input.module === identity.module;
+          && typeof input.requestId === 'string'
+          && `${input.requestId}\u0000client\u0000${identity.key}` === identity.parent.requestId
+          && input.element === identity.key && input.module === identity.module;
       });
     if (belongsToHeldSurface) {
       void processMessage(message);

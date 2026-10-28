@@ -300,41 +300,60 @@ test('async Input waits for its own posts while unrelated timer posts stay uncor
   manager.dispose();
 });
 
-test('cancelled async Input cannot publish a late post, and a live runtime can accept a fresh action', async () => {
+test('cancel invalidates every surface sharing the VM and remount isolates a late continuation', async () => {
   const events = [];
   const manager = new ClientSurfaceManager({ send: message => events.push(message) });
-  const mounted = await manager.mount(mountOptions({
-    runtimeId:'cancelled-input',
-    source:`export function Board(_props, surface) {
-      return surface.elements.Input({ value:surface.state.value || '', onSubmit(){},
-        onInput: async value => {
-          surface.post({stage:'before', value});
-          await new Promise(resolve => {
-            const stop = surface.every(40, () => { stop(); resolve(); });
-          });
-          surface.post({stage:'after', value});
-          surface.setState({value});
-        }
-      });
-    }`,
-  }));
+  const source = `
+    let hidden = '';
+    export function Board(_props, surface) {
+      if (!surface.state.timerStarted) {
+        surface.setState({ timerStarted:true });
+        surface.every(5, () => surface.post({stage:'old-timer'}));
+      }
+      return surface.elements.Input({value:hidden, onSubmit(){}, onInput:async value => {
+        surface.post({stage:'before', value});
+        await globalThis.testGate;
+        hidden = value;
+        surface.post({stage:'after', value});
+        surface.setState({value});
+      }});
+    }
+  `;
+  const first = await manager.mount(mountOptions({runtimeId:'old-one', source}));
+  const sibling = await manager.mount(mountOptions({runtimeId:'old-two', source}));
+  const oldEnvironment = manager.runtimeInstances.get('old-one').environment;
+  assert.equal(manager.runtimeInstances.get('old-two').environment, oldEnvironment,
+    'the two surfaces really share module state');
+  let resume;
+  oldEnvironment.context.testGate = new Promise(resolve => { resume = resolve; });
   const controller = new AbortController();
-  const cancelled = manager.operation({type:'runHeld', runtimeId:mounted.runtimeId,
-    handle:mounted.tree.held, payload:{kind:'change', value:'first'}, postActionId:'cancel-me'},
-    {signal:controller.signal});
-  await delay(5);
+  const pending = manager.operation({type:'runHeld', runtimeId:'old-one', handle:first.tree.held,
+    payload:{kind:'change', value:'cancelled-draft'}, postActionId:'cancel-me'}, {signal:controller.signal});
+  await delay(2);
   controller.abort();
-  await assert.rejects(cancelled, error => error.phase === 'run' && error.outcomeUnknown === true);
-  await delay(60);
-  const posts = events.filter(event => event.action === 'post').map(event => JSON.parse(event.json));
-  assert.deepEqual(posts, [{stage:'before', value:'first'}], 'prior effect survives; delayed effects are fenced');
-  assert.equal(events.filter(event => event.action === 'fault').length, 0, 'cancel is not a worker fault');
-  assert.equal(manager.render(mounted.runtimeId).tree.props.value, '');
-  const fresh = manager.render(mounted.runtimeId);
-  const result = await manager.operation({type:'runHeld', runtimeId:mounted.runtimeId,
-    handle:fresh.tree.held, payload:{kind:'change', value:'second'}, postActionId:'fresh'});
-  assert.deepEqual(result, {accepted:true, postIds:[0, 1]});
-  assert.equal(manager.render(mounted.runtimeId).tree.props.value, 'second');
+  await assert.rejects(pending, error => error.phase === 'run' && error.outcomeUnknown === true);
+  assert.deepEqual(await manager.operation({type:'render', runtimeId:'old-one'}), {stale:true});
+  assert.deepEqual(await manager.operation({type:'render', runtimeId:'old-two'}), {stale:true});
+  assert.deepEqual(await manager.operation({type:'runHeld', runtimeId:'old-two', handle:sibling.tree.held,
+    payload:{kind:'change',value:'must-not-run'}, postActionId:'stale'}), {accepted:false, postIds:[]});
+  assert.equal(events.filter(event => event.action === 'fault').length, 2,
+    'all surfaces sharing the invalidated environment receive a fault');
+  const oldPostCount = events.filter(event => event.action === 'post' && event.runtimeId.startsWith('old-')).length;
+  await delay(20);
+  assert.equal(events.filter(event => event.action === 'post' && event.runtimeId.startsWith('old-')).length, oldPostCount,
+    'timers belonging to the failed VM stop');
+  const fresh = await manager.mount(mountOptions({runtimeId:'fresh', source}));
+  assert.notEqual(manager.runtimeInstances.get('fresh').environment, oldEnvironment,
+    'an explicit remount creates a new VM even for the same plugin and manifest');
+  assert.equal(fresh.tree.props.value, '');
+  resume();
+  await delay(0);
+  assert.equal(manager.render('fresh').tree.props.value, '',
+    'a resumed old continuation cannot change the new VM module state');
+  assert.equal(events.filter(event => event.action === 'post' && event.json.includes('"stage":"after"')).length, 0);
+  assert.deepEqual(await manager.operation({type:'runHeld', runtimeId:'fresh', handle:manager.render('fresh').tree.held,
+    payload:{kind:'change',value:'fresh-value'}, postActionId:'fresh-action'}), {accepted:true, postIds:[0,1]});
+  assert.equal(manager.render('fresh').tree.props.value, 'fresh-value');
   manager.dispose();
 });
 

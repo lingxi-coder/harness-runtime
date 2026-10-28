@@ -745,6 +745,8 @@ struct ClientUiInstance {
     runtime_id: String,
     revision: u64,
     worker_generation: Option<u64>,
+    // Worker-minted identity for the shared VM, distinct from manifest hash.
+    worker_environment_id: Option<String>,
     pending_events: Vec<Utf16JsonProjection>,
     draining_pending_events: bool,
     props: Utf16JsonProjection,
@@ -3472,6 +3474,28 @@ impl ModHost {
         true
     }
 
+    fn record_client_environment_fault(&self, owner: &ClientUiInstance, phase: &str, reason: &ExactHookText) {
+        let ids = {
+            let mut data = lock(&self.client_ui.data);
+            let mut ids = Vec::new();
+            for instance in data.instances.values_mut() {
+                let same_environment = owner.worker_environment_id.as_ref().is_some_and(|id| {
+                    instance.worker_environment_id.as_ref() == Some(id)
+                });
+                if same_environment || instance.runtime_id == owner.runtime_id {
+                    if instance.worker_fault.is_none() {
+                        instance.worker_fault = Some(ClientUiWorkerFault { phase: phase.into(), reason: reason.clone() });
+                    }
+                    ids.push(instance.runtime_id.clone());
+                }
+            }
+            ids
+        };
+        for id in ids {
+            self.client_ui.fail_post_actions_for_runtime(&id, "Client shared environment is unavailable");
+        }
+    }
+
     fn claim_client_worker_fault_dispatch(&self, runtime_id: &str) -> bool {
         let mut data = lock(&self.client_ui.data);
         let Some(instance) = data.instances.get_mut(runtime_id) else {
@@ -3629,9 +3653,10 @@ impl ModHost {
             // suspended action from continuing to publish after owner loss.
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => return Err(ClientWorkerOperationError::Host(
-                    ModError::Unavailable("Client runHeld was cancelled with outcome unknown".into()),
-                )),
+                _ = cancellation.cancelled() => return Err(ClientWorkerOperationError::UnknownFault {
+                    phase: "run".into(),
+                    reason: ExactHookText::from_text("Client runHeld was cancelled with outcome unknown"),
+                }),
                 reply = self.receive(&mut request) => reply,
             }
         } else {
@@ -3892,6 +3917,7 @@ impl ModHost {
             runtime_id: runtime_id.clone(),
             revision,
             worker_generation: None,
+            worker_environment_id: None,
             pending_events: Vec::new(),
             draining_pending_events: false,
             props: trusted_props.clone(),
@@ -4011,6 +4037,10 @@ impl ModHost {
             .ok_or_else(|| {
                 ModError::Protocol("Client mount result has no worker generation".into())
             })?;
+        let worker_environment_id = result.string_at("/environmentInstanceId")
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .ok_or_else(|| ModError::Protocol("Client mount result has no worker environment identity".into()))?
+            .to_owned();
         let still_current = {
             let mut data = lock(&self.client_ui.data);
             if data.latest_started.get(&site) != Some(&revision)
@@ -4027,6 +4057,7 @@ impl ModHost {
                 false
             } else if let Some(instance) = data.instances.get_mut(&runtime_id) {
                 instance.worker_generation = Some(worker_generation);
+                instance.worker_environment_id = Some(worker_environment_id);
                 instance.mounted = true;
                 true
             } else {
@@ -4210,7 +4241,7 @@ impl ModHost {
             Err(ClientWorkerOperationError::UnknownFault { phase, reason }) if kind == "runHeld" => {
                 // Record the Host fence before the response can reach a client;
                 // it blocks operations and background events for this VM.
-                self.record_client_worker_fault(runtime_id, &phase, &reason);
+                self.record_client_environment_fault(&instance, &phase, &reason);
                 let mut response = worker_fault_response(
                     Some(runtime_id), revision, instance.key.identity.plugin(),
                     instance.key.identity.module(), &phase, &reason,
@@ -6504,8 +6535,11 @@ mod tests {
         std::fs::write(&entry, r#"
           export function register(on) {
             on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
-              const {Client, h} = $.ui.resolve(event);
-              return h(Client, {key:'card', module:'./card.tsx', props:{value:''}});
+              const {Box, Client, h} = $.ui.resolve(event);
+              return h(Box, {children:[
+                h(Client, {key:'card', module:'./card.tsx', props:{value:''}}),
+                h(Client, {key:'sibling', module:'./card.tsx', props:{value:''}}),
+              ]});
             });
             on('ui.message', async ($, event) => {
               await $.session.model();
@@ -6546,9 +6580,23 @@ mod tests {
         let input = tree_node_with_key(&mounted["tree"], "query").unwrap();
         assert_eq!(input["props"]["value"], "");
         let handle = tree_press_handle_for_key(&mounted["tree"], "query").unwrap();
+        let sibling = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"pane-async",
+            "plugin":"review", "client":"sibling", "module":"card.tsx", "render_revision":revision,
+            "columns":80, "rows":24,
+        })), session.as_ref()).await.unwrap();
+        let sibling_id = test_value(&sibling)["runtimeId"].as_str().unwrap().to_owned();
+        {
+            let data = lock(&host.client_ui.data);
+            let first_env = &data.instances[&runtime_id].worker_environment_id;
+            assert!(first_env.is_some());
+            assert_eq!(first_env, &data.instances[&sibling_id].worker_environment_id,
+                "the two actual Worker surfaces share the same environment");
+        }
         host.dispatch_client_ui_operation(host_generated_json(json!({
             "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"pane-async",
-            "render_revision":revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+            "render_revision":revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"},
+                {"plugin":"review","key":"sibling","module":"card.tsx"}],
         })), session.as_ref()).await.unwrap();
         let operation = host_generated_json(json!({"type":"runHeld", "runtimeId":runtime_id,
             "render_revision":revision, "handle":handle, "event":{"kind":"change","value":"typed"}}));
@@ -6571,8 +6619,16 @@ mod tests {
             assert_eq!(response["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
             assert_eq!(response["fault"]["phase"], "run");
             assert!(response["fault"]["reason"].as_str().unwrap().contains("failed after update"));
-            assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
-                "the runtime is fenced before the structured unknown result returns");
+            {
+                let data = lock(&host.client_ui.data);
+                assert!(data.instances[&runtime_id].worker_fault.is_some());
+                assert!(data.instances[&sibling_id].worker_fault.is_some(),
+                    "the shared sibling is fenced before the structured unknown result returns");
+            }
+            let sibling_render = host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"render", "runtimeId":sibling_id, "render_revision":revision,
+            })), session.as_ref()).await.unwrap();
+            assert_eq!(test_value(&sibling_render)["handled"], false);
             let next = host.dispatch_client_ui_operation(host_generated_json(json!({
                 "type":"runHeld", "runtimeId":runtime_id, "render_revision":revision, "handle":handle,
             })), session.as_ref()).await.unwrap();
