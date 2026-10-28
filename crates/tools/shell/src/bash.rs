@@ -8419,7 +8419,10 @@ mod tests {
                 "{:?}",
                 result.err().expect("ack failure must remain an error")
             );
-            assert!(error.contains("fixture acknowledgement failed"));
+            assert!(
+                error.contains("fixture acknowledgement failed"),
+                "unexpected tool error: {error}"
+            );
             assert!(error.contains("termination is unverified"));
             assert!(registry.killers.lock().unwrap().contains_key("b1a2b3c4d"));
             let weak_runner = Arc::downgrade(&runner);
