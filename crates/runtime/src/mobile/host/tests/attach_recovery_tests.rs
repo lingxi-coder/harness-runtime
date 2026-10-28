@@ -1461,10 +1461,15 @@ fn queued_prompt_and_slash_cancel_before_dispatch_after_recording_blocks() {
             }
             let cancelling = handle.clone(); let origin = session.clone();
             let cancel = tokio::spawn(async move { cancelling.submit(ClientCommand::Cancel { session_id: Some(origin), turn_id: Some(301) }).await });
-            tokio::time::timeout(std::time::Duration::from_secs(5), async { loop {
+            if tokio::time::timeout(std::time::Duration::from_secs(5), async { loop {
                 if handle.pending_submissions.lock().unwrap().iter().any(|p| p.turn_id == 301 && p.cancel_requested.load(Ordering::Acquire)) { break; }
                 tokio::task::yield_now().await;
-            }}).await.unwrap();
+            }}).await.is_err() {
+                let active = handle.active_cancel.try_lock().map(|guard| guard.as_ref().map(|owner| owner.turn_id)).ok();
+                let pending = handle.pending_submissions.try_lock().map(|guard| guard.iter().map(|item| (item.turn_id, item.cancel_requested.load(Ordering::Acquire))).collect::<Vec<_>>()).ok();
+                let cancel_status = if cancel.is_finished() { format!("{:?}", cancel.await) } else { "still pending".into() };
+                panic!("queued Stop was not recorded: active={active:?}, pending={pending:?}, cancel={cancel_status}");
+            }
             recorder.release.notify_one();
             tokio::time::timeout(std::time::Duration::from_secs(5), submission).await.unwrap().unwrap().unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(5), cancel).await.unwrap().unwrap().unwrap();
@@ -1802,7 +1807,26 @@ fn stop_between_real_midturn_append_and_ack_reports_cancelled_not_internal() {
         let canceller = handle.clone();
         let cancel_session = session.clone();
         let cancelling = tokio::spawn(async move { canceller.submit(ClientCommand::Cancel { session_id: Some(cancel_session), turn_id: Some(351) }).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), owner.cancel.cancelled()).await.unwrap();
+        if tokio::time::timeout(std::time::Duration::from_secs(5), owner.cancel.cancelled()).await.is_err() {
+            use futures_util::FutureExt as _;
+            let active = handle.active_cancel.try_lock().map(|guard| guard.as_ref().map(|turn| (turn.turn_id, Arc::ptr_eq(turn, &owner)))).ok();
+            let gate = handle.durable_turns.delivery_gate(&session, owner.turn_id.unwrap()).unwrap();
+            let delivery = match gate.lock().now_or_never() {
+                Some(Ok(guard)) => { guard.complete(); "free" },
+                Some(Err(_)) => "poisoned",
+                None => "held",
+            };
+            let member_gate = handle.durable_turns.delivery_gate(&session, 351).unwrap();
+            let member_delivery = match member_gate.lock().now_or_never() {
+                Some(Ok(guard)) => { guard.complete(); "free" },
+                Some(Err(_)) => "poisoned",
+                None => "held",
+            };
+            let member_bound = owner.mid_turn_members.try_lock().map(|members| members.contains(&351)).ok();
+            let cancel_status = if cancelling.is_finished() { format!("{:?}", cancelling.await) } else { "still pending".into() };
+            let terminal = owner.terminal_emitted.load(Ordering::Acquire);
+            panic!("active Stop did not signal its owner: active={active:?}, delivery={delivery}, member_delivery={member_delivery}, member_bound={member_bound:?}, terminal={terminal}, cancel={cancel_status}");
+        }
         release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(10), cancelling).await.unwrap().unwrap().unwrap();
         let events = listener.received.lock().await;
