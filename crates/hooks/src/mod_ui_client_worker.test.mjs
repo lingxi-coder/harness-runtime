@@ -972,6 +972,82 @@ test('held action remains revocable after callback result until Host finalizes i
   const after = await request(8, {kind:'ui.client.operation', operation:{type:'render',
     runtimeId:'lease-fresh', generation:fresh.result.generation}});
   assert.equal(after.result.tree.props.value, 'committed');
+  const freshSibling = await mount(9, 'lease-fresh-sibling');
+  assert.equal(freshSibling.result.environmentInstanceId, fresh.result.environmentInstanceId);
+  const beforeUnmount = await request(10, {kind:'ui.client.operation', operation:{type:'runHeld',
+    runtimeId:'lease-fresh', generation:fresh.result.generation, handle:after.result.tree.held,
+    payload:{kind:'change',value:'before-unmount'}, postActionId:'unmount-action'}});
+  assert.deepEqual(beforeUnmount.result, {accepted:true, postIds:[]});
+  const unmounted = await request(11, {kind:'ui.client.operation', operation:{type:'unmount',
+    runtimeId:'lease-fresh', generation:fresh.result.generation}});
+  assert.deepEqual(unmounted.result, {unmounted:true});
+  const siblingAfter = await request(12, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lease-fresh-sibling', generation:freshSibling.result.generation}});
+  assert.deepEqual(siblingAfter.result, {stale:true}, 'unmount revokes the pending action and shared VM');
+});
+
+test('unmount interrupts a suspended held callback with an unknown result', async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed) worker.kill();});
+  const pending=new Map(); let postResolve;
+  const posted=new Promise(resolve=>{postResolve=resolve;});
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0) { if(frame.action==='post') postResolve(); }
+    else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`request ${id} timed out`));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const mounted=await request(1,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({
+    runtimeId:'suspended-unmount',source:`export function Board(_props,surface){
+      return surface.elements.Button({onPress:async ()=>{surface.post({started:true});await new Promise(()=>{});}});
+    }`,
+  })}});
+  const held=request(2,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'suspended-unmount',
+    generation:mounted.result.generation,handle:mounted.result.tree.held,payload:{kind:'press'},postActionId:'pending'}});
+  await posted;
+  const unmounted=await request(3,{kind:'ui.client.operation',operation:{type:'unmount',
+    runtimeId:'suspended-unmount',generation:mounted.result.generation}});
+  assert.deepEqual(unmounted.result,{unmounted:true});
+  const result=await held;
+  assert.equal(result.error.phase,'run');
+  assert.equal(result.error.outcomeUnknown,true,'an invoked callback is never reported as a safe no-op');
+});
+
+test('an unfinalized held action expires and quarantines its VM',
+  {skip:Boolean(process.versions.bun), timeout:36_000}, async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed) worker.kill();});
+  const pending=new Map();
+  const events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0) events.push(frame);
+    else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`request ${id} timed out`));},34_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const mounted=await request(1,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({
+    runtimeId:'lease-expiry',source:`export function Board(_props,surface){
+      return surface.elements.Button({onPress(){}});
+    }`,
+  })}});
+  const result=await request(2,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'lease-expiry',
+    generation:mounted.result.generation,handle:mounted.result.tree.held,payload:{kind:'press'},postActionId:'never-finalized'}});
+  assert.deepEqual(result.result,{accepted:true,postIds:[]});
+  const start=Date.now();
+  const stale=await request(3,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'lease-expiry',generation:mounted.result.generation}});
+  assert.deepEqual(stale.result,{stale:true});
+  assert(Date.now()-start >= 29_000,'the real lease deadline, not an immediate no-op, released the queue');
+  assert.equal(events.filter(event=>event.action==='fault').length,1);
 });
 
 test('mods worker accepts ui.client.operation and returns tree plus asynchronous event frames', async t => {

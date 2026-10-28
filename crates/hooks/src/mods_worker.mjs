@@ -4584,7 +4584,7 @@ async function processMessage(message) {
           clientSurfaceManager.invalidateHeldEnvironment(instance, new Error('Client held action was not finalized'));
         }
       } catch (error) {
-        if (!request.controller.signal.aborted) send({ id: message.id, kind: 'ui.client.result', error: {
+        if (!request.controller.signal.aborted || request.abortedByUnmount) send({ id: message.id, kind: 'ui.client.result', error: {
           phase: ['load', 'render', 'run'].includes(error?.phase) ? error.phase : 'load',
           reason: String(error?.message || error),
           ...(error?.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
@@ -4754,11 +4754,19 @@ input.on('line', line => {
     const request = { controller: new AbortController() };
     activeClientOperations.set(message.id, request);
     const operation = message.operation;
-    const active = ['setProps', 'render'].includes(operation?.type)
+    const active = ['setProps', 'render', 'unmount'].includes(operation?.type)
       ? runningHeldByRuntime.get(operation.runtimeId) : undefined;
-    const authorizedHeldWork = active && active.generation === operation.generation
-      && (operation.type === 'setProps' || operation.postActionId === active.actionId);
-    if (authorizedHeldWork) {
+    const sameHeldGeneration = active && active.generation === operation.generation;
+    if (sameHeldGeneration && operation.type === 'unmount') {
+      // Unmount is a revocation, not work to queue behind the action it ends.
+      const heldRequest = activeClientOperations.get(active.id);
+      if (heldRequest) {
+        heldRequest.abortedByUnmount = true;
+        heldRequest.controller.abort();
+      }
+      void processMessage(message);
+    } else if (sameHeldGeneration && (operation.type === 'setProps'
+        || operation.type === 'render' && operation.postActionId === active.actionId)) {
       void processMessage(message);
     } else {
       queue = queue.then(() => processMessage(message));
