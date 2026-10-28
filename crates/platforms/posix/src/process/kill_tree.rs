@@ -27,8 +27,9 @@ pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 /// may have moved to another group.
 ///
 /// `pid` MUST be the PGID — typically the PID of a child spawned with
-/// `setsid()`, in which case PID == PGID. Passing a non-leader PID will
-/// only signal that one process, which is rarely what callers want.
+/// `setsid()`, in which case PID == PGID. Passing another process's PID
+/// instead targets the process group with that numeric ID if one exists;
+/// it does not selectively target that process.
 ///
 /// # Errors
 /// Returns [`ProcessError::Io`] for signal errors other than `ESRCH`, which
