@@ -280,7 +280,8 @@ fn probe(round: u32, root: &Path) {
     std::fs::create_dir(&directory).unwrap();
     let job = job();
     let mode = if round % 2 == 0 { "live" } else { "exit" };
-    let terminated_first = round % 4 >= 2;
+    let no_time_limit = round < 32;
+    let terminated_first = !no_time_limit && round % 4 >= 2;
     let (leader, leader_pid) = spawn_member(&job, "leader", &directory, mode);
     wait_file(&directory.join("leader-ready"));
     let mut children = Vec::new();
@@ -306,6 +307,39 @@ fn probe(round: u32, root: &Path) {
         WAIT_TIMEOUT,
         "Job already signaled before limit"
     );
+    if no_time_limit {
+        if unsafe { TerminateJobObject(job.as_raw_handle(), 143) } == 0 {
+            fail("TerminateJobObject without time limit");
+        }
+        let job_state = wait(&job, 0);
+        assert!(
+            matches!(job_state, WAIT_OBJECT_0 | WAIT_TIMEOUT),
+            "invalid Job wait: {job_state}"
+        );
+        let mut unsignaled = 0usize;
+        for (_, held) in &children {
+            match wait(held, 0) {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => unsignaled += 1,
+                state => panic!("invalid descendant wait: {state}"),
+            }
+        }
+        println!("jobtime-negative round={round} mode={mode} job_wait={job_state} unsignaled_children={unsignaled}");
+        assert!(
+            job_state != WAIT_OBJECT_0 || unsignaled == 0,
+            "ordinary termination signaled the Job while a retained child remained live"
+        );
+        for (_, held) in &children {
+            assert_eq!(wait(held, 15000), WAIT_OBJECT_0, "held child did not exit");
+        }
+        assert_eq!(
+            wait(&leader, 15000),
+            WAIT_OBJECT_0,
+            "held leader did not exit"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+        return;
+    }
     let (burner, burner_thread, burner_pid) = create_suspended("pulse", &directory, "unused");
     if !terminated_first
         && unsafe { AssignProcessToJobObject(job.as_raw_handle(), burner.as_raw_handle()) } == 0
@@ -326,6 +360,20 @@ fn probe(round: u32, root: &Path) {
         if unsafe { TerminateJobObject(job.as_raw_handle(), 143) } == 0 {
             fail("TerminateJobObject");
         }
+        let job_state = wait(&job, 0);
+        assert!(
+            matches!(job_state, WAIT_OBJECT_0 | WAIT_TIMEOUT),
+            "invalid Job wait: {job_state}"
+        );
+        let unsignaled = children
+            .iter()
+            .filter(|(_, held)| wait(held, 0) == WAIT_TIMEOUT)
+            .count();
+        println!("jobtime-after-terminate round={round} job_wait={job_state} unsignaled_children={unsignaled}");
+        assert!(
+            job_state != WAIT_OBJECT_0 || unsignaled == 0,
+            "Job signaled immediately after TerminateJobObject while a retained child was live"
+        );
         if unsafe { AssignProcessToJobObject(job.as_raw_handle(), burner.as_raw_handle()) } == 0 {
             let error = std::io::Error::last_os_error();
             assert_eq!(
@@ -393,7 +441,7 @@ fn probe(round: u32, root: &Path) {
     }
     drop(extra_thread);
     assert_eq!(assigned, 0, "job accepted another process after signaling");
-    println!("jobtime-probe round={round} mode={mode} terminated_first={terminated_first} leader={leader_pid} burner={burner_pid} signal=job+all-held-handles sealed=true");
+    println!("jobtime-probe round={round} mode={mode} terminated_first={terminated_first} pulse_member={burner_is_member} leader={leader_pid} burner={burner_pid} signal=job+all-held-handles sealed=true");
     std::fs::remove_dir_all(&directory).unwrap();
 }
 fn main() {
@@ -406,11 +454,11 @@ fn main() {
             let root: PathBuf =
                 std::env::temp_dir().join(format!("lingxi-jobtime-probe-{}", std::process::id()));
             std::fs::create_dir(&root).unwrap();
-            for round in 0..24 {
+            for round in 0..48 {
                 probe(round, &root);
             }
             std::fs::remove_dir(&root).unwrap();
-            println!("jobtime-probe all-rounds-passed=24");
+            println!("jobtime-probe all-rounds-passed=48");
         }
         other => panic!("unexpected role: {other:?}"),
     }
