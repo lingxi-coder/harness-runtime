@@ -34,6 +34,10 @@ pub struct AppAgentHost {
     shutdown: AtomicBool,
     #[cfg(test)]
     force_wake_policy: AtomicBool,
+    #[cfg(test)]
+    before_started_event: Mutex<Option<Box<dyn FnOnce(&Path, &str) + Send>>>,
+    #[cfg(test)]
+    fail_started_event_schema: AtomicBool,
 }
 struct AppAgentState {
     store: Arc<AgentStore>,
@@ -171,7 +175,6 @@ struct Control {
     request_id: String,
     id: String,
     protocol_thread_id: Option<String>,
-    protocol_parent_run_id: Option<String>,
     cancel: CancellationToken,
     finished: AtomicBool,
     done: Notify,
@@ -577,6 +580,20 @@ impl Control {
     ) -> Result<(local_app::v2::agent::Task, bool), String> {
         self.store
             .with_protocol_commit(|| {
+                // Once any event write has failed, its bytes may be partial or
+                // fully written without a successful sync. Never append another
+                // event before persisting this run as interrupted.
+                if self.protocol_events_failed.load(Ordering::Acquire) {
+                    let task = self
+                        .store
+                        .interrupt_after_protocol_failure(
+                            &self.owner,
+                            &self.id,
+                            "protocol_event_storage_failed",
+                        )
+                        .map_err(|_| "agent_storage_unavailable")?;
+                    return Ok((task, true));
+                }
                 // This check is inside the same guard as durable cancellation and
                 // success commit. It also covers direct parent-token revocation.
                 let (state, output, error) =
@@ -608,13 +625,18 @@ impl Control {
                     }
                 }
                 if event_storage_failed {
-                    let _ = self.store.interrupt_after_protocol_failure(
-                        &self.owner,
-                        &self.id,
-                        "protocol_event_storage_failed",
-                    );
+                    self.protocol_events_failed.store(true, Ordering::Release);
+                    let interrupted = self
+                        .store
+                        .interrupt_after_protocol_failure(
+                            &self.owner,
+                            &self.id,
+                            "protocol_event_storage_failed",
+                        )
+                        .map_err(|_| "agent_storage_unavailable")?;
+                    return Ok((interrupted, true));
                 }
-                Ok((task, event_storage_failed))
+                Ok((task, false))
             })
             .map_err(|_| "agent_storage_unavailable")?
     }
@@ -847,6 +869,10 @@ impl AppAgentHost {
             shutdown: AtomicBool::new(false),
             #[cfg(test)]
             force_wake_policy: AtomicBool::new(false),
+            #[cfg(test)]
+            before_started_event: Mutex::new(None),
+            #[cfg(test)]
+            fail_started_event_schema: AtomicBool::new(false),
         }))
     }
     fn app_state(&self, app: &str) -> Result<Arc<AppAgentState>, String> {
@@ -1232,6 +1258,32 @@ impl AppAgentHost {
                 return Err("chat_archived".into());
             }
         }
+        // Validate the exact generated event and initialize the pinned schema
+        // before persisting a run or claiming a wake. Schema initialization
+        // failure is a host availability problem, not a damaged run log.
+        let started_event = if let Some(thread_id) = &input.protocol_thread_id {
+            let mut event = json!({
+                "type":"RUN_STARTED", "protocolVersion":"1.0",
+                "threadId":thread_id, "runId":input.request_id
+            });
+            if let Some(parent_run_id) = &input.protocol_parent_run_id {
+                event["parentRunId"] = json!(parent_run_id);
+            }
+            #[cfg(test)]
+            if self.fail_started_event_schema.load(Ordering::Acquire) {
+                return Err("agent_storage_unavailable".into());
+            }
+            local_app::v2::agent::protocol::validate_event(&event).map_err(|error| {
+                if error.code == "protocol_schema_unavailable" {
+                    "agent_storage_unavailable"
+                } else {
+                    "invalid_agent_input"
+                }
+            })?;
+            Some(event)
+        } else {
+            None
+        };
         #[cfg(test)]
         let is_ios = cfg!(target_os = "ios") || self.force_wake_policy.load(Ordering::Acquire);
         #[cfg(not(test))]
@@ -1413,7 +1465,6 @@ impl AppAgentHost {
             request_id: admitted.task.request_id.clone(),
             id: id.clone(),
             protocol_thread_id: input.protocol_thread_id.clone(),
-            protocol_parent_run_id: input.protocol_parent_run_id.clone(),
             cancel,
             finished: AtomicBool::new(false),
             done: Notify::new(),
@@ -1436,15 +1487,13 @@ impl AppAgentHost {
             timed_out: AtomicBool::new(false),
             usage: AsyncMutex::new(None),
         });
-        if let Some(thread_id) = &control.protocol_thread_id {
-            let mut started = json!({
-                "type":"RUN_STARTED",
-                "protocolVersion":"1.0",
-                "threadId":thread_id,
-                "runId":control.request_id
-            });
-            if let Some(parent_run_id) = &control.protocol_parent_run_id {
-                started["parentRunId"] = json!(parent_run_id);
+        if let Some(started) = started_event {
+            #[cfg(test)]
+            {
+                let hook = self.before_started_event.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook(&state.root, &id);
+                }
             }
             if state.store.append_event(&owner, &id, started).is_err() {
                 if let Some(chat_id) = &control.chat_id {
@@ -1462,7 +1511,19 @@ impl AppAgentHost {
                     }
                     let _ = control.chats.finish_turn(chat_id, &id);
                 }
-                let _ = state.store.rollback_queued_admission(&owner, &id);
+                // Do not roll back first: an event append or sync failure may
+                // have left a partial or complete RUN_STARTED on disk. Mark
+                // this exact unstarted run interrupted without touching those
+                // bytes, so the request can never be replayed automatically.
+                if state
+                    .store
+                    .interrupt_unstarted_protocol_admission(&owner, &id)
+                    .is_err()
+                {
+                    // The queued record remains admission-blocking when the
+                    // interrupted state cannot be durably committed.
+                    tracing::warn!(run_id = %id, "could not persist interrupted Agent admission");
+                }
                 if wake_detached {
                     self.clear_wake_run(&id);
                 }
@@ -3147,7 +3208,6 @@ mod progress_tests {
             request_id: input.request_id,
             id,
             protocol_thread_id: input.protocol_thread_id,
-            protocol_parent_run_id: None,
             cancel: CancellationToken::new(),
             finished: AtomicBool::new(false),
             done: Notify::new(),
@@ -3289,6 +3349,40 @@ mod progress_tests {
         assert!(host.active.lock().await.is_empty());
     }
 
+    #[tokio::test]
+    async fn unavailable_started_event_schema_does_not_admit_or_claim_a_wake() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let (owner, input, key, state) = configured_wake_fixture(&host);
+        host.fail_started_event_schema
+            .store(true, Ordering::Release);
+        let result = host
+            .start_task(
+                owner.clone(),
+                1,
+                &[],
+                &[],
+                input,
+                None,
+                None,
+                CancellationToken::new(),
+                true,
+                false,
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), "agent_storage_unavailable");
+        assert!(state
+            .store
+            .task_id_for_request(&owner, &key.request_id)
+            .is_err());
+        assert!(host
+            .wake_reservations
+            .lock()
+            .unwrap()
+            .available(&key, now_millis()));
+        assert!(host.active.lock().await.is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_started_event_write_clears_the_consumed_wake() {
@@ -3321,11 +3415,270 @@ mod progress_tests {
             .unwrap()
             .reservations
             .contains_key(&key));
+        let task = state.store.get_by_request(&owner, &key.request_id).unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(
+            task.error.as_ref().unwrap().code,
+            "protocol_event_storage_failed"
+        );
         assert!(state
             .store
-            .task_id_for_request(&owner, &key.request_id)
+            .protocol_events(&owner, &key.request_id, 0)
             .is_err());
         assert!(host.active.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_started_event_preserves_partial_or_complete_bytes_and_isolates_the_run() {
+        let started = json!({"type":"RUN_STARTED", "protocolVersion":"1.0",
+            "threadId":"fixture-thread", "runId":"wake-a"});
+        assert!(local_app::v2::agent::protocol::validate_event(&started).is_ok());
+        let mut complete = serde_json::to_vec(&json!({"sequence":1, "event":started})).unwrap();
+        complete.push(b'\n');
+        for bytes in [b"{\"sequence\":1,\"event\":".to_vec(), complete] {
+            let root = tempfile::tempdir().unwrap();
+            let (host, _service) = test_wake_host(root.path()).await;
+            let (owner, input, key, state) = configured_wake_fixture(&host);
+            let saved = bytes.clone();
+            *host.before_started_event.lock().unwrap() = Some(Box::new(move |root, id| {
+                std::fs::write(
+                    root.join("tasks/protocol-events")
+                        .join(format!("{id}.jsonl")),
+                    bytes,
+                )
+                .unwrap();
+            }));
+            let result = host
+                .start_task(
+                    owner.clone(),
+                    1,
+                    &[],
+                    &[],
+                    input.clone(),
+                    None,
+                    None,
+                    CancellationToken::new(),
+                    true,
+                    false,
+                )
+                .await;
+            assert_eq!(result.unwrap_err(), "agent_storage_unavailable");
+            let task = state.store.get_by_request(&owner, &key.request_id).unwrap();
+            assert_eq!(task.state, State::Interrupted);
+            assert_eq!(
+                task.error.as_ref().unwrap().code,
+                "protocol_event_storage_failed"
+            );
+            assert_eq!(
+                std::fs::read(
+                    state
+                        .root
+                        .join("tasks/protocol-events")
+                        .join(format!("{}.jsonl", task.run_id))
+                )
+                .unwrap(),
+                saved
+            );
+            assert!(state
+                .store
+                .protocol_events(&owner, &key.request_id, 0)
+                .is_err());
+            assert!(!host
+                .wake_reservations
+                .lock()
+                .unwrap()
+                .reservations
+                .contains_key(&key));
+            assert!(host.active.lock().await.is_empty());
+            let mut later = input;
+            later.request_id = "independent-run".into();
+            assert!(state.store.admit(&owner, &later, &[]).unwrap().start);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_interruption_persist_keeps_queued_run_blocking_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let (owner, input, key, state) = configured_wake_fixture(&host);
+        *host.before_started_event.lock().unwrap() = Some(Box::new(move |root, id| {
+            let tasks = root.join("tasks");
+            std::fs::write(
+                tasks.join("protocol-events").join(format!("{id}.jsonl")),
+                b"{partial",
+            )
+            .unwrap();
+            std::fs::set_permissions(tasks, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }));
+        let result = host
+            .start_task(
+                owner.clone(),
+                1,
+                &[],
+                &[],
+                input.clone(),
+                None,
+                None,
+                CancellationToken::new(),
+                true,
+                false,
+            )
+            .await;
+        std::fs::set_permissions(
+            state.root.join("tasks"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(result.unwrap_err(), "agent_storage_unavailable");
+        let task = state.store.get_by_request(&owner, &key.request_id).unwrap();
+        assert_eq!(
+            task.state,
+            State::Queued,
+            "A failed durable commit must not be presented as interrupted."
+        );
+        assert!(task.error.is_none());
+        assert!(!host
+            .wake_reservations
+            .lock()
+            .unwrap()
+            .reservations
+            .contains_key(&key));
+        assert!(host.active.lock().await.is_empty());
+        let mut later = input;
+        later.request_id = "independent-run".into();
+        assert!(matches!(
+            state.store.admit(&owner, &later, &[]),
+            Err(local_app::v2::AppError::Busy(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_stream_event_never_appends_a_terminal_event() {
+        use std::os::unix::fs::PermissionsExt;
+        for fail_after_write in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let control = running_control_with_protocol(root.path(), true);
+            let event_path = root
+                .path()
+                .join(&control.owner.app_id)
+                .join("agent/agui-v1/tasks/protocol-events")
+                .join(format!("{}.jsonl", control.id));
+            let event = json!({"type":"TEXT_MESSAGE_START", "messageId":"assistant-one", "role":"assistant"});
+            if fail_after_write {
+                // Model an error returned by sync after all event bytes landed.
+                control
+                    .store
+                    .append_event(&control.owner, &control.id, event)
+                    .unwrap();
+                control
+                    .protocol_events_failed
+                    .store(true, Ordering::Release);
+            } else {
+                std::fs::set_permissions(&event_path, std::fs::Permissions::from_mode(0o400))
+                    .unwrap();
+                assert!(control.append_protocol_event(event).is_err());
+                std::fs::set_permissions(&event_path, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                assert!(control.protocol_events_failed.load(Ordering::Acquire));
+            }
+            let before = std::fs::read(&event_path).unwrap();
+            let (task, event_failed) = control
+                .commit_terminal(
+                    State::Failed,
+                    None,
+                    None,
+                    Some("agent_storage_unavailable".into()),
+                )
+                .unwrap();
+            assert!(event_failed);
+            assert_eq!(task.state, State::Interrupted);
+            assert_eq!(
+                task.error.as_ref().unwrap().code,
+                "protocol_event_storage_failed"
+            );
+            assert_eq!(
+                std::fs::read(&event_path).unwrap(),
+                before,
+                "A failed event write must never be followed by RUN_ERROR"
+            );
+            assert!(control
+                .store
+                .protocol_events(&control.owner, &control.request_id, 0)
+                .is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_terminal_interruption_keeps_active_owner_and_wake() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let control = Arc::new(running_control_with_protocol(root.path(), true));
+        let app_root = root.path().join(&control.owner.app_id);
+        let tasks = app_root.join("agent/agui-v1/tasks");
+        let event_path = tasks
+            .join("protocol-events")
+            .join(format!("{}.jsonl", control.id));
+        let before = std::fs::read(&event_path).unwrap();
+        control
+            .protocol_events_failed
+            .store(true, Ordering::Release);
+        let key = WakeKey {
+            app_id: control.owner.app_id.clone(),
+            revision: control.revision,
+            request_id: control.request_id.clone(),
+        };
+        {
+            let mut registry = host.wake_reservations.lock().unwrap();
+            let now = now_millis();
+            registry.reserve(key.clone(), now, 120_000).unwrap();
+            assert!(registry.claim(&key, now));
+            assert!(registry.consume(&key, now, &control.id));
+        }
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+        let admission = Admission {
+            task: control.store.get(&control.owner, &control.id).unwrap(),
+            start: true,
+            tools: BTreeMap::new(),
+            skills: Vec::new(),
+            chat_id: None,
+        };
+        let input: Input =
+            serde_json::from_value(json!({"requestId":control.request_id, "prompt":"fixture"}))
+                .unwrap();
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o500)).unwrap();
+        host.clone()
+            .execute(control.clone(), admission, input, app_root)
+            .await;
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(control.finished.load(Ordering::Acquire));
+        assert!(host.active.lock().await.contains_key(&control.id));
+        assert!(host
+            .wake_reservations
+            .lock()
+            .unwrap()
+            .reservations
+            .contains_key(&key));
+        assert_eq!(
+            control
+                .store
+                .get(&control.owner, &control.id)
+                .unwrap()
+                .state,
+            State::Running
+        );
+        assert_eq!(std::fs::read(&event_path).unwrap(), before);
+        assert_eq!(
+            host.stop_all().await.unwrap_err(),
+            "agent_cleanup_incomplete"
+        );
     }
 
     #[tokio::test]
@@ -3902,7 +4255,6 @@ mod accepted_projection_tests {
             request_id: "public-run-1".into(),
             id,
             protocol_thread_id: Some(chat.chat_id.clone()),
-            protocol_parent_run_id: None,
             cancel: CancellationToken::new(),
             finished: AtomicBool::new(false),
             done: Notify::new(),

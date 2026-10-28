@@ -588,12 +588,35 @@
     let active = true;
     let timer = null;
     let afterSequence;
+    const terminal = task => ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task?.state);
     const poll = async () => {
+      let page;
       try {
-        const page = await taskEvents(afterSequence === undefined ? {runId} : {runId, afterSequence});
+        page = await taskEvents(afterSequence === undefined ? {runId} : {runId, afterSequence});
+      } catch (error) {
         if (!active) return;
+        hostEventError(runId, error);
+        if (!active) return;
+        try {
+          const task = await invoke('agent.tasks.get', {runId});
+          if (!active) return;
+          // A transient transport failure can recover even after task completion.
+          // A terminal task whose event log is unreadable must not poll forever.
+          if (terminal(task) && error?.code !== 'host_unavailable') {
+            active = false;
+            return;
+          }
+        } catch {
+          // Without an authoritative task state, retry at the normal polling interval.
+        }
+        if (active) timer = setTimeout(poll, 1000);
+        return;
+      }
+      if (!active) return;
+      try {
         for (const event of page.events) {
           listener(event);
+          if (!active) return;
           if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') {
             active = false;
             clearTimeout(timer);
@@ -602,7 +625,8 @@
         }
         afterSequence = page.sequence;
         const task = await invoke('agent.tasks.get', {runId});
-        if (['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task?.state)) {
+        if (!active) return;
+        if (terminal(task)) {
           hostEventError(runId, makeError('The host task ended without a terminal AG-UI event.', 'missing_terminal_event'));
           active = false;
           return;

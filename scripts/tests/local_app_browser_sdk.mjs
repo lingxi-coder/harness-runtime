@@ -382,6 +382,154 @@ test('cold official client reconnect reads events without starting a model run',
   assert.deepEqual(b.requests.map(request => request.envelope.method), ['agent.tasks.events']);
 });
 
+test('a terminal task with unreadable events reports once and stops polling', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  await b.flush();
+  const errors = [];
+  const events = [];
+  b.window.addEventListener('localApp:agent-events-error', event => errors.push(event.detail));
+  b.setFetchHandler(request => {
+    const {method} = request.envelope;
+    if (method === 'agent.tasks.events') return {ok: true, json: async () => b.input({
+      ok: false, error: {code: 'agent_events_unavailable', message: 'Events unavailable'}
+    })};
+    if (method === 'agent.tasks.get') return {ok: true, json: async () => b.input({
+      ok: true, value: {state: 'interrupted'}
+    })};
+    assert.fail(`Unexpected method ${method}`);
+  });
+  const unsubscribe = b.api.agent.tasks.subscribe('damaged-run', event => events.push(event));
+  await b.flush();
+  assert.deepEqual(b.requests.map(request => request.envelope.method), ['agent.tasks.events', 'agent.tasks.get']);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, 'agent_events_unavailable');
+  assert.equal(errors[0].runId, 'damaged-run');
+  assert.deepEqual(events, [], 'The SDK must not manufacture terminal AG-UI events.');
+  assert.deepEqual(clock.pending(), []);
+  clock.advance(10000);
+  await b.flush();
+  assert.equal(b.requests.length, 2);
+  unsubscribe();
+});
+
+test('a running task retries event reads and later delivers real events', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  await b.flush();
+  const errors = [];
+  const events = [];
+  let eventReads = 0;
+  b.window.addEventListener('localApp:agent-events-error', event => errors.push(event.detail));
+  b.setFetchHandler(request => {
+    if (request.envelope.method === 'agent.tasks.events') {
+      eventReads++;
+      return {ok: true, json: async () => b.input(eventReads === 1
+        ? {ok: false, error: {code: 'agent_events_unavailable', message: 'Events unavailable'}}
+        : {ok: true, value: {events: runEvents({threadId: 'thread-one', runId: 'running-run'}), sequence: 5}})};
+    }
+    assert.equal(request.envelope.method, 'agent.tasks.get');
+    return {ok: true, json: async () => b.input({ok: true, value: {state: 'running'}})};
+  });
+  const unsubscribe = b.api.agent.tasks.subscribe('running-run', event => events.push(event));
+  await b.flush();
+  assert.equal(errors.length, 1);
+  assert.deepEqual(clock.pending(), [1000]);
+  clock.advance(1000);
+  await b.flush();
+  assert.equal(eventReads, 2);
+  assert.equal(events.at(-1).type, 'RUN_FINISHED');
+  assert.deepEqual(clock.pending(), []);
+  unsubscribe();
+});
+
+test('temporary transport failure retries even when the task already finished', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  await b.flush();
+  const errors = [];
+  const events = [];
+  let eventReads = 0;
+  b.window.addEventListener('localApp:agent-events-error', event => errors.push(event.detail));
+  b.setFetchHandler(request => {
+    if (request.envelope.method === 'agent.tasks.events') {
+      eventReads++;
+      if (eventReads === 1) throw new TypeError('temporary network failure');
+      return {ok: true, json: async () => b.input({ok: true, value: {
+        events: runEvents({threadId: 'thread-one', runId: 'finished-run'}), sequence: 5
+      }})};
+    }
+    assert.equal(request.envelope.method, 'agent.tasks.get');
+    return {ok: true, json: async () => b.input({ok: true, value: {state: 'succeeded'}})};
+  });
+  const unsubscribe = b.api.agent.tasks.subscribe('finished-run', event => events.push(event));
+  await b.flush();
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, 'host_unavailable');
+  assert.deepEqual(clock.pending(), [1000]);
+  clock.advance(1000);
+  await b.flush();
+  assert.equal(events.at(-1).type, 'RUN_FINISHED');
+  assert.equal(eventReads, 2);
+  assert.deepEqual(clock.pending(), []);
+  unsubscribe();
+});
+
+test('an unavailable task-status check does not infer a terminal state', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  await b.flush();
+  const errors = [];
+  let statusReads = 0;
+  b.window.addEventListener('localApp:agent-events-error', event => errors.push(event.detail));
+  b.setFetchHandler(request => {
+    if (request.envelope.method === 'agent.tasks.events') return {ok: true, json: async () => b.input({
+      ok: false, error: {code: 'agent_events_unavailable', message: 'Events unavailable'}
+    })};
+    assert.equal(request.envelope.method, 'agent.tasks.get');
+    statusReads++;
+    if (statusReads === 1) throw new TypeError('status temporarily unreachable');
+    return {ok: true, json: async () => b.input({ok: true, value: {state: 'failed'}})};
+  });
+  const events = [];
+  const unsubscribe = b.api.agent.tasks.subscribe('unknown-status', event => events.push(event));
+  await b.flush();
+  assert.equal(errors.length, 1);
+  assert.deepEqual(clock.pending(), [1000]);
+  clock.advance(1000);
+  await b.flush();
+  assert.equal(statusReads, 2);
+  assert.equal(errors.length, 2);
+  assert.deepEqual(events, []);
+  assert.deepEqual(clock.pending(), []);
+  unsubscribe();
+});
+
+test('unsubscribe while checking task status prevents later polling and events', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  await b.flush();
+  const response = deferred();
+  const events = [];
+  b.setFetchHandler(request => {
+    if (request.envelope.method === 'agent.tasks.events') return {ok: true, json: async () => b.input({
+      ok: false, error: {code: 'agent_events_unavailable', message: 'Events unavailable'}
+    })};
+    assert.equal(request.envelope.method, 'agent.tasks.get');
+    return response.promise;
+  });
+  const unsubscribe = b.api.agent.tasks.subscribe('cancelled-subscription', event => events.push(event));
+  await waitFor(() => b.requests.some(request => request.envelope.method === 'agent.tasks.get'), 'Task status check did not start.');
+  unsubscribe();
+  response.resolve({ok: true, json: async () => b.input({ok: true, value: {state: 'running'}})});
+  await b.flush();
+  assert.deepEqual(clock.pending(), []);
+  clock.advance(10000);
+  await b.flush();
+  assert.equal(b.requests.length, 2);
+  assert.deepEqual(events, []);
+});
+
 test('all six read-only facade calls time out waiting for headers after five seconds', async () => {
   const cases = [
     ['agent.tasks.get', b => b.api.agent.tasks.get('run-one')],

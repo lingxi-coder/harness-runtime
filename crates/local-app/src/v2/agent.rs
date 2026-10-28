@@ -23,6 +23,30 @@ const MAX_ATTACHMENT_BASE64_BYTES: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4;
 const MAX_PROTOCOL_EVENT_LOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_NATIVE_OUTPUT_BYTES: u64 = 9_007_199_254_740_991;
 const MAX_PROTOCOL_EVENT_PAGE: usize = 128;
+const PROTOCOL_EVENT_STORAGE_FAILED: &str = "protocol_event_storage_failed";
+const PROTOCOL_TERMINAL_CONFLICT: &str = "protocol_terminal_conflict";
+
+#[derive(Debug)]
+enum EventLogReadError {
+    Corrupt(&'static str),
+    Unavailable(AppError),
+}
+
+impl From<EventLogReadError> for AppError {
+    fn from(error: EventLogReadError) -> Self {
+        match error {
+            EventLogReadError::Corrupt(message) => invalid(message),
+            EventLogReadError::Unavailable(error) => error,
+        }
+    }
+}
+
+fn protocol_schema_unavailable() -> AppError {
+    AppError::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "The pinned AG-UI event schema is unavailable",
+    ))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -173,12 +197,23 @@ pub struct AttachmentMetadata {
     pub size: u64,
 }
 
+fn deserialize_present_json<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskResult {
     #[serde(default)]
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub output: Option<Value>,
     #[serde(default)]
     pub attachments: Vec<Value>,
@@ -328,6 +363,55 @@ struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_output: Option<NativeOutputObservation>,
     task: Task,
+}
+
+fn protocol_storage_failed(record: &Record) -> bool {
+    record.task.error.as_ref().is_some_and(|error| {
+        error.code == PROTOCOL_EVENT_STORAGE_FAILED || error.code == PROTOCOL_TERMINAL_CONFLICT
+    })
+}
+
+fn mark_protocol_failure(record: &mut Record, code: &str) {
+    record.task.state = State::Interrupted;
+    record.task.phase = None;
+    record.task.error = Some(TaskError {
+        code: code.into(),
+        message: error_message(code).into(),
+    });
+    record.task.sequence = record.task.sequence.saturating_add(1);
+    record.task.updated_at = now();
+}
+
+fn mark_protocol_storage_failed(record: &mut Record) {
+    mark_protocol_failure(record, PROTOCOL_EVENT_STORAGE_FAILED);
+}
+
+fn terminal_matches_task(record: &Record, event: &Value) -> bool {
+    let event_type = event["type"].as_str();
+    let outcome = event
+        .get("outcome")
+        .and_then(|value| value["type"].as_str());
+    match record.task.state {
+        State::Succeeded => {
+            event_type == Some("RUN_FINISHED")
+                && (event.get("outcome").is_none() || outcome == Some("success"))
+                && !event.get("result").is_some_and(Value::is_null)
+                && record.task.result.as_ref().is_some_and(|result| {
+                    !result.output.as_ref().is_some_and(Value::is_null)
+                        && result.output.as_ref() == event.get("result")
+                })
+        }
+        State::Cancelled => event_type == Some("RUN_FINISHED") && outcome == Some("cancelled"),
+        State::Failed | State::Interrupted => {
+            let event_code = event.get("code").and_then(Value::as_str);
+            let task_code = record.task.error.as_ref().map(|error| error.code.as_str());
+            event_type == Some("RUN_ERROR")
+                && event_code
+                    .zip(task_code)
+                    .is_none_or(|(event, task)| event == task)
+        }
+        State::Queued | State::Running => false,
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -686,12 +770,25 @@ pub fn error_message(code: &str) -> &'static str {
         "agent_storage_unavailable" | "task_storage_failed" => {
             "Agent task storage is unavailable. Existing task data has been preserved."
         }
+        PROTOCOL_EVENT_STORAGE_FAILED => {
+            "The Agent event stream could not be verified. Review this task before retrying."
+        }
+        PROTOCOL_TERMINAL_CONFLICT => {
+            "The saved Agent task and its terminal event disagree. Review this task before retrying."
+        }
         _ => "The Agent task could not complete. Review the host status before retrying.",
     }
 }
 
 impl AgentStore {
     pub fn open(root: &Path) -> Result<Self, AppError> {
+        Self::open_with_event_validator(root, protocol::validate_event)
+    }
+
+    fn open_with_event_validator(
+        root: &Path,
+        validate_event: impl Fn(&Value) -> Result<(), protocol::ProtocolError>,
+    ) -> Result<Self, AppError> {
         ensure_private_directory(root)?;
         let events_root = root.join("protocol-events");
         ensure_private_directory(&events_root)?;
@@ -701,7 +798,54 @@ impl AgentStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ledger::default(),
             Err(e) => return Err(e.into()),
         };
+        if ledger
+            .runs
+            .values()
+            .any(|record| record.protocol_thread_id.is_some())
+        {
+            // Check the validator independently of any one event file. A
+            // broken schema must not be persisted as per-run corruption.
+            validate_event(&json!({
+                "type":"RUN_STARTED", "threadId":"schema-probe", "runId":"schema-probe"
+            }))
+            .map_err(|_| protocol_schema_unavailable())?;
+        }
+        let mut pending_terminal_events = Vec::new();
         for record in ledger.runs.values_mut() {
+            let events = if record.protocol_thread_id.is_some() {
+                // An interrupted write is evidence, not a stream we can
+                // repair by appending to it. Keep the original bytes in place
+                // and isolate this run from the rest of the app.
+                if protocol_storage_failed(record) {
+                    if record.task.state != State::Interrupted {
+                        let code = record
+                            .task
+                            .error
+                            .as_ref()
+                            .expect("protocol failure")
+                            .code
+                            .clone();
+                        mark_protocol_failure(record, &code);
+                    }
+                    continue;
+                }
+                let event_path = protocol_event_path(&events_root, &record.task.run_id)?;
+                let thread_id = record.protocol_thread_id.as_deref().expect("protocol run");
+                match read_protocol_events_with_validator(
+                    &event_path,
+                    Some((thread_id, &record.task.request_id)),
+                    &validate_event,
+                ) {
+                    Ok(events) if !events.is_empty() => Some(events),
+                    Ok(_) | Err(EventLogReadError::Corrupt(_)) => {
+                        mark_protocol_storage_failed(record);
+                        continue;
+                    }
+                    Err(EventLogReadError::Unavailable(error)) => return Err(error),
+                }
+            } else {
+                None
+            };
             if !record.task.state.terminal() {
                 record.task.state = State::Interrupted;
                 record.task.phase = None;
@@ -713,11 +857,11 @@ impl AgentStore {
                 });
                 record.task.sequence += 1;
                 record.task.updated_at = now();
-            } else if record.protocol_thread_id.is_some()
-                && !read_protocol_events(&protocol_event_path(&events_root, &record.task.run_id)?)?
+            } else if events.as_ref().is_some_and(|events| {
+                !events
                     .last()
                     .is_some_and(|entry| is_terminal_event(&entry.event))
-                && record.task.state == State::Succeeded
+            }) && record.task.state == State::Succeeded
             {
                 record.task.state = State::Interrupted;
                 record.task.error = Some(TaskError {
@@ -727,6 +871,30 @@ impl AgentStore {
                 record.task.sequence += 1;
                 record.task.updated_at = now();
             }
+            if events
+                .as_ref()
+                .and_then(|events| events.last())
+                .is_some_and(|entry| {
+                    is_terminal_event(&entry.event) && !terminal_matches_task(record, &entry.event)
+                })
+            {
+                mark_protocol_failure(record, PROTOCOL_TERMINAL_CONFLICT);
+                continue;
+            }
+            if events.as_ref().is_some_and(|events| {
+                !events
+                    .last()
+                    .is_some_and(|entry| is_terminal_event(&entry.event))
+            }) {
+                pending_terminal_events.push((
+                    record.owner.clone(),
+                    record.task.run_id.clone(),
+                    record.task.request_id.clone(),
+                    record.protocol_thread_id.clone().expect("protocol run"),
+                    record.task.state.clone(),
+                    record.task.error.clone(),
+                ));
+            }
         }
         let store = Self {
             path,
@@ -734,75 +902,39 @@ impl AgentStore {
             protocol_commit: Mutex::new(()),
             ledger: Mutex::new(ledger),
         };
+        for (owner, task_id, run_id, thread_id, state, task_error) in pending_terminal_events {
+            let terminal = match state {
+                State::Cancelled => json!({
+                    "type":"RUN_FINISHED",
+                    "threadId":thread_id,
+                    "runId":run_id,
+                    "outcome":{"type":"cancelled"}
+                }),
+                State::Failed => json!({
+                    "type":"RUN_ERROR",
+                    "message":task_error.as_ref().map_or("The Agent run failed.", |error| error.message.as_str()),
+                    "code":task_error.as_ref().map_or("agent_failed", |error| error.code.as_str())
+                }),
+                State::Succeeded | State::Interrupted | State::Queued | State::Running => {
+                    json!({
+                        "type":"RUN_ERROR",
+                        "message":"The host restarted before the Agent run completed.",
+                        "code":task_error.as_ref().map_or("host_restarted", |error| error.code.as_str())
+                    })
+                }
+            };
+            // If recovery cannot write this event, no ledger write has been
+            // attempted. Earlier event appends may have succeeded. A partial
+            // event remains for the next open to validate and, if damaged,
+            // isolate; a complete write may be indistinguishable from a sync.
+            store.append_event(&owner, &task_id, terminal)?;
+        }
         {
             let ledger = store
                 .ledger
                 .lock()
                 .map_err(|_| invalid("Agent storage unavailable"))?;
             store.persist(&ledger)?;
-        }
-        let incomplete = store
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?
-            .runs
-            .values()
-            .filter(|record| record.protocol_thread_id.is_some())
-            .map(|record| {
-                (
-                    record.owner.clone(),
-                    record.task.run_id.clone(),
-                    record.task.request_id.clone(),
-                    record
-                        .protocol_thread_id
-                        .clone()
-                        .expect("filtered thread ID"),
-                    record.task.state.clone(),
-                    record.task.error.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        for (owner, task_id, run_id, thread_id, state, task_error) in incomplete {
-            let path = store.event_path(&task_id)?;
-            let events = read_protocol_events(&path)?;
-            if events.is_empty() {
-                store.append_event(
-                    &owner,
-                    &task_id,
-                    json!({
-                        "type":"RUN_STARTED",
-                        "protocolVersion":"1.0",
-                        "threadId":thread_id,
-                        "runId":run_id
-                    }),
-                )?;
-            }
-            if !events
-                .last()
-                .is_some_and(|entry| is_terminal_event(&entry.event))
-            {
-                let terminal = match state {
-                    State::Cancelled => json!({
-                        "type":"RUN_FINISHED",
-                        "threadId":thread_id,
-                        "runId":run_id,
-                        "outcome":{"type":"cancelled"}
-                    }),
-                    State::Failed => json!({
-                        "type":"RUN_ERROR",
-                        "message":task_error.as_ref().map_or("The Agent run failed.", |error| error.message.as_str()),
-                        "code":task_error.as_ref().map_or("agent_failed", |error| error.code.as_str())
-                    }),
-                    State::Succeeded | State::Interrupted | State::Queued | State::Running => {
-                        json!({
-                            "type":"RUN_ERROR",
-                            "message":"The host restarted before the Agent run completed.",
-                            "code":task_error.as_ref().map_or("host_restarted", |error| error.code.as_str())
-                        })
-                    }
-                };
-                store.append_event(&owner, &task_id, terminal)?;
-            }
         }
         Ok(store)
     }
@@ -1167,8 +1299,13 @@ impl AgentStore {
             .ok_or_else(|| AppError::NotFound("AG-UI task".into()))
     }
     /// Remove an admission that failed before RUN_STARTED. The request ID can
-    /// then be retried because the host never accepted execution.
+    /// then be retried because the host never accepted execution. Existing
+    /// empty event files are left untouched rather than risking loss of data.
     pub fn rollback_queued_admission(&self, owner: &Owner, id: &str) -> Result<(), AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
         let path = self.event_path(id)?;
         let mut ledger = self
@@ -1180,19 +1317,52 @@ impl AgentStore {
             .get(id)
             .filter(|record| record.owner == *owner)
             .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
-        if record.task.state != State::Queued || !read_protocol_events(&path)?.is_empty() {
+        let identity = record
+            .protocol_thread_id
+            .as_deref()
+            .map(|thread_id| (thread_id, record.task.request_id.as_str()));
+        if record.task.state != State::Queued || !read_protocol_events(&path, identity)?.is_empty()
+        {
             return Err(invalid("Agent admission has already started"));
         }
         let mut next = ledger.clone();
         next.runs.remove(id);
         self.persist(&next)?;
         *ledger = next;
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
         Ok(())
+    }
+
+    /// Record an initial event-write failure for a run that the host has not
+    /// started. The caller must not have spawned an executor. The original
+    /// event file is never read, deleted or rewritten by this operation.
+    pub fn interrupt_unstarted_protocol_admission(
+        &self,
+        owner: &Owner,
+        id: &str,
+    ) -> Result<Task, AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        owner.validate()?;
+        let mut ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let mut next = ledger.clone();
+        let record = next
+            .runs
+            .get_mut(id)
+            .filter(|record| record.owner == *owner && record.protocol_thread_id.is_some())
+            .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+        if record.task.state != State::Queued {
+            return Err(invalid("Agent admission has already started"));
+        }
+        mark_protocol_storage_failed(record);
+        let task = record.task.clone();
+        self.persist(&next)?;
+        *ledger = next;
+        Ok(task)
     }
     /// Append one schema-validated AG-UI event to the durable task log.
     pub fn append_event(
@@ -1202,8 +1372,13 @@ impl AgentStore {
         event: Value,
     ) -> Result<u64, AppError> {
         owner.validate()?;
-        protocol::validate_event(&event)
-            .map_err(|_| invalid("AG-UI event does not match the pinned protocol"))?;
+        protocol::validate_event(&event).map_err(|error| {
+            if error.code == "protocol_schema_unavailable" {
+                protocol_schema_unavailable()
+            } else {
+                invalid("AG-UI event does not match the pinned protocol")
+            }
+        })?;
         let path = self.event_path(task_id)?;
         let ledger = self
             .ledger
@@ -1214,12 +1389,15 @@ impl AgentStore {
             .get(task_id)
             .filter(|record| record.owner == *owner)
             .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+        if protocol_storage_failed(record) {
+            return Err(invalid("AG-UI event log is unavailable"));
+        }
         let thread_id = record
             .protocol_thread_id
             .as_deref()
             .ok_or_else(|| invalid("Agent task is not an AG-UI run"))?;
         validate_event_identity(&event, thread_id, &record.task.request_id)?;
-        let events = read_protocol_events(&path)?;
+        let events = read_protocol_events(&path, Some((thread_id, &record.task.request_id)))?;
         if events.is_empty() {
             if event["type"] != "RUN_STARTED" {
                 return Err(invalid("AG-UI run must begin with RUN_STARTED"));
@@ -1293,12 +1471,16 @@ impl AgentStore {
                     && record.task.request_id == run_id
             })
             .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
-        if record.protocol_thread_id.is_none() {
-            return Err(invalid("Agent task is not an AG-UI run"));
+        let thread_id = record
+            .protocol_thread_id
+            .as_deref()
+            .ok_or_else(|| invalid("Agent task is not an AG-UI run"))?;
+        if protocol_storage_failed(record) {
+            return Err(invalid("AG-UI event log is unavailable"));
         }
         let task_id = record.task.run_id.clone();
         let path = self.event_path(&task_id)?;
-        let events = read_protocol_events(&path)?;
+        let events = read_protocol_events(&path, Some((thread_id, &record.task.request_id)))?;
         let latest = events.last().map_or(0, |entry| entry.sequence);
         if record.task.state.terminal()
             && !events
@@ -1628,7 +1810,8 @@ impl AgentStore {
     }
 
     /// If the standard terminal event could not be durably recorded, prevent
-    /// private task metadata from claiming a successful public run.
+    /// private task metadata from claiming a successful public run. Preserve an
+    /// existing result as evidence without treating it as a successful outcome.
     pub fn interrupt_after_protocol_failure(
         &self,
         owner: &Owner,
@@ -1643,7 +1826,6 @@ impl AgentStore {
                 .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
             record.task.state = State::Interrupted;
             record.task.phase = None;
-            record.task.result = None;
             record.task.error = Some(TaskError {
                 code: code.to_owned(),
                 message: error_message(code).to_owned(),
@@ -1724,31 +1906,66 @@ fn is_terminal_event(event: &Value) -> bool {
     )
 }
 
-fn read_protocol_events(path: &Path) -> Result<Vec<SequencedEvent>, AppError> {
+fn read_protocol_events(
+    path: &Path,
+    identity: Option<(&str, &str)>,
+) -> Result<Vec<SequencedEvent>, AppError> {
+    read_protocol_events_with_validator(path, identity, &protocol::validate_event)
+        .map_err(Into::into)
+}
+
+fn read_protocol_events_with_validator(
+    path: &Path,
+    identity: Option<(&str, &str)>,
+    validate_event: &impl Fn(&Value) -> Result<(), protocol::ProtocolError>,
+) -> Result<Vec<SequencedEvent>, EventLogReadError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(EventLogReadError::Unavailable(error.into())),
     };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > MAX_PROTOCOL_EVENT_LOG_BYTES
-    {
-        return Err(invalid("AG-UI event log is unavailable"));
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(EventLogReadError::Unavailable(AppError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, "AG-UI event log is unavailable"),
+        )));
     }
-    let encoded = fs::read_to_string(path)?;
+    if metadata.len() > MAX_PROTOCOL_EVENT_LOG_BYTES {
+        return Err(EventLogReadError::Corrupt(
+            "AG-UI event log exceeds its storage limit",
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| EventLogReadError::Unavailable(error.into()))?;
+    let encoded = std::str::from_utf8(&bytes)
+        .map_err(|_| EventLogReadError::Corrupt("AG-UI event log is invalid"))?;
+    if !encoded.is_empty() && !encoded.ends_with('\n') {
+        return Err(EventLogReadError::Corrupt("AG-UI event log is incomplete"));
+    }
     let mut events = Vec::new();
     for line in encoded.lines() {
-        let entry: SequencedEvent =
-            serde_json::from_str(line).map_err(|_| invalid("AG-UI event log is invalid"))?;
+        let entry: SequencedEvent = serde_json::from_str(line)
+            .map_err(|_| EventLogReadError::Corrupt("AG-UI event log is invalid"))?;
+        validate_event(&entry.event).map_err(|error| {
+            if error.code == "protocol_schema_unavailable" {
+                EventLogReadError::Unavailable(protocol_schema_unavailable())
+            } else {
+                EventLogReadError::Corrupt("AG-UI event does not match the pinned protocol")
+            }
+        })?;
+        if let Some((thread_id, run_id)) = identity {
+            validate_event_identity(&entry.event, thread_id, run_id).map_err(|_| {
+                EventLogReadError::Corrupt("AG-UI event identity does not match its run")
+            })?;
+        }
         if entry.sequence != events.len() as u64 + 1
-            || protocol::validate_event(&entry.event).is_err()
             || (events.is_empty() && entry.event["type"] != "RUN_STARTED")
+            || (!events.is_empty() && entry.event["type"] == "RUN_STARTED")
             || events
                 .last()
                 .is_some_and(|last: &SequencedEvent| is_terminal_event(&last.event))
         {
-            return Err(invalid("AG-UI event log ordering is invalid"));
+            return Err(EventLogReadError::Corrupt(
+                "AG-UI event log ordering is invalid",
+            ));
         }
         events.push(entry);
     }
@@ -1979,5 +2196,743 @@ mod configure_tests {
             assert!(kept.affected_run_ids.is_empty());
             assert_eq!(ledger.epoch, initial_epoch + 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod protocol_failure_tests {
+    use super::*;
+
+    fn owner() -> Owner {
+        Owner {
+            app_id: format!("a{}", "1".repeat(32)),
+            release_digest: "a".repeat(64),
+            invocation_id: "page".into(),
+        }
+    }
+
+    fn input(request_id: &str) -> Input {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "protocolThreadId": "thread-1",
+            "prompt": "Do the requested work"
+        }))
+        .unwrap()
+    }
+
+    fn setup() -> (tempfile::TempDir, AgentStore, Owner) {
+        let root = tempfile::tempdir().unwrap();
+        let store = AgentStore::open(root.path()).unwrap();
+        let owner = owner();
+        let settings = serde_json::from_value(json!({
+            "model": {"providerId": "provider", "modelId": "model"},
+            "tools": {}, "skills": [], "background": false,
+            "maxTurns": 4, "timeoutMs": 30_000
+        }))
+        .unwrap();
+        store.configure(owner.clone(), Some(settings)).unwrap();
+        (root, store, owner)
+    }
+
+    fn started_event(request_id: &str) -> Vec<u8> {
+        serde_json::to_vec(&SequencedEvent {
+            sequence: 1,
+            event: json!({"type":"RUN_STARTED", "protocolVersion":"1.0",
+                         "threadId":"thread-1", "runId":request_id}),
+        })
+        .unwrap()
+    }
+
+    fn encode_events(events: Vec<Value>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (index, event) in events.into_iter().enumerate() {
+            bytes.extend(
+                serde_json::to_vec(&SequencedEvent {
+                    sequence: index as u64 + 1,
+                    event,
+                })
+                .unwrap(),
+            );
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    #[test]
+    fn failed_unstarted_event_preserves_bytes_and_does_not_replay() {
+        let mut complete = started_event("failed-run");
+        complete.push(b'\n');
+        let cases = [
+            Some(b"{\"sequence\":1,\"event\":".to_vec()),
+            Some(started_event("failed-run")),
+            Some(Vec::new()),
+            // A complete row may still have failed during sync_data.
+            Some(complete),
+            None,
+        ];
+        for bytes in cases {
+            let (root, store, owner) = setup();
+            let original = input("failed-run");
+            let run = store.admit(&owner, &original, &[]).unwrap().task;
+            let path = store.event_path(&run.run_id).unwrap();
+            if let Some(bytes) = &bytes {
+                fs::write(&path, bytes).unwrap();
+            }
+
+            let interrupted = store
+                .interrupt_unstarted_protocol_admission(&owner, &run.run_id)
+                .unwrap();
+            assert_eq!(interrupted.state, State::Interrupted);
+            assert!(interrupted.result.is_none());
+            assert_eq!(
+                interrupted.error.unwrap().code,
+                PROTOCOL_EVENT_STORAGE_FAILED
+            );
+            assert!(store.protocol_events(&owner, "failed-run", 0).is_err());
+            assert!(store
+                .append_event(
+                    &owner,
+                    &run.run_id,
+                    json!({
+                        "type":"RUN_STARTED", "threadId":"thread-1", "runId":"failed-run"
+                    })
+                )
+                .is_err());
+            assert!(!store.admit(&owner, &original, &[]).unwrap().start);
+            drop(store);
+
+            for _ in 0..2 {
+                let store = AgentStore::open(root.path()).unwrap();
+                let recovered = store.get_by_request(&owner, "failed-run").unwrap();
+                assert_eq!(recovered.state, State::Interrupted);
+                assert_eq!(recovered.error.unwrap().code, PROTOCOL_EVENT_STORAGE_FAILED);
+                assert!(store.protocol_events(&owner, "failed-run", 0).is_err());
+                match &bytes {
+                    Some(expected) => assert_eq!(&fs::read(&path).unwrap(), expected),
+                    None => assert!(!path.exists()),
+                }
+                drop(store);
+            }
+            let store = AgentStore::open(root.path()).unwrap();
+            assert!(store.admit(&owner, &input("new-run"), &[]).unwrap().start);
+        }
+    }
+
+    #[test]
+    fn reopen_isolates_a_corrupt_or_empty_run_without_changing_its_bytes() {
+        let cases = [
+            b"{\"sequence\":1,\"event\":".to_vec(),
+            started_event("damaged-run"),
+            Vec::new(),
+        ];
+        for bytes in cases {
+            let (root, store, owner) = setup();
+            let run = store
+                .admit(&owner, &input("damaged-run"), &[])
+                .unwrap()
+                .task;
+            let path = store.event_path(&run.run_id).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            drop(store);
+
+            for _ in 0..2 {
+                let store = AgentStore::open(root.path()).unwrap();
+                let task = store.get_by_request(&owner, "damaged-run").unwrap();
+                assert_eq!(task.state, State::Interrupted);
+                assert_eq!(task.error.unwrap().code, PROTOCOL_EVENT_STORAGE_FAILED);
+                assert!(store.protocol_events(&owner, "damaged-run", 0).is_err());
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                drop(store);
+            }
+            let store = AgentStore::open(root.path()).unwrap();
+            assert!(
+                store
+                    .admit(&owner, &input("another-run"), &[])
+                    .unwrap()
+                    .start
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_identities_and_duplicate_started_are_isolated() {
+        let started = json!({"type":"RUN_STARTED", "threadId":"thread-1", "runId":"damaged-run"});
+        let finished = json!({"type":"RUN_FINISHED", "threadId":"thread-1", "runId":"damaged-run"});
+        let cases = [
+            vec![json!({"type":"RUN_STARTED", "threadId":"other", "runId":"damaged-run"})],
+            vec![
+                started.clone(),
+                json!({"type":"RUN_FINISHED", "threadId":"thread-1", "runId":"other"}),
+            ],
+            vec![started.clone(), started.clone(), finished.clone()],
+        ];
+        for events in cases {
+            let (root, store, owner) = setup();
+            let run = store
+                .admit(&owner, &input("damaged-run"), &[])
+                .unwrap()
+                .task;
+            let path = store.event_path(&run.run_id).unwrap();
+            let bytes = encode_events(events);
+            fs::write(&path, &bytes).unwrap();
+            assert!(store.protocol_events(&owner, "damaged-run", 0).is_err());
+            assert!(store
+                .append_event(&owner, &run.run_id, finished.clone())
+                .is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            drop(store);
+
+            let reopened = AgentStore::open(root.path()).unwrap();
+            let task = reopened.get_by_request(&owner, "damaged-run").unwrap();
+            assert_eq!(task.state, State::Interrupted);
+            assert_eq!(task.error.unwrap().code, PROTOCOL_EVENT_STORAGE_FAILED);
+            assert!(reopened.protocol_events(&owner, "damaged-run", 0).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn unavailable_event_reader_does_not_mutate_the_ledger() {
+        let (root, store, owner) = setup();
+        let run = store
+            .admit(&owner, &input("unavailable-run"), &[])
+            .unwrap()
+            .task;
+        store
+            .append_event(
+                &owner,
+                &run.run_id,
+                json!({
+                    "type":"RUN_STARTED", "threadId":"thread-1", "runId":"unavailable-run"
+                }),
+            )
+            .unwrap();
+        let event_path = store.event_path(&run.run_id).unwrap();
+        let ledger_path = store.path.clone();
+        let ledger_before = fs::read(&ledger_path).unwrap();
+        let event_before = fs::read(&event_path).unwrap();
+        drop(store);
+
+        let error = AgentStore::open_with_event_validator(root.path(), |_| {
+            Err(protocol::ProtocolError {
+                code: "protocol_schema_unavailable",
+                message: "schema unavailable",
+            })
+        });
+        assert!(matches!(error, Err(AppError::Io(_))));
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
+        assert_eq!(fs::read(&event_path).unwrap(), event_before);
+
+        let error = AgentStore::open_with_event_validator(root.path(), |event| {
+            if event["runId"] == "unavailable-run" {
+                Err(protocol::ProtocolError {
+                    code: "protocol_schema_unavailable",
+                    message: "schema unavailable",
+                })
+            } else {
+                protocol::validate_event(event)
+            }
+        });
+        assert!(matches!(error, Err(AppError::Io(_))));
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
+        assert_eq!(fs::read(&event_path).unwrap(), event_before);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&event_path, fs::Permissions::from_mode(0o000)).unwrap();
+            // A privileged test runner may still be able to read mode 000.
+            if fs::read(&event_path).is_err() {
+                assert!(matches!(
+                    AgentStore::open(root.path()),
+                    Err(AppError::Io(_))
+                ));
+                assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
+            }
+            fs::set_permissions(&event_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let backup = event_path.with_extension("test-backup");
+        fs::rename(&event_path, &backup).unwrap();
+        fs::create_dir(&event_path).unwrap();
+        assert!(matches!(
+            AgentStore::open(root.path()),
+            Err(AppError::Io(_))
+        ));
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
+        fs::remove_dir(&event_path).unwrap();
+        fs::rename(&backup, &event_path).unwrap();
+
+        // The file becomes unavailable after the first successful read, while
+        // recovery is about to append a terminal event.
+        let changed = std::cell::Cell::new(false);
+        let error = AgentStore::open_with_event_validator(root.path(), |event| {
+            if event["runId"] == "unavailable-run" && !changed.replace(true) {
+                fs::rename(&event_path, &backup).unwrap();
+                fs::create_dir(&event_path).unwrap();
+            }
+            protocol::validate_event(event)
+        });
+        assert!(matches!(error, Err(AppError::Io(_))));
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
+        fs::remove_dir(&event_path).unwrap();
+        fs::rename(&backup, &event_path).unwrap();
+        assert_eq!(fs::read(&event_path).unwrap(), event_before);
+
+        let reopened = AgentStore::open(root.path()).unwrap();
+        assert_eq!(
+            reopened
+                .get_by_request(&owner, "unavailable-run")
+                .unwrap()
+                .state,
+            State::Interrupted
+        );
+    }
+
+    #[test]
+    fn partial_multi_run_recovery_keeps_the_ledger_and_retries_only_event_recovery() {
+        let (root, store, owner) = setup();
+        let mut runs = Vec::new();
+        for request_id in ["recovery-a", "recovery-b"] {
+            let run = store.admit(&owner, &input(request_id), &[]).unwrap().task;
+            store
+                .append_event(
+                    &owner,
+                    &run.run_id,
+                    json!({
+                        "type":"RUN_STARTED", "threadId":"thread-1", "runId":request_id
+                    }),
+                )
+                .unwrap();
+            store
+                .update(
+                    &owner,
+                    &run.run_id,
+                    State::Failed,
+                    None,
+                    None,
+                    Some("agent_failed".into()),
+                )
+                .unwrap();
+            runs.push((
+                run.run_id.clone(),
+                request_id,
+                store.event_path(&run.run_id).unwrap(),
+            ));
+        }
+        runs.sort_by(|a, b| a.0.cmp(&b.0));
+        let first_path = runs[0].2.clone();
+        let second_path = runs[1].2.clone();
+        let second_request = runs[1].1;
+        let backup = second_path.with_extension("test-backup");
+        let first_before = fs::read(&first_path).unwrap();
+        let second_before = fs::read(&second_path).unwrap();
+        let ledger_path = store.path.clone();
+        let ledger_before = fs::read(&ledger_path).unwrap();
+        drop(store);
+
+        let changed = std::cell::Cell::new(false);
+        let error = AgentStore::open_with_event_validator(root.path(), |event| {
+            if event["runId"] == second_request && !changed.replace(true) {
+                fs::rename(&second_path, &backup).unwrap();
+                fs::create_dir(&second_path).unwrap();
+            }
+            protocol::validate_event(event)
+        });
+        assert!(matches!(error, Err(AppError::Io(_))));
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
+        let first_after = fs::read(&first_path).unwrap();
+        assert!(first_after.starts_with(&first_before));
+        assert!(first_after.len() > first_before.len());
+        assert_eq!(fs::read(&backup).unwrap(), second_before);
+        fs::remove_dir(&second_path).unwrap();
+        fs::rename(&backup, &second_path).unwrap();
+
+        let reopened = AgentStore::open(root.path()).unwrap();
+        for (_, request_id, _) in &runs {
+            assert_eq!(
+                reopened.get_by_request(&owner, request_id).unwrap().state,
+                State::Failed
+            );
+            let page = reopened.protocol_events(&owner, request_id, 0).unwrap();
+            assert_eq!(page.events.last().unwrap()["type"], "RUN_ERROR");
+            assert_eq!(page.events.last().unwrap()["code"], "agent_failed");
+            assert!(
+                !reopened
+                    .admit(&owner, &input(request_id), &[])
+                    .unwrap()
+                    .start
+            );
+        }
+    }
+
+    #[test]
+    fn reopening_a_corrupt_completed_run_cannot_report_success() {
+        let (root, store, owner) = setup();
+        let run = store
+            .admit(&owner, &input("completed-run"), &[])
+            .unwrap()
+            .task;
+        store
+            .append_event(
+                &owner,
+                &run.run_id,
+                json!({
+                    "type":"RUN_STARTED", "threadId":"thread-1", "runId":"completed-run"
+                }),
+            )
+            .unwrap();
+        let result = TaskResult {
+            text: "Previously persisted result evidence".into(),
+            output: Some(json!({"answer": 42})),
+            attachments: vec![],
+            chat_id: None,
+            message_id: None,
+        };
+        store
+            .update(
+                &owner,
+                &run.run_id,
+                State::Succeeded,
+                Some(result.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+        let path = store.event_path(&run.run_id).unwrap();
+        let corrupt = b"{\"sequence\":1,\"event\":";
+        fs::write(&path, corrupt).unwrap();
+        drop(store);
+
+        for _ in 0..2 {
+            let reopened = AgentStore::open(root.path()).unwrap();
+            let task = reopened.get_by_request(&owner, "completed-run").unwrap();
+            assert_eq!(task.state, State::Interrupted);
+            assert_eq!(task.result, Some(result.clone()));
+            assert_eq!(task.error.unwrap().code, PROTOCOL_EVENT_STORAGE_FAILED);
+            assert!(reopened
+                .protocol_events(&owner, "completed-run", 0)
+                .is_err());
+            assert_eq!(fs::read(&path).unwrap(), corrupt);
+        }
+        let reopened = AgentStore::open(root.path()).unwrap();
+        assert!(
+            reopened
+                .admit(&owner, &input("other-run"), &[])
+                .unwrap()
+                .start
+        );
+    }
+
+    #[test]
+    fn terminal_event_and_ledger_conflicts_never_report_success() {
+        let cases = [
+            (
+                State::Succeeded,
+                Some(json!({"answer":42})),
+                json!({
+                    "type":"RUN_ERROR", "message":"The task was interrupted.", "code":"protocol_terminal_missing"
+                }),
+            ),
+            (
+                State::Succeeded,
+                Some(Value::Null),
+                json!({
+                    "type":"RUN_ERROR", "message":"Null cannot be represented.", "code":"structured_output_not_representable"
+                }),
+            ),
+            (
+                State::Succeeded,
+                Some(Value::Null),
+                json!({
+                    "type":"RUN_FINISHED", "threadId":"thread-1", "runId":"conflict-run", "outcome":{"type":"success"}
+                }),
+            ),
+            (
+                State::Succeeded,
+                Some(json!({"answer":42})),
+                json!({
+                    "type":"RUN_FINISHED", "threadId":"thread-1", "runId":"conflict-run", "outcome":{"type":"success"}, "result":{"answer":99}
+                }),
+            ),
+            (
+                State::Failed,
+                None,
+                json!({
+                    "type":"RUN_FINISHED", "threadId":"thread-1", "runId":"conflict-run", "outcome":{"type":"success"}
+                }),
+            ),
+            (
+                State::Queued,
+                None,
+                json!({
+                    "type":"RUN_FINISHED", "threadId":"thread-1", "runId":"conflict-run", "outcome":{"type":"success"}
+                }),
+            ),
+        ];
+        for (state, output, terminal) in cases {
+            let (root, store, owner) = setup();
+            let run = store
+                .admit(&owner, &input("conflict-run"), &[])
+                .unwrap()
+                .task;
+            store
+                .append_event(
+                    &owner,
+                    &run.run_id,
+                    json!({
+                        "type":"RUN_STARTED", "threadId":"thread-1", "runId":"conflict-run"
+                    }),
+                )
+                .unwrap();
+            let evidence = (state == State::Succeeded).then(|| TaskResult {
+                text: "Saved evidence".into(),
+                output,
+                attachments: vec![],
+                chat_id: None,
+                message_id: None,
+            });
+            if state != State::Queued {
+                store
+                    .update(&owner, &run.run_id, state, evidence.clone(), None, None)
+                    .unwrap();
+            }
+            // The durable ledger still has the previous state when this
+            // terminal has already been written (e.g. crash before ledger sync).
+            store.append_event(&owner, &run.run_id, terminal).unwrap();
+            let path = store.event_path(&run.run_id).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            drop(store);
+            for _ in 0..2 {
+                let reopened = AgentStore::open(root.path()).unwrap();
+                let task = reopened.get_by_request(&owner, "conflict-run").unwrap();
+                assert_eq!(task.state, State::Interrupted);
+                assert_eq!(task.error.unwrap().code, PROTOCOL_TERMINAL_CONFLICT);
+                assert_eq!(task.result, evidence);
+                assert!(reopened.protocol_events(&owner, "conflict-run", 0).is_err());
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+            }
+            let reopened = AgentStore::open(root.path()).unwrap();
+            assert!(
+                reopened
+                    .admit(&owner, &input("next-run"), &[])
+                    .unwrap()
+                    .start
+            );
+        }
+    }
+
+    #[test]
+    fn matching_successful_terminal_remains_readable_after_restart() {
+        let (root, store, owner) = setup();
+        let run = store
+            .admit(&owner, &input("success-run"), &[])
+            .unwrap()
+            .task;
+        store
+            .append_event(
+                &owner,
+                &run.run_id,
+                json!({
+                    "type":"RUN_STARTED", "threadId":"thread-1", "runId":"success-run"
+                }),
+            )
+            .unwrap();
+        let result = TaskResult {
+            text: "Saved answer".into(),
+            output: Some(json!({"answer":42})),
+            attachments: vec![],
+            chat_id: None,
+            message_id: None,
+        };
+        store
+            .update(
+                &owner,
+                &run.run_id,
+                State::Succeeded,
+                Some(result.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .append_event(
+                &owner,
+                &run.run_id,
+                json!({
+                    "type":"RUN_FINISHED", "threadId":"thread-1", "runId":"success-run",
+                    "outcome":{"type":"success"}, "result":{"answer":42}
+                }),
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = AgentStore::open(root.path()).unwrap();
+        let task = reopened.get_by_request(&owner, "success-run").unwrap();
+        assert_eq!(task.state, State::Succeeded);
+        assert_eq!(task.result, Some(result));
+        let events = reopened.protocol_events(&owner, "success-run", 0).unwrap();
+        assert_eq!(events.events.last().unwrap()["type"], "RUN_FINISHED");
+    }
+
+    #[test]
+    fn full_started_bytes_and_failed_interruption_recover_as_host_restart() {
+        let (root, mut store, owner) = setup();
+        let original = input("uncertain-run");
+        let run = store.admit(&owner, &original, &[]).unwrap().task;
+        let event_path = store.event_path(&run.run_id).unwrap();
+        let mut started = started_event("uncertain-run");
+        started.push(b'\n');
+        fs::write(&event_path, &started).unwrap();
+
+        // Simulate a failed event sync and an independent ledger write failure.
+        let ledger_path = store.path.clone();
+        let blocked_path = ledger_path.with_extension("unwritable-directory");
+        fs::create_dir(&blocked_path).unwrap();
+        store.path = blocked_path;
+        assert!(store
+            .interrupt_unstarted_protocol_admission(&owner, &run.run_id)
+            .is_err());
+        assert_eq!(store.get(&owner, &run.run_id).unwrap().state, State::Queued);
+        store.path = ledger_path;
+        drop(store);
+
+        let reopened = AgentStore::open(root.path()).unwrap();
+        let task = reopened.get_by_request(&owner, "uncertain-run").unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(task.error.unwrap().code, "host_restarted");
+        assert!(!reopened.admit(&owner, &original, &[]).unwrap().start);
+        let page = reopened
+            .protocol_events(&owner, "uncertain-run", 0)
+            .unwrap();
+        assert_eq!(page.events.last().unwrap()["type"], "RUN_ERROR");
+        assert_eq!(page.events.last().unwrap()["code"], "host_restarted");
+        assert!(fs::read(&event_path).unwrap().starts_with(&started));
+    }
+
+    #[test]
+    fn interrupt_after_terminal_write_failure_retains_result_evidence() {
+        let (root, store, owner) = setup();
+        let run = store
+            .admit(&owner, &input("terminal-failure"), &[])
+            .unwrap()
+            .task;
+        store
+            .append_event(
+                &owner,
+                &run.run_id,
+                json!({
+                    "type":"RUN_STARTED", "threadId":"thread-1", "runId":"terminal-failure"
+                }),
+            )
+            .unwrap();
+        let result = TaskResult {
+            text: "Result evidence".into(),
+            output: Some(json!({"value":1})),
+            attachments: vec![],
+            chat_id: None,
+            message_id: None,
+        };
+        store
+            .update(
+                &owner,
+                &run.run_id,
+                State::Succeeded,
+                Some(result.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .with_protocol_commit(|| {
+                store.interrupt_after_protocol_failure(
+                    &owner,
+                    &run.run_id,
+                    PROTOCOL_EVENT_STORAGE_FAILED,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let path = store.event_path(&run.run_id).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        drop(store);
+
+        let reopened = AgentStore::open(root.path()).unwrap();
+        let task = reopened.get_by_request(&owner, "terminal-failure").unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(task.result, Some(result));
+        assert!(reopened
+            .protocol_events(&owner, "terminal-failure", 0)
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn failed_interrupt_does_not_release_the_queued_admission() {
+        let (_root, mut store, owner) = setup();
+        let run = store
+            .admit(&owner, &input("blocked-run"), &[])
+            .unwrap()
+            .task;
+        let blocked_path = store.path.with_extension("unwritable-directory");
+        fs::create_dir(&blocked_path).unwrap();
+        store.path = blocked_path;
+
+        assert!(store
+            .interrupt_unstarted_protocol_admission(&owner, &run.run_id)
+            .is_err());
+        assert_eq!(store.get(&owner, &run.run_id).unwrap().state, State::Queued);
+        assert!(matches!(
+            store.admit(&owner, &input("new-run"), &[]),
+            Err(AppError::Busy(_))
+        ));
+    }
+
+    #[test]
+    fn rollback_keeps_empty_event_file_even_if_it_cannot_be_unlinked() {
+        let (root, store, owner) = setup();
+        let original = input("rollback-run");
+        let run = store.admit(&owner, &original, &[]).unwrap().task;
+        let path = store.event_path(&run.run_id).unwrap();
+        fs::write(&path, []).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&store.events_root, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let result = store.rollback_queued_admission(&owner, &run.run_id);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&store.events_root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        result.unwrap();
+        assert!(path.is_file());
+        assert!(fs::read(&path).unwrap().is_empty());
+        assert!(store.get_by_request(&owner, "rollback-run").is_err());
+        drop(store);
+        let reopened = AgentStore::open(root.path()).unwrap();
+        assert!(reopened.admit(&owner, &original, &[]).unwrap().start);
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn unstarted_failure_api_rejects_an_active_run() {
+        let (_root, store, owner) = setup();
+        let run = store.admit(&owner, &input("active-run"), &[]).unwrap().task;
+        store
+            .update(&owner, &run.run_id, State::Running, None, None, None)
+            .unwrap();
+        assert!(store
+            .interrupt_unstarted_protocol_admission(&owner, &run.run_id)
+            .is_err());
+        assert_eq!(
+            store.get(&owner, &run.run_id).unwrap().state,
+            State::Running
+        );
+        assert!(matches!(
+            store.admit(&owner, &input("new-run"), &[]),
+            Err(AppError::Busy(_))
+        ));
     }
 }
