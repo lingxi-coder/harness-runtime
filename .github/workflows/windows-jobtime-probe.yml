@@ -9,7 +9,12 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
+      - name: Enable long paths
+        shell: pwsh
+        run: git config --global core.longpaths true
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: validation/windows-jobtime-probe
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Compile isolated Win32 probe
         shell: pwsh
