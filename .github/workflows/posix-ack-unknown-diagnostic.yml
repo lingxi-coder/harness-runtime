@@ -1,0 +1,61 @@
+name: Background ack failure ownership diagnostic
+on:
+  push:
+    branches: [codex/media-posix-ack-unknown-20261028]
+permissions:
+  contents: read
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  ack-failure:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Build shell tests
+        run: cargo test --locked -p tool-shell --lib --no-run
+      - name: Verify live process, output and original error
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test_name in failed_background_ack_keeps_live_child_and_output_unverified background_registration_and_pid_binding_precede_detachment_ack; do
+            timeout 45s cargo test --locked -p tool-shell --lib "bash::tests::$test_name" -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/$test_name.log"
+            grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/$test_name.log"
+          done
+      - name: Demonstrate legacy false killed state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/tools/shell/src/bash.rs')
+          text = path.read_text()
+          begin = text.index('                // This remains a stop request, not an exit receipt.')
+          end = text.index('            }\n            // An owned launch', begin)
+          legacy = '''                let _ = self.ctx.process.kill(handle).await;
+                  if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
+                      let _ = registry.settle_background_bash(id, None, true).await;
+                      registry.discard_bash_output(id).await;
+                  }
+          '''
+          path.write_text(text[:begin] + legacy + text[end:])
+          PY
+          set +e
+          timeout 45s cargo test --locked -p tool-shell --lib bash::tests::failed_background_ack_keeps_live_child_and_output_unverified -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/legacy-ack.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -eq 0 ] || [ "$code" -eq 124 ]; then echo "legacy negative control did not fail normally: $code"; exit 1; fi
+          grep -F 'live child was marked terminal' "$RUNNER_TEMP/legacy-ack.log"
+          grep -F 'test result: FAILED. 0 passed; 1 failed; 0 ignored' "$RUNNER_TEMP/legacy-ack.log"
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posix-ack-unknown-diagnostic
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: ignore

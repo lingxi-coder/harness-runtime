@@ -2663,11 +2663,17 @@ impl BashTool {
         .await;
         if let Err(error) = result {
             if !preserve_owned_cleanup {
-                let _ = self.ctx.process.kill(handle).await;
-                if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
-                    let _ = registry.settle_background_bash(id, None, true).await;
-                    registry.discard_bash_output(id).await;
-                }
+                // This remains a stop request, not an exit receipt. A failed
+                // signal or an accepted signal can both leave a live process.
+                // Keep the row, output and existing process owner in place.
+                let stop_observation = match self.ctx.process.kill(handle).await {
+                    Ok(()) => "stop request accepted".to_string(),
+                    Err(stop_error) => format!("stop request failed: {stop_error}"),
+                };
+                return Err(ToolError::Io(
+                    format!("{error}; background termination is unverified ({stop_observation})")
+                        .into(),
+                ));
             }
             // An owned launch is already tracked by the host request. The
             // registration error is not an exit receipt: its background sink
@@ -7497,6 +7503,8 @@ mod tests {
     struct RecordingRegistry {
         fail_register: bool,
         fail_bind: bool,
+        output_root: Option<std::path::PathBuf>,
+        settled: std::sync::Mutex<Vec<(String, bool)>>,
         bound_pids: std::sync::Mutex<Vec<u32>>,
         output_chunks: std::sync::Mutex<Vec<(String, String)>>,
         output_flushes: std::sync::Mutex<Vec<String>>,
@@ -7510,6 +7518,12 @@ mod tests {
             )>,
         >,
         bound: std::sync::Mutex<Vec<String>>,
+        killers: std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
+            >,
+        >,
         discarded: std::sync::Mutex<Vec<String>>,
         armed: std::sync::Mutex<Vec<String>>,
         requesters: std::sync::Mutex<Vec<String>>,
@@ -7800,7 +7814,10 @@ mod tests {
             self.allocated.lock().unwrap().push(id.clone());
             Ok(lingxi_core::host::task_registry::BackgroundBashHandle {
                 task_id: id,
-                output_path: "/session/tasks/b1a2b3c4d.output".to_string(),
+                output_path: self.output_root.as_ref().map_or_else(
+                    || "/session/tasks/b1a2b3c4d.output".to_string(),
+                    |root| root.join("b1a2b3c4d.output").display().to_string(),
+                ),
             })
         }
         async fn allocate_owned_bash_output(
@@ -7837,7 +7854,22 @@ mod tests {
                 .contains_key(task_id)
             {
                 self.discarded.lock().unwrap().push(task_id.to_string());
+                if let Some(root) = &self.output_root {
+                    let _ = std::fs::remove_file(root.join(format!("{task_id}.output")));
+                }
             }
+        }
+        async fn settle_background_bash(
+            &self,
+            task_id: &str,
+            _exit_code: Option<i32>,
+            killed: bool,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+            self.settled
+                .lock()
+                .unwrap()
+                .push((task_id.to_owned(), killed));
+            Ok(())
         }
         async fn bind_background_process(
             &self,
@@ -7859,9 +7891,10 @@ mod tests {
         async fn bind_background_killer(
             &self,
             id: &str,
-            _killer: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
+            killer: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
         ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             self.bound.lock().unwrap().push(id.to_string());
+            self.killers.lock().unwrap().insert(id.to_string(), killer);
             Ok(())
         }
     }
@@ -8308,6 +8341,131 @@ mod tests {
             .unwrap()
             .contains_key("bpromoted"));
         assert!(registry.unarmed.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_background_ack_keeps_live_child_and_output_unverified() {
+        struct LiveAckRunner {
+            child: tokio::sync::Mutex<Option<tokio::process::Child>>,
+            pretend_accepted: bool,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for LiveAckRunner {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn spawn_background(
+                &self,
+                command: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                let binding = command.background_task().expect("bound output identity");
+                std::fs::write(&binding.output_path, b"live child output\n").unwrap();
+                let mut process = tokio::process::Command::new("sleep");
+                process.arg("30").kill_on_drop(true);
+                let child = process.spawn().unwrap();
+                let pid = child.id().unwrap();
+                *self.child.lock().await = Some(child);
+                Ok(ProcessHandle {
+                    task_id: binding.task_id.clone(),
+                    pid,
+                })
+            }
+            async fn acknowledge_shell(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Err(ProcessError::Io("fixture acknowledgement failed".into()))
+            }
+            async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+                assert_eq!(
+                    self.child.lock().await.as_ref().unwrap().id(),
+                    Some(handle.pid)
+                );
+                if self.pretend_accepted {
+                    Ok(()) // An accepted request is deliberately not exit proof.
+                } else {
+                    Err(ProcessError::Io("fixture permission denied".into()))
+                }
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        for pretend_accepted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let registry = Arc::new(RecordingRegistry {
+                output_root: Some(directory.path().to_owned()),
+                ..Default::default()
+            });
+            let runner = Arc::new(LiveAckRunner {
+                child: tokio::sync::Mutex::new(None),
+                pretend_accepted,
+            });
+            let mut ctx = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            ctx.process = runner.clone();
+            ctx.task_registry = Some(registry.clone());
+            let result = BashTool::new(ctx)
+                .call(
+                    source_json!({"command":"sleep 30", "run_in_background":true}),
+                    use_ctx(),
+                    fresh_tx(),
+                )
+                .await;
+            let error = format!(
+                "{:?}",
+                result.err().expect("ack failure must remain an error")
+            );
+            assert!(error.contains("fixture acknowledgement failed"));
+            assert!(error.contains("termination is unverified"));
+            assert!(registry.killers.lock().unwrap().contains_key("b1a2b3c4d"));
+            let weak_runner = Arc::downgrade(&runner);
+            drop(runner);
+            let retained_runner = weak_runner
+                .upgrade()
+                .expect("registered killer must retain the process owner");
+            let mut child = retained_runner.child.lock().await;
+            let child = child.as_mut().unwrap();
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "exact child must still be live"
+            );
+            assert!(
+                registry.settled.lock().unwrap().is_empty(),
+                "live child was marked terminal"
+            );
+            assert!(
+                registry.discarded.lock().unwrap().is_empty(),
+                "unverified output was discarded"
+            );
+            assert_eq!(registry.registered.lock().unwrap().len(), 1);
+            assert_eq!(
+                registry.bound_pids.lock().unwrap().as_slice(),
+                [child.id().unwrap()]
+            );
+            assert_eq!(
+                std::fs::read(directory.path().join("b1a2b3c4d.output"))
+                    .expect("unverified output was discarded"),
+                b"live child output\n"
+            );
+            assert!(error.contains("termination is unverified"));
+            assert!(error.contains(if pretend_accepted {
+                "stop request accepted"
+            } else {
+                "fixture permission denied"
+            }));
+            tokio::time::timeout(Duration::from_secs(5), child.kill())
+                .await
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+        }
     }
 
     #[tokio::test]
