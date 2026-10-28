@@ -39,6 +39,8 @@ jobs:
           grep -F 'real_worker_held_drop_after_callback_result_fences_before_next_action ... ok' "$RUNNER_TEMP/held-drop.log"
           cargo test --locked -p hooks --lib real_worker_held_drop_after_finalize_ack_revokes_worker_environment -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/finalize-ack-drop.log"
           grep -F 'real_worker_held_drop_after_finalize_ack_revokes_worker_environment ... ok' "$RUNNER_TEMP/finalize-ack-drop.log"
+          cargo test --locked -p hooks --lib real_worker_finalize_failure_returns_unknown_and_revokes_environment -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/finalize-failure.log"
+          grep -F 'real_worker_finalize_failure_returns_unknown_and_revokes_environment ... ok' "$RUNNER_TEMP/finalize-failure.log"
       - name: Run held Worker and sink admission tests
         shell: bash
         run: |
@@ -48,6 +50,8 @@ jobs:
           cargo test --locked -p hooks --lib real_worker_callback_with_ -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/worker-receipt.log"
           grep -F 'real_worker_callback_with_default_sink_has_unknown_outcome ... ok' "$RUNNER_TEMP/worker-receipt.log"
           grep -F 'real_worker_callback_with_accepting_sink_returns_updated_frame ... ok' "$RUNNER_TEMP/worker-receipt.log"
+          cargo test --locked -p hooks --lib real_worker_accepted_callback_render_fault_returns_unknown -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/render-fault.log"
+          grep -F 'real_worker_accepted_callback_render_fault_returns_unknown ... ok' "$RUNNER_TEMP/render-fault.log"
           cargo test --locked -p hooks --lib weak_session_frame_admission_reports_dead_owner_and_sink_result -- --nocapture | tee "$RUNNER_TEMP/weak-receipt.log"
           grep -F 'weak_session_frame_admission_reports_dead_owner_and_sink_result ... ok' "$RUNNER_TEMP/weak-receipt.log"
       - name: Run runHeld v3 host lifecycle

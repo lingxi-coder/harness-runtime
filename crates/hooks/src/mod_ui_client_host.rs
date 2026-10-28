@@ -259,6 +259,8 @@ pub(super) struct ClientUiHostState {
     held_result_received: AtomicU64,
     #[cfg(test)]
     finalize_gate: StdMutex<Option<ClientHeldFinalizeGate>>,
+    #[cfg(test)]
+    fail_finalize_after_ack: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -292,6 +294,7 @@ pub(super) struct ClientPostActionGuard {
     receiver: mpsc::UnboundedReceiver<ClientPostAck>,
     cancellation: CancellationToken,
     settled: bool,
+    pub(super) dispatch_attempted: bool,
 }
 
 impl ClientPostActionGuard {
@@ -536,6 +539,7 @@ impl ClientPostAckRegistry {
             receiver,
             cancellation,
             settled: false,
+            dispatch_attempted: false,
         })
     }
 
@@ -676,6 +680,8 @@ struct ParentUiPressAction {
 }
 
 enum ClientWorkerOperationError {
+    // The Worker refused this operation before invoking it.
+    Busy,
     Fault {
         phase: String,
         reason: ExactHookText,
@@ -698,6 +704,9 @@ impl From<ModError> for ClientWorkerOperationError {
 impl From<ClientWorkerOperationError> for ModError {
     fn from(error: ClientWorkerOperationError) -> Self {
         match error {
+            ClientWorkerOperationError::Busy => ModError::Unavailable(
+                "Client shared environment is busy; operation was not executed".into(),
+            ),
             ClientWorkerOperationError::Fault { phase, reason }
             | ClientWorkerOperationError::UnknownFault { phase, reason } => {
                 ModError::Hook(format!("Client surface {phase} failed: {}", reason.display))
@@ -825,6 +834,9 @@ impl ClientHeldLease<'_> {
             "id":self.request.id, "kind":"ui.client.finalize", "postActionId":action_id,
         })).await?;
         let reply = self.host.receive(&mut self.request).await?;
+        // An ACK alone does not commit: the Host still has to verify that the
+        // original runtime and action remain current before returning a frame.
+        self.request.completed = false;
         #[cfg(test)]
         {
             let gate = { lock(&self.host.client_ui.finalize_gate).take() };
@@ -834,15 +846,21 @@ impl ClientHeldLease<'_> {
                 self.request.completed = false;
                 gate.entered.notify_one();
                 gate.release.notified().await;
-                self.request.completed = true;
+            }
+            if self.host.client_ui.fail_finalize_after_ack.swap(false, Ordering::SeqCst) {
+                return Err(ModError::Unavailable("injected finalize failure after Worker ACK".into()));
             }
         }
         if reply.string_at("/kind") != Some("ui.client.finalized") {
             self.request.completed = false;
             return Err(ModError::Unavailable("Client held action finalization failed with outcome unknown".into()));
         }
-        self.committed = true;
         Ok(())
+    }
+
+    fn commit(&mut self) {
+        self.request.completed = true;
+        self.committed = true;
     }
 }
 
@@ -3561,6 +3579,20 @@ impl ModHost {
         }
     }
 
+    fn unknown_held_response(
+        &self, owner: &ClientUiInstance, revision: u64, phase: &str, reason: &ExactHookText,
+    ) -> Utf16JsonProjection {
+        self.record_client_environment_fault(owner, phase, reason);
+        let mut response = worker_fault_response(
+            Some(&owner.runtime_id), revision, owner.key.identity.plugin(),
+            owner.key.identity.module(), phase, reason,
+        );
+        response.set_field("outcome", host_generated_json(json!({
+            "status":"unknown", "runtime":"unavailable",
+        }))).expect("worker fault response accepts an outcome object");
+        response
+    }
+
     fn claim_client_worker_fault_dispatch(&self, runtime_id: &str) -> bool {
         let mut data = lock(&self.client_ui.data);
         let Some(instance) = data.instances.get_mut(runtime_id) else {
@@ -3672,7 +3704,7 @@ impl ModHost {
         &self,
         operation: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ClientWorkerOperationError> {
-        self.run_client_worker_operation_inner(operation, None)
+        self.run_client_worker_operation_inner(operation, None, None)
             .await
             .map(|(result, _, _)| result)
     }
@@ -3681,8 +3713,9 @@ impl ModHost {
         &self,
         operation: Utf16JsonProjection,
         post_action: &mut ClientPostActionGuard,
+        client_environment_id: Option<String>,
     ) -> Result<(Utf16JsonProjection, u64, Option<RequestChannel>), ClientWorkerOperationError> {
-        self.run_client_worker_operation_inner(operation, Some(post_action))
+        self.run_client_worker_operation_inner(operation, Some(post_action), client_environment_id)
             .await
     }
 
@@ -3690,6 +3723,7 @@ impl ModHost {
         &self,
         operation: Utf16JsonProjection,
         post_action: Option<&mut ClientPostActionGuard>,
+        client_environment_id: Option<String>,
     ) -> Result<(Utf16JsonProjection, u64, Option<RequestChannel>), ClientWorkerOperationError> {
         let mut envelope = host_generated_json(json!({
             "kind":"ui.client.operation",
@@ -3701,7 +3735,7 @@ impl ModHost {
             })?;
         let cancellation = post_action.as_ref().map(|action| action.cancellation.clone());
         let mut request = if let Some(post_action) = post_action {
-            self.request_projection_for_client_post_action(envelope, post_action)
+            self.request_projection_for_client_post_action(envelope, post_action, client_environment_id)
                 .await?
         } else {
             self.request_projection(envelope).await?
@@ -3744,13 +3778,17 @@ impl ModHost {
             }
             Err(error) => return Err(error.into()),
         };
+        if cancellation.is_some() {
+            // Keep cancellation armed until the reply is proved to be a safe
+            // rejection or a fully committed held action.
+            request.completed = false;
+        }
         match reply.string_at("/kind") {
             Some("ui.client.result") => {
                 if reply.get_property("error").is_some() {
                     if reply.at_pointer("/error/busy").and_then(|value| value.as_bool()) == Some(true) {
-                        return Err(ClientWorkerOperationError::Host(ModError::Unavailable(
-                            "Client shared environment is busy; operation was not executed".into(),
-                        )));
+                        request.completed = true;
+                        return Err(ClientWorkerOperationError::Busy);
                     }
                     let phase = reply
                         .string_at("/error/phase")
@@ -3771,6 +3809,7 @@ impl ModHost {
                             phase: phase.to_owned(), reason,
                         });
                     }
+                    request.completed = true;
                     return Err(ClientWorkerOperationError::Fault {
                         phase: phase.to_owned(),
                         reason,
@@ -3782,15 +3821,18 @@ impl ModHost {
                     ))
                 })?;
                 let held_request = if cancellation.is_some()
-                    && result.at_pointer("/accepted").and_then(|value| value.as_bool()) == Some(true)
-                {
+                    && !matches!(client_run_held_result(&result),
+                        Ok(ClientRunHeldResult::Stale | ClientRunHeldResult::Rejected)) {
                     // ui.client.result is provisional; Drop must still send
                     // cancellation until a finalization acknowledgement.
                     request.completed = false;
                     #[cfg(test)]
                     self.client_ui.held_result_received.fetch_add(1, Ordering::SeqCst);
                     Some(request)
-                } else { None };
+                } else {
+                    request.completed = true;
+                    None
+                };
                 Ok((result, worker_epoch, held_request))
             }
             Some("error") => Err(ClientWorkerOperationError::Host(ModError::Hook(
@@ -4314,7 +4356,9 @@ impl ModHost {
         }
         let mut pending_held_request = None;
         let result = match if let Some(post_action) = post_action.as_mut() {
-            self.run_client_worker_operation_with_post_action(worker_operation, post_action)
+            self.run_client_worker_operation_with_post_action(
+                worker_operation, post_action, instance.worker_environment_id.clone(),
+            )
                 .await
                 .map(|(result, _worker_epoch, request)| {
                     pending_held_request = request;
@@ -4325,17 +4369,12 @@ impl ModHost {
         } {
             Ok(result) => result,
             Err(ClientWorkerOperationError::UnknownFault { phase, reason }) if kind == "runHeld" => {
-                // Record the Host fence before the response can reach a client;
-                // it blocks operations and background events for this VM.
-                self.record_client_environment_fault(&instance, &phase, &reason);
-                let mut response = worker_fault_response(
-                    Some(runtime_id), revision, instance.key.identity.plugin(),
-                    instance.key.identity.module(), &phase, &reason,
-                );
-                response.set_field("outcome", host_generated_json(json!({
-                    "status":"unknown", "runtime":"unavailable",
-                }))).map_err(|error| ModError::Protocol(error.to_string()))?;
-                return Ok(response);
+                return Ok(self.unknown_held_response(&instance, revision, &phase, &reason));
+            }
+            Err(ClientWorkerOperationError::Host(error))
+                if kind == "runHeld" && post_action.as_ref().is_some_and(|action| action.dispatch_attempted) => {
+                let reason = ExactHookText::from_text(&error.to_string());
+                return Ok(self.unknown_held_response(&instance, revision, "run", &reason));
             }
             Err(ClientWorkerOperationError::Fault { phase, reason }) if kind != "unmount" => {
                 self.record_client_worker_fault(runtime_id, &phase, &reason);
@@ -4354,15 +4393,28 @@ impl ModHost {
             request.cancel_client_environment_id = instance.worker_environment_id.clone();
             ClientHeldLease { host: self, owner: instance.clone(), request, committed: false }
         });
+        macro_rules! held_outcome_unknown {
+            ($error:expr) => {{
+                let reason = ExactHookText::from_text(&$error.to_string());
+                drop(held_lease.take());
+                return Ok(self.unknown_held_response(&instance, revision, "run", &reason));
+            }};
+        }
         if let Some(post_action) = post_action.as_mut() {
-            match client_run_held_result(&result)? {
+            let held_result = match client_run_held_result(&result) {
+                Ok(result) => result,
+                Err(error) => held_outcome_unknown!(error),
+            };
+            match held_result {
                 ClientRunHeldResult::Stale | ClientRunHeldResult::Rejected => {
                     return Ok(host_generated_json(
                         json!({"handled":false,"renderRevision":revision}),
                     ));
                 }
                 ClientRunHeldResult::Accepted(post_ids) => {
-                    post_action.wait_for_posts(&post_ids).await?;
+                    if let Err(error) = post_action.wait_for_posts(&post_ids).await {
+                        held_outcome_unknown!(error);
+                    }
                 }
             }
         }
@@ -4392,8 +4444,9 @@ impl ModHost {
                 "type":"render", "runtimeId":runtime_id, "generation":instance.worker_generation,
             }));
             if let Some(action) = post_action.as_ref() {
-                render_operation.set_field("postActionId", plain_text_projection(action.action_id()))
-                    .map_err(|error| ModError::Protocol(error.to_string()))?;
+                if let Err(error) = render_operation.set_field("postActionId", plain_text_projection(action.action_id())) {
+                    held_outcome_unknown!(error);
+                }
             }
             let rendered = match self
                 .run_client_worker_operation(render_operation)
@@ -4401,6 +4454,10 @@ impl ModHost {
             {
                 Ok(rendered) => rendered,
                 Err(ClientWorkerOperationError::Fault { phase, reason }) => {
+                    if kind == "runHeld" {
+                        drop(held_lease.take());
+                        return Ok(self.unknown_held_response(&instance, revision, &phase, &reason));
+                    }
                     return Ok(worker_fault_response(
                         Some(runtime_id),
                         revision,
@@ -4410,6 +4467,7 @@ impl ModHost {
                         &reason,
                     ));
                 }
+                Err(error) if kind == "runHeld" => held_outcome_unknown!(ModError::from(error)),
                 Err(error) => return Err(error.into()),
             };
             if rendered
@@ -4420,19 +4478,17 @@ impl ModHost {
                 if kind == "runHeld" {
                     // The callback already ran; a stale follow-up frame is
                     // not evidence that the action had no side effects.
-                    return Err(ModError::Unavailable(
-                        "Client runHeld was accepted but its follow-up frame is stale".into(),
-                    ));
+                    held_outcome_unknown!("Client runHeld was accepted but its follow-up frame is stale");
                 }
                 return Ok(host_generated_json(
                     json!({"handled":false,"renderRevision":revision}),
                 ));
             }
-            let frame = self
-                .frame_for_worker_result(runtime_id, revision, &plugin, &rendered)
-                .ok_or_else(|| {
-                    ModError::Protocol("Client operation produced no render frame".into())
-                })?;
+            let frame = match self.frame_for_worker_result(runtime_id, revision, &plugin, &rendered) {
+                Some(frame) => frame,
+                None if kind == "runHeld" => held_outcome_unknown!("Client operation produced no render frame"),
+                None => return Err(ModError::Protocol("Client operation produced no render frame".into())),
+            };
             if kind == "runHeld" {
                 let data = lock(&self.client_ui.data);
                 if !self.client_instance_is_current(&data, &instance)
@@ -4440,24 +4496,25 @@ impl ModHost {
                         .as_ref()
                         .is_some_and(|action| action.cancellation.is_cancelled())
                 {
-                    return Err(ModError::Unavailable(
-                        "Client runHeld completed after its runtime changed or was cancelled"
-                            .into(),
-                    ));
+                    drop(data);
+                    held_outcome_unknown!("Client runHeld completed after its runtime changed or was cancelled");
                 }
             }
             if kind == "runHeld" {
                 let action = post_action.as_ref().expect("runHeld has a post action");
-                let lease = held_lease.as_mut().ok_or_else(|| ModError::Protocol(
-                    "accepted Client runHeld has no pending finalization lease".into(),
-                ))?;
-                lease.finalize(action.action_id()).await?;
+                let Some(lease) = held_lease.as_mut() else {
+                    held_outcome_unknown!("accepted Client runHeld has no pending finalization lease");
+                };
+                if let Err(error) = lease.finalize(action.action_id()).await {
+                    held_outcome_unknown!(error);
+                }
                 let data = lock(&self.client_ui.data);
                 if !self.client_instance_is_current(&data, &instance) || action.cancellation.is_cancelled() {
-                    return Err(ModError::Unavailable(
-                        "Client runHeld finalized after its runtime changed or was cancelled".into(),
-                    ));
+                    drop(data);
+                    held_outcome_unknown!("Client runHeld finalized after its runtime changed or was cancelled");
                 }
+                drop(data);
+                lease.commit();
             }
             return Ok(frame);
         }
@@ -6598,8 +6655,12 @@ mod tests {
             assert_eq!(accepting.frames.lock().unwrap().iter().filter(|(runtime, frame)|
                 runtime == &runtime_id && frame.at_pointer("/fault").is_some()).count(), 1);
         } else {
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("outcome is unknown"), "{error}");
+            let response = test_value(&result.unwrap());
+            assert_eq!(response["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+            assert_eq!(response["runtimeId"], runtime_id);
+            assert_eq!(response["renderRevision"], revision);
+            assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
+                "frame admission failure fences the VM before the structured result");
             assert!(accepting.frames.lock().unwrap().is_empty());
         }
     }
@@ -6611,6 +6672,60 @@ mod tests {
     #[tokio::test]
     async fn real_worker_callback_with_accepting_sink_returns_updated_frame() {
         real_worker_frame_receipt(true).await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_accepted_callback_render_fault_returns_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Button, h } from 'claude:surface-runtime';
+          let callbackChangedState = false;
+          export function Card(_props, _surface) {
+            if (callbackChangedState) throw new Error('render observed callback mutation');
+            return h(Button, {key:'send', label:'Send', onPress:() => {callbackChangedState=true;}});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Client, h} = $.ui.resolve(event);
+              return h(Client, {key:'card', module:'./card.tsx', props:{}});
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let session_impl = Arc::new(UiLifecycleSession {root:directory.path().to_path_buf(), ..Default::default()});
+        let session: Arc<dyn ModSessionContext> = session_impl;
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let render = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"render-fault",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap();
+        let revision = render.render_revision.unwrap();
+        let mount = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"render-fault",
+            "plugin":"review", "client":"card", "module":"card.tsx", "render_revision":revision,
+            "columns":80, "rows":24,
+        })), session.as_ref()).await.unwrap();
+        let mounted = test_value(&mount);
+        let runtime_id = mounted["runtimeId"].as_str().unwrap().to_owned();
+        let handle = tree_press_handle_for_key(&mounted["tree"], "send").unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"render-fault",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let result = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"runHeld", "runtimeId":runtime_id, "render_revision":revision, "handle":handle,
+        })), session.as_ref()).await.unwrap();
+        let response = test_value(&result);
+        assert_eq!(response["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+        assert!(response["fault"]["reason"].as_str().unwrap().contains("render observed callback mutation"));
+        assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some());
     }
 
 
@@ -6767,15 +6882,20 @@ mod tests {
 
     #[tokio::test]
     async fn real_worker_held_drop_after_callback_result_fences_before_next_action() {
-        real_worker_held_drop_fences_before_next_action(false).await;
+        real_worker_held_drop_fences_before_next_action(false, false).await;
     }
 
     #[tokio::test]
     async fn real_worker_held_drop_after_finalize_ack_revokes_worker_environment() {
-        real_worker_held_drop_fences_before_next_action(true).await;
+        real_worker_held_drop_fences_before_next_action(true, false).await;
     }
 
-    async fn real_worker_held_drop_fences_before_next_action(after_finalize_ack: bool) {
+    #[tokio::test]
+    async fn real_worker_finalize_failure_returns_unknown_and_revokes_environment() {
+        real_worker_held_drop_fences_before_next_action(true, true).await;
+    }
+
+    async fn real_worker_held_drop_fences_before_next_action(after_finalize_ack: bool, fail_finalize: bool) {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
         let entry = directory.path().join("register.tsx");
@@ -6829,7 +6949,9 @@ mod tests {
         })), session.as_ref()).await.unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        if after_finalize_ack {
+        if fail_finalize {
+            host.client_ui.fail_finalize_after_ack.store(true, Ordering::SeqCst);
+        } else if after_finalize_ack {
             *lock(&host.client_ui.finalize_gate) = Some(ClientHeldFinalizeGate {
                 entered: entered.clone(), release: release.clone(),
             });
@@ -6847,15 +6969,34 @@ mod tests {
         let task = tokio::spawn(async move {
             host_task.dispatch_client_ui_operation(operation, session_task.as_ref()).await
         });
-        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while host.client_ui.held_result_received.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
+        if fail_finalize {
+            let response = tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
+            let response = test_value(&response);
+            assert_eq!(response["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+            assert_eq!(response["runtimeId"], runtime_id);
+            assert_eq!(response["renderRevision"], revision);
+            assert!(lock(&session_impl.frames).iter().any(|(id, frame)| {
+                id == &runtime_id && tree_contains_text(&frame["tree"], "after effect")
+            }), "the callback's post reached the frame sink before finalization failed");
+        } else {
+            tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while host.client_ui.held_result_received.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("the Worker callback result was already received before dropping the Host future");
+            assert!(!task.is_finished(), "the selected Host completion boundary is held");
+            if !after_finalize_ack {
+                let busy = host.dispatch_client_ui_operation(host_generated_json(json!({
+                    "type":"render", "runtimeId":runtime_id, "render_revision":revision,
+                })), session.as_ref()).await.unwrap_err();
+                assert!(busy.to_string().contains("operation was not executed"));
+                assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_none(),
+                    "a Worker refusal before execution must not fence a healthy VM");
             }
-        }).await.expect("the Worker callback result was already received before dropping the Host future");
-        assert!(!task.is_finished(), "the selected Host completion boundary is held");
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
         assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
             "dropping an unfinalized lease synchronously fences the Host runtime");
         release.notify_one();
@@ -6869,7 +7010,7 @@ mod tests {
         if after_finalize_ack {
             let worker_result = host.run_client_worker_operation(host_generated_json(json!({
                 "type":"render", "runtimeId":runtime_id, "generation":generation,
-            }))).await.unwrap();
+            }))).await.map_err(ModError::from).unwrap();
             assert_eq!(test_value(&worker_result), json!({"stale":true}),
                 "the late cancellation revoked the actual Worker VM, not only the Host state");
             let remount = host.dispatch_client_ui_operation(host_generated_json(json!({

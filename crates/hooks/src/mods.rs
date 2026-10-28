@@ -6793,6 +6793,7 @@ impl ModHost {
             generation_session,
             inherited_generation_context_ticket,
             None,
+            None,
         )
         .await
     }
@@ -6801,6 +6802,7 @@ impl ModHost {
         &self,
         message: Utf16JsonProjection,
         post_action: &mut client_ui_host::ClientPostActionGuard,
+        client_environment_id: Option<String>,
     ) -> Result<RequestChannel, ModError> {
         self.request_projection_inner(
             message,
@@ -6808,6 +6810,7 @@ impl ModHost {
             None,
             None,
             Some(post_action),
+            client_environment_id,
         )
         .await
     }
@@ -6818,7 +6821,8 @@ impl ModHost {
         api_origin: lingxi_core::host::task_registry::FieldPresence<Value>,
         generation_session: Option<Arc<dyn ModSessionContext>>,
         inherited_generation_context_ticket: Option<String>,
-        post_action: Option<&mut client_ui_host::ClientPostActionGuard>,
+        mut post_action: Option<&mut client_ui_host::ClientPostActionGuard>,
+        client_environment_id: Option<String>,
     ) -> Result<RequestChannel, ModError> {
         let epoch = self.current_worker_epoch().await;
         if projection_u64(&message, "/ownedWorkerEpoch")
@@ -6828,7 +6832,7 @@ impl ModHost {
                 "owned host Mod worker changed".into(),
             ));
         }
-        if let Some(post_action) = post_action {
+        if let Some(post_action) = post_action.as_deref_mut() {
             post_action.bind_worker_epoch(epoch.id)?;
         }
         let status = epoch.status.load(Ordering::Acquire);
@@ -6918,7 +6922,7 @@ impl ModHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, sender);
-        let channel = RequestChannel {
+        let mut channel = RequestChannel {
             id,
             cancel_client_environment_id: None,
             api_context_ticket: Some(ticket.as_str().to_owned()),
@@ -6938,6 +6942,12 @@ impl ModHost {
         let line = encode_mod_ipc_frame(&message)?
             .to_json_string()
             .map_err(|error| ModError::Protocol(error.to_string()))?;
+        if let Some(post_action) = post_action.as_deref_mut() {
+            // From the first attempted write onward a partial delivery cannot
+            // prove that the Worker did not invoke the callback.
+            post_action.dispatch_attempted = true;
+            channel.cancel_client_environment_id = client_environment_id;
+        }
         self.send_serialized(id, line.as_bytes()).await?;
         Ok(channel)
     }
