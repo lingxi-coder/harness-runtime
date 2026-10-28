@@ -7071,11 +7071,16 @@ mod tests {
         real_worker_background_timer_events(Some("frame")).await;
     }
 
+    #[tokio::test]
+    async fn real_worker_old_background_post_is_not_relabelled_to_new_revision() {
+        real_worker_background_timer_events(Some("revision")).await;
+    }
+
     async fn real_worker_background_timer_events(fence_mode: Option<&str>) {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
         let entry = directory.path().join("register.tsx");
-        std::fs::write(&child, r#"
+        let source = r#"
           import { Box, Button, Text, h } from 'claude:surface-runtime';
           export function Card(props, surface) {
             return h(Box, {children:[h(Text,{children:props.title}),
@@ -7083,11 +7088,14 @@ mod tests {
               h(Button,{key:'send',label:'Send',onPress:()=>{
                 surface.post({kind:'action'});
                 const stop=surface.every(5,()=>{
-                  stop(); surface.setState({timer:'timer-state'}); surface.post({kind:'timer'});
+                  stop(); surface.setState({timer:'timer-state'}); surface.post({kind:'timer'}); /*LATE_POST*/
                 });
               }})]});
           }
-        "#).unwrap();
+        "#.replace("/*LATE_POST*/", if fence_mode==Some("revision") {
+            "surface.post({kind:'late-old'});"
+        } else { "" });
+        std::fs::write(&child, source).unwrap();
         std::fs::write(&entry, r#"
           export function register(on) {
             on('ui.render', {surface:'desktop',component:'Pane'}, ($,event) => {
@@ -7095,6 +7103,10 @@ mod tests {
               return h(Client,{key:'card',module:'./card.tsx',props:{title:'initial'}});
             });
             on('ui.message', async ($,event) => {
+              if (event.data.kind === 'late-old') {
+                $.ui.log('late old event handled');
+                return {handled:true,props:{title:'late-old-frame'}};
+              }
               if (event.data.kind === 'timer') {
                 await $.session.model(); $.ui.log('background timer processed');
                 return {handled:true,props:{title:'timer-frame'}};
@@ -7150,6 +7162,35 @@ mod tests {
             "runtimeId":runtime_id,"render_revision":revision,"handle":handle})),session.as_ref()).await.unwrap_err();
         assert!(blocked.to_string().contains("operation was not executed"));
         assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_none());
+        if fence_mode == Some("revision") {
+            let newer=host.dispatch_client_ui_control(host_generated_json(json!({
+                "subtype":"ui_render","surface":"desktop","component":"Pane","instance_id":"background-test",
+                "props":{},"viewport":{"columns":80,"rows":24},
+            })),session.as_ref()).await.unwrap();
+            let new_revision=newer.render_revision.unwrap();
+            assert!(new_revision>revision);
+            host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"draw_commit","surface":"desktop","component":"Pane","instance_id":"background-test",
+                "render_revision":new_revision,"clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+            })),session.as_ref()).await.unwrap();
+            let busy=host.dispatch_client_ui_operation(host_generated_json(json!({"type":"render",
+                "runtimeId":runtime_id,"render_revision":new_revision})),session.as_ref()).await.unwrap_err();
+            assert!(busy.to_string().contains("operation was not executed"));
+            timer_release.notify_one();
+            tokio::time::timeout(Duration::from_secs(5),async {
+                loop {
+                    if lock(&session_impl.logs).iter().any(|line|line=="late old event handled")
+                        || lock(&session_impl.frames).iter().any(|(id,frame)| id==&runtime_id
+                            && frame.get("fault").is_some() && frame["renderRevision"]==new_revision) { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("either the stale event ran or its VM was fenced");
+            assert!(!lock(&session_impl.logs).iter().any(|line|line=="late old event handled"),
+                "an event queued under the old revision must not execute under the new revision");
+            assert!(!lock(&session_impl.frames).iter().any(|(id,frame)| id==&runtime_id
+                && frame["renderRevision"]==new_revision && tree_contains_text(&frame["tree"],"late-old-frame")));
+            return;
+        }
         let background_frame_entered=Arc::new(tokio::sync::Notify::new());
         let background_frame_release=Arc::new(tokio::sync::Notify::new());
         let background_frame_delivered=Arc::new(tokio::sync::Notify::new());
