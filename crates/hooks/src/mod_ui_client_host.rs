@@ -4534,8 +4534,11 @@ impl ModHost {
         macro_rules! held_outcome_unknown {
             ($error:expr) => {{
                 let reason = ExactHookText::from_text(&$error.to_string());
+                // Preserve the concrete failure before dropping the lease:
+                // its fallback fence must not replace the cause we observed.
+                let response = self.unknown_held_response(&instance, revision, "run", &reason);
                 drop(held_lease.take());
-                return Ok(self.unknown_held_response(&instance, revision, "run", &reason));
+                return Ok(response);
             }};
         }
         let mut callback_accepted = false;
@@ -4607,8 +4610,9 @@ impl ModHost {
                 Ok(rendered) => rendered,
                 Err(ClientWorkerOperationError::Fault { phase, reason }) => {
                     if callback_accepted {
+                        let response = self.unknown_held_response(&instance, revision, &phase, &reason);
                         drop(held_lease.take());
-                        return Ok(self.unknown_held_response(&instance, revision, &phase, &reason));
+                        return Ok(response);
                     }
                     return Ok(worker_fault_response(
                         Some(runtime_id),
@@ -8014,6 +8018,9 @@ mod tests {
             assert_eq!(response["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
             assert_eq!(response["runtimeId"], runtime_id);
             assert_eq!(response["renderRevision"], revision);
+            assert!(response["fault"]["reason"].as_str().unwrap()
+                .contains("injected finalize failure after Worker ACK"),
+                "the lease fallback must not replace the observed finalization failure");
             assert!(lock(&session_impl.frames).iter().any(|(id, frame)| {
                 id == &runtime_id && tree_contains_text(&frame["tree"], "after effect")
             }), "the callback's post reached the frame sink before finalization failed");
