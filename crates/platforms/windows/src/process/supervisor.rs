@@ -707,6 +707,108 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn unaccepted_or_stopped_output_handoff_retains_job_and_reports_unknown() {
+        for accepted in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let command = ProcessCommand {
+                command: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    DETACHED_HELPER.into(),
+                    "--exact".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: Some(fixture.path().to_path_buf()),
+                env: std::collections::HashMap::from([
+                    (
+                        test_env("DETACHED_JOB_TEST_DIR"),
+                        fixture.path().to_string_lossy().into_owned(),
+                    ),
+                    (test_env("DETACHED_JOB_HOLD_PIPE"), "1".into()),
+                ]),
+                timeout: Some(Duration::from_secs(5)),
+                stdin: None,
+            };
+            let (mut supervisor, mut stream, endpoint, nonce, _, _cleanup) =
+                start(command, None, false, fixture.path().join("release")).await;
+            let supervisor_pid = supervisor.id().unwrap();
+            wait_file(&fixture.path().join("started")).await;
+            let pid: u32 = std::fs::read_to_string(fixture.path().join("descendant.pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let held = native::hold_process_handle_for_test(pid).unwrap();
+            assert_eq!(native::process_handle_is_alive_for_test(&held), Some(true));
+            let response = tokio::time::timeout(Duration::from_secs(12), receive(&mut stream))
+                .await
+                .expect("output ownership was not offered");
+            let result: ForegroundRunResult =
+                serde_json::from_value(response["result"].clone()).unwrap();
+            assert!(matches!(
+                result.outcome,
+                ForegroundOutcome::MovedToBackground(_)
+            ));
+            if accepted {
+                send(
+                    &mut stream,
+                    serde_json::json!({"request":"Accepted", "nonce":nonce}),
+                )
+                .await;
+                assert_eq!(receive(&mut stream).await["response"], "Ack");
+                let stopped = rpc(
+                    &endpoint,
+                    supervisor_pid,
+                    serde_json::json!({"request":"Kill", "nonce":nonce}),
+                )
+                .await;
+                assert_eq!(stopped["response"], "Ack", "{stopped}");
+            } else {
+                // A missing handoff acknowledgement must stop, not release,
+                // the original Job while its output writer is still alive.
+                drop(stream);
+            }
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    match native::process_handle_is_alive_for_test(&held) {
+                        Some(false) => break,
+                        Some(true) => tokio::time::sleep(Duration::from_millis(10)).await,
+                        None => panic!("could not inspect original descendant handle"),
+                    }
+                }
+            })
+            .await
+            .expect("handoff stop did not terminate the held descendant");
+            let unknown = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let state = rpc(
+                        &endpoint,
+                        supervisor_pid,
+                        serde_json::json!({"request":"Inspect", "nonce":nonce}),
+                    )
+                    .await;
+                    if state["stop_cause"]
+                        .as_str()
+                        .is_some_and(|cause| cause.starts_with("wait_unverified:"))
+                    {
+                        break state;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("handoff stop did not report unknown cleanup");
+            assert_eq!(unknown["cleanup_verified"], false, "{unknown}");
+            supervisor.start_kill().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), supervisor.wait())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn real_supervisor_strict_cancel_reaps_the_payload_tree() {
         let fixture = tempfile::tempdir().unwrap();
         let command = ProcessCommand {

@@ -387,31 +387,35 @@ async fn terminate_and_reap(
 fn retain_until_reaped(
     mut child: tokio::process::Child,
     mut guard: StreamingProcessTreeGuard,
-    deadline: DrainDeadline,
+    mut deadline: DrainDeadline,
     lifetime_guard: Option<lingxi_core::host::BackendPlanHandle>,
     verified_sink: Option<(
         std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink>,
         String,
     )>,
+    defer_termination_until_stop: bool,
 ) {
     tokio::spawn(async move {
         #[cfg(windows)]
         if deadline.job.is_some() {
             // There is currently no way to upgrade an arbitrary resumed Job
-            // to a complete held-descendant proof. Keep the exact owner and
-            // lease, and keep later explicit stop requests actionable. The
-            // original Job remains held even after a termination attempt.
-            if let Some(stop) = verified_sink
-                .as_ref()
-                .and_then(|(sink, _)| sink.stop_notify())
-            {
-                loop {
-                    stop.notified().await;
-                    let _ = terminate_and_reap(&deadline, &mut child, &mut guard).await;
+            // to a complete held-descendant proof. A naturally ended output
+            // handoff keeps the Job alive until Stop; after Stop (or an
+            // earlier cleanup error), keep retrying termination, never proof.
+            if defer_termination_until_stop {
+                match verified_sink
+                    .as_ref()
+                    .and_then(|(sink, _)| sink.stop_notify())
+                {
+                    Some(stop) => stop.notified().await,
+                    None => std::future::pending::<()>().await,
                 }
             }
-            // Runtime/process loss remains a separate durability boundary.
-            std::future::pending::<()>().await;
+            loop {
+                deadline.terminated = false;
+                let _ = terminate_and_reap(&deadline, &mut child, &mut guard).await;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
         }
         loop {
             if terminate_and_reap(&deadline, &mut child, &mut guard)
@@ -474,7 +478,7 @@ async fn foreground_failure(
                 }
                 let lifetime_guard = cmd.lifetime_guard().cloned();
                 deadline.verify_lease |= lifetime_guard.is_some();
-                retain_until_reaped(child, guard, deadline, lifetime_guard, verified_sink);
+                retain_until_reaped(child, guard, deadline, lifetime_guard, verified_sink, false);
             }
             error
         }
@@ -1296,6 +1300,7 @@ pub(super) async fn run(
             false,
         )
         .await;
+        let defer_termination_until_stop = retain_after_output_eof && result.is_ok();
         let mut cleanup_verified = false;
         let status = match result {
             Ok(status) => {
@@ -1394,7 +1399,14 @@ pub(super) async fn run(
             // Reporting an unverified failure is bounded, but releasing a
             // backend mount while an owned process may still use it is not
             // safe. Keep the exact child/job/lease and retry independently.
-            retain_until_reaped(child, guard, deadline, lifetime_guard, verified_sink);
+            retain_until_reaped(
+                child,
+                guard,
+                deadline,
+                lifetime_guard,
+                verified_sink,
+                defer_termination_until_stop,
+            );
         } else {
             // The lease outlives the held process, payload job, and terminal
             // output notification, even without a task registry.
