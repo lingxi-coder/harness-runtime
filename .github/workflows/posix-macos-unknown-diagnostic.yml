@@ -1,0 +1,110 @@
+name: POSIX unknown cleanup diagnostic
+on:
+  push:
+    branches: [codex/media-posix-macos-unknown-20261028]
+permissions:
+  contents: read
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  real-permission:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Verify noninteractive fixture privilege
+        run: |
+          test "$(id -u)" -ne 0
+          sudo -n true
+      - name: Build actual platform tests
+        run: |
+          cargo test --locked -p platform-posix --test process_kill_permission_test --no-run
+          cargo test --locked -p platform-posix --lib --no-run
+      - name: Test errno classification without privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 45s cargo test --locked -p platform-posix --lib process::kill_tree::tests::only_esrch_means_no_matching_group -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/posix-eperm-unit.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/posix-eperm-unit.log"
+      - name: Test protected and permitted groups and absent group
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 45s cargo test --locked -p platform-posix --test process_kill_permission_test eperm_is_not_a_successful_tree_kill -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/posix-eperm.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/posix-eperm.log"
+      - name: Demonstrate prior EPERM false success
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('crates/platforms/posix/src/process/kill_tree.rs')
+          text = source.read_text()
+          fixed = 'matches!(e, nix::errno::Errno::ESRCH)'
+          old = 'matches!(e, nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM)'
+          assert text.count(fixed) == 1
+          source.write_text(text.replace(fixed, old, 1))
+          PY
+          set +e
+          timeout 45s cargo test --locked -p platform-posix --test process_kill_permission_test eperm_is_not_a_successful_tree_kill -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/posix-eperm-legacy.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -eq 0 ] || [ "$code" -eq 124 ]; then echo "legacy negative control did not fail normally: $code"; exit 1; fi
+          grep -F 'signal denied but kill_tree_force returned Ok while protected leader is alive' "$RUNNER_TEMP/posix-eperm-legacy.log"
+          grep -F 'test result: FAILED. 0 passed; 1 failed; 0 ignored' "$RUNNER_TEMP/posix-eperm-legacy.log"
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posix-eperm-diagnostic
+          path: ${{ runner.temp }}/posix-eperm*.log
+          if-no-files-found: ignore
+
+  held-zombie:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Build macOS platform tests
+        run: cargo test --locked -p platform-posix --lib --no-run
+      - name: Verify real held zombie remains unknown
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_name=process::kill_tree::tests::graceful_stop_reports_unknown_for_held_zombie
+          timeout 45s cargo test --locked -p platform-posix --lib "$test_name" -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/macos-zombie.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/macos-zombie.log"
+      - name: Verify old EPERM classification fails
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          path = Path('crates/platforms/posix/src/process/kill_tree.rs')
+          text = path.read_text()
+          fixed = 'matches!(e, nix::errno::Errno::ESRCH)'
+          old = 'matches!(e, nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM)'
+          assert text.count(fixed) == 1
+          path.write_text(text.replace(fixed, old, 1))
+          PYCODE
+          set +e
+          timeout 45s cargo test --locked -p platform-posix --lib process::kill_tree::tests::graceful_stop_reports_unknown_for_held_zombie -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/macos-zombie-legacy.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -eq 0 ] || [ "$code" -eq 124 ]; then echo "legacy negative control did not fail normally: $code"; exit 1; fi
+          grep -F 'numeric PGID must not turn EPERM into cleanup success' "$RUNNER_TEMP/macos-zombie-legacy.log"
+          grep -F 'test result: FAILED. 0 passed; 1 failed; 0 ignored' "$RUNNER_TEMP/macos-zombie-legacy.log"
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-held-zombie
+          path: ${{ runner.temp }}/macos-zombie*.log
+          if-no-files-found: ignore

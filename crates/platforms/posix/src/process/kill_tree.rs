@@ -53,7 +53,7 @@ pub fn kill_tree_force(pid: u32) -> Result<(), ProcessError> {
     match killpg(pgid, Signal::SIGKILL) {
         Ok(()) => Ok(()),
         Err(e) if group_already_gone(e) => Ok(()),
-        Err(e) => Err(ProcessError::Io(format!("killpg SIGKILL: {e}"))),
+        Err(e) => Err(signal_error("SIGKILL", e)),
     }
 }
 
@@ -67,7 +67,7 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
     match killpg(pgid, Signal::SIGTERM) {
         Ok(()) => {}
         Err(e) if group_already_gone(e) => return Ok(()),
-        Err(e) => return Err(ProcessError::Io(format!("killpg SIGTERM: {e}"))),
+        Err(e) => return Err(signal_error("SIGTERM", e)),
     }
 
     tokio::time::sleep(grace).await;
@@ -76,7 +76,20 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
     match killpg(pgid, Signal::SIGKILL) {
         Ok(()) => Ok(()),
         Err(e) if group_already_gone(e) => Ok(()),
-        Err(e) => Err(ProcessError::Io(format!("killpg SIGKILL: {e}"))),
+        Err(e) => Err(signal_error("SIGKILL", e)),
+    }
+}
+
+// EPERM can describe a live protected group or, on macOS, a group whose
+// sole held leader has already exited. Without a held owner capability this
+// function cannot distinguish them, so it reports an unverified observation.
+fn signal_error(signal: &str, error: nix::errno::Errno) -> ProcessError {
+    if error == nix::errno::Errno::EPERM {
+        ProcessError::Io(format!(
+            "killpg {signal}: {error}; process-group termination is unverified"
+        ))
+    } else {
+        ProcessError::Io(format!("killpg {signal}: {error}"))
     }
 }
 
@@ -96,7 +109,7 @@ fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_already_gone, kill_tree_force, kill_tree_unix};
+    use super::{group_already_gone, kill_tree_force, kill_tree_unix, signal_error};
     use mobile_linux_api::ProcessError;
 
     #[test]
@@ -104,6 +117,76 @@ mod tests {
         assert!(group_already_gone(nix::errno::Errno::ESRCH));
         assert!(!group_already_gone(nix::errno::Errno::EPERM));
         assert!(!group_already_gone(nix::errno::Errno::EINVAL));
+        assert!(signal_error("SIGKILL", nix::errno::Errno::EPERM)
+            .to_string()
+            .contains("termination is unverified"));
+    }
+
+    /// macOS may report EPERM after a real child became a held zombie.
+    /// A numeric PGID-only stop cannot distinguish that from live protected
+    /// members: preserve Unknown, then let the actual parent wait its child.
+    /// Waiting the leader does not establish that all descendants exited.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn graceful_stop_reports_unknown_for_held_zombie() {
+        use nix::errno::Errno;
+        use nix::sys::signal::killpg;
+        use nix::unistd::Pid;
+        use std::os::unix::process::ExitStatusExt;
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "printf ready; exec /bin/sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        super::super::spawn_unsafe::attach_setsid(&mut command);
+        let mut child = command.spawn().expect("spawn exact owned child");
+        let pid = child.id().expect("owned child pid");
+        let mut ready = [0u8; 5];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            child.stdout.take().unwrap().read_exact(&mut ready),
+        )
+        .await
+        .expect("child ready timed out")
+        .expect("read child ready");
+        assert_eq!(&ready, b"ready");
+        let stop =
+            tokio::spawn(
+                async move { super::kill_tree_with_grace(pid, Duration::from_secs(8)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if super::super::spawn_unsafe::child_exited_without_reaping(pid)
+                    .expect("waitid must inspect the held child")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("SIGTERM did not yield a held zombie");
+        assert_eq!(killpg(Pid::from_raw(pid as i32), None), Err(Errno::EPERM));
+        let result = tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("stop call timed out")
+            .expect("stop task panicked");
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("owner wait timed out")
+            .expect("owner wait failed");
+        assert_eq!(
+            status.signal(),
+            Some(nix::sys::signal::Signal::SIGTERM as i32)
+        );
+        let message = result
+            .expect_err("numeric PGID must not turn EPERM into cleanup success")
+            .to_string();
+        assert!(message.contains("EPERM"), "{message}");
+        assert!(message.contains("termination is unverified"), "{message}");
     }
 
     /// Killing a non-existent PGID returns `Ok(())` — `ESRCH` on the first
