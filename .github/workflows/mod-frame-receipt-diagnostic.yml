@@ -47,6 +47,8 @@ jobs:
           grep -F 'real_host_rejects_old_revision_event_before_dispatch ... ok' "$RUNNER_TEMP/event-revision.log"
           cargo test --locked -p hooks --lib real_worker_fenced_callback_reports_not_started_without_fault_delivery -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/missing-fault-outcome.log"
           grep -F 'real_worker_fenced_callback_reports_not_started_without_fault_delivery ... ok' "$RUNNER_TEMP/missing-fault-outcome.log"
+          cargo test --locked -p hooks --lib real_worker_fault_preempts_blocked_background_hook -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/fault-priority.log"
+          grep -F 'real_worker_fault_preempts_blocked_background_hook ... ok' "$RUNNER_TEMP/fault-priority.log"
           cargo test --locked -p hooks --lib real_worker_pointer_and_key_wait_for_async_post_delivery -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/listener-events.log"
           grep -F 'real_worker_pointer_and_key_wait_for_async_post_delivery ... ok' "$RUNNER_TEMP/listener-events.log"
           cargo test --locked -p hooks --lib real_worker_held_drop_after_callback_result_fences_before_next_action -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/held-drop.log"

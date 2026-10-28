@@ -7097,6 +7097,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_worker_fault_preempts_blocked_background_hook() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Button, h } from 'claude:surface-runtime';
+          export function Card(_props, surface) {
+            return h(Button, {key:'send', label:'Send', onPress:()=>{
+              const stopPost=surface.every(20,()=>{stopPost();surface.post({kind:'blocked'});});
+              const stopFault=surface.every(1000,()=>{stopFault();throw new Error('timer failed');});
+            }});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Client, h} = $.ui.resolve(event);
+              return h(Client, {key:'card', module:'./card.tsx', props:{}});
+            });
+            on('ui.message', async ($, event) => {
+              await $.session.model();
+              $.ui.log('blocked hook continued after VM fault');
+              return {handled:true, props:{}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let session_impl = Arc::new(UiLifecycleSession {
+            root:directory.path().to_path_buf(),
+            model_gate:StdMutex::new(Some(UiLifecycleModelGate {
+                entered:entered.clone(), release:release.clone(), completed:Arc::new(tokio::sync::Notify::new()),
+            })), ..Default::default()
+        });
+        let session: Arc<dyn ModSessionContext> = session_impl.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let revision = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"fault-priority",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap().render_revision.unwrap();
+        let frame = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"fault-priority",
+            "plugin":"review", "client":"card", "module":"card.tsx", "render_revision":revision,
+            "columns":80, "rows":24,
+        })), session.as_ref()).await.unwrap();
+        let frame = test_value(&frame);
+        let runtime_id = frame["runtimeId"].as_str().unwrap().to_owned();
+        let handle = tree_press_handle_for_key(&frame["tree"], "send").unwrap();
+        let generation = lock(&host.client_ui.data).instances[&runtime_id].worker_generation.unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"fault-priority",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"runHeld", "runtimeId":runtime_id, "render_revision":revision, "handle":handle,
+        })), session.as_ref()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await
+            .expect("the actual background post must enter the blocked ui.message hook");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let probe = host.run_client_worker_operation(host_generated_json(json!({
+                    "type":"runHeld", "runtimeId":runtime_id, "generation":generation,
+                    "hostRenderRevision":revision, "handle":handle, "postActionId":"fault-priority-probe",
+                }))).await;
+                if matches!(probe, Err(ClientWorkerOperationError::NotStartedUnavailable { .. })) { break; }
+                assert!(matches!(probe, Err(ClientWorkerOperationError::Busy)));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the actual Worker must invalidate the shared VM while the hook is blocked");
+        let host_fenced = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.is_ok();
+        release.notify_one();
+        if !host_fenced {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !lock(&session_impl.logs).iter().any(|line| line == "blocked hook continued after VM fault") {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("the old ordering permits the blocked hook's observable side effect");
+        }
+        assert!(host_fenced, "Worker fault must fence Host before the blocked hook is released");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!lock(&session_impl.logs).iter().any(|line| line == "blocked hook continued after VM fault"));
+    }
+
+    #[tokio::test]
     async fn real_worker_pointer_and_key_wait_for_async_post_delivery() {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
