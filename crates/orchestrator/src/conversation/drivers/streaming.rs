@@ -3554,6 +3554,7 @@ impl StreamingTurnDriver<'_> {
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut TurnLoopState,
         in_human_turn: bool,
+        ack_failure: &mut bool,
     ) -> Result<StepExit, OrchestratorError> {
         let mut step_cache = None;
         loop {
@@ -4035,6 +4036,7 @@ impl StreamingTurnDriver<'_> {
                         post_tool_batch_dispatch,
                         pre_batch_mcp_tool_count,
                         refusal_tool_uses_settled,
+                        ack_failure,
                     )
                     .await?
                 {
@@ -4068,19 +4070,24 @@ impl StreamingTurnDriver<'_> {
                         }
                         Ok(Some(StepExit::Continue))
                     }
-                    StreamingIterationDisposition::Complete(message_id) => {
+                    StreamingIterationDisposition::NaturalComplete(message_id) => {
                         // Pending input can arrive while the final response is
                         // streaming, after the top-of-loop drain has already run.
                         // Give it one final drain before committing the natural
                         // end-turn so it continues this same turn.
-                        if orch.drain_mid_turn_input().await? {
-                            return Ok(Some(StepExit::Continue));
+                        let injected = orch
+                            .drain_mid_turn_input_until_cancelled(user_cancel, ack_failure)
+                            .await?;
+                        if injected && !token_aborted(user_cancel) {
+                            return Ok(Some(StepExit::ContinueAfterFinalDrain));
                         }
-                        Ok(Some(StepExit::FinishThroughEpilogue(message_id)))
+                        // Publish only after the epilogue has settled and the
+                        // final cancellation and budget checks have run.
+                        Ok(Some(StepExit::FinishNaturalThroughEpilogue(message_id)))
                     }
-                    StreamingIterationDisposition::ForcedComplete(message_id) => {
-                        Ok(Some(StepExit::FinishThroughEpilogue(message_id)))
-                    }
+                    StreamingIterationDisposition::ForcedComplete(message_id, terminal) => Ok(
+                        Some(StepExit::FinishForcedThroughEpilogue(message_id, terminal)),
+                    ),
                     // §3.6: the ONE disposition that skips the epilogue.
                     StreamingIterationDisposition::Return(outcome) => {
                         Ok(Some(StepExit::ReturnDirect(outcome)))
@@ -4645,6 +4652,10 @@ impl StreamingTurnDriver<'_> {
             user_cancel.clone(),
         );
         let final_message_id;
+        let mut natural_terminal_pending = false;
+        let mut forced_terminal_pending = None;
+        let mut final_drain_continuation = false;
+        let mut deferred_ack_error = None;
         loop {
             // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE
             // every terminal top-of-loop guard, including `max_turns`. A message
@@ -4656,13 +4667,64 @@ impl StreamingTurnDriver<'_> {
             // The cancel guard is NOT part of this: on this path it runs AFTER
             // the increment (below), where the two batched entries have it first
             // or not at all.
-            match orch
-                .run_turn_loop_guards(loop_state::LoopGuardOrder::Streaming, &mut loop_state)
-                .await?
+            if final_drain_continuation && token_aborted(&user_cancel) {
+                let cost = orch.snapshot_cost_real().await;
+                orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                    .await;
+                final_message_id = loop_state.last_message_id;
+                break;
+            }
+            // This marker is set only by a failed source acknowledgement;
+            // unrelated Internal errors must keep their original return path.
+            let mut ack_failure = false;
+            let guard_verdict = match orch
+                .run_turn_loop_guards_with_cancel_drain(
+                    loop_state::LoopGuardOrder::Streaming,
+                    &mut loop_state,
+                    final_drain_continuation,
+                    &mut ack_failure,
+                )
+                .await
             {
-                loop_state::GuardVerdict::Proceed => {}
+                Err(error)
+                    if ack_failure
+                        || (matches!(&error, OrchestratorError::RecoveryInterrupted)
+                            && token_aborted(&user_cancel)) =>
+                {
+                    deferred_ack_error = Some(error);
+                    final_message_id = loop_state.last_message_id;
+                    break;
+                }
+                Err(error) => return Err(error),
+                Ok(verdict) => verdict,
+            };
+            if final_drain_continuation
+                && token_aborted(&user_cancel)
+                && !matches!(
+                    &guard_verdict,
+                    loop_state::GuardVerdict::StructuredOutputRetries(_)
+                )
+            {
+                let cost = orch.snapshot_cost_real().await;
+                orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                    .await;
+                final_message_id = loop_state.last_message_id;
+                break;
+            }
+            match guard_verdict {
+                loop_state::GuardVerdict::Proceed => final_drain_continuation = false,
                 loop_state::GuardVerdict::StructuredOutputRetries(error) => return Err(error),
                 loop_state::GuardVerdict::MaxTurns => {
+                    let cost = orch.snapshot_cost_real().await;
+                    if final_drain_continuation && token_aborted(&user_cancel) {
+                        orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                        orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                            .await;
+                        final_message_id = loop_state.last_message_id;
+                        break;
+                    }
                     return Err(OrchestratorError::MaxTurnsReached {
                         max_turns: orch.config.max_turns,
                     });
@@ -4705,18 +4767,46 @@ impl StreamingTurnDriver<'_> {
                 loop_state.mod_turn_started = true;
             }
 
-            match Box::pin(Self::run_round(
+            let round = Box::pin(Self::run_round(
                 orch,
                 &system_prompt,
                 &user_cancel,
                 &mut loop_state,
                 in_human_turn,
+                &mut ack_failure,
             ))
-            .await?
-            {
+            .await;
+            let round = match round {
+                Err(error)
+                    if ack_failure
+                        || (matches!(&error, OrchestratorError::RecoveryInterrupted)
+                            && token_aborted(&user_cancel)) =>
+                {
+                    deferred_ack_error = Some(error);
+                    final_message_id = loop_state.last_message_id;
+                    break;
+                }
+                Err(error) => return Err(error),
+                Ok(round) => round,
+            };
+            match round {
                 StepExit::Continue => continue,
+                StepExit::ContinueAfterFinalDrain => {
+                    final_drain_continuation = true;
+                    continue;
+                }
                 StepExit::FinishThroughEpilogue(message_id) => {
                     final_message_id = message_id;
+                    break;
+                }
+                StepExit::FinishNaturalThroughEpilogue(message_id) => {
+                    final_message_id = message_id;
+                    natural_terminal_pending = true;
+                    break;
+                }
+                StepExit::FinishForcedThroughEpilogue(message_id, terminal) => {
+                    final_message_id = message_id;
+                    forced_terminal_pending = Some(terminal);
                     break;
                 }
                 // §3.6: skips the file-history epilogue below, which is exactly
@@ -4751,15 +4841,34 @@ impl StreamingTurnDriver<'_> {
             }
         }
 
+        // A failed acknowledgement is not a successful turn. Preserve the
+        // original error after the ordinary file-history epilogue so the owner
+        // can keep the claimed input uncertain and finish cleanup.
+        if let Some(error) = deferred_ack_error {
+            return Err(error);
+        }
+
         // The final response can cross the session budget without requiring
         // another loop iteration. Check after owned tools, accounting and
         // persistence have settled, so an end_turn cannot bypass the limit.
-        if !token_aborted(&user_cancel) && orch.over_budget().await {
-            let cost = orch.snapshot_cost_real().await;
-            orch.emit_turn_terminal("budget_exhausted", &cost).await;
+        let over_budget = !token_aborted(&user_cancel) && orch.over_budget().await;
+        if over_budget && !token_aborted(&user_cancel) {
             return Err(OrchestratorError::MaxBudgetReached {
                 budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
             });
+        }
+
+        if natural_terminal_pending {
+            let cost = orch.snapshot_cost_real().await;
+            if token_aborted(&user_cancel) {
+                orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                    .await;
+            } else {
+                orch.emit_turn_terminal("end_turn", &cost).await;
+            }
+        } else if let Some(terminal) = forced_terminal_pending {
+            orch.publish_deferred_terminal(terminal, &user_cancel).await;
         }
 
         Ok(ConversationOutcome::EndTurn {

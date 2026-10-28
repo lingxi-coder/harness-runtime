@@ -1,0 +1,130 @@
+name: Mobile Stop and ACK diagnostics v4
+on:
+  push:
+    branches: [codex/harness-stop-ack-v4-20261028-hgyo0ycg]
+permissions:
+  contents: read
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  diagnostics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - name: Install runtime test dependencies
+        id: setup
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap libcap2-bin socat
+      - name: Enable user namespaces for hosted runtime tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 0
+          bwrap --ro-bind / / --unshare-user --unshare-pid --proc /proc -- /bin/true
+      - name: Check production orchestrator and mobile runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_log="$RUNNER_TEMP/orchestrator-check.jsonl"
+          if ! cargo check --locked -p orchestrator --lib --message-format=json > "$check_log"; then
+            python3 - "$check_log" <<'PY'
+          import json, sys
+          for line in open(sys.argv[1], encoding='utf-8'):
+              try:
+                  item = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if item.get('reason') == 'compiler-message':
+                  print(item['message'].get('rendered') or item['message'].get('message', ''))
+          PY
+            exit 1
+          fi
+          python3 - "$check_log" <<'PY'
+          import json, sys
+          found = []
+          for line in open(sys.argv[1], encoding='utf-8'):
+              try:
+                  item = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if item.get('reason') != 'compiler-message':
+                  continue
+              message = item.get('message', {})
+              if (message.get('level') == 'warning'
+                  and (message.get('code') or {}).get('code') == 'dead_code'
+                  and 'drain_mid_turn_input' in message.get('message', '')):
+                  found.append(message.get('rendered') or message['message'])
+          if found:
+              print('\n'.join(found), file=sys.stderr)
+              raise SystemExit('production build emitted a dead_code warning for the drain wrapper')
+          print('production orchestrator check passed without a drain_mid_turn_input dead_code warning')
+          PY
+          cargo check --locked -p harness-runtime --no-default-features --features mobile --lib
+      - name: Exact orchestrator ACK and negative regressions
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          for test_name in \
+            failed_ack_after_real_write_persists_reopenable_file_history \
+            source_take_failure_does_not_run_ack_failure_epilogue \
+            interrupted_ack_without_cancel_skips_epilogue_and_returns_error; do
+            log="$RUNNER_TEMP/$test_name.log"
+            if cargo test --locked -p orchestrator --test mid_turn_input_test "$test_name" -- --exact --nocapture | tee "$log"; then
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log" || { echo "missing passing test $test_name"; status=1; }
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Exact real Mobile ACK and Stop regressions
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          for test_name in \
+            mobile::host::tests::attach_recovery_tests::real_write_and_mobile_ack_failure_reopen_rewind_with_and_without_stop \
+            mobile::host::tests::attach_recovery_tests::real_midturn_ack_write_failure_stays_uncertain_before_and_after_stop \
+            mobile::host::tests::attach_recovery_tests::stop_between_real_midturn_append_and_ack_reports_cancelled_not_internal; do
+            log="$RUNNER_TEMP/${test_name//::/_}.log"
+            if cargo test --locked -p harness-runtime --features mobile --lib "$test_name" -- --exact --nocapture | tee "$log"; then
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log" || { echo "missing passing test $test_name"; status=1; }
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Orchestrator regression suites
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          for target in mid_turn_input_test turn_epilogue_boundary_test; do
+            log="$RUNNER_TEMP/suite-$target.log"
+            if cargo test --locked -p orchestrator --test "$target" -- --nocapture | tee "$log"; then
+              grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$log" || { echo "no passing tests in $target"; status=1; }
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Mobile attach and recovery suite
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p harness-runtime --features mobile --lib mobile::host::tests::attach_recovery_tests -- --nocapture | tee "$RUNNER_TEMP/attach-recovery.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/attach-recovery.log"

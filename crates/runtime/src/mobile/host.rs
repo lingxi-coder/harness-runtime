@@ -2392,21 +2392,36 @@ const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
 
 /// One received command awaiting its admission result. The registry contains
 /// only real submissions, so an unknown Cancel cannot create a tombstone.
-struct PendingSubmission {
+pub(crate) struct PendingSubmission {
     session_id: String,
     turn_id: u64,
+    submitting_handle: std::sync::Weak<MobileEngineHandle>,
     shared_lease: StdMutex<Option<crate::mobile::turn_durability::PendingAdmissionLease>>,
+    decision: StdMutex<PendingAdmissionDecision>,
     cancel_requested: AtomicBool,
     suppressed: AtomicBool,
     cancel_without_checkpoint: AtomicBool,
-    local_command_started: AtomicBool,
     owner: StdMutex<Option<std::sync::Weak<ActiveTurn>>>,
     result: StdMutex<Option<Result<(), ClientError>>>,
     finished: Notify,
     #[cfg(test)]
     test_stage: std::sync::atomic::AtomicU8,
     #[cfg(test)]
+    cancel_requested_notify: Notify,
+    #[cfg(test)]
     owner_barrier: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+}
+
+#[derive(Default)]
+struct PendingAdmissionDecision {
+    completed: bool,
+    local_command_started: bool,
+}
+
+enum PendingCancelDecision {
+    Requested,
+    LocalCommandStarted,
+    Completed,
 }
 
 impl PendingSubmission {
@@ -2414,22 +2429,62 @@ impl PendingSubmission {
         session_id: String,
         turn_id: u64,
         shared_lease: crate::mobile::turn_durability::PendingAdmissionLease,
+        submitting_handle: std::sync::Weak<MobileEngineHandle>,
     ) -> Self {
         Self {
             session_id,
             turn_id,
+            submitting_handle,
             shared_lease: StdMutex::new(Some(shared_lease)),
+            decision: StdMutex::new(PendingAdmissionDecision::default()),
             cancel_requested: AtomicBool::new(false),
             suppressed: AtomicBool::new(false),
             cancel_without_checkpoint: AtomicBool::new(false),
-            local_command_started: AtomicBool::new(false),
             owner: StdMutex::new(None),
             result: StdMutex::new(None),
             finished: Notify::new(),
             #[cfg(test)]
             test_stage: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
+            cancel_requested_notify: Notify::new(),
+            #[cfg(test)]
             owner_barrier: StdMutex::new(None),
+        }
+    }
+
+    fn request_cancel(&self) -> PendingCancelDecision {
+        let decision = self.decision.lock().unwrap_or_else(|e| e.into_inner());
+        if decision.local_command_started {
+            return PendingCancelDecision::LocalCommandStarted;
+        }
+        if decision.completed {
+            return PendingCancelDecision::Completed;
+        }
+        self.cancel_requested.store(true, Ordering::Release);
+        #[cfg(test)]
+        self.cancel_requested_notify.notify_waiters();
+        PendingCancelDecision::Requested
+    }
+
+    fn try_start_local_command(&self) -> bool {
+        let mut decision = self.decision.lock().unwrap_or_else(|e| e.into_inner());
+        if decision.completed || self.cancel_requested.load(Ordering::Acquire) {
+            return false;
+        }
+        decision.local_command_started = true;
+        true
+    }
+
+    #[cfg(test)]
+    async fn wait_for_cancel_request(&self) {
+        loop {
+            let notified = self.cancel_requested_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cancel_requested.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -2437,10 +2492,57 @@ impl PendingSubmission {
         *self.owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(owner));
     }
 
+    fn bound_owner(&self) -> Option<Arc<ActiveTurn>> {
+        self.owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+    }
+
     fn complete(&self, result: Result<(), ClientError>) {
+        let mut decision = self.decision.lock().unwrap_or_else(|e| e.into_inner());
+        self.complete_locked(&mut decision, result);
+        drop(decision);
+        self.finished.notify_waiters();
+    }
+
+    // Atomically choose between a received Stop and finishing an otherwise
+    // successful queue admission. Queue consumers stay fenced by the lease
+    // until this decision is made.
+    fn complete_if_not_cancelled(&self) -> bool {
+        let mut decision = self.decision.lock().unwrap_or_else(|e| e.into_inner());
+        if decision.completed || self.cancel_requested.load(Ordering::Acquire) {
+            return false;
+        }
+        self.complete_locked(&mut decision, Ok(()));
+        drop(decision);
+        self.finished.notify_waiters();
+        true
+    }
+
+    fn complete_locked(
+        &self,
+        decision: &mut PendingAdmissionDecision,
+        result: Result<(), ClientError>,
+    ) {
         let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
+            // An error after Stop can mean that a checkpoint or its
+            // cancellation was only partly published. Do not let another
+            // handle claim this identity merely because this task finished.
+            if result.is_err() && self.cancel_requested.load(Ordering::Acquire) {
+                if let Some(lease) = self
+                    .shared_lease
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
+                    lease.mark_unresolved();
+                }
+            }
             *slot = Some(result);
+            decision.completed = true;
             // Once admission and its cleanup are finished, observers may retain
             // this object while waiting for the result without fencing the store.
             self.shared_lease
@@ -2448,8 +2550,6 @@ impl PendingSubmission {
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
         }
-        drop(slot);
-        self.finished.notify_waiters();
     }
 
     async fn wait(&self) -> Result<(), ClientError> {
@@ -6045,9 +6145,16 @@ impl MobileEngineHandle {
         // A queued item always remains attached to the active owner's session.
         // The loop transition guard prevents a concurrent New/Resume retarget
         // between choosing that session and durably admitting the operation.
-        if let Some(active) = self.active_cancel.lock().await.clone() {
+        let active_session = {
+            self.active_cancel
+                .lock()
+                .await
+                .as_ref()
+                .map(|turn| turn.session_id.clone())
+        };
+        if let Some(active_session) = active_session {
             self.persist_and_enqueue_mobile_slash(
-                &active.session_id,
+                &active_session,
                 client_turn_id,
                 raw_source,
                 images.clone(),
@@ -6744,9 +6851,16 @@ impl MobileEngineHandle {
         transition: tokio::sync::MutexGuard<'_, ()>,
         pending: Option<Arc<PendingSubmission>>,
     ) -> Result<(), ClientError> {
-        if let Some(active) = self.active_cancel.lock().await.clone() {
+        let active_session = {
+            self.active_cancel
+                .lock()
+                .await
+                .as_ref()
+                .map(|turn| turn.session_id.clone())
+        };
+        if let Some(active_session) = active_session {
             self.persist_and_enqueue_mobile_prompt(
-                &active.session_id,
+                &active_session,
                 client_turn_id,
                 client_turn_id,
                 command,
@@ -6795,13 +6909,18 @@ impl MobileEngineHandle {
         {
             Ok(owner) => owner,
             Err(error) => {
-                if let Some(active) = self.active_cancel.lock().await.clone() {
-                    if active.session_id == session_id {
-                        enqueue_mobile_prompt_dispatch(&self.message_queue, &session_id, &admitted)
-                            .await;
-                        drop(transition);
-                        return Ok(());
-                    }
+                let active_session = {
+                    self.active_cancel
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|turn| turn.session_id.clone())
+                };
+                if active_session.as_deref() == Some(session_id.as_str()) {
+                    enqueue_mobile_prompt_dispatch(&self.message_queue, &session_id, &admitted)
+                        .await;
+                    drop(transition);
+                    return Ok(());
                 }
                 let _ = self
                     .durable_turns
@@ -7822,11 +7941,17 @@ impl MobileEngineHandle {
                         message: "a submission with this turn id is already pending".into(),
                     });
                 }
-                let lease = self
+                let pending = self
                     .durable_turns
-                    .register_pending_admission(session_id, *turn_id)
+                    .register_pending_admission(session_id, *turn_id, |lease| {
+                        Arc::new(PendingSubmission::new(
+                            session_id.clone(),
+                            *turn_id,
+                            lease,
+                            self.self_weak.clone(),
+                        ))
+                    })
                     .map_err(Self::map_durable_turn_error)?;
-                let pending = Arc::new(PendingSubmission::new(session_id.clone(), *turn_id, lease));
                 registry.push(pending.clone());
                 Some(pending)
             }
@@ -8122,9 +8247,8 @@ impl MobileEngineHandle {
         Ok(())
     }
 
-    /// Complete a received queued admission under the same owner boundary used
-    /// by Cancel. The shared lease prevents queue consumers from claiming this
-    /// identity until the cancellation decision has been durably made.
+    /// Complete a received queued admission. The exact shared admission lease
+    /// fences claim until its cancellation decision is durably committed.
     async fn finish_received_queue_admission(
         &self,
         pending: &Arc<PendingSubmission>,
@@ -8132,48 +8256,32 @@ impl MobileEngineHandle {
         let mut delivery = self
             .lock_turn_delivery(&pending.session_id, pending.turn_id)
             .await?;
-        let active = self.active_cancel.lock().await;
-        if !pending.cancel_requested.load(Ordering::Acquire) {
-            pending.complete(Ok(()));
+        if pending.complete_if_not_cancelled() {
             delivery.complete();
             return Ok(());
         }
-        let cancel = || -> Result<Option<TurnRecoverySnapshotDto>, DurableTurnStoreError> {
-            match self
-                .durable_turns
-                .cancel_pending(&pending.session_id, pending.turn_id)
-            {
-                Ok(Some(_)) => self
-                    .durable_turns
-                    .expose_cancelled_pending(&pending.session_id, pending.turn_id)
-                    .map(Some),
-                Ok(None)
-                | Err(DurableTurnStoreError::NotFound { .. })
-                | Err(DurableTurnStoreError::Terminal { .. }) => Ok(None),
-                Err(error) => Err(error),
-            }
-        };
         delivery.arm();
-        let result = match active
-            .as_ref()
-            .filter(|owner| owner.session_id == pending.session_id)
-            .and_then(|owner| owner.live_owner.as_ref())
-        {
-            Some(lease) => self.durable_turns.with_live_owner(
-                &pending.session_id,
-                lease,
-                Some(pending.turn_id),
-                cancel,
-            ),
-            None => self.durable_turns.with_no_live_owner(
-                &pending.session_id,
-                Some(pending.turn_id),
-                cancel,
-            ),
+        let result = {
+            let lease = pending
+                .shared_lease
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match lease.as_ref() {
+                Some(lease) => self.durable_turns.cancel_unclaimed_admission(
+                    &pending.session_id,
+                    pending.turn_id,
+                    lease,
+                    pending,
+                ),
+                None => Err(DurableTurnStoreError::PendingAdmission {
+                    session_id: pending.session_id.clone(),
+                    turn_id: pending.turn_id,
+                }),
+            }
         };
         let snapshot = match result {
             Ok(Some(snapshot)) => snapshot,
-            Ok(None) => {
+            Ok(None) | Err(DurableTurnStoreError::NotFound { .. }) => {
                 pending
                     .cancel_without_checkpoint
                     .store(true, Ordering::Release);
@@ -8189,15 +8297,14 @@ impl MobileEngineHandle {
             }
         };
         pending.suppressed.store(true, Ordering::Release);
-        drop(active);
-        let task = self.spawn_recovery_delivery(delivery, snapshot);
-        pending.complete(Ok(()));
         remove_mobile_prompt_dispatches(
             &self.message_queue,
             &pending.session_id,
             &[pending.turn_id],
         )
         .await;
+        let task = self.spawn_recovery_delivery(delivery, snapshot);
+        pending.complete(Ok(()));
         Self::await_recovery_delivery(task).await
     }
 
@@ -8209,7 +8316,40 @@ impl MobileEngineHandle {
         let Some(turn_id) = turn_id else {
             return self.cancel_active_turn(session_id, None).await;
         };
-        let (pending, live_owner) = {
+        if session_id.is_empty() || self.active_session_id() != session_id {
+            return Err(ClientError::Rejected {
+                message: "cancel request belongs to a different session".into(),
+            });
+        }
+
+        // A store-scoped admission can belong to another handle. Record Stop
+        // before waiting for the submitting handle's owner or delivery gate:
+        // those can be held up by foreign callbacks. The pending decision
+        // itself is a short synchronous boundary shared by all handles.
+        let Some(pending) = self.durable_turns.pending_admission(session_id, turn_id) else {
+            return self.cancel_active_turn(session_id, Some(turn_id)).await;
+        };
+        if matches!(pending.request_cancel(), PendingCancelDecision::LocalCommandStarted) {
+            return Err(ClientError::Rejected {
+                message: "the local command has already started and cannot be cancelled".into(),
+            });
+        }
+        let handle = pending.submitting_handle.upgrade().ok_or_else(|| ClientError::Rejected {
+            message: "the submitting engine is no longer available".into(),
+        })?;
+        handle
+            .cancel_registered_submission(session_id, turn_id, pending)
+            .await
+    }
+
+    async fn cancel_registered_submission(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        pending: Arc<PendingSubmission>,
+    ) -> Result<(), ClientError> {
+        let bound_owner = pending.bound_owner();
+        let live_owner = {
             let active = self.active_cancel.lock().await;
             let current = self
                 .inner
@@ -8221,63 +8361,44 @@ impl MobileEngineHandle {
                     message: "cancel request belongs to a different session".into(),
                 });
             }
-            let pending = self
-                .pending_submissions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .filter(|item| item.session_id == session_id && item.turn_id == turn_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            if pending
-                .iter()
-                .any(|item| item.local_command_started.load(Ordering::Acquire))
-            {
-                return Err(ClientError::Rejected {
-                    message: "the local command has already started and cannot be cancelled".into(),
-                });
-            }
-            for item in &pending {
-                item.cancel_requested.store(true, Ordering::Release);
-            }
-            let live_owner = active
+            active
                 .as_ref()
-                .filter(|owner| owner.session_id == session_id && owner.turn_id == Some(turn_id))
-                .cloned();
-            (pending, live_owner)
+                .filter(|owner| {
+                    owner.session_id == session_id
+                        && owner.turn_id == Some(turn_id)
+                        && bound_owner
+                            .as_ref()
+                            .is_some_and(|bound| Arc::ptr_eq(owner, bound))
+                })
+                .cloned()
         };
         if let Some(owner) = live_owner {
             return self
                 .cancel_active_turn_for_owner(session_id, Some(turn_id), Some(owner))
                 .await;
         }
-        for item in &pending {
-            if let Err(error) = item.wait().await {
-                if !item.suppressed.load(Ordering::Acquire) {
-                    return Err(error);
-                }
+        if let Err(error) = pending.wait().await {
+            if !pending.suppressed.load(Ordering::Acquire) {
+                return Err(error);
             }
         }
-        if pending
-            .iter()
-            .any(|item| item.cancel_without_checkpoint.load(Ordering::Acquire))
-        {
+        if pending.cancel_without_checkpoint.load(Ordering::Acquire) {
             return Err(ClientError::Rejected {
                 message: "the local command has already crossed its cancellation boundary".into(),
             });
         }
-        if !pending.is_empty()
-            && pending
-                .iter()
-                .all(|item| item.suppressed.load(Ordering::Acquire))
-        {
+        if pending.suppressed.load(Ordering::Acquire) {
             // Submission queued its terminal callback without awaiting foreign
             // code; Cancel acknowledges only after that delivery has returned.
             let delivery = self.lock_turn_delivery(session_id, turn_id).await?;
             delivery.complete();
             return Ok(());
         }
-        self.cancel_active_turn(session_id, Some(turn_id)).await
+        let owner = pending.bound_owner().ok_or_else(|| ClientError::Rejected {
+            message: "the original admission finished before cancellation was established; retry".into(),
+        })?;
+        self.cancel_active_turn_for_owner(session_id, Some(turn_id), Some(owner))
+            .await
     }
 
     async fn submit_impl(
@@ -8415,12 +8536,9 @@ impl MobileEngineHandle {
             let is_local = command_api::parse_slash_command(&source)
                 .is_some_and(|parsed| matches!(parsed.name.string_at(""), Some("cd" | "add-dir")));
             if is_local {
-                let active = self.active_cancel.lock().await;
-                if pending.cancel_requested.load(Ordering::Acquire) {
-                    drop(active);
+                if !pending.try_start_local_command() {
                     return self.cancel_received_submission(&command, pending).await;
                 }
-                pending.local_command_started.store(true, Ordering::Release);
             }
         }
 

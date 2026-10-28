@@ -173,8 +173,15 @@ fn build_orch_with_config(
     api: Arc<MockStreamingApiClient>,
     config: OrchestratorConfig,
 ) -> Arc<ConversationOrchestrator> {
+    build_orch_with_output(api, config, Arc::new(MockOutputStream::new()))
+}
+
+fn build_orch_with_output(
+    api: Arc<MockStreamingApiClient>,
+    config: OrchestratorConfig,
+    output: Arc<MockOutputStream>,
+) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
-    let output = Arc::new(MockOutputStream::new());
     let tools = Arc::new(ToolRegistry::new());
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
@@ -238,6 +245,153 @@ impl MidTurnInputSource for DelayedOnceSource {
         } else {
             state.1.take().map(source_text)
         }
+    }
+}
+
+struct AckGatedSource {
+    polls: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    cancel: CancellationToken,
+}
+
+#[async_trait]
+impl MidTurnInputSource for AckGatedSource {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+        (self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1)
+            .then(|| source_text("late guidance".into()))
+    }
+
+    async fn input_consumed(
+        &self,
+        _inputs: &[orchestrator::prompt::mid_turn_input::MidTurnInput],
+    ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        if self.cancel.is_cancelled() {
+            Err(orchestrator::prompt::mid_turn_input::MidTurnConsumptionError::Interrupted)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct FailingAckSource {
+    polls: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl MidTurnInputSource for FailingAckSource {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+        (self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1)
+            .then(|| source_text("late guidance".into()))
+    }
+
+    async fn input_consumed(
+        &self,
+        _inputs: &[orchestrator::prompt::mid_turn_input::MidTurnInput],
+    ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Err(
+            orchestrator::prompt::mid_turn_input::MidTurnConsumptionError::Failure(
+                "durable acknowledgement failed".into(),
+            ),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AcknowledgementBoundary {
+    FinalDrain,
+    NextLoopDrain,
+}
+
+struct AdditionalQueuedInputSource {
+    polls: std::sync::atomic::AtomicUsize,
+    acknowledgements: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    boundary: AcknowledgementBoundary,
+}
+
+#[async_trait]
+impl MidTurnInputSource for AdditionalQueuedInputSource {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+        let poll = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match (self.boundary, poll) {
+            (_, 1) | (AcknowledgementBoundary::NextLoopDrain, 3) => {
+                Some(source_text("already claimed".into()))
+            }
+            (AcknowledgementBoundary::FinalDrain, 2)
+            | (AcknowledgementBoundary::NextLoopDrain, 4) => {
+                Some(source_text("must stay queued".into()))
+            }
+            _ => None,
+        }
+    }
+
+    async fn input_consumed(
+        &self,
+        _inputs: &[orchestrator::prompt::mid_turn_input::MidTurnInput],
+    ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
+        let count = self
+            .acknowledgements
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let at_boundary = matches!(
+            (self.boundary, count),
+            (AcknowledgementBoundary::FinalDrain, 0) | (AcknowledgementBoundary::NextLoopDrain, 1)
+        );
+        if at_boundary {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CancelBarrierPoint {
+    EmptyFinalDrain,
+    SuccessfulAck,
+    NextLoopDrain,
+}
+
+struct CancelBarrierSource {
+    polls: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    point: CancelBarrierPoint,
+}
+
+#[async_trait]
+impl MidTurnInputSource for CancelBarrierSource {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+        let poll = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if poll == 1 && matches!(self.point, CancelBarrierPoint::EmptyFinalDrain) {
+            self.entered.notify_one();
+            self.release.notified().await;
+            return None;
+        }
+        if poll == 3 && matches!(self.point, CancelBarrierPoint::NextLoopDrain) {
+            self.entered.notify_one();
+            self.release.notified().await;
+            return None;
+        }
+        (poll == 1).then(|| source_text("late guidance".into()))
+    }
+
+    async fn input_consumed(
+        &self,
+        _inputs: &[orchestrator::prompt::mid_turn_input::MidTurnInput],
+    ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
+        if matches!(self.point, CancelBarrierPoint::SuccessfulAck) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
     }
 }
 
@@ -378,6 +532,507 @@ async fn mid_turn_input_arriving_during_final_response_continues_the_turn() {
         second_user_text.contains("late guidance"),
         "{second_user_text}"
     );
+}
+
+#[tokio::test]
+async fn natural_end_waits_for_late_input_ack_before_publishing_terminal() {
+    for interrupt in [false, true] {
+        let api = Arc::new(MockStreamingApiClient::with_turns(vec![
+            text_round("m1", "first answer"),
+            text_round("m2", "updated answer"),
+        ]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch =
+            build_orch_with_output(api.clone(), OrchestratorConfig::default(), output.clone());
+        let cancel = CancellationToken::new();
+        let source = Arc::new(AckGatedSource {
+            polls: std::sync::atomic::AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            cancel: cancel.clone(),
+        });
+        orch.set_mid_turn_input(source.clone());
+        let task = tokio::spawn({
+            let orch = orch.clone();
+            let cancel = cancel.clone();
+            async move { orch.run_turn_streaming_with_cancel("seed", cancel).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), source.entered.notified())
+            .await
+            .expect("late input reaches acknowledgement");
+        assert_eq!(api.captured_calls().await.len(), 1);
+        assert!(
+            !output
+                .snapshot()
+                .await
+                .iter()
+                .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })),
+            "the host must still own the turn while acknowledgement is pending"
+        );
+        if interrupt {
+            cancel.cancel();
+        }
+        source.release.notify_one();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("turn settles")
+            .expect("turn task does not panic");
+        let events = output.snapshot().await;
+        let terminal_count = events
+            .iter()
+            .filter(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. }))
+            .count();
+        if interrupt {
+            assert!(matches!(
+                outcome,
+                Err(orchestrator::OrchestratorError::RecoveryInterrupted)
+            ));
+            assert_eq!(api.captured_calls().await.len(), 1);
+            assert_eq!(
+                terminal_count, 0,
+                "no natural terminal before interrupted acknowledgement"
+            );
+        } else {
+            assert_eq!(outcome.unwrap(), TurnOutcome::EndTurn);
+            assert_eq!(api.captured_calls().await.len(), 2);
+            assert_eq!(
+                terminal_count, 1,
+                "one terminal after the continued turn ends"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn interrupted_late_ack_persists_file_history_before_propagating_interruption() {
+    let temp = tempfile::tempdir().unwrap();
+    let session_path = temp.path().join("session.jsonl");
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(temp.path().to_path_buf()),
+    );
+    let writer = Arc::new(session::jsonl::JsonlWriter::new(session_path.clone(), fs));
+    let history = Arc::new(session::FileHistory::new(
+        temp.path().to_path_buf(),
+        temp.path().to_path_buf(),
+        "interrupted-ack".to_string(),
+    ));
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![text_round(
+        "m1",
+        "first answer",
+    )]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            temp.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer)
+        .with_file_history(history),
+    );
+    let cancel = CancellationToken::new();
+    let source = Arc::new(AckGatedSource {
+        polls: std::sync::atomic::AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        cancel: cancel.clone(),
+    });
+    orch.set_mid_turn_input(source.clone());
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move { orch.run_turn_streaming_with_cancel("seed", cancel).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), source.entered.notified())
+        .await
+        .unwrap();
+    cancel.cancel();
+    source.release.notify_one();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(orchestrator::OrchestratorError::RecoveryInterrupted)
+    ));
+    assert_eq!(api.captured_calls().await.len(), 1);
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+    let lines = std::fs::read_to_string(session_path).unwrap();
+    let snapshots = lines
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| {
+            value.get("type").and_then(serde_json::Value::as_str) == Some("file-history-snapshot")
+        })
+        .count();
+    assert_eq!(
+        snapshots, 1,
+        "an interrupted acknowledgement must not omit the file-history epilogue"
+    );
+}
+
+#[tokio::test]
+async fn interrupted_ack_without_cancel_skips_epilogue_and_returns_error() {
+    struct InterruptedWithoutCancellation {
+        polls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MidTurnInputSource for InterruptedWithoutCancellation {
+        async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+            (self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1)
+                .then(|| source_text("late guidance".into()))
+        }
+
+        async fn input_consumed(
+            &self,
+            _inputs: &[orchestrator::prompt::mid_turn_input::MidTurnInput],
+        ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
+            Err(orchestrator::prompt::mid_turn_input::MidTurnConsumptionError::Interrupted)
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let session_path = temp.path().join("session.jsonl");
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(temp.path().to_path_buf()),
+    );
+    let writer = Arc::new(session::jsonl::JsonlWriter::new(session_path.clone(), fs));
+    let history = Arc::new(session::FileHistory::new(
+        temp.path().to_path_buf(),
+        temp.path().to_path_buf(),
+        "uncancelled-interrupted-ack".to_string(),
+    ));
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![text_round(
+        "m1", "answer",
+    )]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            temp.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer)
+        .with_file_history(history),
+    );
+    orch.set_mid_turn_input(Arc::new(InterruptedWithoutCancellation {
+        polls: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    let cancel = CancellationToken::new();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        orch.run_turn_streaming_with_cancel("seed", cancel.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(!cancel.is_cancelled());
+    assert!(matches!(
+        result,
+        Err(orchestrator::OrchestratorError::RecoveryInterrupted)
+    ));
+    assert_eq!(api.captured_calls().await.len(), 1);
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+    let lines = if session_path.try_exists().unwrap() {
+        std::fs::read_to_string(session_path).unwrap()
+    } else {
+        String::new()
+    };
+    assert!(!lines
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(
+            |value| value.get("type").and_then(serde_json::Value::as_str)
+                == Some("file-history-snapshot")
+        ));
+}
+
+#[tokio::test]
+async fn late_input_ack_failure_is_not_hidden_by_concurrent_cancellation() {
+    for cancel_during_ack in [false, true] {
+        let api = Arc::new(MockStreamingApiClient::with_turns(vec![
+            text_round("m1", "first answer"),
+            text_round("m2", "must not run"),
+        ]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch =
+            build_orch_with_output(api.clone(), OrchestratorConfig::default(), output.clone());
+        let cancel = CancellationToken::new();
+        let source = Arc::new(FailingAckSource {
+            polls: std::sync::atomic::AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        orch.set_mid_turn_input(source.clone());
+        let task = tokio::spawn({
+            let orch = orch.clone();
+            let cancel = cancel.clone();
+            async move { orch.run_turn_streaming_with_cancel("seed", cancel).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), source.entered.notified())
+            .await
+            .expect("late input reaches acknowledgement");
+        assert!(!output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+        if cancel_during_ack {
+            cancel.cancel();
+        }
+        source.release.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("failed acknowledgement settles")
+            .expect("turn task does not panic");
+        assert!(matches!(
+            result,
+            Err(orchestrator::OrchestratorError::Internal(message))
+                if message == "durable acknowledgement failed"
+        ));
+        assert_eq!(api.captured_calls().await.len(), 1);
+        assert!(!output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+    }
+}
+
+#[tokio::test]
+async fn cancellation_after_claim_does_not_claim_another_queued_input() {
+    use std::sync::atomic::Ordering;
+
+    for (boundary, expected_polls, expected_acknowledgements) in [
+        (AcknowledgementBoundary::FinalDrain, 2, 1),
+        (AcknowledgementBoundary::NextLoopDrain, 4, 2),
+    ] {
+        let api = Arc::new(MockStreamingApiClient::with_turns(vec![
+            text_round("m1", "first answer"),
+            text_round("m2", "must not run"),
+        ]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch =
+            build_orch_with_output(api.clone(), OrchestratorConfig::default(), output.clone());
+        let cancel = CancellationToken::new();
+        let source = Arc::new(AdditionalQueuedInputSource {
+            polls: std::sync::atomic::AtomicUsize::new(0),
+            acknowledgements: std::sync::atomic::AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            boundary,
+        });
+        orch.set_mid_turn_input(source.clone());
+        let task = tokio::spawn({
+            let orch = orch.clone();
+            let cancel = cancel.clone();
+            async move { orch.run_turn_streaming_with_cancel("seed", cancel).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), source.entered.notified())
+            .await
+            .expect("the selected acknowledgement boundary is reached");
+        assert!(!output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+        cancel.cancel();
+        source.release.notify_one();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancelled turn settles")
+            .expect("turn task does not panic")
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::Cancelled);
+        assert_eq!(source.polls.load(Ordering::SeqCst), expected_polls);
+        assert_eq!(
+            source.acknowledgements.load(Ordering::SeqCst),
+            expected_acknowledgements
+        );
+        assert_eq!(api.captured_calls().await.len(), 1);
+        let terminal_reasons = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_reasons, ["aborted_streaming"]);
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_final_drain_cannot_publish_natural_or_max_turn_terminal() {
+    for point in [
+        CancelBarrierPoint::EmptyFinalDrain,
+        CancelBarrierPoint::SuccessfulAck,
+        CancelBarrierPoint::NextLoopDrain,
+    ] {
+        let api = Arc::new(MockStreamingApiClient::with_turns(vec![text_round(
+            "m1",
+            "first answer",
+        )]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = build_orch_with_output(
+            api.clone(),
+            OrchestratorConfig {
+                max_turns: 1,
+                ..OrchestratorConfig::default()
+            },
+            output.clone(),
+        );
+        let cancel = CancellationToken::new();
+        let source = Arc::new(CancelBarrierSource {
+            polls: std::sync::atomic::AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            point,
+        });
+        orch.set_mid_turn_input(source.clone());
+        let task = tokio::spawn({
+            let orch = orch.clone();
+            let cancel = cancel.clone();
+            async move { orch.run_turn_streaming_with_cancel("seed", cancel).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), source.entered.notified())
+            .await
+            .expect("the selected final-drain boundary is reached");
+        assert!(!output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+        cancel.cancel();
+        source.release.notify_one();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancelled turn settles")
+            .expect("turn task does not panic")
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::Cancelled);
+        assert_eq!(api.captured_calls().await.len(), 1);
+        let terminal_reasons = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_reasons, ["aborted_streaming"]);
+    }
+}
+
+#[tokio::test]
+async fn acknowledged_late_input_at_max_turns_gets_one_max_turn_terminal() {
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![text_round(
+        "m1",
+        "first answer",
+    )]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch_with_output(
+        api.clone(),
+        OrchestratorConfig {
+            max_turns: 1,
+            ..OrchestratorConfig::default()
+        },
+        output.clone(),
+    );
+    orch.set_mid_turn_input(DelayedOnceSource::after_empty_polls(
+        1,
+        "accepted late input",
+    ));
+    assert_eq!(
+        orch.run_turn_streaming_with_cancel("seed", CancellationToken::new())
+            .await
+            .unwrap(),
+        TurnOutcome::MaxTurns
+    );
+    assert_eq!(api.captured_calls().await.len(), 1);
+    let terminal_reasons = output
+        .snapshot()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_reasons, ["max_turns"]);
+    let session = orch.session();
+    assert!(session.lock().await.history.iter().any(|message| matches!(
+        message,
+        ConversationMessage::User { content, .. }
+            if content.iter().any(|block| exact_fixture_text(block)
+                .is_some_and(|text| text.contains("accepted late input")))
+    )));
+}
+
+#[tokio::test]
+async fn terminal_stop_leaves_late_input_for_the_next_turn() {
+    let first = scripted![
+        message_start("m1", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "answer"),
+        content_block_stop(0),
+        message_delta_stop("stop_sequence"),
+        message_stop(),
+    ];
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![
+        first,
+        text_round("m2", "must not run in this turn"),
+    ]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch_with_output(api.clone(), OrchestratorConfig::default(), output.clone());
+    let source = DelayedOnceSource::after_empty_polls(1, "next turn input");
+    orch.set_mid_turn_input(source.clone());
+
+    assert_eq!(
+        orch.run_turn_streaming_with_cancel("seed", CancellationToken::new())
+            .await
+            .unwrap(),
+        TurnOutcome::EndTurn
+    );
+    assert_eq!(api.captured_calls().await.len(), 1);
+    let terminal_reasons = output
+        .snapshot()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_reasons, ["stop_sequence"]);
+    let queued = source
+        .take_mid_turn_input()
+        .await
+        .expect("terminal turn must leave its next input in the source");
+    assert_eq!(queued.string_at(""), Some("next turn input"));
 }
 
 /// NO SOURCE WIRED: the drain is a strict no-op — the outgoing request carries
@@ -687,14 +1342,14 @@ async fn cold_shutdown_redelivery_reuses_the_original_user_row() {
 // ── §4 late-drain rows ───────────────────────────────────────────────────────
 //
 // `mid_turn_input_arriving_during_final_response_continues_the_turn` above pins
-// the NATURAL end: streaming's `Complete` arm gives pending input one last drain
-// AFTER `emit_end_turn` has already fired, and continues the SAME turn on a hit.
+// the NATURAL end: streaming's `NaturalComplete` arm gives pending input one last drain
+// before emitting `end_turn`, and continues the SAME turn on a hit.
 //
 // §4 keeps one neighbour of that row deliberately different: a tool-requested
 // end produces `ForcedComplete`, which breaks immediately and does NOT drain.
 // The two arms sit three lines apart:
 //
-//     Complete(id)       => { if orch.drain_mid_turn_input().await { continue; } … }
+//     NaturalComplete(id) => { if orch.drain_mid_turn_input().await { continue; } … }
 //     ForcedComplete(id) => { final_message_id = id; break; }
 //
 // A shared end-handler that gives every "the turn is finishing" disposition the
@@ -835,8 +1490,8 @@ fn text_round(id: &str, text: &str) -> Vec<llm_runtime::HistoryEvent> {
 /// STREAMING: a tool-requested end does NOT take the late drain.
 ///
 /// Measured by counting how many times the loop ASKS for pending input. A
-/// natural end asks once more than a tool-requested one, because `Complete`
-/// drains after `emit_end_turn` and `ForcedComplete` breaks straight out.
+/// natural end asks once more than a tool-requested one, because `NaturalComplete`
+/// drains before `emit_end_turn` and `ForcedComplete` breaks straight out.
 ///
 /// The first version of this test asserted a model-round count instead, and a
 /// probe that added the drain to `ForcedComplete` left it green: the input had
@@ -853,6 +1508,7 @@ async fn a_tool_requested_end_does_not_take_the_late_drain() {
         ]));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(EndTurnTool));
+        let output = Arc::new(MockOutputStream::new());
         let orch =
             ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
                 OrchestratorConfig::default(),
@@ -861,7 +1517,7 @@ async fn a_tool_requested_end_does_not_take_the_late_drain() {
                 Arc::new(registry),
                 orchestrator::test_support::noop_hook_executor(),
                 Arc::new(NoOpPermissionGate),
-                Arc::new(MockOutputStream::new()),
+                output.clone(),
                 Arc::new(StaticMemoryProvider::empty()),
                 PathBuf::from("/tmp"),
             ));
@@ -872,6 +1528,16 @@ async fn a_tool_requested_end_does_not_take_the_late_drain() {
             1,
             "a tool-requested end stops at that round"
         );
+        let reasons = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasons, ["end_turn"]);
     }
 
     let natural = CountingSource::new();
@@ -888,7 +1554,7 @@ async fn a_tool_requested_end_does_not_take_the_late_drain() {
     assert!(
         natural.polls() > forced.polls(),
         "the natural end must ask for pending input MORE times than the tool-requested one \
-         ({} vs {}): `Complete` drains after emit_end_turn, `ForcedComplete` breaks straight \
+         ({} vs {}): `NaturalComplete` drains before emit_end_turn, `ForcedComplete` breaks straight \
          out three lines away. A shared end-handler that drains on every finishing \
          disposition makes these equal, and a turn the tool asked to stop runs on.",
         natural.polls(),
@@ -1036,4 +1702,281 @@ async fn only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop() {
          with no drain at all. Giving it one reads like a bug fix and is a behaviour change — \
          a turn the user is cancelling would pull in a queued message on its way out."
     );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FailedAckPoint {
+    LoopAfterWrite,
+    FinalAfterWrite,
+    AfterToolsAfterWrite,
+}
+
+struct FileHistoryFailpointSource {
+    point: FailedAckPoint,
+    polls: std::sync::atomic::AtomicUsize,
+    fail_take: bool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl MidTurnInputSource for FileHistoryFailpointSource {
+    fn admits_at(&self, point: orchestrator::prompt::mid_turn_input::MidTurnInputPoint) -> bool {
+        use orchestrator::prompt::mid_turn_input::MidTurnInputPoint;
+        match self.point {
+            FailedAckPoint::AfterToolsAfterWrite => point == MidTurnInputPoint::AfterTools,
+            _ => point == MidTurnInputPoint::LoopStart,
+        }
+    }
+
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
+        unreachable!("this fixture overrides batch delivery")
+    }
+
+    async fn take_mid_turn_batch(
+        &self,
+    ) -> Result<Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>>, String> {
+        use std::sync::atomic::Ordering;
+        let target_poll = match self.point {
+            FailedAckPoint::LoopAfterWrite => 2,
+            FailedAckPoint::FinalAfterWrite => 3,
+            FailedAckPoint::AfterToolsAfterWrite => 1,
+        };
+        if self.polls.fetch_add(1, Ordering::SeqCst) != target_poll {
+            return Ok(None);
+        }
+        if self.fail_take {
+            return Err("durable acknowledgement failed".into());
+        }
+        Ok(Some(vec![
+            orchestrator::prompt::mid_turn_input::MidTurnInput {
+                text: source_text("pending guidance".into()),
+                images: Vec::new(),
+                origin_kind: None,
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
+                pending_prompt_identity: None,
+            },
+        ]))
+    }
+
+    async fn input_consumed(
+        &self,
+        _inputs: &[orchestrator::prompt::mid_turn_input::MidTurnInput],
+    ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Err(
+            orchestrator::prompt::mid_turn_input::MidTurnConsumptionError::Failure(
+                "durable acknowledgement failed".into(),
+            ),
+        )
+    }
+}
+
+fn run_file_history_failpoint(point: FailedAckPoint, cancel_during_ack: bool, fail_take: bool) {
+    std::thread::Builder::new()
+        .name("ack-file-history".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let temp = tempfile::tempdir().unwrap();
+                    let home = temp.path().join("home");
+                    let cwd = temp.path().join("project");
+                    std::fs::create_dir_all(&home).unwrap();
+                    std::fs::create_dir_all(&cwd).unwrap();
+                    let cwd = cwd.canonicalize().unwrap();
+                    let file = cwd.join("fixture.txt");
+                    std::fs::write(&file, "original content\n").unwrap();
+                    let session_id = lingxi_core::types::SessionId::new();
+                    let session_uuid = session_id.as_uuid();
+                    let session_path = session::jsonl::session_path(
+                        &home,
+                        cwd.to_str().unwrap(),
+                        &session_uuid.to_string(),
+                    );
+                    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+                        platform_posix::fs::PosixFileSystem::new(temp.path().to_path_buf()),
+                    );
+                    let writer =
+                        Arc::new(session::jsonl::JsonlWriter::new(session_path.clone(), fs));
+                    let history = Arc::new(session::FileHistory::new(
+                        home.clone(),
+                        cwd.clone(),
+                        session_uuid.to_string(),
+                    ));
+                    let tool_context = tool_api::test_support::ctx_for_file_tools(
+                        tool_api::test_support::make_dummy_fs(),
+                        Arc::new(telemetry::AnalyticsBus::new()),
+                        vec![cwd.clone()],
+                    );
+                    let mut registry = ToolRegistry::new();
+                    registry.register_builtin(Arc::new(tool_file::FileReadTool::new(
+                        tool_context.clone(),
+                    )));
+                    registry
+                        .register_builtin(Arc::new(tool_file::FileWriteTool::new(tool_context)));
+                    let file_input = |content: Option<&str>| {
+                        let input = match content {
+                            Some(content) => {
+                                json!({"file_path": file.to_str().unwrap(), "content": content})
+                            }
+                            None => json!({"file_path": file.to_str().unwrap()}),
+                        };
+                        input.to_string()
+                    };
+                    let round = |message: &str, id: &str, tool: &str, input: &str| {
+                        vec![
+                            message_start(message, "claude-opus-4-7"),
+                            orchestrator::test_support_stream::content_block_start_tool_use(
+                                0,
+                                id.into(),
+                                tool,
+                            ),
+                            input_json_delta(0, input),
+                            content_block_stop(0),
+                            message_delta_stop("tool_use"),
+                            message_stop(),
+                        ]
+                    };
+                    let api = Arc::new(MockStreamingApiClient::with_turns(vec![
+                        round("read-message", "read-tool", "Read", &file_input(None)),
+                        round(
+                            "write-message",
+                            "write-tool",
+                            "Write",
+                            &file_input(Some("edited content\n")),
+                        ),
+                        text_round("final-message", "answer"),
+                    ]));
+                    let output = Arc::new(MockOutputStream::new());
+                    let orch = ConversationOrchestrator::into_shared(
+                        ConversationOrchestrator::new_with_streaming(
+                            OrchestratorConfig::default(),
+                            Arc::new(MockApiClient::new(Vec::new())),
+                            api.clone(),
+                            Arc::new(registry),
+                            orchestrator::test_support::noop_hook_executor(),
+                            Arc::new(NoOpPermissionGate),
+                            output.clone(),
+                            Arc::new(StaticMemoryProvider::empty()),
+                            cwd.clone(),
+                        )
+                        .with_session_id(session_id)
+                        .with_jsonl_writer(writer)
+                        .with_file_history(history),
+                    );
+                    let cancel = CancellationToken::new();
+                    let source = Arc::new(FileHistoryFailpointSource {
+                        point,
+                        polls: std::sync::atomic::AtomicUsize::new(0),
+                        fail_take,
+                        entered: tokio::sync::Notify::new(),
+                        release: tokio::sync::Notify::new(),
+                    });
+                    orch.set_mid_turn_input(source.clone());
+                    let task = tokio::spawn({
+                        let orch = orch.clone();
+                        let cancel = cancel.clone();
+                        async move {
+                            orch.run_turn_streaming_with_cancel("edit file", cancel)
+                                .await
+                        }
+                    });
+                    if !fail_take {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            source.entered.notified(),
+                        )
+                        .await
+                        .expect("ack failpoint reached after Write");
+                        assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited content\n");
+                        if cancel_during_ack {
+                            cancel.cancel();
+                        }
+                        source.release.notify_one();
+                    }
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                        .await
+                        .expect("turn settles")
+                        .expect("turn task does not panic");
+                    assert!(
+                        matches!(result,
+                        Err(orchestrator::OrchestratorError::Internal(message))
+                            if message == "durable acknowledgement failed"),
+                        "{point:?}"
+                    );
+                    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited content\n");
+                    assert!(!output.snapshot().await.iter().any(|event| matches!(
+                        event,
+                        lingxi_core::host::OutputEvent::EndTurn { .. }
+                    )));
+                    let expected_calls = if matches!(point, FailedAckPoint::FinalAfterWrite) {
+                        3
+                    } else {
+                        2
+                    };
+                    assert_eq!(api.captured_calls().await.len(), expected_calls);
+                    drop(orch);
+                    let transcript = std::fs::read_to_string(&session_path).unwrap_or_default();
+                    let records = session::file_history::parse_snapshot_records(&transcript);
+                    if fail_take {
+                        assert!(
+                            records.is_empty(),
+                            "unrelated take failure must retain direct-return behavior"
+                        );
+                    } else {
+                        assert_eq!(records.len(), 1, "one persisted turn snapshot, {point:?}");
+                        assert_eq!(records[0].tracked_file_backups.len(), 1);
+                        assert!(
+                            records[0]
+                                .tracked_file_backups
+                                .values()
+                                .any(|backup| backup.backup_file_name.is_some()),
+                            "the snapshot must contain the pre-write backup"
+                        );
+                        let rewound = session::file_history::rewind_from_disk(
+                            &home,
+                            cwd.to_str().unwrap(),
+                            session_uuid,
+                            records[0].message_id,
+                        )
+                        .await
+                        .expect("reopen and rewind from JSONL");
+                        assert_eq!(rewound.changed.len(), 1);
+                        assert_eq!(rewound.failed, 0);
+                        assert_eq!(rewound.skipped_links, 0);
+                        assert_eq!(
+                            std::fs::read_to_string(&file).unwrap(),
+                            "original content\n"
+                        );
+                    }
+                });
+        })
+        .unwrap()
+        .join()
+        .expect("file history failpoint test thread");
+}
+
+#[test]
+fn failed_ack_after_real_write_persists_reopenable_file_history() {
+    for point in [
+        FailedAckPoint::LoopAfterWrite,
+        FailedAckPoint::FinalAfterWrite,
+        FailedAckPoint::AfterToolsAfterWrite,
+    ] {
+        for cancel_during_ack in [false, true] {
+            run_file_history_failpoint(point, cancel_during_ack, false);
+        }
+    }
+}
+
+#[test]
+fn source_take_failure_does_not_run_ack_failure_epilogue() {
+    run_file_history_failpoint(FailedAckPoint::LoopAfterWrite, false, true);
 }

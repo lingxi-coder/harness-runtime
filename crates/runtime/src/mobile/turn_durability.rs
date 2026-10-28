@@ -812,6 +812,26 @@ pub(crate) struct PendingAdmissionLease {
     turn_id: u64,
 }
 
+struct PendingAdmissionEntry {
+    submission: Weak<super::host::PendingSubmission>,
+    unresolved: bool,
+}
+
+impl PendingAdmissionLease {
+    /// A failed cancellation write may have reached disk. Retain the
+    /// in-process admission fence until a recovery protocol can resolve it.
+    pub(crate) fn mark_unresolved(&self) {
+        let mut admissions = self
+            .store
+            .pending_admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = admissions.get_mut(&(self.session_id.clone(), self.turn_id)) {
+            entry.unresolved = true;
+        }
+    }
+}
+
 impl Drop for PendingAdmissionLease {
     fn drop(&mut self) {
         let mut admissions = self
@@ -820,11 +840,12 @@ impl Drop for PendingAdmissionLease {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let key = (self.session_id.clone(), self.turn_id);
-        if let Some(count) = admissions.get_mut(&key) {
-            *count -= 1;
-            if *count == 0 {
-                admissions.remove(&key);
+        if admissions.get(&key).is_some_and(|entry| entry.unresolved) {
+            if let Some(entry) = admissions.get_mut(&key) {
+                entry.submission = Weak::new();
             }
+        } else {
+            admissions.remove(&key);
         }
     }
 }
@@ -900,7 +921,9 @@ impl Drop for LiveTurnWorkLeaseInner {
 pub(crate) struct DurableTurnStore {
     root: PathBuf,
     delivery_gates: super::turn_delivery::TurnDeliveryGates,
-    pending_admissions: Mutex<HashMap<(String, u64), usize>>,
+    // Keep only a weak reference: the submitting command owns the admission,
+    // while every handle for this store can find the same cancellation target.
+    pending_admissions: Mutex<HashMap<(String, u64), PendingAdmissionEntry>>,
     /// Lock order: live owners, then cache, then session index.
     live_owners: Mutex<LiveTurnOwners>,
     lock: Mutex<HashMap<PathBuf, CachedTurn>>,
@@ -979,7 +1002,8 @@ impl DurableTurnStore {
         self: &Arc<Self>,
         session_id: &str,
         turn_id: u64,
-    ) -> Result<PendingAdmissionLease, DurableTurnStoreError> {
+        make_submission: impl FnOnce(PendingAdmissionLease) -> Arc<super::host::PendingSubmission>,
+    ) -> Result<Arc<super::host::PendingSubmission>, DurableTurnStoreError> {
         let mut admissions = self
             .pending_admissions
             .lock()
@@ -991,12 +1015,28 @@ impl DurableTurnStore {
                 turn_id,
             });
         }
-        admissions.insert(key, 1);
-        Ok(PendingAdmissionLease {
+        let pending = make_submission(PendingAdmissionLease {
             store: self.clone(),
             session_id: session_id.to_string(),
             turn_id,
-        })
+        });
+        admissions.insert(key, PendingAdmissionEntry {
+            submission: Arc::downgrade(&pending),
+            unresolved: false,
+        });
+        Ok(pending)
+    }
+
+    pub(crate) fn pending_admission(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Option<Arc<super::host::PendingSubmission>> {
+        self.pending_admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(session_id.to_string(), turn_id))
+            .and_then(|entry| entry.submission.upgrade())
     }
 
     pub(crate) fn with_no_pending_admission<T>(
@@ -1029,6 +1069,81 @@ impl DurableTurnStore {
             });
         }
         operation()
+    }
+
+    /// Cancel one still-private queue entry while its exact admission remains
+    /// registered. This does not borrow authority from a live turn owner.
+    /// Queued dispatchers hold the admission lock before taking the store lock.
+    pub(crate) fn cancel_unclaimed_admission(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        lease: &PendingAdmissionLease,
+        pending: &Arc<super::host::PendingSubmission>,
+    ) -> Result<Option<TurnRecoverySnapshotDto>, DurableTurnStoreError> {
+        let reject = || DurableTurnStoreError::PendingAdmission {
+            session_id: session_id.to_string(),
+            turn_id,
+        };
+        if !std::ptr::eq(self, Arc::as_ptr(&lease.store))
+            || lease.session_id != session_id
+            || lease.turn_id != turn_id
+        {
+            return Err(reject());
+        }
+        let admissions = self
+            .pending_admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = admissions.get(&(session_id.to_string(), turn_id)) else {
+            return Err(reject());
+        };
+        if entry.unresolved
+            || !entry
+                .submission
+                .upgrade()
+                .is_some_and(|registered| Arc::ptr_eq(&registered, pending))
+        {
+            return Err(reject());
+        }
+
+        let mut cache = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let checkpoints = self.read_session_checkpoints(&mut cache, session_id)?;
+        let Some(target) = checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.turn_id == turn_id)
+        else {
+            return Err(DurableTurnStoreError::NotFound {
+                session_id: session_id.to_string(),
+                turn_id,
+            });
+        };
+        if target.state.is_some()
+            || target.queue_delivery != QueueDeliveryState::Pending
+            || target.coalesced_batch.is_some()
+            || checkpoints.iter().any(|checkpoint| {
+                checkpoint
+                    .coalesced_batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.member_turn_ids.contains(&turn_id))
+            })
+        {
+            return Ok(None);
+        }
+        self.update_if_locked(&mut cache, session_id, turn_id, |checkpoint| {
+            if checkpoint.state.is_some()
+                || checkpoint.queue_delivery != QueueDeliveryState::Pending
+                || checkpoint.coalesced_batch.is_some()
+            {
+                return Ok(None);
+            }
+            checkpoint.queue_delivery = QueueDeliveryState::Cancelled;
+            checkpoint.cancelled_before_claim = true;
+            checkpoint.state = Some(TurnRecoveryStateDto::Cancelled);
+            checkpoint.safe_to_resume = false;
+            checkpoint.reason = Some("explicit_cancel".into());
+            Ok(Some(checkpoint.snapshot()))
+        })
     }
 
     /// Return the shared delivery gate for one durable turn. The caller must
@@ -2953,6 +3068,11 @@ impl DurableTurnStore {
     pub(crate) fn fail_before_next_journal_write(&self) {
         self.fail_before_journal_write
             .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_before_next_metadata_write(&self) {
+        self.fail_before_metadata_write.store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]

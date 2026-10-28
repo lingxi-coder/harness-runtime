@@ -38,12 +38,14 @@ use streaming::StreamingTurnDriver;
 
 fn map_mid_turn_consumption_error(
     error: crate::prompt::mid_turn_input::MidTurnConsumptionError,
+    ack_failure: &mut bool,
 ) -> OrchestratorError {
     match error {
         crate::prompt::mid_turn_input::MidTurnConsumptionError::Interrupted => {
             OrchestratorError::RecoveryInterrupted
         }
         crate::prompt::mid_turn_input::MidTurnConsumptionError::Failure(message) => {
+            *ack_failure = true;
             OrchestratorError::Internal(message)
         }
     }
@@ -395,12 +397,32 @@ impl TurnLoopState {
 
 enum StreamingIterationDisposition {
     Continue(crate::turn_loop::NativeQueryTransition),
-    /// A natural completion may absorb input queued while the model streamed.
-    Complete(MessageId),
-    /// A result-level end request is terminal for this query. Pending input is
-    /// left for the next turn instead of causing another model invocation.
-    ForcedComplete(MessageId),
+    /// Natural completion must settle late input before publishing its terminal.
+    NaturalComplete(MessageId),
+    /// Pending input remains with its source for the next turn. The terminal
+    /// event is published after the epilogue and budget check.
+    ForcedComplete(MessageId, DeferredTerminal),
     Return(ConversationOutcome),
+}
+
+pub(crate) struct DeferredTerminal {
+    reason: String,
+    publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+    interruption_kind: QueryUserInterruptionKind,
+}
+
+impl DeferredTerminal {
+    fn new(
+        reason: impl Into<String>,
+        publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+        interruption_kind: QueryUserInterruptionKind,
+    ) -> Self {
+        Self {
+            reason: reason.into(),
+            publication_guard,
+            interruption_kind,
+        }
+    }
 }
 
 /// `p.abortController.signal.aborted` — whether the USER cancelled this turn.
@@ -413,6 +435,43 @@ fn token_aborted(token: &Option<CancellationToken>) -> bool {
 }
 
 impl ConversationOrchestrator {
+    async fn publish_deferred_terminal(
+        &self,
+        terminal: DeferredTerminal,
+        user_cancel: &Option<CancellationToken>,
+    ) {
+        let cost = self.snapshot_cost_real().await;
+        let mut cancelled = false;
+        let emit = async {
+            // Read cancellation only after any generation publication lock is
+            // acquired; cancellation may arrive while waiting for that lock.
+            cancelled = token_aborted(user_cancel);
+            let reason = if cancelled {
+                match terminal.interruption_kind {
+                    QueryUserInterruptionKind::Streaming => "aborted_streaming",
+                    QueryUserInterruptionKind::Tools => "aborted_tools",
+                }
+            } else {
+                &terminal.reason
+            };
+            self.emit_turn_terminal(reason, &cost).await;
+        };
+        let published = if let Some(guard) = terminal.publication_guard.as_ref() {
+            guard.publish_if_current(Box::pin(emit)).await
+        } else {
+            emit.await;
+            true
+        };
+        if published && cancelled {
+            let mutation = self.inject_query_user_interruption(terminal.interruption_kind);
+            if let Some(guard) = terminal.publication_guard.as_ref() {
+                guard.commit_if_current(Box::pin(mutation)).await;
+            } else {
+                mutation.await;
+            }
+        }
+    }
+
     /// Read the active turn's [`crate::prompt::mid_turn_input::CancelReason`] from
     /// the wired flag, defaulting to `UserInterrupt` when no flag is wired (so an
     /// un-wired turn always takes the user-interrupt branch — today's behavior).
@@ -433,6 +492,22 @@ impl ConversationOrchestrator {
     /// delivery error before proceeding to model admission. Mirrors claude-code's
     /// `joinPromptValues` + meta-prompt injection at query.ts ~1570-1580.
     pub(super) async fn drain_mid_turn_input(&self) -> Result<bool, OrchestratorError> {
+        self.drain_mid_turn_input_until_cancelled(&None, &mut false)
+            .await
+    }
+
+    /// Finish acknowledging a batch already taken from the source, but do not
+    /// start another take once cancellation is observed. The source must still
+    /// serialize its own claim against cancellation. A failed acknowledgement
+    /// propagates to the host so it can preserve the uncertain durable state.
+    async fn drain_mid_turn_input_until_cancelled(
+        &self,
+        user_cancel: &Option<CancellationToken>,
+        ack_failure: &mut bool,
+    ) -> Result<bool, OrchestratorError> {
+        if token_aborted(user_cancel) {
+            return Ok(false);
+        }
         let mut injected = self.drain_peer_inbox(true).await;
         let Some(source) = self.mid_turn_input.get() else {
             return Ok(injected);
@@ -450,6 +525,9 @@ impl ConversationOrchestrator {
         // single drain step can never spin unboundedly.
         const MAX_DRAIN_BATCHES: usize = 1024;
         for _ in 0..MAX_DRAIN_BATCHES {
+            if token_aborted(user_cancel) {
+                break;
+            }
             match source
                 .take_mid_turn_batch()
                 .await
@@ -493,7 +571,7 @@ impl ConversationOrchestrator {
                         source
                             .input_consumed(&batch)
                             .await
-                            .map_err(map_mid_turn_consumption_error)?;
+                            .map_err(|error| map_mid_turn_consumption_error(error, ack_failure))?;
                         continue;
                     }
                     self.reset_goal_interruption();
@@ -520,7 +598,7 @@ impl ConversationOrchestrator {
                     source
                         .input_consumed(&batch)
                         .await
-                        .map_err(map_mid_turn_consumption_error)?;
+                        .map_err(|error| map_mid_turn_consumption_error(error, ack_failure))?;
                     injected = true;
                 }
                 None => break,
@@ -531,7 +609,10 @@ impl ConversationOrchestrator {
 
     /// SDK human input folds only after tool settlement. Ordinary completions
     /// return before this native path, leaving their followers for dispatch.
-    async fn drain_mid_turn_input_after_tools(&self) -> Result<(), OrchestratorError> {
+    async fn drain_mid_turn_input_after_tools(
+        &self,
+        ack_failure: &mut bool,
+    ) -> Result<(), OrchestratorError> {
         let Some(source) = self.mid_turn_input.get() else {
             return Ok(());
         };
@@ -584,7 +665,7 @@ impl ConversationOrchestrator {
         source
             .input_consumed(&batch)
             .await
-            .map_err(map_mid_turn_consumption_error)?;
+            .map_err(|error| map_mid_turn_consumption_error(error, ack_failure))?;
         Ok(())
     }
 
@@ -938,6 +1019,7 @@ impl ConversationOrchestrator {
                     id,
                     allow_budget_continuation,
                     tool_requested_end,
+                    disposition::TerminalEmission::Immediate,
                 )
                 .await
             }
@@ -1334,9 +1416,9 @@ impl ConversationOrchestrator {
                 Box::pin(self.try_run_turn_streaming("", Vec::new(), cancel, None, true, false)),
             )
             .await;
-        // The outer boundary emits the MaxTurns/error terminal after the inner
-        // driver returns. Keep the owner active through that emission so the
-        // completed metrics retain the same terminal reason as the output.
+        // The outer boundary emits errors after the inner driver returns. Keep
+        // the owner active through that emission so the completed metrics
+        // retain the same terminal reason as the output.
         let metrics_outcome = result.as_ref().ok().cloned();
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = match result {
@@ -1352,10 +1434,23 @@ impl ConversationOrchestrator {
                     TurnOutcome::EndTurn
                 },
             ),
-            Err(OrchestratorError::MaxTurnsReached { .. }) => {
-                let cost = self.snapshot_cost_real().await;
-                self.emit_turn_terminal("max_tokens", &cost).await;
-                Ok(TurnOutcome::MaxTurns)
+            Err(OrchestratorError::MaxTurnsReached { .. }) => Ok(
+                if cancel_probe
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    TurnOutcome::Cancelled
+                } else {
+                    TurnOutcome::MaxTurns
+                },
+            ),
+            // The host owns reporting a budget failure. An EndTurn here
+            // would close its event gate before the failure can be reported.
+            Err(error @ OrchestratorError::MaxBudgetReached { .. }) => {
+                let model = self.session.lock().await.model.clone();
+                let error_text = crate::turn_loop::orchestrator_error_text_source(&error, &model);
+                self.output.emit_system_notice(&error_text, true).await;
+                Err(error)
             }
             Err(error) => {
                 let model = self.session.lock().await.model.clone();
@@ -1954,7 +2049,14 @@ impl ConversationOrchestrator {
         assistant_id: MessageId,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
         match self
-            .end_of_turn_sequence(loop_state, "end_turn", assistant_id, true, false)
+            .end_of_turn_sequence(
+                loop_state,
+                "end_turn",
+                assistant_id,
+                true,
+                false,
+                disposition::TerminalEmission::Deferred,
+            )
             .await
         {
             TurnEndVerdict::Continue => Ok(StreamingIterationDisposition::Continue(
@@ -1966,9 +2068,9 @@ impl ConversationOrchestrator {
             TurnEndVerdict::MaxTurns => Err(OrchestratorError::MaxTurnsReached {
                 max_turns: self.config.max_turns,
             }),
-            // `Complete`, not `ForcedComplete`: a natural end still gets the
-            // loop's one final drain before it commits.
-            TurnEndVerdict::EndTurn(id) => Ok(StreamingIterationDisposition::Complete(id)),
+            // A natural end still gets the loop's one final drain before it
+            // publishes its terminal event.
+            TurnEndVerdict::EndTurn(id) => Ok(StreamingIterationDisposition::NaturalComplete(id)),
         }
     }
 
@@ -1988,8 +2090,15 @@ impl ConversationOrchestrator {
         let sequence = async {
             self.admit_structured_output_completion(loop_state).await;
             sequence_result = Some(
-                self.end_of_turn_sequence(loop_state, "end_turn", assistant_id, false, true)
-                    .await,
+                self.end_of_turn_sequence(
+                    loop_state,
+                    "end_turn",
+                    assistant_id,
+                    false,
+                    true,
+                    disposition::TerminalEmission::Deferred,
+                )
+                .await,
             );
         };
         let completed = if let Some(guard) = publication_guard.as_ref() {
@@ -2023,7 +2132,14 @@ impl ConversationOrchestrator {
             // `ForcedComplete`: a tool asked the turn to end, so it does NOT get
             // the loop's final drain — that is the whole difference between this
             // helper and the natural one.
-            TurnEndVerdict::EndTurn(id) => Ok(StreamingIterationDisposition::ForcedComplete(id)),
+            TurnEndVerdict::EndTurn(id) => Ok(StreamingIterationDisposition::ForcedComplete(
+                id,
+                DeferredTerminal::new(
+                    "end_turn",
+                    publication_guard,
+                    QueryUserInterruptionKind::Tools,
+                ),
+            )),
         }
     }
 
@@ -2231,15 +2347,22 @@ impl ConversationOrchestrator {
         } else {
             None
         };
-        let cost = self.snapshot_cost_real().await;
         let terminal_reason = if stop_reason == "refusal" {
             "api_error"
         } else {
             stop_reason
         };
-        self.emit_turn_terminal(terminal_reason, &cost).await;
-        Ok(StreamingIterationDisposition::Complete(
+        Ok(StreamingIterationDisposition::ForcedComplete(
             surfaced_id.unwrap_or(assistant_id),
+            DeferredTerminal::new(
+                terminal_reason,
+                None,
+                if pumped.tool_uses.is_empty() {
+                    QueryUserInterruptionKind::Streaming
+                } else {
+                    QueryUserInterruptionKind::Tools
+                },
+            ),
         ))
     }
 
@@ -2314,6 +2437,7 @@ impl ConversationOrchestrator {
         post_tool_batch_dispatch: crate::turn_loop::PostToolBatchDispatch,
         pre_batch_mcp_tool_count: usize,
         refusal_tool_uses_settled: bool,
+        ack_failure: &mut bool,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
         let dispatch_guard = post_tool_batch_dispatch.publication_guard.clone();
         if dispatch_guard
@@ -2613,8 +2737,17 @@ impl ConversationOrchestrator {
                 // EndConversation turn here, where on the batched path it does
                 // not. Deliberate; see the shared helper's note.
                 let mut end_conversation_requested = false;
+                let mut end_conversation_over_budget = false;
                 let take_end_conversation = async {
-                    end_conversation_requested = self.take_end_conversation_request().await;
+                    end_conversation_requested = self.take_end_conversation_request_slot();
+                    if end_conversation_requested {
+                        end_conversation_over_budget = !token_aborted(&loop_state.user_cancel)
+                            && self.over_budget().await
+                            && !token_aborted(&loop_state.user_cancel);
+                        if !end_conversation_over_budget {
+                            self.emit_end_conversation_message().await;
+                        }
+                    }
                 };
                 if let Some(guard) = batch_guard.as_ref() {
                     if !guard
@@ -2643,6 +2776,20 @@ impl ConversationOrchestrator {
                     ));
                 }
                 if end_conversation_requested {
+                    if end_conversation_over_budget && !token_aborted(&loop_state.user_cancel) {
+                        return Err(OrchestratorError::MaxBudgetReached {
+                            budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
+                        });
+                    }
+                    self.publish_deferred_terminal(
+                        DeferredTerminal::new(
+                            "end_turn",
+                            batch_guard,
+                            QueryUserInterruptionKind::Tools,
+                        ),
+                        &loop_state.user_cancel,
+                    )
+                    .await;
                     return Ok(StreamingIterationDisposition::Return(
                         ConversationOutcome::EndTurn {
                             turn_count: loop_state.turn_count,
@@ -2698,13 +2845,6 @@ impl ConversationOrchestrator {
                     } else {
                         telemetry.await;
                     }
-                    let cost = self.snapshot_cost_real().await;
-                    let emit = self.emit_turn_terminal("end_turn", &cost);
-                    if let Some(guard) = batch_guard.as_ref() {
-                        guard.publish_if_current(Box::pin(emit)).await;
-                    } else {
-                        emit.await;
-                    }
                     if batch_guard
                         .as_ref()
                         .is_some_and(|guard| !guard.is_current())
@@ -2716,19 +2856,31 @@ impl ConversationOrchestrator {
                             },
                         ));
                     }
-                    return Ok(StreamingIterationDisposition::Complete(assistant_id));
+                    return Ok(StreamingIterationDisposition::ForcedComplete(
+                        assistant_id,
+                        DeferredTerminal::new(
+                            "end_turn",
+                            batch_guard,
+                            QueryUserInterruptionKind::Tools,
+                        ),
+                    ));
                 }
                 // Native post-tool fold is gated before the next model cycle.
                 if self.config.max_turns == 0 || loop_state.turn_count < self.config.max_turns {
-                    self.drain_mid_turn_input_after_tools().await?;
+                    self.drain_mid_turn_input_after_tools(ack_failure).await?;
                 }
                 if !pumped.tool_input_issues.is_empty() {
                     if loop_state.recovery.output_recovery_actions
                         >= MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
                     {
-                        let cost = self.snapshot_cost_real().await;
-                        self.emit_turn_terminal("max_tokens", &cost).await;
-                        return Ok(StreamingIterationDisposition::Complete(assistant_id));
+                        return Ok(StreamingIterationDisposition::ForcedComplete(
+                            assistant_id,
+                            DeferredTerminal::new(
+                                "max_tokens",
+                                None,
+                                QueryUserInterruptionKind::Tools,
+                            ),
+                        ));
                     }
                     loop_state.recovery.output_recovery_actions += 1;
                     self.inject_meta_user_message(crate::output_recovery::INCOMPLETE_TOOL_NUDGE)
@@ -2811,9 +2963,14 @@ impl ConversationOrchestrator {
                         ApiErrorEnvelope::default(),
                     )
                     .await;
-                    let cost = self.snapshot_cost_real().await;
-                    self.emit_turn_terminal("end_turn", &cost).await;
-                    return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
+                    return Ok(StreamingIterationDisposition::ForcedComplete(
+                        failed_msg.id(),
+                        DeferredTerminal::new(
+                            "end_turn",
+                            None,
+                            QueryUserInterruptionKind::Streaming,
+                        ),
+                    ));
                 }
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
                     .await;
@@ -3153,7 +3310,13 @@ impl ConversationOrchestrator {
         )
         .await;
         let cleanup = crate::native_computer::cleanup(self).await;
-        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+        let result = match (result, cleanup) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Ok(_), Err(error)) | (Err(OrchestratorError::MaxTurnsReached { .. }), Err(error)) => {
+                Err(error)
+            }
+            (Err(error), _) => Err(error),
+        };
         self.fire_mod_turn_complete(
             completion_cancel
                 .as_ref()
@@ -3161,6 +3324,16 @@ impl ConversationOrchestrator {
             result.is_err(),
         )
         .await;
+        if matches!(&result, Err(OrchestratorError::MaxTurnsReached { .. })) {
+            let cost = self.snapshot_cost_real().await;
+            if token_aborted(&completion_cancel) {
+                self.emit_turn_terminal("aborted_streaming", &cost).await;
+                self.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                    .await;
+            } else {
+                self.emit_turn_terminal("max_turns", &cost).await;
+            }
+        }
         if !transient_rewake {
             self.complete_turn_metrics(result.as_ref().ok());
             if matches!(&result, Ok(ConversationOutcome::EndTurn { .. }))
@@ -4254,7 +4427,20 @@ impl ConversationOrchestrator {
                     Ok(TurnOutcome::EndTurn)
                 }
             }
-            Err(OrchestratorError::MaxTurnsReached { .. }) => Ok(TurnOutcome::MaxTurns),
+            Err(OrchestratorError::MaxTurnsReached { .. }) => {
+                if cancel.is_cancelled() {
+                    self.abort_startup_responses_websocket_prewarm();
+                    if let Err(err) = self.api.close_responses_websocket_session().await {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to close responses websocket session after cancelled streaming turn"
+                        );
+                    }
+                    Ok(TurnOutcome::Cancelled)
+                } else {
+                    Ok(TurnOutcome::MaxTurns)
+                }
+            }
             Err(OrchestratorError::VisionDelegationCancelled) if cancel.is_cancelled() => {
                 Ok(TurnOutcome::Cancelled)
             }
@@ -4947,7 +5133,9 @@ mod current_prompt_upe_scope_tests {
         orch.prompt_runtime
             .record_current_prompt_upe_attachment_id(current_upe_id);
 
-        orch.drain_mid_turn_input_after_tools().await.unwrap();
+        orch.drain_mid_turn_input_after_tools(&mut false)
+            .await
+            .unwrap();
 
         assert_eq!(
             orch.prompt_runtime.current_prompt_upe_attachment_ids(),
@@ -5014,7 +5202,9 @@ mod current_prompt_upe_scope_tests {
         orch.prompt_runtime
             .record_current_prompt_upe_attachment_id(current_upe_id);
 
-        orch.drain_mid_turn_input_after_tools().await.unwrap();
+        orch.drain_mid_turn_input_after_tools(&mut false)
+            .await
+            .unwrap();
 
         assert_eq!(
             orch.prompt_runtime.current_prompt_upe_attachment_ids(),

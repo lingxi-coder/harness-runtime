@@ -294,6 +294,16 @@ fn streaming_end_conversation_returns_before_the_wakeup_check() {
             ended_message_emitted(&output),
             "the streaming arm emits the same end-of-conversation message"
         );
+        let terminal_reasons = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_reasons, ["end_turn"]);
         assert!(
             !end_slot.load(Ordering::SeqCst),
             "the EndConversation slot is consumed by the arm that fires"
@@ -305,6 +315,81 @@ fn streaming_end_conversation_returns_before_the_wakeup_check() {
              flag. §4: 命中 EndConversation 后不会执行后面的 wakeup 消费. A shared handler \
              that runs the wakeup consume first — the batched order — eats it here."
         );
+    });
+}
+
+#[test]
+fn streaming_end_conversation_over_budget_reports_error_before_terminal() {
+    run_with_large_stack(|| async {
+        use orchestrator::test_support_stream::{
+            message_delta_stop_with_usage, message_start_with_usage,
+        };
+        let measured_usage = |input_tokens, output_tokens| llm_runtime::ExecutionUsage {
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
+            ..Default::default()
+        };
+        let model = "claude-opus-4-6";
+        let stream = scripted![
+            message_start_with_usage("m1", model, measured_usage(1_000, 0)),
+            orchestrator::test_support_stream::content_block_start_tool_use(
+                0,
+                ToolUseId::new(),
+                "ScheduleWakeup",
+            ),
+            input_json_delta(0, "{}"),
+            content_block_stop(0),
+            message_delta_stop_with_usage("tool_use", measured_usage(1_000, 500)),
+            message_stop(),
+        ];
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let tracker = Arc::new(cost::CostTracker::new(
+            lingxi_core::types::SessionId::new(),
+            Arc::new(cost::pricing::PricingCatalog::builtin_reference()),
+            tx,
+        ));
+        let end_slot = Arc::new(AtomicBool::new(true));
+        let wakeup_slot = Arc::new(AtomicBool::new(true));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig {
+                    model: model.into(),
+                    max_budget_nano_usd: Some(1_000_000),
+                    ..OrchestratorConfig::default()
+                },
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![stream])),
+                registry(&[("ScheduleWakeup", false)]),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_cost_tracker(tracker)
+            .with_end_conversation_slot(end_slot.clone())
+            .with_loop_wakeup_armed_slot(wakeup_slot.clone()),
+        );
+        let result = orch.run_turn_streaming("ping").await;
+        assert!(matches!(
+            result,
+            Err(orchestrator::OrchestratorError::MaxBudgetReached { .. })
+        ));
+        assert!(!output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, OutputEvent::EndTurn { .. })));
+        assert!(!ended_message_emitted(&output));
+        assert!(!end_slot.load(Ordering::SeqCst));
+        assert!(wakeup_slot.load(Ordering::SeqCst));
     });
 }
 

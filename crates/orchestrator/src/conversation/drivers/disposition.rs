@@ -1,10 +1,9 @@
 //! The end-of-turn sequence, and shared end-of-turn signal handling
 //! (§4 / §5.3).
 //!
-//! `end_of_turn_sequence` is the part all three entries run identically: Stop
-//! hooks before the token budget, then the end event. It existed in three copies
-//! before, which is the drift this plan is about — a change to the order had to
-//! be made three times or it silently applied to one path.
+//! `end_of_turn_sequence` runs Stop hooks before the token budget for all three
+//! entries. Natural streaming completion defers its terminal event until its
+//! final mid-turn input drain has settled.
 //!
 //! Everything else here is shared CONSUMPTION of a signal, not the ORDER the
 //! signals are consulted in. Order stays with each driver, because it is
@@ -13,6 +12,11 @@
 //! a result (`tests/turn_end_conversation_boundary_test.rs`).
 
 use super::*;
+
+pub(crate) enum TerminalEmission {
+    Immediate,
+    Deferred,
+}
 
 impl ConversationOrchestrator {
     /// Consume a pending `EndConversation` request, surfacing the user-facing
@@ -28,23 +32,31 @@ impl ConversationOrchestrator {
     /// calls it after resolving the lone wakeup, streaming before, and that
     /// asymmetry decides whether a wakeup arming survives the turn.
     pub(crate) async fn take_end_conversation_request(&self) -> bool {
-        let requested = self
-            .end_conversation_slot
-            .as_ref()
-            .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
+        let requested = self.take_end_conversation_request_slot();
         if requested {
-            let message = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
-                crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE,
-            );
-            self.output.emit_text(&message).await;
+            self.emit_end_conversation_message().await;
         }
         requested
+    }
+
+    pub(super) fn take_end_conversation_request_slot(&self) -> bool {
+        self.end_conversation_slot
+            .as_ref()
+            .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst))
+    }
+
+    pub(super) async fn emit_end_conversation_message(&self) {
+        let message = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE,
+        );
+        self.output.emit_text(&message).await;
     }
 }
 
 impl ConversationOrchestrator {
     /// The end-of-turn sequence, once, for all three entries: Stop hooks BEFORE
-    /// the token budget (`query.ts:1262-1308`), then the end event.
+    /// the token budget (`query.ts:1262-1308`), then the end event unless the
+    /// streaming driver must first settle its final input drain.
     ///
     /// This ordering existed in three copies — one per driver — which is exactly
     /// the drift the plan is about: a change to it had to be made three times or
@@ -68,6 +80,7 @@ impl ConversationOrchestrator {
         final_message_id: MessageId,
         allow_budget_continuation: bool,
         tool_requested_end: bool,
+        terminal_emission: TerminalEmission,
     ) -> TurnEndVerdict {
         if !tool_requested_end && stop_reason == "end_turn" {
             {
@@ -143,8 +156,10 @@ impl ConversationOrchestrator {
         {
             return TurnEndVerdict::Continue;
         }
-        let cost = self.snapshot_cost_real().await;
-        self.emit_turn_terminal(stop_reason, &cost).await;
+        if matches!(terminal_emission, TerminalEmission::Immediate) {
+            let cost = self.snapshot_cost_real().await;
+            self.emit_turn_terminal(stop_reason, &cost).await;
+        }
         TurnEndVerdict::EndTurn(final_message_id)
     }
 }
