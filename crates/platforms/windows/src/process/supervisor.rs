@@ -606,6 +606,120 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn foreground_only_stop_or_deadline_keeps_output_and_reports_unknown() {
+        for stop in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let command = ProcessCommand {
+                command: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    DETACHED_HELPER.into(),
+                    "--exact".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: Some(fixture.path().to_path_buf()),
+                env: std::collections::HashMap::from([
+                    (
+                        test_env("DETACHED_JOB_TEST_DIR"),
+                        fixture.path().to_string_lossy().into_owned(),
+                    ),
+                    (test_env("DETACHED_JOB_HOLD_PIPE"), "1".into()),
+                    (test_env("DETACHED_JOB_WRITE_BEFORE_READY"), "1".into()),
+                ]),
+                timeout: Some(Duration::from_secs(5)),
+                stdin: None,
+            };
+            let (mut supervisor, mut stream, endpoint, nonce, payload, cleanup) =
+                start(command, None, false, fixture.path().join("release")).await;
+            let supervisor_pid = supervisor.id().unwrap();
+            let leader = native::hold_process_handle_for_test(payload).unwrap();
+            wait_file(&fixture.path().join("started")).await;
+            let pid = std::fs::read_to_string(fixture.path().join("descendant.pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let held = native::hold_process_handle_for_test(pid).unwrap();
+            assert_eq!(native::process_handle_is_alive_for_test(&held), Some(true));
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while native::process_handle_is_alive_for_test(&leader) == Some(true) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("held leader did not exit before foreground stop");
+            assert_eq!(
+                native::process_handle_is_alive_for_test(&leader),
+                Some(false)
+            );
+            if stop {
+                let ack = rpc(
+                    &endpoint,
+                    supervisor_pid,
+                    serde_json::json!({"request":"Kill", "nonce":nonce}),
+                )
+                .await;
+                assert_eq!(ack["response"], "Ack", "{ack}");
+            }
+            let response = tokio::time::timeout(Duration::from_secs(15), receive(&mut stream))
+                .await
+                .unwrap();
+            assert_eq!(response["response"], "Error", "{response}");
+            assert!(
+                response["message"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("cleanup unverified")),
+                "{response}"
+            );
+            let output = cleanup.directories[1].join("output");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if std::fs::read_to_string(&output)
+                        .unwrap_or_default()
+                        .contains("detached-child-before-stop")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("foreground output prefix was not retained");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while native::process_handle_is_alive_for_test(&held) == Some(true) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("foreground Stop did not signal held descendant");
+            assert_eq!(native::process_handle_is_alive_for_test(&held), Some(false));
+            let inspect = rpc(
+                &endpoint,
+                supervisor_pid,
+                serde_json::json!({"request":"Inspect", "nonce":nonce}),
+            )
+            .await;
+            assert_eq!(inspect["group_cleanup_verified"], false, "{inspect}");
+            assert!(
+                inspect["stop_cause"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("wait_unverified:")),
+                "{inspect}"
+            );
+            assert!(
+                supervisor.try_wait().unwrap().is_none(),
+                "unverified owner must remain held"
+            );
+            supervisor.start_kill().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), supervisor.wait())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn real_supervisor_retains_output_and_job_until_explicit_stop() {
         let fixture = tempfile::tempdir().unwrap();
         let command = ProcessCommand {

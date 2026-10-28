@@ -593,6 +593,11 @@ mod tests {
         };
         let directory = PathBuf::from(directory);
         if std::env::var_os("LINGXI_DETACHED_JOB_CHILD").is_some() {
+            if std::env::var_os("LINGXI_DETACHED_JOB_WRITE_BEFORE_READY").is_some() {
+                use std::io::Write as _;
+                writeln!(std::io::stdout(), "detached-child-before-stop").unwrap();
+                std::io::stdout().flush().unwrap();
+            }
             std::fs::write(
                 directory.join("descendant.pid"),
                 std::process::id().to_string(),

@@ -59,6 +59,7 @@ jobs:
             'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe',
             'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants',
             'process::supervisor::integration_tests::real_supervisor_retains_output_and_job_until_explicit_stop',
+            'process::supervisor::integration_tests::foreground_only_stop_or_deadline_keeps_output_and_reports_unknown',
             'process::supervisor::integration_tests::unaccepted_or_stopped_output_handoff_retains_job_and_reports_unknown',
             'process::supervisor::integration_tests::real_registry_stop_does_not_claim_unverified_windows_job_exited',
             'process::owned_job::tests::job_unknown_and_suspended_start_are_proven_in_dedicated_helpers',
