@@ -3625,6 +3625,11 @@ impl ModHost {
         &self, owner: &ClientUiInstance, revision: u64, phase: &str, reason: &ExactHookText,
     ) -> Utf16JsonProjection {
         self.record_client_environment_fault(owner, phase, reason);
+        // A Worker fault may fence the action before the request receives its
+        // own error. Prefer that already recorded cause to a generic cancel.
+        let recorded = self.client_worker_fault(&owner.runtime_id);
+        let phase = recorded.as_ref().map_or(phase, |fault| fault.phase.as_str());
+        let reason = recorded.as_ref().map_or(reason, |fault| &fault.reason);
         let mut response = worker_fault_response(
             Some(&owner.runtime_id), revision, owner.key.identity.plugin(),
             owner.key.identity.module(), phase, reason,
