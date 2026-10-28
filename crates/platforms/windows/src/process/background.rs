@@ -448,7 +448,7 @@ async fn retain_unverified_foreground(
     cmd: &SandboxedCommand,
     reason: &str,
     mut child: tokio::process::Child,
-    guard: StreamingProcessTreeGuard,
+    mut guard: StreamingProcessTreeGuard,
     mut deadline: DrainDeadline,
     mut stdout: tokio::process::ChildStdout,
     mut stderr: tokio::process::ChildStderr,
@@ -456,6 +456,12 @@ async fn retain_unverified_foreground(
     mut eof: [bool; 2],
     registration: Option<lingxi_core::host::agent_processes::Registration>,
 ) -> ProcessError {
+    // The retained Job is the signalling capability. Once the leader can
+    // exit, a fallback taskkill by numeric PID could target a reused PID if
+    // this future is dropped, so never leave that fallback armed alongside it.
+    if deadline.job.is_some() {
+        guard.0 = None;
+    }
     deadline.verify_lease = true;
     let termination = tokio::time::timeout(
         std::time::Duration::from_secs(5),
