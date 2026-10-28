@@ -75,6 +75,12 @@ fn client_pending_event(
             .map_err(|error| ModError::Protocol(error.to_string()))?;
         post_ack.defer();
     }
+    if event.string_at("/backgroundEventId").is_some() {
+        if let Some(epoch) = worker_epoch.or_else(|| client_post_u64(event, "/hostBackgroundWorkerEpoch")) {
+            pending.set_field("hostBackgroundWorkerEpoch", host_generated_json(json!(epoch)))
+                .map_err(|error| ModError::Protocol(error.to_string()))?;
+        }
+    }
     Ok(pending)
 }
 
@@ -434,7 +440,7 @@ impl ClientPostEventGuard {
         event: &Utf16JsonProjection,
         worker_epoch: Option<u64>,
     ) -> Option<Self> {
-        if event.string_at("/action") != Some("post") {
+        if !matches!(event.string_at("/action"), Some("post" | "schedule")) {
             return None;
         }
         let action_id = event.string_at("/postActionId").map(str::to_owned);
@@ -2510,7 +2516,7 @@ impl ModHost {
                 )
             }
             "ui_message" => (
-                self.dispatch_client_message(&request, session, None).await?,
+                self.dispatch_client_message(&request, session, None, None).await?,
                 None,
                 BTreeMap::new(),
                 None,
@@ -2970,6 +2976,7 @@ impl ModHost {
                 session,
                 Some(client_action_context),
                 None,
+                None,
                 move |forwarded| {
                     *lock(&reached_core) = forwarded.clone();
                     let mut response = host_generated_json(json!({"handled":true}));
@@ -3206,6 +3213,7 @@ impl ModHost {
                 session,
                 Some(press_token),
                 None,
+                None,
                 move |forwarded| {
                     *lock(&reached_core) = forwarded.clone();
                     let mut response = host_generated_json(json!({"handled":true}));
@@ -3287,6 +3295,7 @@ impl ModHost {
         request: &Utf16JsonProjection,
         session: &dyn ModSessionContext,
         post_action_id: Option<&str>,
+        background_event_id: Option<&str>,
     ) -> Result<Utf16JsonProjection, ModError> {
         let site = client_site_from_projection(request)?;
         let identity = client_identity_from_control(request)?;
@@ -3327,6 +3336,7 @@ impl ModHost {
                 session,
                 None,
                 post_action_id,
+                background_event_id,
                 |_| async { Ok(Some(host_generated_json(json!({"handled":true})))) },
             )
             .await?;
@@ -3353,6 +3363,10 @@ impl ModHost {
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
             if let Some(post_action_id) = post_action_id {
                 operation.set_field("postActionId", plain_text_projection(post_action_id))
+                    .map_err(|error| ModError::Protocol(error.to_string()))?;
+            }
+            if let Some(background_event_id) = background_event_id {
+                operation.set_field("backgroundEventId", plain_text_projection(background_event_id))
                     .map_err(|error| ModError::Protocol(error.to_string()))?;
             }
             let frame = self.run_client_worker_operation(operation).await?;
@@ -3635,6 +3649,7 @@ impl ModHost {
         session: &dyn ModSessionContext,
         press_token: Option<Utf16JsonProjection>,
         post_action_id: Option<&str>,
+        background_event_id: Option<&str>,
         core: F,
     ) -> Result<Utf16JsonProjection, ModError>
     where
@@ -3647,6 +3662,7 @@ impl ModHost {
             press_token,
             ui_render_host_revision: None,
             client_post_action: post_action_id.map(str::to_owned),
+            client_background_event: background_event_id.map(str::to_owned),
         };
         let outcome = self
             .dispatch_with_utf16_at_context_scope(
@@ -4208,6 +4224,7 @@ impl ModHost {
         revision: u64,
     ) -> Result<Utf16JsonProjection, ModError> {
         let kind = operation.string_at("/type").expect("validated type");
+        let is_callback = matches!(kind, "runHeld" | "pointer" | "key");
         let runtime_id = operation
             .string_at("/runtimeId")
             .expect("validated runtime id");
@@ -4341,7 +4358,7 @@ impl ModHost {
             "render" | "unmount" => {}
             _ => unreachable!("operation was validated"),
         }
-        let mut post_action = if kind == "runHeld" {
+        let mut post_action = if is_callback {
             Some(self.client_ui.begin_post_action(runtime_id)?)
         } else {
             None
@@ -4368,11 +4385,11 @@ impl ModHost {
             self.run_client_worker_operation(worker_operation).await
         } {
             Ok(result) => result,
-            Err(ClientWorkerOperationError::UnknownFault { phase, reason }) if kind == "runHeld" => {
+            Err(ClientWorkerOperationError::UnknownFault { phase, reason }) if is_callback => {
                 return Ok(self.unknown_held_response(&instance, revision, &phase, &reason));
             }
             Err(ClientWorkerOperationError::Host(error))
-                if kind == "runHeld" && post_action.as_ref().is_some_and(|action| action.dispatch_attempted) => {
+                if is_callback && post_action.as_ref().is_some_and(|action| action.dispatch_attempted) => {
                 let reason = ExactHookText::from_text(&error.to_string());
                 return Ok(self.unknown_held_response(&instance, revision, "run", &reason));
             }
@@ -4400,23 +4417,36 @@ impl ModHost {
                 return Ok(self.unknown_held_response(&instance, revision, "run", &reason));
             }};
         }
+        let mut callback_accepted = false;
         if let Some(post_action) = post_action.as_mut() {
             let held_result = match client_run_held_result(&result) {
                 Ok(result) => result,
                 Err(error) => held_outcome_unknown!(error),
             };
             match held_result {
-                ClientRunHeldResult::Stale | ClientRunHeldResult::Rejected => {
+                ClientRunHeldResult::Stale => {
                     return Ok(host_generated_json(
                         json!({"handled":false,"renderRevision":revision}),
                     ));
                 }
+                ClientRunHeldResult::Rejected if kind == "runHeld" => {
+                    return Ok(host_generated_json(
+                        json!({"handled":false,"renderRevision":revision}),
+                    ));
+                }
+                ClientRunHeldResult::Rejected => {}
                 ClientRunHeldResult::Accepted(post_ids) => {
+                    callback_accepted = true;
                     if let Err(error) = post_action.wait_for_posts(&post_ids).await {
                         held_outcome_unknown!(error);
                     }
                 }
             }
+        }
+        if is_callback && !callback_accepted {
+            // A missing pointer/key listener is still allowed to render its
+            // current frame, matching the existing public operation contract.
+            post_action = None;
         }
         if kind == "unmount" {
             let handled = result
@@ -4454,7 +4484,7 @@ impl ModHost {
             {
                 Ok(rendered) => rendered,
                 Err(ClientWorkerOperationError::Fault { phase, reason }) => {
-                    if kind == "runHeld" {
+                    if callback_accepted {
                         drop(held_lease.take());
                         return Ok(self.unknown_held_response(&instance, revision, &phase, &reason));
                     }
@@ -4467,7 +4497,7 @@ impl ModHost {
                         &reason,
                     ));
                 }
-                Err(error) if kind == "runHeld" => held_outcome_unknown!(ModError::from(error)),
+                Err(error) if callback_accepted => held_outcome_unknown!(ModError::from(error)),
                 Err(error) => return Err(error.into()),
             };
             if rendered
@@ -4475,10 +4505,10 @@ impl ModHost {
                 .and_then(|value| value.as_bool())
                 == Some(true)
             {
-                if kind == "runHeld" {
+                if callback_accepted {
                     // The callback already ran; a stale follow-up frame is
                     // not evidence that the action had no side effects.
-                    held_outcome_unknown!("Client runHeld was accepted but its follow-up frame is stale");
+                    held_outcome_unknown!(format!("Client {kind} was accepted but its follow-up frame is stale"));
                 }
                 return Ok(host_generated_json(
                     json!({"handled":false,"renderRevision":revision}),
@@ -4486,10 +4516,10 @@ impl ModHost {
             }
             let frame = match self.frame_for_worker_result(runtime_id, revision, &plugin, &rendered) {
                 Some(frame) => frame,
-                None if kind == "runHeld" => held_outcome_unknown!("Client operation produced no render frame"),
+                None if callback_accepted => held_outcome_unknown!("Client operation produced no render frame"),
                 None => return Err(ModError::Protocol("Client operation produced no render frame".into())),
             };
-            if kind == "runHeld" {
+            if callback_accepted {
                 let data = lock(&self.client_ui.data);
                 if !self.client_instance_is_current(&data, &instance)
                     || post_action
@@ -4500,8 +4530,8 @@ impl ModHost {
                     held_outcome_unknown!("Client runHeld completed after its runtime changed or was cancelled");
                 }
             }
-            if kind == "runHeld" {
-                let action = post_action.as_ref().expect("runHeld has a post action");
+            if callback_accepted {
+                let action = post_action.as_ref().expect("accepted callback has a post action");
                 let Some(lease) = held_lease.as_mut() else {
                     held_outcome_unknown!("accepted Client runHeld has no pending finalization lease");
                 };
@@ -4751,7 +4781,7 @@ impl ModHost {
                 }
                 instance.pending_events.remove(0)
             };
-            self.handle_client_ui_background_event_inner(&event, session, true, None)
+            self.handle_client_ui_background_event_recorded(&event, session, true, None)
                 .await?;
         }
     }
@@ -4762,7 +4792,7 @@ impl ModHost {
         event: &Utf16JsonProjection,
         session: &dyn ModSessionContext,
     ) -> Result<(), ModError> {
-        self.handle_client_ui_background_event_inner(event, session, false, None)
+        self.handle_client_ui_background_event_recorded(event, session, false, None)
             .await
     }
 
@@ -4772,8 +4802,38 @@ impl ModHost {
         session: &dyn ModSessionContext,
         worker_epoch: u64,
     ) -> Result<(), ModError> {
-        self.handle_client_ui_background_event_inner(event, session, false, Some(worker_epoch))
+        self.handle_client_ui_background_event_recorded(event, session, false, Some(worker_epoch))
             .await
+    }
+
+    pub(super) async fn acknowledge_client_background_event(
+        &self, event: &Utf16JsonProjection, worker_epoch: Option<u64>, accepted: bool,
+    ) -> Result<(), ModError> {
+        let Some(event_id) = event.string_at("/backgroundEventId").filter(|id| !id.is_empty()) else {
+            return Ok(());
+        };
+        let Some(expected_epoch) = worker_epoch.or_else(|| client_post_u64(event, "/hostBackgroundWorkerEpoch")) else {
+            return Err(ModError::Protocol("Client background event has no worker epoch".into()));
+        };
+        let epoch = self.current_worker_epoch().await;
+        if epoch.id != expected_epoch { return Ok(()); }
+        self.send_generated_in_epoch(&epoch, &json!({
+            "id":0, "kind":"ui.client.backgroundComplete", "backgroundEventId":event_id, "accepted":accepted,
+        })).await
+    }
+
+    async fn handle_client_ui_background_event_recorded(
+        &self, event: &Utf16JsonProjection, session: &dyn ModSessionContext,
+        from_pending_queue: bool, worker_epoch: Option<u64>,
+    ) -> Result<(), ModError> {
+        let mut buffered = false;
+        let result = self.handle_client_ui_background_event_inner(
+            event, session, from_pending_queue, worker_epoch, &mut buffered,
+        ).await;
+        if !buffered {
+            self.acknowledge_client_background_event(event, worker_epoch, result.is_ok()).await?;
+        }
+        result
     }
 
     async fn handle_client_ui_background_event_inner(
@@ -4782,6 +4842,7 @@ impl ModHost {
         session: &dyn ModSessionContext,
         from_pending_queue: bool,
         worker_epoch: Option<u64>,
+        buffered: &mut bool,
     ) -> Result<(), ModError> {
         if event.string_at("/kind") != Some("ui.client.event") {
             return Ok(());
@@ -4828,6 +4889,7 @@ impl ModHost {
                 if let Some(instance) = data.instances.get_mut(&runtime_id) {
                     let pending = client_pending_event(event, &mut post_ack, worker_epoch)?;
                     instance.pending_events.push(pending);
+                    *buffered = true;
                 }
                 return Ok(());
             }
@@ -4850,6 +4912,7 @@ impl ModHost {
                 if let Some(instance) = data.instances.get_mut(&runtime_id) {
                     let pending = client_pending_event(event, &mut post_ack, worker_epoch)?;
                     instance.pending_events.push(pending);
+                    *buffered = true;
                 }
                 return Ok(());
             }
@@ -4863,22 +4926,43 @@ impl ModHost {
         }
         match action {
             "schedule" => {
-                let result = self
-                    .run_client_worker_operation(host_generated_json(json!({
-                        "type":"render","runtimeId":runtime_id,
-                        "generation":instance.worker_generation,
-                    })))
-                    .await?;
-                if let Some(frame) =
-                    self.frame_for_worker_result(&runtime_id, instance.revision, &plugin, &result)
-                {
-                    if self
-                        .current_instance(&instance.key.site, &instance.key.identity)
-                        .is_some()
-                    {
-                        let _ = self
-                            .emit_client_frame(session, &runtime_id, instance.revision, &frame)
-                            .await;
+                let mut operation = host_generated_json(json!({
+                    "type":"render","runtimeId":runtime_id,"generation":instance.worker_generation,
+                }));
+                if let Some(action_id) = post_ack.as_ref().and_then(|ack| ack.action_id.as_deref()) {
+                    operation.set_field("postActionId", plain_text_projection(action_id))
+                        .map_err(|error| ModError::Protocol(error.to_string()))?;
+                }
+                if let Some(event_id) = event.string_at("/backgroundEventId") {
+                    operation.set_field("backgroundEventId", plain_text_projection(event_id))
+                        .map_err(|error| ModError::Protocol(error.to_string()))?;
+                }
+                let result = if let Some(ack) = post_ack.as_ref() {
+                    let cancellation = ack.cancellation.clone();
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Ok(()),
+                        result = self.run_client_worker_operation(operation) => result,
+                    }
+                } else { self.run_client_worker_operation(operation).await }?;
+                let frame = self.frame_for_worker_result(&runtime_id, instance.revision, &plugin, &result)
+                    .ok_or_else(|| ModError::Unavailable("Client scheduled render is stale".into()))?;
+                if self.current_instance(&instance.key.site, &instance.key.identity).is_some() {
+                    let publication = if let Some(ack) = post_ack.as_ref() {
+                        let cancellation = ack.cancellation.clone();
+                        tokio::select! {
+                            biased;
+                            _ = cancellation.cancelled() => return Ok(()),
+                            result = self.emit_client_frame(session, &runtime_id, instance.revision, &frame) => result,
+                        }
+                    } else {
+                        self.emit_client_frame(session, &runtime_id, instance.revision, &frame).await
+                    };
+                    publication?;
+                    if let Some(ack) = post_ack.take() {
+                        let data = lock(&self.client_ui.data);
+                        if self.client_instance_is_current(&data, &instance) { ack.complete(); }
+                        else { ack.fail("Client runtime changed before scheduled frame admission"); }
                     }
                 }
             }
@@ -4918,10 +5002,10 @@ impl ModHost {
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => return Ok(()),
-                        response = self.dispatch_client_message(&request, session, post_ack.action_id.as_deref()) => response,
+                        response = self.dispatch_client_message(&request, session, post_ack.action_id.as_deref(), event.string_at("/backgroundEventId")) => response,
                     }
                 } else {
-                    self.dispatch_client_message(&request, session, None).await
+                    self.dispatch_client_message(&request, session, None, event.string_at("/backgroundEventId")).await
                 };
                 let response = match response {
                     Ok(response) => response,
@@ -5058,6 +5142,7 @@ impl ClientUiFaultHost for ClientFaultHostAdapter<'_> {
                 &plugin,
                 event.to_projection(),
                 self.session,
+                None,
                 None,
                 None,
                 |_| async { Ok(Some(host_generated_json(json!({"handled":true})))) },
@@ -6675,6 +6760,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_worker_pointer_and_key_wait_for_async_post_delivery() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Text, h } from 'claude:surface-runtime';
+          export function Card(props,surface) {
+            surface.onPointer(async ()=>{await Promise.resolve();surface.post({kind:'pointer'});});
+            surface.onKey(async ()=>{await Promise.resolve();surface.post({kind:'key'});});
+            return h(Text,{children:props.title});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render',{surface:'desktop',component:'Pane'},($,event)=>{
+              const {Client,h}=$.ui.resolve(event);return h(Client,{key:'card',module:'./card.tsx',props:{title:'initial'}});
+            });
+            on('ui.message',async ($,event)=>{
+              await $.session.model();return {handled:true,props:{title:event.data.kind}};
+            });
+          }
+        "#).unwrap();
+        let host=ModHost::start(None).await.unwrap();
+        let observation=Arc::new(ReceiptTestSession {root:directory.path().to_path_buf(),models:std::sync::atomic::AtomicUsize::new(0)});
+        let accepting=Arc::new(ReceiptAcceptedSession {inner:observation.clone(),frames:StdMutex::new(Vec::new()),
+            refuse_fault:std::sync::atomic::AtomicBool::new(false)});
+        let session:Arc<dyn ModSessionContext>=accepting.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared=host.prepare_module(directory.path(),&entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review","review@user",directory.path(),&entry,
+            Utf16JsonProjection::parse("{}").unwrap(),"user",None,Some(&prepared)).await.unwrap();
+        let render=host.dispatch_client_ui_control(host_generated_json(json!({"subtype":"ui_render",
+            "surface":"desktop","component":"Pane","instance_id":"listener-test","props":{},
+            "viewport":{"columns":80,"rows":24}})),session.as_ref()).await.unwrap();
+        let revision=render.render_revision.unwrap();
+        let mount=host.dispatch_client_ui_operation(host_generated_json(json!({"type":"mount","surface":"desktop",
+            "component":"Pane","instance_id":"listener-test","plugin":"review","client":"card",
+            "module":"card.tsx","render_revision":revision,"columns":80,"rows":24})),session.as_ref()).await.unwrap();
+        let runtime_id=test_value(&mount)["runtimeId"].as_str().unwrap().to_owned();
+        host.dispatch_client_ui_operation(host_generated_json(json!({"type":"draw_commit","surface":"desktop",
+            "component":"Pane","instance_id":"listener-test","render_revision":revision,
+            "clients":[{"plugin":"review","key":"card","module":"card.tsx"}]})),session.as_ref()).await.unwrap();
+        for kind in ["pointer","key"] {
+            let result=host.dispatch_client_ui_operation(host_generated_json(json!({"type":kind,"runtimeId":runtime_id,
+                "render_revision":revision,"event":{"value":kind}})),session.as_ref()).await.unwrap();
+            assert!(tree_contains_text(&test_value(&result)["tree"],kind));
+            assert!(accepting.frames.lock().unwrap().iter().any(|(id,frame)| id==&runtime_id
+                && projection_tree_contains_text(frame,kind)), "{kind} post frame must be admitted before response");
+        }
+        assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst),2,
+            "each async listener post executed exactly once");
+    }
+
+    #[tokio::test]
     async fn real_worker_accepted_callback_render_fault_returns_unknown() {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
@@ -6877,6 +7016,94 @@ mod tests {
     #[tokio::test]
     async fn real_worker_async_input_rejection_returns_unknown_and_fences_runtime() {
         real_worker_async_input_waits_for_post_and_fences_rejection(true).await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_background_timer_events_survive_held_action() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Box, Button, Text, h } from 'claude:surface-runtime';
+          export function Card(props, surface) {
+            return h(Box, {children:[h(Text,{children:props.title}),
+              h(Text,{children:surface.state.timer || 'no timer'}),
+              h(Button,{key:'send',label:'Send',onPress:()=>{
+                surface.post({kind:'action'});
+                const stop=surface.every(5,()=>{
+                  stop(); surface.setState({timer:'timer-state'}); surface.post({kind:'timer'});
+                });
+              }})]});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop',component:'Pane'}, ($,event) => {
+              const {Client,h}=$.ui.resolve(event);
+              return h(Client,{key:'card',module:'./card.tsx',props:{title:'initial'}});
+            });
+            on('ui.message', async ($,event) => {
+              if (event.data.kind === 'timer') {
+                await $.session.model(); $.ui.log('background timer processed');
+                return {handled:true,props:{title:'timer-frame'}};
+              }
+              return {handled:true,props:{title:'action-frame'}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let session_impl = Arc::new(UiLifecycleSession {root:directory.path().to_path_buf(), ..Default::default()});
+        let session: Arc<dyn ModSessionContext> = session_impl.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared=host.prepare_module(directory.path(),&entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review","review@user",directory.path(),&entry,
+            Utf16JsonProjection::parse("{}").unwrap(),"user",None,Some(&prepared)).await.unwrap();
+        let render=host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render","surface":"desktop","component":"Pane","instance_id":"background-test",
+            "props":{},"viewport":{"columns":80,"rows":24},
+        })),session.as_ref()).await.unwrap();
+        let revision=render.render_revision.unwrap();
+        let mount=host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount","surface":"desktop","component":"Pane","instance_id":"background-test",
+            "plugin":"review","client":"card","module":"card.tsx","render_revision":revision,"columns":80,"rows":24,
+        })),session.as_ref()).await.unwrap();
+        let mounted=test_value(&mount);
+        let runtime_id=mounted["runtimeId"].as_str().unwrap().to_owned();
+        let handle=tree_press_handle_for_key(&mounted["tree"],"send").unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit","surface":"desktop","component":"Pane","instance_id":"background-test",
+            "render_revision":revision,"clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })),session.as_ref()).await.unwrap();
+        let frame_entered=Arc::new(tokio::sync::Notify::new());
+        let frame_release=Arc::new(tokio::sync::Notify::new());
+        *lock(&session_impl.frame_gate)=Some(UiLifecycleFrameGate {runtime_id:runtime_id.clone(),
+            expected_text:"action-frame",entered:frame_entered.clone(),release:frame_release.clone(),
+            delivered:Arc::new(tokio::sync::Notify::new())});
+        let timer_entered=Arc::new(tokio::sync::Notify::new());
+        let timer_release=Arc::new(tokio::sync::Notify::new());
+        *lock(&session_impl.model_gate)=Some(UiLifecycleModelGate {entered:timer_entered.clone(),
+            release:timer_release.clone(),completed:Arc::new(tokio::sync::Notify::new())});
+        let host_task=host.clone();let session_task=session.clone();
+        let operation=host_generated_json(json!({"type":"runHeld","runtimeId":runtime_id,
+            "render_revision":revision,"handle":handle}));
+        let task=tokio::spawn(async move {host_task.dispatch_client_ui_operation(operation,session_task.as_ref()).await});
+        tokio::time::timeout(Duration::from_secs(5),frame_entered.notified()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!lock(&session_impl.logs).iter().any(|line| line=="background timer processed"));
+        frame_release.notify_one();
+        let response=tokio::time::timeout(Duration::from_secs(5),task).await.unwrap().unwrap().unwrap();
+        assert!(tree_contains_text(&test_value(&response)["tree"],"action-frame"));
+        tokio::time::timeout(Duration::from_secs(5),timer_entered.notified()).await.unwrap();
+        let blocked=host.dispatch_client_ui_operation(host_generated_json(json!({"type":"runHeld",
+            "runtimeId":runtime_id,"render_revision":revision,"handle":handle})),session.as_ref()).await.unwrap_err();
+        assert!(blocked.to_string().contains("operation was not executed"));
+        assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_none());
+        timer_release.notify_one();
+        let timer_frame=wait_for_client_frame(&session_impl,&runtime_id,"background timer",|frame| {
+            tree_contains_text(&frame["tree"],"timer-frame")
+        }).await;
+        assert!(tree_contains_text(&timer_frame["tree"],"timer-state"));
+        assert_eq!(lock(&session_impl.logs).iter().filter(|line| *line=="background timer processed").count(),1);
     }
 
 
@@ -8037,13 +8264,16 @@ mod tests {
                 frame_runtime == &recovered_runtime
                     && tree_contains_text(&frame["tree"], race_frame_text)
             }));
-        let race_error = tokio::time::timeout(Duration::from_secs(2), race_task)
+        let race_result = tokio::time::timeout(Duration::from_secs(2), race_task)
             .await
             .expect("the accepted action resolves after post settlement")
             .unwrap()
-            .unwrap_err();
-        assert!(race_error
-            .to_string()
+            .unwrap();
+        let race_result = test_value(&race_result);
+        assert_eq!(race_result["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+        assert_eq!(race_result["runtimeId"], recovered_runtime);
+        assert_eq!(race_result["renderRevision"], recovered_revision);
+        assert!(race_result["fault"]["reason"].as_str().unwrap()
             .contains("accepted but its follow-up frame is stale"));
 
         // A Host removal first erases the instance under the data lock and
@@ -8144,17 +8374,18 @@ mod tests {
                 .await
                 .expect("the accepted action resolves")
                 .unwrap();
-            let error = result.expect_err(
-                "a post for a removed Host instance must not be acknowledged as delivered",
-            );
+            let result = test_value(&result.unwrap());
+            assert_eq!(result["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+            assert_eq!(result["runtimeId"], runtime_id);
+            assert_eq!(result["renderRevision"], revision);
             let expected_error = if race_value == "host-removal-before-frame" {
                 "Client runtime was removed before its frame was delivered"
             } else {
                 "Client runtime changed before the post completed"
             };
             assert!(
-                error.to_string().contains(expected_error),
-                "{race_value}: unexpected error {error}"
+                result["fault"]["reason"].as_str().unwrap().contains(expected_error),
+                "{race_value}: unexpected result {result}"
             );
             let delivered = lock(&session_impl.frames).iter().any(|(id, frame)| {
                 id == &runtime_id && tree_contains_text(&frame["tree"], race_value)

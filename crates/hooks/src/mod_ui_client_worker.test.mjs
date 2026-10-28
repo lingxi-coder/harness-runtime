@@ -16,6 +16,13 @@ import { decodeModsIpcFrame, encodeModsIpcFrame } from './mods_ipc_codec.mjs';
 const SURFACE_RUNTIME_SOURCE = readFileSync(new URL('./mod_ui_client_helpers.mjs', import.meta.url), 'utf8');
 const HOOKS_TYPES_SOURCE = readFileSync(new URL('./mod_ui_hooks_types.mjs', import.meta.url), 'utf8');
 
+function acknowledgeBackground(worker, frame) {
+  if (typeof frame.backgroundEventId === 'string') {
+    worker.stdin.write(`${encodeModsIpcFrame({id:0, kind:'ui.client.backgroundComplete',
+      backgroundEventId:frame.backgroundEventId, accepted:true})}\n`);
+  }
+}
+
 async function loadPrepared(request, id, message) {
   const prepared = await request(id, {
     kind: 'prepare', root: message.root, module: message.module,
@@ -289,7 +296,7 @@ test('async Input waits for its own posts while unrelated timer posts stay uncor
   assert.equal(completed, false, 'the old tree cannot be acknowledged while callback is suspended');
   assert.equal(manager.render(mounted.runtimeId).tree.props.value, '');
   const result = await operation;
-  assert.deepEqual(result, { accepted:true, postIds:[0, 1] });
+  assert.deepEqual(result, { accepted:true, postIds:[0, 1, 2] });
   const posts = events.filter(event => event.action === 'post');
   const byStage = Object.fromEntries(posts.map(event => [JSON.parse(event.json).stage, event]));
   assert.equal(byStage.before.postActionId, 'input-1');
@@ -352,7 +359,7 @@ test('cancel invalidates every surface sharing the VM and remount isolates a lat
     'a resumed old continuation cannot change the new VM module state');
   assert.equal(events.filter(event => event.action === 'post' && event.json.includes('"stage":"after"')).length, 0);
   assert.deepEqual(await manager.operation({type:'runHeld', runtimeId:'fresh', handle:manager.render('fresh').tree.held,
-    payload:{kind:'change',value:'fresh-value'}, postActionId:'fresh-action'}), {accepted:true, postIds:[0,1]});
+    payload:{kind:'change',value:'fresh-value'}, postActionId:'fresh-action'}), {accepted:true, postIds:[0,1,2]});
   assert.equal(manager.render('fresh').tree.props.value, 'fresh-value');
   manager.dispose();
 });
@@ -811,6 +818,7 @@ test('mods worker admits matching setProps while an async held action waits for 
   const posted = new Promise(resolve => { wakePost = resolve; });
   createInterface({ input:worker.stdout, crlfDelay:Infinity }).on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.id === 0) {
       events.push(frame);
       if (frame.action === 'post') wakePost();
@@ -877,6 +885,7 @@ test('held post permits its nested Host API dispatch while unrelated dispatch re
   });
   createInterface({input:worker.stdout, crlfDelay:Infinity}).on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({id:frame.id, kind:'api.callers.result', callId:frame.callId})}\n`);
     } else if (frame.kind === 'api' && frame.method === 'session.model') {
@@ -941,6 +950,7 @@ test('held action remains revocable after callback result until Host finalizes i
   const events = [];
   createInterface({input:worker.stdout, crlfDelay:Infinity}).on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.id === 0) events.push(frame);
     else { pending.get(frame.id)?.(frame); pending.delete(frame.id); }
   });
@@ -1016,6 +1026,191 @@ test('held action remains revocable after callback result until Host finalizes i
   assert.deepEqual(siblingAfter.result, {stale:true}, 'unmount revokes the pending action and shared VM');
 });
 
+test('background timer events wait for the held action and Host acknowledgements', async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(), events=[];
+  let coreCalls=0;
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.kind==='next') {
+      coreCalls++;
+      worker.stdin.write(`${encodeModsIpcFrame({id:frame.id,kind:'next.result',callId:frame.callId,result:{handled:true}})}\n`);
+    } else if(frame.id===0) events.push(frame);
+    else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`request ${id} timed out`));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const source=`export function Board(_props,surface) {
+    return surface.elements.Input({value:surface.state.value||'',onSubmit(){},onInput:()=>{
+      const stop=surface.every(5,()=>{stop();surface.setState({value:'timer'});surface.post({stage:'timer'});});
+    }});
+  }`;
+  const options=mountOptions({runtimeId:'background-owner',source});
+  options.parent.requestId=['render-7','client','board'].join(String.fromCharCode(0));
+  const mounted=await request(1,{kind:'ui.client.operation',operation:{type:'mount',...options}});
+  const result=await request(2,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'background-owner',
+    generation:mounted.result.generation,handle:mounted.result.tree.held,payload:{kind:'change',value:'x'},postActionId:'action'}});
+  assert.deepEqual(result.result,{accepted:true,postIds:[]});
+  await delay(30);
+  assert.equal(events.filter(event=>event.action==='schedule'||event.action==='post').length,0,
+    'unrelated timer effects remain queued while the action is unconfirmed');
+  assert.equal((await request(2,{kind:'ui.client.finalize',postActionId:'action'})).kind,'ui.client.finalized');
+  for(let i=0;i<100 && !events.some(event=>event.action==='schedule');i++) await delay(5);
+  const scheduled=events.find(event=>event.action==='schedule');
+  assert(scheduled?.backgroundEventId);
+  assert.equal(events.some(event=>event.action==='post'),false,'a later event waits for the first Host acknowledgement');
+  const unowned=await request(3,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'background-owner',generation:mounted.result.generation}});
+  assert.equal(unowned.error.busy,true);
+  const rendered=await request(4,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'background-owner',
+    generation:mounted.result.generation,backgroundEventId:scheduled.backgroundEventId}});
+  assert.equal(rendered.result.tree.props.value,'timer');
+  worker.stdin.write(`${encodeModsIpcFrame({id:0,kind:'ui.client.backgroundComplete',backgroundEventId:scheduled.backgroundEventId,accepted:true})}\n`);
+  for(let i=0;i<100 && !events.some(event=>event.action==='post');i++) await delay(5);
+  const posted=events.find(event=>event.action==='post');
+  assert(posted?.backgroundEventId);
+  assert.notEqual(posted.backgroundEventId,scheduled.backgroundEventId);
+  worker.stdin.write(`${encodeModsIpcFrame({id:0,kind:'ui.client.backgroundComplete',backgroundEventId:scheduled.backgroundEventId,accepted:false})}\n`);
+  const input={surface:'desktop',component:'panel',requestId:'render-7',element:'board',module:'board.mjs',data:{stage:'timer'}};
+  assert.equal((await request(5,{kind:'dispatch',event:'ui.message',pluginScope:'example',input})).kind,'error');
+  assert.equal(coreCalls,0,'an unowned event must not execute the hook/core');
+  assert.equal((await request(6,{kind:'dispatch',event:'ui.message',pluginScope:'example',
+    clientBackgroundEventId:posted.backgroundEventId,input})).kind,'result');
+  assert.equal(coreCalls,1);
+  worker.stdin.write(`${encodeModsIpcFrame({id:0,kind:'ui.client.backgroundComplete',backgroundEventId:posted.backgroundEventId,accepted:true})}\n`);
+  const after=await request(7,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'background-owner',generation:mounted.result.generation}});
+  assert.equal(after.result.tree.props.value,'timer');
+});
+
+test('pointer and key callbacks wait for promises and keep their post identity', async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(),events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    acknowledgeBackground(worker,frame);
+    if(frame.id===0)events.push(frame);else{pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`request ${id} timed out`));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const source=`export function Board(_props,surface){
+    surface.onPointer(async value=>{surface.post({kind:'pointer-before',value});await Promise.resolve();surface.post({kind:'pointer-after'});});
+    surface.onKey(async value=>{surface.post({kind:'key-before',value});await Promise.resolve();surface.post({kind:'key-after'});});
+    return surface.elements.Text({children:'ready'});
+  }`;
+  const mounted=await request(1,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({runtimeId:'listener-owner',source})}});
+  for(const [index,type] of ['pointer','key'].entries()) {
+    const actionId=`listener-${type}`, requestId=index+2;
+    const outcome=await request(requestId,{kind:'ui.client.operation',operation:{type,runtimeId:'listener-owner',
+      generation:mounted.result.generation,payload:{value:type},postActionId:actionId}});
+    assert.deepEqual(outcome.result,{accepted:true,postIds:[0,1]});
+    const posts=events.filter(event=>event.action==='post'&&event.postActionId===actionId);
+    assert.deepEqual(posts.map(event=>event.postId),[0,1]);
+    assert.deepEqual(posts.map(event=>JSON.parse(event.json).kind),[`${type}-before`,`${type}-after`]);
+    const frame=await request(index+10,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'listener-owner',
+      generation:mounted.result.generation,postActionId:actionId}});
+    assert.equal(frame.result.tree.type,'Text');
+    assert.equal((await request(requestId,{kind:'ui.client.finalize',postActionId:actionId})).kind,'ui.client.finalized');
+  }
+});
+
+test('background queue overflow faults only its shared VM and drops its queued events', async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(), events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0) events.push(frame);
+    else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`request ${id} timed out`));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const source=`export function Board(_props,surface){return surface.elements.Button({onPress:()=>{
+    const stop=surface.every(5,()=>{stop();for(let i=0;i<129;i++)surface.post({i});});
+  }});}`;
+  const mount=(id,runtimeId)=>request(id,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({runtimeId,source})}});
+  const first=await mount(1,'overflow-owner');
+  const sibling=await mount(2,'overflow-sibling');
+  const otherOptions=mountOptions({runtimeId:'overflow-other',source});otherOptions.plugin='other';
+  const other=await request(3,{kind:'ui.client.operation',operation:{type:'mount',...otherOptions}});
+  assert.deepEqual((await request(4,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'overflow-owner',
+    generation:first.result.generation,handle:first.result.tree.held,payload:{kind:'press'},postActionId:'overflow'}})).result,
+    {accepted:true,postIds:[]});
+  for(let i=0;i<100 && events.filter(event=>event.action==='fault').length<2;i++)await delay(5);
+  assert.equal(events.filter(event=>event.action==='fault').length,2);
+  assert.equal(events.some(event=>event.action==='post'),false,'overflow never silently releases a partial queue');
+  const stale=await request(5,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'overflow-sibling',generation:sibling.result.generation}});
+  assert.deepEqual(stale.result,{stale:true});
+  const intact=await request(6,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'overflow-other',generation:other.result.generation}});
+  assert.equal(intact.result.tree.type,'Button');
+  const fresh=await mount(7,'overflow-fresh');
+  assert.notEqual(fresh.result.environmentInstanceId,first.result.environmentInstanceId);
+});
+
+async function backgroundOwnerEnds(t, mode) {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(),events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0)events.push(frame);
+    else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`request ${id} timed out`));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const source=`let started=false;export function Board(props,surface){
+    if(props.start&&!started){started=true;const stop=surface.every(5,()=>{stop();surface.post({stage:'background'});});}
+    return surface.elements.Button({onPress(){}});
+  }`;
+  const mount=(id,runtimeId)=>request(id,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({runtimeId,source})}});
+  const owner=await mount(1,'background-ending-owner');
+  const sibling=await mount(2,'background-ending-sibling');
+  await request(8,{kind:'ui.client.operation',operation:{type:'setProps',
+    runtimeId:'background-ending-owner',generation:owner.result.generation,props:{start:true}}});
+  for(let i=0;i<100 && !events.some(event=>event.action==='post');i++)await delay(5);
+  const post=events.find(event=>event.action==='post');
+  assert(post?.backgroundEventId);
+  if(mode==='reject') {
+    worker.stdin.write(`${encodeModsIpcFrame({id:0,kind:'ui.client.backgroundComplete',backgroundEventId:post.backgroundEventId,accepted:false})}\n`);
+  } else if(mode==='unmount') {
+    const removed=await request(3,{kind:'ui.client.operation',operation:{type:'unmount',
+      runtimeId:'background-ending-owner',generation:owner.result.generation}});
+    assert.equal(removed.result.unmounted,true);
+  }
+  const budget=mode==='timeout'?32_000:2_000, start=Date.now();
+  while(events.filter(event=>event.action==='fault').length<2 && Date.now()-start<budget)await delay(10);
+  assert.equal(events.filter(event=>event.action==='fault').length,2);
+  const stale=await request(4,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'background-ending-sibling',generation:sibling.result.generation}});
+  assert.deepEqual(stale.result,{stale:true});
+  const fresh=await mount(5,'background-ending-fresh');
+  assert.notEqual(fresh.result.environmentInstanceId,owner.result.environmentInstanceId);
+  worker.stdin.write(`${encodeModsIpcFrame({id:0,kind:'ui.client.backgroundComplete',backgroundEventId:post.backgroundEventId,accepted:false})}\n`);
+  const intact=await request(6,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'background-ending-fresh',generation:fresh.result.generation}});
+  assert.equal(intact.result.tree.type,'Button','a late acknowledgement cannot fence a newly-created VM');
+  assert.equal(events.filter(event=>event.action==='post').length,1,'an uncertain event is never automatically replayed');
+}
+
+test('rejected background admission fences its shared VM', async t => backgroundOwnerEnds(t,'reject'));
+test('unmount during a background event fences its shared VM', async t => backgroundOwnerEnds(t,'unmount'));
+test('unacknowledged background event expires and fences its shared VM',
+  {timeout:36_000}, async t => backgroundOwnerEnds(t,'timeout'));
+
 test('unmount interrupts a suspended held callback with an unknown result', async t => {
   const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
   const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
@@ -1024,6 +1219,7 @@ test('unmount interrupts a suspended held callback with an unknown result', asyn
   const posted=new Promise(resolve=>{postResolve=resolve;});
   createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
     const frame=decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if(frame.id===0) { if(frame.action==='post') postResolve(); }
     else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
   });
@@ -1056,6 +1252,7 @@ test('a lost finalize acknowledgement revokes only the identified VM', async t =
   const events = [];
   createInterface({input:worker.stdout, crlfDelay:Infinity}).on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.id === 0) events.push(frame);
     else { pending.get(frame.id)?.(frame); pending.delete(frame.id); }
   });
@@ -1110,6 +1307,7 @@ test('an unfinalized held action expires and quarantines its VM',
   const fault=new Promise(resolve=>{faultResolve=resolve;});
   createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
     const frame=decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if(frame.id===0) {events.push(frame);if(frame.action==='fault') faultResolve();}
     else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
   });
@@ -1148,6 +1346,7 @@ test('mods worker accepts ui.client.operation and returns tree plus asynchronous
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     frames.push(frame);
     if (frame.id !== 0) {
       pending.get(frame.id)?.(frame);
@@ -1190,6 +1389,9 @@ test('mods worker accepts ui.client.operation and returns tree plus asynchronous
   assert.deepEqual(mounted.result.tree, { type: 'Text', props: {}, children: ['worker tree'] });
   assert(frames.some(frame => frame.id === 0 && frame.kind === 'ui.client.event'
     && frame.runtimeId === 'worker-drawing' && frame.action === 'schedule'));
+  for (let i=0; i<100 && !frames.some(frame => frame.kind === 'ui.client.event'
+    && frame.runtimeId === 'worker-drawing' && frame.action === 'post'
+    && frame.json === '{"kind":"worker-mounted"}'); i+=1) await delay(5);
   assert(frames.some(frame => frame.kind === 'ui.client.event'
     && frame.runtimeId === 'worker-drawing' && frame.action === 'post'
     && frame.json === '{"kind":"worker-mounted"}'));
@@ -1322,6 +1524,7 @@ test('prepared desktop ui.resolve constructors render a validated tree and route
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({ id: frame.id, kind: 'api.callers.result', callId: frame.callId })}\n`);
       return;
@@ -1717,6 +1920,7 @@ test('Client render ownership permits downstream prop edits but rejects key/modu
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({ id: frame.id, kind: 'api.callers.result', callId: frame.callId })}\n`);
       return;
@@ -1809,6 +2013,7 @@ test('scoped hover ownership stamps current Box/Text and preserves foreign group
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({ id: frame.id, kind: 'api.callers.result', callId: frame.callId })}\n`);
       return;
@@ -1876,6 +2081,7 @@ test('prepare consumes an immutable compiled hook graph without reading JSX path
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({ id: frame.id, kind: 'api.callers.result', callId: frame.callId })}\n`);
       return;
@@ -1992,6 +2198,7 @@ test('ui.listener queries registrations without running hooks and pluginScope fi
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
+    acknowledgeBackground(worker, frame);
     frames.push(frame);
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({ id: frame.id, kind: 'api.callers.result', callId: frame.callId })}\n`);

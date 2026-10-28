@@ -627,6 +627,7 @@ function createEnvironment(manager, key, options) {
   };
   environment.dispose = () => {
     if (environment.disposed) return;
+    manager.onEnvironmentInvalidated(environment);
     environment.disposed = true;
     for (const instance of [...environment.instances.values()]) manager.unmount(instance.runtimeId);
     environment.moduleCache.clear();
@@ -662,10 +663,11 @@ function hasListener(instance, kind) {
 }
 
 export class ClientSurfaceManager {
-  constructor({ send, asyncHeldBudgetMs = ASYNC_HELD_BUDGET_MS } = {}) {
+  constructor({ send, asyncHeldBudgetMs = ASYNC_HELD_BUDGET_MS, onEnvironmentInvalidated = () => {} } = {}) {
     if (typeof send !== 'function') fail('ClientSurfaceManager requires a host send callback');
     if (!Number.isFinite(asyncHeldBudgetMs) || asyncHeldBudgetMs <= 0) fail('invalid Client callback budget');
     this.send = send;
+    this.onEnvironmentInvalidated = onEnvironmentInvalidated;
     this.asyncHeldBudgetMs = asyncHeldBudgetMs;
     // A per-async-chain context prevents unrelated timers and callbacks from
     // being attributed to a held action that happens to be awaiting.
@@ -702,7 +704,7 @@ export class ClientSurfaceManager {
     if (instance.destroyed || this.disposed || (instance.failure && action !== 'fault')) return;
     const held = this.heldContext.getStore();
     if (action !== 'fault' && held?.instance === instance && held.cancelled) return;
-    const postAction = action === 'post' && held?.instance === instance && held.active
+    const postAction = ['post', 'schedule'].includes(action) && held?.instance === instance && held.active
       && typeof held.id === 'string' ? held : undefined;
     const postCorrelation = postAction
       ? { postActionId: postAction.id, postId: postAction.postIds.length }
@@ -748,6 +750,7 @@ export class ClientSurfaceManager {
 
   invalidateEnvironment(environment, error) {
     if (environment.disposed) return;
+    this.onEnvironmentInvalidated(environment);
     // Modules and module-level variables are shared by every surface in this
     // environment. A non-cancellable continuation could still mutate them, so
     // fence every member and never reuse this VM for a fresh mount.
@@ -922,6 +925,20 @@ export class ClientSurfaceManager {
     }
     const callback = instance.held.get(handle);
     if (typeof callback !== 'function') return { accepted: false, postIds: [] };
+    return this.runActionCore(instance, callback, payload, postActionId, signal);
+  }
+
+  async runListenerWithPostIds(runtimeId, kind, payload, postActionId, signal) {
+    const instance = this.runtimeInstances.get(runtimeId);
+    if (!instance || instance.destroyed || instance.failure || signal?.aborted) {
+      return { accepted: false, postIds: [] };
+    }
+    const callback = instance.binding.listener(kind);
+    if (typeof callback !== 'function') return { accepted: false, postIds: [] };
+    return this.runActionCore(instance, callback, payload, postActionId, signal);
+  }
+
+  async runActionCore(instance, callback, payload, postActionId, signal) {
     if (instance.activePostAction) fail('Client post action is already active');
     const action = { id: postActionId, postIds: [], instance, active: true,
       cancelled: false, controller: new AbortController() };
@@ -1065,8 +1082,14 @@ export class ClientSurfaceManager {
       case 'render': return this.render(operation.runtimeId);
       case 'setProps': return this.setProps(operation.runtimeId, operation.props);
       case 'resize': return this.resize(operation.runtimeId, operation.columns, operation.rows);
-      case 'pointer': return { accepted: this.pointer(operation.runtimeId, operation.payload) };
-      case 'key': return { accepted: this.key(operation.runtimeId, operation.payload) };
+      case 'pointer':
+      case 'key':
+        if (typeof operation.postActionId !== 'string' || operation.postActionId.length === 0) {
+          fail('Client listener operation requires a host post action ID');
+        }
+        return this.runListenerWithPostIds(
+          operation.runtimeId, operation.type, operation.payload, operation.postActionId, signal,
+        );
       case 'runHeld':
         if (typeof operation.postActionId !== 'string' || operation.postActionId.length === 0) {
           fail('Client runHeld operation requires a host post action ID');

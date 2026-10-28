@@ -171,7 +171,76 @@ function materializeSkillPromptIpcResult(result, originalText) {
   return own;
 }
 
-const clientSurfaceManager = new ClientSurfaceManager({ send });
+// Background events need their own bounded admission handshake. Without it a
+// timer post can race an action and be refused after the timer already ran.
+const BACKGROUND_EVENT_LIMIT = 128;
+const BACKGROUND_EVENT_BUDGET_MS = 30_000;
+const clientBackgroundEnvironments = new Map();
+const clientBackgroundById = new Map();
+let nextClientBackgroundId = 1;
+
+function clearClientBackground(environment) {
+  const state = clientBackgroundEnvironments.get(environment);
+  if (!state) return;
+  clearTimeout(state.timer);
+  if (state.inFlight) clientBackgroundById.delete(state.inFlight.id);
+  clientBackgroundEnvironments.delete(environment);
+}
+
+function onClientEnvironmentInvalidated(environment) {
+  clearClientBackground(environment);
+  for (const held of runningHeldByRuntime.values()) {
+    if (held.environment === environment) activeClientOperations.get(held.id)?.controller.abort();
+  }
+}
+
+function drainClientBackground(environment) {
+  const state = clientBackgroundEnvironments.get(environment);
+  if (!state || state.inFlight || environment.disposed || [...runningHeldByRuntime.values()]
+      .some(held => held.environment === environment)) return;
+  const event = state.events.shift();
+  if (!event) {
+    clientBackgroundEnvironments.delete(environment);
+    return;
+  }
+  const id = `client-background-${nextClientBackgroundId++}`;
+  if (!Number.isSafeInteger(nextClientBackgroundId)) {
+    clientSurfaceManager.invalidateEnvironment(environment, new Error('Client background event ID space exhausted'));
+    return;
+  }
+  state.inFlight = {id, event};
+  clientBackgroundById.set(id, environment);
+  state.timer = setTimeout(() => {
+    clientSurfaceManager.invalidateEnvironment(environment, new Error('Client background event was not settled'));
+  }, BACKGROUND_EVENT_BUDGET_MS);
+  send({...event, backgroundEventId:id});
+}
+
+function sendClientEvent(event) {
+  const instance = clientSurfaceManager.runtimeInstances.get(event.runtimeId);
+  const environment = instance?.environment;
+  if (!environment || event.action === 'fault'
+      || !['post', 'schedule'].includes(event.action) || event.postActionId) {
+    send(event);
+    return;
+  }
+  let state = clientBackgroundEnvironments.get(environment);
+  if (!state) {
+    state = {events:[], inFlight:undefined, timer:undefined};
+    clientBackgroundEnvironments.set(environment, state);
+  }
+  if (state.events.length + Number(Boolean(state.inFlight)) >= BACKGROUND_EVENT_LIMIT) {
+    clientSurfaceManager.invalidateEnvironment(environment, new Error('Client background event queue is full'));
+    return;
+  }
+  state.events.push(event);
+  drainClientBackground(environment);
+}
+
+const clientSurfaceManager = new ClientSurfaceManager({
+  send:sendClientEvent,
+  onEnvironmentInvalidated:onClientEnvironmentInvalidated,
+});
 
 function heldForClientOperation(operation) {
   const target = clientSurfaceManager.runtimeInstances.get(operation?.runtimeId);
@@ -184,6 +253,26 @@ function heldForClientOperation(operation) {
           && operation.environmentId === environment.environmentId) return {runtimeId, held};
   }
   return undefined;
+}
+
+function backgroundForClientOperation(operation) {
+  const target = clientSurfaceManager.runtimeInstances.get(operation?.runtimeId);
+  for (const [environment, state] of clientBackgroundEnvironments) {
+    if (!state.inFlight) continue;
+    if (target?.environment === environment ||
+        operation?.type === 'mount' && operation.plugin === environment.plugin ||
+        operation?.type === 'disposeEnvironment' && operation.plugin === environment.plugin
+          && operation.environmentId === environment.environmentId) return {environment, state};
+  }
+  return undefined;
+}
+
+function allowedBackgroundClientOperation(operation, owner) {
+  if (operation?.type === 'unmount') return true;
+  const event = owner.state.inFlight?.event;
+  return event && operation?.runtimeId === event.runtimeId && operation.generation === event.generation
+    && ['setProps', 'render'].includes(operation.type)
+    && operation.backgroundEventId === owner.state.inFlight.id;
 }
 
 function heldForUiMessage(message) {
@@ -205,6 +294,27 @@ function heldForUiMessage(message) {
   return undefined;
 }
 
+function backgroundForUiMessage(message) {
+  if (message.kind !== 'dispatch' || message.event !== 'ui.message') return undefined;
+  const input = message.input;
+  if (!input || typeof input.requestId !== 'string') return undefined;
+  for (const target of clientSurfaceManager.runtimeInstances.values()) {
+    const identity = target.identity;
+    if (!identity || message.pluginScope !== identity.plugin
+        || input.surface !== identity.parent.surface || input.component !== identity.parent.component
+        || `${input.requestId}\u0000client\u0000${identity.key}` !== identity.parent.requestId
+        || input.element !== identity.key || input.module !== identity.module) continue;
+    const state = clientBackgroundEnvironments.get(target.environment);
+    if (state?.inFlight) return {target, state};
+  }
+  return undefined;
+}
+
+function isBackgroundMessage(message, owner) {
+  return owner && owner.state.inFlight?.event.runtimeId === owner.target.runtimeId
+    && message.clientBackgroundEventId === owner.state.inFlight.id;
+}
+
 function isHeldPostMessage(message, owner) {
   return owner && clientSurfaceManager.runtimeInstances.get(owner.runtimeId) === owner.target
     && message.clientPostActionId === owner.held.actionId;
@@ -212,7 +322,9 @@ function isHeldPostMessage(message, owner) {
 
 async function processQueuedDispatch(message) {
   const owner = heldForUiMessage(message);
-  if (owner && !isHeldPostMessage(message, owner) && !cancelledRequests.has(message.id)) {
+  const background = backgroundForUiMessage(message);
+  if ((owner && !isHeldPostMessage(message, owner) || background && !isBackgroundMessage(message, background))
+      && !cancelledRequests.has(message.id)) {
     pendingDispatch.delete(message.id);
     send({id:message.id, kind:'error', message:'Client shared environment is busy; operation was not executed'});
     return;
@@ -230,7 +342,9 @@ async function processQueuedClientOperation(message) {
   const request = activeClientOperations.get(message.id);
   if (!request) return;
   const owner = heldForClientOperation(message.operation);
-  if (owner && !allowedHeldClientOperation(message.operation, owner)) {
+  const background = backgroundForClientOperation(message.operation);
+  if (owner && !allowedHeldClientOperation(message.operation, owner)
+      || background && !allowedBackgroundClientOperation(message.operation, background)) {
     activeClientOperations.delete(message.id);
     if (!request.controller.signal.aborted) send({id:message.id, kind:'ui.client.result', error:{
       phase:'run', reason:'Client shared environment is busy; operation was not executed', busy:true,
@@ -4616,7 +4730,7 @@ async function processMessage(message) {
         return;
       }
       const operation = message.operation;
-      const held = operation?.type === 'runHeld' ? {
+      const held = ['runHeld', 'pointer', 'key'].includes(operation?.type) ? {
         id: message.id, generation: operation.generation, actionId: operation.postActionId,
         environment: clientSurfaceManager.runtimeInstances.get(operation.runtimeId)?.environment,
       } : undefined;
@@ -4625,6 +4739,7 @@ async function processMessage(message) {
       const release = () => {
         if (held && runningHeldByRuntime.get(operation.runtimeId) === held) runningHeldByRuntime.delete(operation.runtimeId);
         if (activeClientOperations.get(message.id) === request) activeClientOperations.delete(message.id);
+        if (held?.environment) drainClientBackground(held.environment);
       };
       try {
         const result = await clientSurfaceManager.operation(operation, { signal: request.controller.signal });
@@ -4758,6 +4873,16 @@ input.on('line', line => {
     pendingApiCallerRegistrations.delete(message.callId);
     if (message.kind === 'api.callers.result') reply.resolve();
     else reply.reject(new Error(message.message));
+  } else if (message.kind === 'ui.client.backgroundComplete') {
+    const environment = clientBackgroundById.get(message.backgroundEventId);
+    const state = environment && clientBackgroundEnvironments.get(environment);
+    if (state?.inFlight?.id === message.backgroundEventId) {
+      clearTimeout(state.timer);
+      clientBackgroundById.delete(state.inFlight.id);
+      state.inFlight = undefined;
+      if (message.accepted === true) drainClientBackground(environment);
+      else clientSurfaceManager.invalidateEnvironment(environment, new Error('Client background event was not admitted'));
+    }
   } else if (message.kind === 'ui.client.finalize') {
     const request = activeClientOperations.get(message.id);
     if (request?.finalize?.(message.postActionId)) {
@@ -4821,6 +4946,8 @@ input.on('line', line => {
     pendingDispatch.add(message.id);
     const heldUiMessage = heldForUiMessage(message);
     const belongsToHeldSurface = isHeldPostMessage(message, heldUiMessage);
+    const backgroundUiMessage = backgroundForUiMessage(message);
+    const belongsToBackground = isBackgroundMessage(message, backgroundUiMessage);
     if (process.env.LINGXI_ASYNC_TRACE === '1' && message.event === 'ui.message') {
       console.error('TRACE dispatch', JSON.stringify({ input: message.input, pluginScope: message.pluginScope,
         active: [...runningHeldByRuntime.keys()].map(id => clientSurfaceManager.runtimeInstances.get(id)?.identity),
@@ -4828,10 +4955,10 @@ input.on('line', line => {
     }
     const nestedHeldDispatch = message.kind === 'dispatch'
       && heldRelatedDispatches.has(message.logRouteId);
-    if (belongsToHeldSurface || nestedHeldDispatch && !heldUiMessage) {
+    if (belongsToHeldSurface || belongsToBackground || nestedHeldDispatch && !heldUiMessage && !backgroundUiMessage) {
       heldRelatedDispatches.add(message.id);
       void processMessage(message).finally(() => heldRelatedDispatches.delete(message.id));
-    } else if (heldUiMessage) {
+    } else if (heldUiMessage || backgroundUiMessage) {
       // Only the Host-validated post belonging to the action may run a hook
       // inside a VM whose held action has not yet been finalized.
       pendingDispatch.delete(message.id);
@@ -4846,6 +4973,7 @@ input.on('line', line => {
     activeClientOperations.set(message.id, request);
     const operation = message.operation;
     const owner = heldForClientOperation(operation);
+    const background = backgroundForClientOperation(operation);
     if (owner && operation?.type === 'unmount') {
       // Unmount of the owning surface revokes the held action immediately;
       // unmounting a sibling is also safe and must not wait behind the lease.
@@ -4860,9 +4988,26 @@ input.on('line', line => {
     } else if (owner && operation?.type === 'disposeEnvironment') {
       activeClientOperations.get(owner.held.id)?.controller.abort();
       void processMessage(message);
+    } else if (background && operation?.type === 'disposeEnvironment') {
+      clearClientBackground(background.environment);
+      void processMessage(message);
+    } else if (background && operation?.type === 'unmount') {
+      const event = background.state.inFlight?.event;
+      if (event?.runtimeId === operation.runtimeId
+          && (operation.generation === undefined || operation.generation === event.generation)) {
+        // The Host may already have started the event's hook. Do not reuse the
+        // shared VM while its outcome is unresolved after owner removal.
+        clientSurfaceManager.invalidateEnvironment(background.environment,
+          new Error('Client background event owner was unmounted before settlement'));
+      } else {
+        background.state.events = background.state.events.filter(event => event.runtimeId !== operation.runtimeId);
+      }
+      void processQueuedClientOperation(message);
     } else if (owner && allowedHeldClientOperation(operation, owner)) {
       void processQueuedClientOperation(message);
-    } else if (owner) {
+    } else if (background && allowedBackgroundClientOperation(operation, background)) {
+      void processQueuedClientOperation(message);
+    } else if (owner || background) {
       // This request has not executed. Refuse promptly rather than letting a
       // 30-second lease trip the Host's shorter worker watchdog.
       void processQueuedClientOperation(message);
