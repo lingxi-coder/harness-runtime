@@ -1,3 +1,4 @@
+//! Native Windows regressions for the desktop typed-Bash entry and wrapper.
 #![cfg(windows)]
 
 use harness_runtime::desktop::{run_typed_bash_for_test, TestingTypedBashProcess};
@@ -7,9 +8,53 @@ use lingxi_core::host::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
+
+struct CountingRunner {
+    calls: Arc<AtomicUsize>,
+    inner: platform_windows::process::WindowsProcess,
+}
+#[async_trait::async_trait]
+impl ProcessRunner for CountingRunner {
+    async fn run(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.run(cmd).await
+    }
+    async fn run_foreground_with_output_limit(
+        &self,
+        cmd: &SandboxedCommand,
+        limit: Option<usize>,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, mobile_linux_api::ProcessError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .run_foreground_with_output_limit(cmd, limit)
+            .await
+    }
+    async fn spawn_background(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.spawn_background(cmd).await
+    }
+    async fn kill(
+        &self,
+        handle: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), mobile_linux_api::ProcessError> {
+        self.inner.kill(handle).await
+    }
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
+    }
+}
 
 struct SourceSink;
 #[async_trait::async_trait]
@@ -115,7 +160,11 @@ async fn desktop_typed_bash_entry_rejects_windows_before_spawn() {
         },
         fixture.0.path().to_path_buf(),
     );
-    ctx.process = Arc::new(platform_windows::process::WindowsProcess::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    ctx.process = Arc::new(CountingRunner {
+        calls: calls.clone(),
+        inner: platform_windows::process::WindowsProcess::new(),
+    });
     let result = run_typed_bash_for_test(
         ctx,
         "echo spawned > should-not-exist",
@@ -123,9 +172,11 @@ async fn desktop_typed_bash_entry_rejects_windows_before_spawn() {
     )
     .await;
     assert_ne!(result.exit_code, 0);
-    assert!(
-        result.stderr.contains("Bash is not supported on Windows"),
-        "{result:?}"
+    assert!(result.stderr == "invalid input", "{result:?}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the Windows runner must not be invoked"
     );
     assert!(!fixture.0.path().join("should-not-exist").exists());
 }
