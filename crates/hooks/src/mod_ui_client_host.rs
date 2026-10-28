@@ -772,6 +772,8 @@ struct ClientUiInstance {
     worker_generation: Option<u64>,
     // Worker-minted identity for the shared VM, distinct from manifest hash.
     worker_environment_id: Option<String>,
+    // Cancels uncorrelated background work when this exact runtime is fenced.
+    background_cancellation: CancellationToken,
     pending_events: Vec<Utf16JsonProjection>,
     draining_pending_events: bool,
     props: Utf16JsonProjection,
@@ -885,7 +887,9 @@ fn remove_instance_if_current(
     runtime_id: &str,
     key: &ClientUiInstanceKey,
 ) {
-    data.instances.remove(runtime_id);
+    if let Some(instance) = data.instances.remove(runtime_id) {
+        instance.background_cancellation.cancel();
+    }
     if data.instance_by_identity.get(key).map(String::as_str) == Some(runtime_id) {
         data.instance_by_identity.remove(key);
     }
@@ -989,8 +993,10 @@ impl ClientUiHostState {
                         .map(|(runtime_id, _)| runtime_id.clone())
                         .collect::<Vec<_>>();
                     data.instances.retain(|_, instance| {
-                        host_plugin_name(instance.key.identity.plugin()).as_deref()
-                            != Some(plugin.as_str())
+                        let retain = host_plugin_name(instance.key.identity.plugin()).as_deref()
+                            != Some(plugin.as_str());
+                        if !retain { instance.background_cancellation.cancel(); }
+                        retain
                     });
                     data.instance_by_identity.retain(|key, _| {
                         host_plugin_name(key.identity.plugin()).as_deref() != Some(plugin.as_str())
@@ -3547,7 +3553,9 @@ impl ModHost {
 
     fn update_instance_props(&self, runtime_id: &str, props: Utf16JsonProjection) {
         if let Some(instance) = lock(&self.client_ui.data).instances.get_mut(runtime_id) {
-            instance.props = props;
+            if instance.worker_fault.is_none() && !instance.background_cancellation.is_cancelled() {
+                instance.props = props;
+            }
         }
     }
 
@@ -3564,6 +3572,7 @@ impl ModHost {
         if instance.worker_fault.is_some() {
             return false;
         }
+        instance.background_cancellation.cancel();
         instance.worker_fault = Some(ClientUiWorkerFault {
             phase: phase.to_owned(),
             reason: reason.clone(),
@@ -3580,6 +3589,7 @@ impl ModHost {
                     instance.worker_environment_id.as_ref() == Some(id)
                 });
                 if same_environment || instance.runtime_id == owner.runtime_id {
+                    instance.background_cancellation.cancel();
                     if instance.worker_fault.is_none() {
                         instance.worker_fault = Some(ClientUiWorkerFault { phase: phase.into(), reason: reason.clone() });
                     }
@@ -3908,14 +3918,17 @@ impl ModHost {
         revision: u64,
         frame: &Utf16JsonProjection,
     ) -> Result<(), ModError> {
-        let Some(instance_key) = lock(&self.client_ui.data)
-            .instances
-            .get(runtime_id)
-            .map(|instance| instance.key.clone())
-        else {
-            return Err(ModError::Unavailable(
-                "Client runtime was removed before its frame was delivered".into(),
-            ));
+        let instance_key = {
+            let data = lock(&self.client_ui.data);
+            let Some(instance) = data.instances.get(runtime_id) else {
+                return Err(ModError::Unavailable(
+                    "Client runtime was removed before its frame was delivered".into(),
+                ));
+            };
+            if instance.worker_fault.is_some() || instance.background_cancellation.is_cancelled() {
+                return Err(ModError::Unavailable("Client runtime was fenced before frame admission".into()));
+            }
+            instance.key.clone()
         };
         let (Ok(frame_sequence), Ok(has_pointer_listener), Ok(has_key_listener)) = (
             frame.subprojection("/frameSequence"),
@@ -4033,6 +4046,7 @@ impl ModHost {
             }
         };
         if let Some(old_instance) = old_instance {
+            old_instance.background_cancellation.cancel();
             self.client_ui.fail_post_actions_for_runtime(
                 &old_instance.runtime_id,
                 "Client runtime was replaced",
@@ -4058,6 +4072,7 @@ impl ModHost {
             revision,
             worker_generation: None,
             worker_environment_id: None,
+            background_cancellation: CancellationToken::new(),
             pending_events: Vec::new(),
             draining_pending_events: false,
             props: trusted_props.clone(),
@@ -4636,6 +4651,7 @@ impl ModHost {
                 .collect::<Vec<_>>();
             for (runtime_id, _) in &stale_runtimes {
                 if let Some(instance) = data.instances.remove(runtime_id) {
+                    instance.background_cancellation.cancel();
                     if data
                         .instance_by_identity
                         .get(&instance.key)
@@ -4720,6 +4736,7 @@ impl ModHost {
                 .collect::<Vec<_>>();
             for runtime_id in &runtimes {
                 if let Some(instance) = data.instances.remove(runtime_id) {
+                    instance.background_cancellation.cancel();
                     data.instance_by_identity.remove(&instance.key);
                 }
             }
@@ -4827,9 +4844,30 @@ impl ModHost {
         from_pending_queue: bool, worker_epoch: Option<u64>,
     ) -> Result<(), ModError> {
         let mut buffered = false;
-        let result = self.handle_client_ui_background_event_inner(
-            event, session, from_pending_queue, worker_epoch, &mut buffered,
-        ).await;
+        let cancellation = if event.string_at("/backgroundEventId").is_some() {
+            event.string_at("/runtimeId").and_then(|id| {
+                lock(&self.client_ui.data).instances.get(id)
+                    .map(|instance| instance.background_cancellation.clone())
+            })
+        } else { None };
+        let result = if let Some(cancellation) = cancellation {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(ModError::Unavailable(
+                    "Client background runtime was fenced before the event completed".into(),
+                )),
+                result = tokio::time::timeout(CLIENT_POST_SETTLEMENT_BUDGET,
+                    self.handle_client_ui_background_event_inner(
+                        event, session, from_pending_queue, worker_epoch, &mut buffered,
+                    )) => result.unwrap_or_else(|_| Err(ModError::Unavailable(
+                        "Client background event did not settle in time".into(),
+                    ))),
+            }
+        } else {
+            self.handle_client_ui_background_event_inner(
+                event, session, from_pending_queue, worker_epoch, &mut buffered,
+            ).await
+        };
         if !buffered {
             self.acknowledge_client_background_event(event, worker_epoch, result.is_ok()).await?;
         }
@@ -7020,6 +7058,20 @@ mod tests {
 
     #[tokio::test]
     async fn real_worker_background_timer_events_survive_held_action() {
+        real_worker_background_timer_events(None).await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_background_fence_cancels_inflight_hook_and_frame() {
+        real_worker_background_timer_events(Some("hook")).await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_background_fence_cancels_frame_admission_after_side_effect() {
+        real_worker_background_timer_events(Some("frame")).await;
+    }
+
+    async fn real_worker_background_timer_events(fence_mode: Option<&str>) {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
         let entry = directory.path().join("register.tsx");
@@ -7098,11 +7150,54 @@ mod tests {
             "runtimeId":runtime_id,"render_revision":revision,"handle":handle})),session.as_ref()).await.unwrap_err();
         assert!(blocked.to_string().contains("operation was not executed"));
         assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_none());
+        let background_frame_entered=Arc::new(tokio::sync::Notify::new());
+        let background_frame_release=Arc::new(tokio::sync::Notify::new());
+        let background_frame_delivered=Arc::new(tokio::sync::Notify::new());
+        if fence_mode == Some("frame") {
+            *lock(&session_impl.frame_gate)=Some(UiLifecycleFrameGate {runtime_id:runtime_id.clone(),
+                expected_text:"timer-frame",entered:background_frame_entered.clone(),
+                release:background_frame_release.clone(),delivered:background_frame_delivered.clone()});
+        }
+        if fence_mode == Some("hook") {
+            let instance=lock(&host.client_ui.data).instances[&runtime_id].clone();
+            host.record_client_environment_fault(&instance,"run",&ExactHookText::from_text("test runtime fence"));
+        }
         timer_release.notify_one();
+        if fence_mode == Some("frame") {
+            tokio::time::timeout(Duration::from_secs(5),background_frame_entered.notified()).await.unwrap();
+            let instance=lock(&host.client_ui.data).instances[&runtime_id].clone();
+            host.record_client_environment_fault(&instance,"run",&ExactHookText::from_text("test runtime fence"));
+            background_frame_release.notify_one();
+        }
+        if fence_mode.is_some() {
+            let _fault=wait_for_client_frame(&session_impl,&runtime_id,"background fence",|frame| {
+                frame.get("fault").is_some()
+            }).await;
+            assert!(!lock(&session_impl.frames).iter().any(|(id,frame)| id==&runtime_id
+                && tree_contains_text(&frame["tree"],"timer-frame")),
+                "a hook still in flight at the fence cannot admit its later frame");
+            if fence_mode == Some("hook") {
+                assert!(!lock(&session_impl.logs).iter().any(|line| line=="background timer processed"));
+            } else {
+                assert!(tokio::time::timeout(Duration::from_millis(100),background_frame_delivered.notified()).await.is_err(),
+                    "the gate signalled an attempt, but cancellation prevented queue admission");
+                tokio::time::timeout(Duration::from_secs(2),async {
+                    while !lock(&session_impl.logs).iter().any(|line| line=="background timer processed") {
+                        tokio::task::yield_now().await;
+                    }
+                }).await.expect("the hook's side effect occurred before the frame fence");
+            }
+            return;
+        }
         let timer_frame=wait_for_client_frame(&session_impl,&runtime_id,"background timer",|frame| {
             tree_contains_text(&frame["tree"],"timer-frame")
         }).await;
         assert!(tree_contains_text(&timer_frame["tree"],"timer-state"));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !lock(&session_impl.logs).iter().any(|line| line=="background timer processed") {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the timer hook's log reached the session");
         assert_eq!(lock(&session_impl.logs).iter().filter(|line| *line=="background timer processed").count(),1);
     }
 

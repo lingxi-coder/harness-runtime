@@ -1122,6 +1122,34 @@ test('pointer and key callbacks wait for promises and keep their post identity',
   }
 });
 
+test('Worker reports an invoked callback rejection after invalidating its VM', async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(),events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0)events.push(frame);else{pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`request ${id} timed out`));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const mounted=await request(1,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({
+    runtimeId:'rejected-action',source:`export function Board(_props,surface){return surface.elements.Button({
+      onPress:async()=>{surface.post({stage:'before-reject'});await Promise.resolve();throw new Error('callback rejected');}
+    });}`,
+  })}});
+  const result=await request(2,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'rejected-action',
+    generation:mounted.result.generation,handle:mounted.result.tree.held,payload:{kind:'press'},postActionId:'reject-action'}});
+  assert(events.some(event=>event.action==='post' && event.postActionId==='reject-action'
+    && JSON.parse(event.json).stage==='before-reject'));
+  assert.equal(result.error.outcomeUnknown,true);
+  assert.match(result.error.reason,/callback rejected/);
+  assert(events.some(event=>event.action==='fault'));
+});
+
 test('background queue overflow faults only its shared VM and drops its queued events', async t => {
   const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
   const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});

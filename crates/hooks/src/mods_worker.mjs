@@ -190,7 +190,12 @@ function clearClientBackground(environment) {
 function onClientEnvironmentInvalidated(environment) {
   clearClientBackground(environment);
   for (const held of runningHeldByRuntime.values()) {
-    if (held.environment === environment) activeClientOperations.get(held.id)?.controller.abort();
+    if (held.environment !== environment) continue;
+    const request = activeClientOperations.get(held.id);
+    if (request && !request.controller.signal.aborted) {
+      request.abortedByEnvironment = true;
+      request.controller.abort();
+    }
   }
 }
 
@@ -4778,7 +4783,7 @@ async function processMessage(message) {
         }).finally(release);
         send({ id: message.id, kind: 'ui.client.result', result });
       } catch (error) {
-        if (!request.controller.signal.aborted || request.abortedByUnmount) send({ id: message.id, kind: 'ui.client.result', error: {
+        if (!request.controller.signal.aborted || request.abortedByUnmount || request.abortedByEnvironment) send({ id: message.id, kind: 'ui.client.result', error: {
           phase: ['load', 'render', 'run'].includes(error?.phase) ? error.phase : 'load',
           reason: String(error?.message || error),
           ...(error?.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
