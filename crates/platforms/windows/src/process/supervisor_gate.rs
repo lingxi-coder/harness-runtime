@@ -589,16 +589,48 @@ mod tests {
         };
         let directory = PathBuf::from(directory);
         if std::env::var_os("LINGXI_DETACHED_JOB_CHILD").is_some() {
+            std::fs::write(
+                directory.join("descendant.pid"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
             std::fs::write(directory.join("started"), "ready").unwrap();
             let until = std::time::Instant::now() + Duration::from_secs(30);
             while std::time::Instant::now() < until {
                 if directory.join("release").exists() {
+                    if std::env::var_os("LINGXI_DETACHED_JOB_WRITE_AFTER_RELEASE").is_some() {
+                        use std::io::Write as _;
+                        let mut stdout = std::io::stdout().lock();
+                        writeln!(stdout, "detached-child-output-after-release").unwrap();
+                        stdout.flush().unwrap();
+                    }
                     std::fs::write(directory.join("finished"), "survived").unwrap();
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
             return;
+        }
+        // Rust's Windows Command inherits every inheritable handle, not only
+        // the redirected standard handles. Record the incoming stdout flag so
+        // CI can distinguish this inheritance from another timeout cause.
+        // SAFETY: GetStdHandle borrows the leader's standard output handle.
+        let stdout = unsafe { GetStdHandle(-11i32 as u32) };
+        let mut flags = 0;
+        assert!(!stdout.is_null() && stdout != -1isize as Handle);
+        // SAFETY: stdout is borrowed from this process and flags is writable.
+        assert_ne!(unsafe { GetHandleInformation(stdout, &mut flags) }, 0);
+        std::fs::write(
+            directory.join("stdout-inheritable"),
+            (flags & 1).to_string(),
+        )
+        .unwrap();
+        // A detached child redirected to NUL must not retain the leader's
+        // original stdout/stderr as extra inherited handles. A child that asks
+        // to hold stdout still receives a fresh inheritable duplicate from
+        // Command's default stdout(Stdio::inherit()) implementation.
+        if std::env::var_os("LINGXI_DETACHED_JOB_UNSAFE_INHERITANCE").is_none() {
+            protect_standard_handles().unwrap();
         }
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command

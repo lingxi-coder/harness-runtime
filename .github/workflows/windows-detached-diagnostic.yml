@@ -1,0 +1,72 @@
+name: Windows detached supervisor diagnostic
+on:
+  push:
+    branches: [codex/media-harness-detached-probe-20261028]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+
+jobs:
+  detached:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Enable long paths
+        shell: pwsh
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Ensure native crypto assembler
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Build the Windows test executable
+        run: cargo test --locked -p platform-windows --lib --no-run
+      - name: Verify unsafe handle inheritance reproduces the blocked case
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:LINGXI_DETACHED_JOB_UNSAFE_INHERITANCE = '1'
+          $log = Join-Path $env:RUNNER_TEMP 'unsafe-inheritance.log'
+          cargo test --locked -p platform-windows --lib process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          $testExit = $LASTEXITCODE
+          Remove-Item Env:LINGXI_DETACHED_JOB_UNSAFE_INHERITANCE
+          $ErrorActionPreference = 'Stop'
+          if ($testExit -eq 0) { throw 'negative control unexpectedly passed' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'detached-probe: child alive, stdout inheritable=1')) { throw 'negative control did not establish a live child and inheritable stdout' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'redirected descendant retained the supervisor output pipe')) { throw 'negative control failed for a different reason' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'negative control did not execute exactly the expected test' }
+      - name: Verify redirected and deliberately inherited pipes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tests = @(
+            'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
+            'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe'
+          )
+          foreach ($test in $tests) {
+            $log = Join-Path $env:RUNNER_TEMP (($test -replace '::','-') + '.log')
+            cargo test --locked -p platform-windows --lib $test -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw "target test did not pass: $test" }
+          }
+      - name: Preserve diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-detached-diagnostic
+          path: |
+            ${{ runner.temp }}/unsafe-inheritance.log
+            ${{ runner.temp }}/process-supervisor-integration_tests-*.log
+          if-no-files-found: ignore

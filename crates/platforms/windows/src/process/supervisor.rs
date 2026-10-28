@@ -353,12 +353,35 @@ mod integration_tests {
                 test_env("DETACHED_JOB_TEST_DIR"),
                 fixture.path().to_string_lossy().into_owned(),
             )]),
-            timeout: Some(Duration::from_secs(20)),
+            timeout: Some(Duration::from_secs(120)),
             stdin: None,
         };
         let (mut supervisor, mut stream, _, _, _, _cleanup) =
             start(command, None, false, fixture.path().join("release")).await;
-        let response = receive(&mut stream).await;
+        wait_file(&fixture.path().join("started")).await;
+        let descendant: u32 = std::fs::read_to_string(fixture.path().join("descendant.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let descendant = native::hold_process_handle_for_test(descendant).unwrap();
+        assert_eq!(
+            native::process_handle_is_alive_for_test(&descendant),
+            Some(true)
+        );
+        eprintln!(
+            "detached-probe: child alive, stdout inheritable={}",
+            std::fs::read_to_string(fixture.path().join("stdout-inheritable")).unwrap(),
+        );
+        // The result must arrive before the fixture child is released and
+        // before the command deadline; a deadline fallback is not EOF proof.
+        let response = tokio::time::timeout(Duration::from_secs(15), receive(&mut stream))
+            .await
+            .expect("redirected descendant retained the supervisor output pipe");
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("stdout-inheritable")).unwrap(),
+            "1",
+            "fixture did not start with an inheritable stdout pipe"
+        );
         assert_eq!(response["response"], "Started", "{response}");
         let result: ForegroundRunResult =
             serde_json::from_value(response["result"].clone()).unwrap();
@@ -370,10 +393,105 @@ mod integration_tests {
             .expect("supervisor did not exit")
             .unwrap();
         assert!(status.success());
+        assert_eq!(
+            native::process_handle_is_alive_for_test(&descendant),
+            Some(true),
+            "the original detached process must survive supervisor exit"
+        );
         // The detached process must do useful work after the real supervisor has
         // exited; mere PID existence before that point would not test its Job.
         std::fs::write(fixture.path().join("release"), "release").unwrap();
         wait_file(&fixture.path().join("finished")).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match native::process_handle_is_alive_for_test(&descendant) {
+                    Some(false) => break,
+                    Some(true) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    None => panic!("could not inspect held descendant process"),
+                }
+            }
+        })
+        .await
+        .expect("detached process did not exit after writing its marker");
+    }
+
+    #[tokio::test]
+    async fn real_supervisor_drains_a_deliberately_inherited_descendant_pipe() {
+        let fixture = tempfile::tempdir().unwrap();
+        let command = ProcessCommand {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                DETACHED_HELPER.into(),
+                "--exact".into(),
+                "--nocapture".into(),
+            ],
+            cwd: Some(fixture.path().to_path_buf()),
+            env: std::collections::HashMap::from([
+                (
+                    test_env("DETACHED_JOB_TEST_DIR"),
+                    fixture.path().to_string_lossy().into_owned(),
+                ),
+                (test_env("DETACHED_JOB_HOLD_PIPE"), "1".into()),
+                (test_env("DETACHED_JOB_WRITE_AFTER_RELEASE"), "1".into()),
+            ]),
+            timeout: Some(Duration::from_secs(60)),
+            stdin: None,
+        };
+        let (mut supervisor, mut stream, _, _, payload, _cleanup) =
+            start(command, None, false, fixture.path().join("release")).await;
+        // Retain the original process object; checking a recycled PID would
+        // not establish which leader exited.
+        let leader = native::hold_process_handle_for_test(payload).unwrap();
+        wait_file(&fixture.path().join("started")).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match native::process_handle_is_alive_for_test(&leader) {
+                    Some(false) => break,
+                    Some(true) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    None => panic!("could not inspect held leader process"),
+                }
+            }
+        })
+        .await
+        .expect("leader did not exit");
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("stdout-inheritable")).unwrap(),
+            "1"
+        );
+        let response = receive(&mut stream);
+        tokio::pin!(response);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut response)
+                .await
+                .is_err(),
+            "foreground returned while the descendant still owned the output pipe"
+        );
+        // The child writes to the same inherited pipe before exiting. Preserve
+        // the future across the timeout so a partial protocol frame is not lost.
+        std::fs::write(fixture.path().join("release"), "release").unwrap();
+        let response = response.await;
+        assert_eq!(response["response"], "Started", "{response}");
+        let result: ForegroundRunResult =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        let ForegroundOutcome::Completed(output) = result.outcome else {
+            panic!("foreground was unexpectedly moved to background");
+        };
+        assert!(!output.timed_out);
+        assert_eq!(output.exit_code, 0);
+        assert!(output
+            .stdout
+            .contains("detached-child-output-after-release"));
+        wait_file(&fixture.path().join("finished")).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), supervisor.wait())
+                .await
+                .expect("supervisor did not exit")
+                .unwrap()
+                .success()
+        );
     }
 
     #[tokio::test]
