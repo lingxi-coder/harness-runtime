@@ -184,6 +184,7 @@ async fn desktop_typed_bash_entry_rejects_windows_before_spawn() {
 #[tokio::test]
 async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
     let fixture = Fixture(tempfile::tempdir().unwrap());
+    eprintln!("typed-stop-stage: enabling supervisor");
     platform_windows::process::supervisor::enable_supervisor(driver());
     let token = tokio_util::sync::CancellationToken::new();
     let process = TestingTypedBashProcess::for_test(
@@ -197,10 +198,14 @@ async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
             .run_foreground_with_output_limit(&cmd, Some(1024))
             .await
     });
+    eprintln!("typed-stop-stage: waiting for child marker");
     let held = held_child(fixture.0.path()).await;
+    eprintln!("typed-stop-stage: opened original child handle");
     assert_eq!(held.is_alive(), Some(true));
     token.cancel();
+    eprintln!("typed-stop-stage: cancellation requested");
     let result = tokio::time::timeout(Duration::from_secs(20), running).await;
+    eprintln!("typed-stop-stage: runner wait finished: {result:?}");
     let signaled = wait_held_exit(&held).await;
     std::fs::write(fixture.0.path().join("release"), "release").unwrap();
     eprintln!("typed-stop-probe: result={result:?}; held_signaled={signaled}");
@@ -221,6 +226,7 @@ async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
 #[tokio::test]
 async fn real_typed_bash_timeout_cannot_report_success_with_live_writer() {
     let fixture = Fixture(tempfile::tempdir().unwrap());
+    eprintln!("typed-timeout-stage: enabling supervisor");
     platform_windows::process::supervisor::enable_supervisor(driver());
     let process = TestingTypedBashProcess::for_test(
         Arc::new(platform_windows::process::WindowsProcess::new()),
@@ -234,8 +240,10 @@ async fn real_typed_bash_timeout_cannot_report_success_with_live_writer() {
             .await
     });
     let held = held_child(fixture.0.path()).await;
+    eprintln!("typed-timeout-stage: opened original child handle");
     assert_eq!(held.is_alive(), Some(true));
     let result = tokio::time::timeout(Duration::from_secs(20), running).await;
+    eprintln!("typed-timeout-stage: runner wait finished: {result:?}");
     let was_alive = held.is_alive();
     let signaled_before_release = wait_held_exit(&held).await;
     std::fs::write(fixture.0.path().join("release"), "release").unwrap();

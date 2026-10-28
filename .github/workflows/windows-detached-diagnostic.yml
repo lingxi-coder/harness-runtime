@@ -159,6 +159,7 @@ jobs:
       - name: Build the desktop typed Bash tests
         run: cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows --no-run
       - name: Real typed Bash Stop with a retained Windows process handle
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -168,6 +169,7 @@ jobs:
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash Stop did not execute exactly once' }
           exit 0
       - name: Real typed Bash timeout retains output and stops the held descendant
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -177,6 +179,7 @@ jobs:
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash timeout did not execute exactly once' }
           exit 0
       - name: Reproduce the old typed Bash timeout defect
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -191,6 +194,7 @@ jobs:
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'negative control did not execute exactly once' }
           exit 0
       - name: Verify actual desktop typed Bash entry rejects Windows before spawn
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
