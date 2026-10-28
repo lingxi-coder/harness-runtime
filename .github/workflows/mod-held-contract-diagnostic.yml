@@ -1,7 +1,7 @@
 name: Mod held callback contract diagnostic
 on:
   push:
-    branches: [codex/media-run-held-contract-v2-ff076]
+    branches: [codex/media-run-held-contract-v3-ff076]
 env:
   CARGO_BUILD_JOBS: "2"
   CARGO_INCREMENTAL: "0"
@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p hooks --lib mods::client_ui_host::tests:: -- --nocapture | tee "$RUNNER_TEMP/host.log"
+          cargo test --locked -p hooks --lib mods::client_ui_host::tests:: -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/host.log"
           grep -E '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/host.log"
           grep -F 'run_held_reply_requires_an_unambiguous_acceptance ... ok' "$RUNNER_TEMP/host.log"
           grep -F 'prepared_tsx_client_runs_the_host_render_mount_draw_post_and_unload_lifecycle ... ok' "$RUNNER_TEMP/host.log"
