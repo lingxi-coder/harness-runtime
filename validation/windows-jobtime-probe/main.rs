@@ -73,6 +73,7 @@ extern "system" {
     fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
     fn SetInformationJobObject(job: Handle, class: u32, info: *const c_void, len: u32) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+    fn TerminateJobObject(job: Handle, code: u32) -> i32;
     fn IsProcessInJob(process: Handle, job: Handle, result: *mut i32) -> i32;
     fn CreateProcessW(
         application: *const u16,
@@ -222,10 +223,12 @@ fn exit_code(process: &OwnedHandle) -> u32 {
     }
     result
 }
-fn require_quota_exit(process: &OwnedHandle, description: &str) {
+fn require_expected_exit(process: &OwnedHandle, description: &str, terminated_first: bool) {
     let code = exit_code(process);
     assert!(
-        code == ERROR_NOT_ENOUGH_QUOTA || code == STATUS_QUOTA_EXCEEDED,
+        code == ERROR_NOT_ENOUGH_QUOTA
+            || code == STATUS_QUOTA_EXCEEDED
+            || (terminated_first && code == 143),
         "{description} did not receive quota termination: {code:#x}"
     );
 }
@@ -277,6 +280,7 @@ fn probe(round: u32, root: &Path) {
     std::fs::create_dir(&directory).unwrap();
     let job = job();
     let mode = if round % 2 == 0 { "live" } else { "exit" };
+    let terminated_first = round % 4 >= 2;
     let (leader, leader_pid) = spawn_member(&job, "leader", &directory, mode);
     wait_file(&directory.join("leader-ready"));
     let mut children = Vec::new();
@@ -302,11 +306,10 @@ fn probe(round: u32, root: &Path) {
         WAIT_TIMEOUT,
         "Job already signaled before limit"
     );
-    // The pulse is already a suspended Job member before the limit is set.
-    // Thus even if a live payload exceeds the limit during this operation,
-    // there is no assignment race after the Job becomes sealed.
     let (burner, burner_thread, burner_pid) = create_suspended("pulse", &directory, "unused");
-    if unsafe { AssignProcessToJobObject(job.as_raw_handle(), burner.as_raw_handle()) } == 0 {
+    if !terminated_first
+        && unsafe { AssignProcessToJobObject(job.as_raw_handle(), burner.as_raw_handle()) } == 0
+    {
         let error = std::io::Error::last_os_error();
         unsafe {
             TerminateProcess(burner.as_raw_handle(), 0xdead);
@@ -315,15 +318,39 @@ fn probe(round: u32, root: &Path) {
         panic!("assign suspended pulse: {error}");
     }
     set_job_time(&job);
-    let previous = unsafe { ResumeThread(burner_thread.as_raw_handle()) };
-    if previous != 1 {
-        let error = std::io::Error::last_os_error();
-        assert!(
-            previous == u32::MAX
-                && wait(&job, 15000) == WAIT_OBJECT_0
-                && wait(&burner, 0) == WAIT_OBJECT_0,
-            "resume suspended pulse: previous={previous}, error={error}"
-        );
+    let mut burner_is_member = true;
+    if terminated_first {
+        // Stop current payload members immediately, then start a trusted pulse
+        // only to drive the documented Job time-limit signal. The pulse stays
+        // suspended until it is safely assigned to this exact Job.
+        if unsafe { TerminateJobObject(job.as_raw_handle(), 143) } == 0 {
+            fail("TerminateJobObject");
+        }
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), burner.as_raw_handle()) } == 0 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                wait(&job, 15000),
+                WAIT_OBJECT_0,
+                "pulse assignment failed without a signaled Job: {error}"
+            );
+            unsafe {
+                TerminateProcess(burner.as_raw_handle(), 0xdead);
+            }
+            assert_eq!(wait(&burner, 5000), WAIT_OBJECT_0);
+            burner_is_member = false;
+        }
+    }
+    if burner_is_member {
+        let previous = unsafe { ResumeThread(burner_thread.as_raw_handle()) };
+        if previous != 1 {
+            let error = std::io::Error::last_os_error();
+            assert!(
+                previous == u32::MAX
+                    && wait(&job, 15000) == WAIT_OBJECT_0
+                    && wait(&burner, 0) == WAIT_OBJECT_0,
+                "resume suspended pulse: previous={previous}, error={error}"
+            );
+        }
     }
     drop(burner_thread);
     assert_eq!(
@@ -342,14 +369,16 @@ fn probe(round: u32, root: &Path) {
             WAIT_OBJECT_0,
             "Job signaled while retained descendant {pid} is unsignaled"
         );
-        require_quota_exit(held, &format!("descendant {pid}"));
+        require_expected_exit(held, &format!("descendant {pid}"), terminated_first);
     }
     assert_eq!(
         wait(&burner, 0),
         WAIT_OBJECT_0,
         "Job signaled while pulse handle unsignaled"
     );
-    require_quota_exit(&burner, "pulse");
+    if burner_is_member {
+        require_expected_exit(&burner, "pulse", terminated_first);
+    }
     let (extra, extra_thread, _) = create_suspended("pulse", &directory, "unused");
     let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle(), extra.as_raw_handle()) };
     if assigned == 0 {
@@ -364,7 +393,7 @@ fn probe(round: u32, root: &Path) {
     }
     drop(extra_thread);
     assert_eq!(assigned, 0, "job accepted another process after signaling");
-    println!("jobtime-probe round={round} mode={mode} leader={leader_pid} burner={burner_pid} signal=job+all-held-handles sealed=true");
+    println!("jobtime-probe round={round} mode={mode} terminated_first={terminated_first} leader={leader_pid} burner={burner_pid} signal=job+all-held-handles sealed=true");
     std::fs::remove_dir_all(&directory).unwrap();
 }
 fn main() {
