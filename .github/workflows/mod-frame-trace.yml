@@ -1,0 +1,28 @@
+name: Async Worker host trace diagnostic
+on:
+  push:
+    branches: [codex/media-mod-frame-trace-20261028-a]
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - name: Trace real Worker and Host
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LINGXI_MOD_BUN_EXECUTABLE="$(command -v bun)"
+          export LINGXI_ASYNC_TRACE=1
+          cargo test --locked -p hooks --lib real_worker_async_input_waits_for_post_before_confirming -- --nocapture --test-threads=1

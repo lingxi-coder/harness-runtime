@@ -120,6 +120,10 @@ function expiredCall() {
 }
 
 function send(message) {
+  if (process.env.LINGXI_ASYNC_TRACE === '1' && message.id !== 0) {
+    console.error('TRACE OUT', JSON.stringify({ id: message.id, kind: message.kind, method: message.method,
+      callId: message.callId, message: message.message }));
+  }
   process.stdout.write(`${encodeModsIpcFrame(message)}\n`);
 }
 
@@ -4597,6 +4601,10 @@ input.on('line', line => {
   let message;
   try { message = decodeModsIpcFrame(line); }
   catch (error) { send({ kind: 'error', message: String(error) }); return; }
+  if (process.env.LINGXI_ASYNC_TRACE === '1' && message.id !== 0) {
+    console.error('TRACE IN', JSON.stringify({ id: message.id, kind: message.kind, event: message.event,
+      operation: message.operation?.type, callId: message.callId }));
+  }
   if (message.kind === 'next.result' || message.kind === 'next.error') {
     const reply = pendingCore.get(message.callId);
     if (!reply || reply.requestId !== message.id) {
