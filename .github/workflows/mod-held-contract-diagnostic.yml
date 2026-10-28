@@ -1,0 +1,38 @@
+name: Mod held callback contract diagnostic
+on:
+  push:
+    branches: [codex/media-run-held-contract-ff076]
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Test worker dispatch acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-vm-modules --test --test-reporter=tap --test-name-pattern='runHeld correlates synchronous posts only and still rejects a replaced handle' crates/hooks/src/mod_ui_client_worker.test.mjs | tee "$RUNNER_TEMP/worker.log"
+          grep -E '^ok [0-9]+ - .*runHeld correlates synchronous posts only and still rejects a replaced handle' "$RUNNER_TEMP/worker.log"
+      - name: Test host callback acceptance and lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p hooks --lib mods::client_ui_host::tests:: -- --nocapture | tee "$RUNNER_TEMP/host.log"
+          grep -E '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/host.log"
+          grep -F 'run_held_reply_requires_an_unambiguous_acceptance ... ok' "$RUNNER_TEMP/host.log"
+          grep -F 'prepared_tsx_client_runs_the_host_render_mount_draw_post_and_unload_lifecycle ... ok' "$RUNNER_TEMP/host.log"

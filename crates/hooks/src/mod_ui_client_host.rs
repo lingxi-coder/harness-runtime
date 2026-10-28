@@ -105,6 +105,42 @@ fn client_post_ids(result: &Utf16JsonProjection) -> Result<Vec<u64>, ModError> {
         .collect()
 }
 
+enum ClientRunHeldResult {
+    Stale,
+    Rejected,
+    Accepted(Vec<u64>),
+}
+
+fn client_run_held_result(result: &Utf16JsonProjection) -> Result<ClientRunHeldResult, ModError> {
+    if let Some(stale) = result.at_pointer("/stale") {
+        // The worker only reports stale before dispatching the callback. Do
+        // not turn contradictory or malformed replies into a safe no-op.
+        if stale.as_bool() != Some(true)
+            || result.get_property("accepted").is_some()
+            || result.get_property("postIds").is_some()
+        {
+            return Err(ModError::Protocol(
+                "Client runHeld result has an invalid stale status".into(),
+            ));
+        }
+        return Ok(ClientRunHeldResult::Stale);
+    }
+    let accepted = result
+        .at_pointer("/accepted")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| ModError::Protocol("Client runHeld result has no accepted flag".into()))?;
+    let post_ids = client_post_ids(result)?;
+    if accepted {
+        Ok(ClientRunHeldResult::Accepted(post_ids))
+    } else if post_ids.is_empty() {
+        Ok(ClientRunHeldResult::Rejected)
+    } else {
+        Err(ModError::Protocol(
+            "Client runHeld rejected with post IDs".into(),
+        ))
+    }
+}
+
 /// Convert worker-private numeric held handles into the public Client frame's
 /// plugin-scoped `press` carrier, without materializing the worker tree as a
 /// serde value or losing exact string/key UTF-16 units.
@@ -4054,13 +4090,15 @@ impl ModHost {
             Err(error) => return Err(error.into()),
         };
         if let Some(post_action) = post_action.as_mut() {
-            if result
-                .at_pointer("/stale")
-                .and_then(|value| value.as_bool())
-                != Some(true)
-            {
-                let post_ids = client_post_ids(&result)?;
-                post_action.wait_for_posts(&post_ids).await?;
+            match client_run_held_result(&result)? {
+                ClientRunHeldResult::Stale | ClientRunHeldResult::Rejected => {
+                    return Ok(host_generated_json(
+                        json!({"handled":false,"renderRevision":revision}),
+                    ));
+                }
+                ClientRunHeldResult::Accepted(post_ids) => {
+                    post_action.wait_for_posts(&post_ids).await?;
+                }
             }
         }
         if kind == "unmount" {
@@ -4111,6 +4149,13 @@ impl ModHost {
                 .and_then(|value| value.as_bool())
                 == Some(true)
             {
+                if kind == "runHeld" {
+                    // The callback already ran; a stale follow-up frame is
+                    // not evidence that the action had no side effects.
+                    return Err(ModError::Unavailable(
+                        "Client runHeld was accepted but its follow-up frame is stale".into(),
+                    ));
+                }
                 return Ok(host_generated_json(
                     json!({"handled":false,"renderRevision":revision}),
                 ));
@@ -4710,6 +4755,36 @@ mod tests {
             .to_json_string()
             .expect("test projection is valid JSON");
         serde_json::from_str(&source).expect("test projection serializes as JSON")
+    }
+
+    #[test]
+    fn run_held_reply_requires_an_unambiguous_acceptance() {
+        let reply = |value| host_generated_json(value);
+        assert!(matches!(
+            client_run_held_result(&reply(json!({"stale":true}))),
+            Ok(ClientRunHeldResult::Stale)
+        ));
+        assert!(matches!(
+            client_run_held_result(&reply(json!({"accepted":false,"postIds":[]}))),
+            Ok(ClientRunHeldResult::Rejected)
+        ));
+        match client_run_held_result(&reply(json!({"accepted":true,"postIds":[0,2]}))).unwrap() {
+            ClientRunHeldResult::Accepted(post_ids) => assert_eq!(post_ids, vec![0, 2]),
+            _ => panic!("accepted callback must preserve its synchronous post IDs"),
+        }
+        for invalid in [
+            json!({}),
+            json!({"accepted":"true","postIds":[]}),
+            json!({"accepted":true}),
+            json!({"accepted":false,"postIds":[0]}),
+            json!({"stale":false}),
+            json!({"stale":true,"accepted":true,"postIds":[]}),
+        ] {
+            assert!(
+                client_run_held_result(&reply(invalid.clone())).is_err(),
+                "malformed or contradictory reply must remain an error: {invalid}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -6352,6 +6427,30 @@ mod tests {
                 > test_value(&mount)["frameSequence"].as_u64().unwrap()
         );
 
+        let old_input_handle = tree_press_handle_for_key(mounted_tree, "query").unwrap();
+        let current_input_handle = tree_press_handle_for_key(&posted["tree"], "query").unwrap();
+        assert_ne!(old_input_handle, current_input_handle);
+        for handle in [old_input_handle, MAX_JS_SAFE_INTEGER] {
+            let rejected = host
+                .dispatch_client_ui_operation(
+                    host_generated_json(json!({
+                        "type":"runHeld",
+                        "runtimeId":runtime_id,
+                        "render_revision":revision,
+                        "handle":handle,
+                        "event":{"kind":"change","value":"rejected handle ran"},
+                    })),
+                    session.as_ref(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                test_value(&rejected),
+                json!({"handled":false,"renderRevision":revision}),
+                "old and unknown handles are rejected without producing a frame"
+            );
+        }
+
         let client_press = |element: &str, event: Value| {
             host_generated_json(json!({
                 "subtype":"ui_client_press",
@@ -6418,6 +6517,12 @@ mod tests {
                 tree_contains_text(&frame["tree"], "Input changed (change): typed")
             })
             .await;
+        assert!(!lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &runtime_id
+                    && tree_contains_text(&frame["tree"], "rejected handle ran")
+            }));
         assert!(tree_press_handle_for_key(&changed_input_frame["tree"], "query").is_some());
         // The background `ui.message` frame above is an intermediate frame.
         // runHeld settles its synchronous posts and then returns the current
@@ -6907,6 +7012,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(test_value(&recovered_commit)["handled"], true);
+
+        // Once the callback posts, a concurrent worker unmount can make the
+        // final render stale. That is an unknown outcome, never a safe no-op.
+        let recovered_posted = wait_for_client_frame(
+            &session_impl,
+            &recovered_runtime,
+            "recovered initial post",
+            |frame| tree_contains_text(&frame["tree"], "posted"),
+        )
+        .await;
+        let race_handle = tree_press_handle_for_key(&recovered_posted["tree"], "query").unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
+            runtime_id: recovered_runtime.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let race_operation = host_generated_json(json!({
+            "type":"runHeld",
+            "runtimeId":recovered_runtime,
+            "render_revision":recovered_revision,
+            "handle":race_handle,
+            "event":{"kind":"change","value":"accepted before unmount"},
+        }));
+        let race_host = host.clone();
+        let race_session = session.clone();
+        let race_task = tokio::spawn(async move {
+            race_host
+                .dispatch_client_ui_operation(race_operation, race_session.as_ref())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("the accepted callback's post reached frame emission");
+        assert!(!race_task.is_finished());
+        let worker_generation = lock(&host.client_ui.data).instances[&recovered_runtime]
+            .worker_generation
+            .unwrap();
+        let worker_unmount = host
+            .run_client_worker_operation(host_generated_json(json!({
+                "type":"unmount",
+                "runtimeId":recovered_runtime,
+                "generation":worker_generation,
+            })))
+            .await
+            .map_err(ModError::from)
+            .unwrap();
+        assert_eq!(test_value(&worker_unmount)["unmounted"], true);
+        release.notify_one();
+        let race_error = tokio::time::timeout(Duration::from_secs(2), race_task)
+            .await
+            .expect("the accepted action resolves after post settlement")
+            .unwrap()
+            .unwrap_err();
+        assert!(race_error
+            .to_string()
+            .contains("accepted but its follow-up frame is stale"));
+        assert!(lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &recovered_runtime
+                    && tree_contains_text(&frame["tree"], "accepted before unmount")
+            }));
 
         // Timer failures have no operation result. The Host emits a local
         // fault snapshot immediately, even though this plugin has no
