@@ -1,19 +1,18 @@
-//! Cross-platform MCP transport helpers shared by `platforms/posix` and
-//! `platforms/windows`.
+//! Cross-platform primitives and transport helpers.
 //!
-//! Stdio spawn lives per-platform because process creation differs slightly
-//! between POSIX and Windows, but the WebSocket / SSE / HTTP connectors and
-//! small shared utilities (stderr ring buffer, `StdioConfig`) live here to
-//! avoid duplication.
-//!
-//! Also hosts the shared built-in Anthropic LLM config so `engine-desktop` and
-//! `engine-mobile` stay in sync without duplicating the model table.
+//! The system clock, Tokio task spawner, HTTP/MCP connectors, mobile Linux
+//! adapters, and shared configuration are available to all consumers. The
+//! `desktop` feature enables the native watcher and desktop LSP transport;
+//! POSIX and Windows keep their respective child-process command policies.
 
 #![forbid(unsafe_code)]
 
+pub mod clock;
 pub mod guest_fs;
 pub mod http;
 pub mod llm_config;
+#[cfg(feature = "desktop")]
+pub mod lsp;
 pub mod mcp_http;
 pub mod mcp_proxy;
 pub mod mcp_remote;
@@ -22,6 +21,9 @@ pub mod mcp_stdio;
 pub mod mcp_ws;
 pub mod mobile_linux;
 pub mod proxy_auth_helper;
+pub mod runtime;
+#[cfg(feature = "desktop")]
+pub mod watch_helper;
 pub mod worktree_create_guard;
 pub mod worktree_include;
 

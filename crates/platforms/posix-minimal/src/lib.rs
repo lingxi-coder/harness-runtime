@@ -1,16 +1,19 @@
-//! Minimal posix-style platform implementation suitable for the M1.22
-//! cli-demo and host-side tests.
+//! Portable primitives and unavailable capability implementations shared by
+//! demo, test, and mobile composition roots.
 //!
-//! Real I/O is provided for the trait pairs the demo exercises today —
-//! [`FileSystem`](lingxi_core::host::FileSystem),
-//! [`RuntimeSpawner`](lingxi_core::host::RuntimeSpawner), and
-//! [`Clock`](lingxi_core::host::Clock). Every other trait is stubbed with the
-//! "unsupported / unavailable" branch of its error enum so engine code that
-//! reaches them during the demo fails loudly rather than silently no-oping.
+//! [`PosixFileSystem`] performs real filesystem I/O and advisory locking; its
+//! workspace root supplies an `is_within_workspace` predicate, not an I/O
+//! confinement boundary. Its watch stream is empty. [`PosixClock`] and
+//! [`PosixRuntime`] are portable local implementations; keeping these small
+//! primitives here avoids pulling the larger platform-common transport graph
+//! into minimal-only consumers. [`PosixHttp`] uses the real HTTP client.
 //!
-//! The hardened POSIX platform (sandbox-exec / Linux namespaces, real LSP
-//! and MCP transports, `git worktree` shell-out, OS keychain) lands in
-//! `platforms/posix` during Plan 17.
+//! Process execution, sandbox preparation, LSP, MCP, bridge, worktree, swarm,
+//! and credential persistence are unavailable or non-persisting test/demo
+//! implementations. Mobile composition chooses its real Linux runtime and
+//! native credential services separately when supplied; these placeholders do
+//! not provide those capabilities. Desktop composition uses `platform-posix`
+//! or `platform-windows` for its platform-specific implementations.
 
 #![forbid(unsafe_code)]
 
