@@ -162,6 +162,22 @@ create. Only an explicit user retry may call `create` with the same saved ID and
 unchanged options. A different input conflicts, and a deleted Chat cannot be
 recreated with the same ID. `chats.forgetCreation(requestId)` removes a resolved
 browser receipt, not the Chat. Receipts are partitioned by App and revision.
+On Mobile, the SDK shows a dismissible recovery prompt when Chat creation is
+still waiting or an Agent read cannot reach the host. Its Open LingXi button
+requires a user action and opens trusted App review; the user may need to reopen
+the App in the browser. It does not complete the request or preserve its Promise
+across reload. On a fresh page, Mobile may check saved pending creation IDs
+read-only, sequentially and within the current App and revision; it does not
+select a Chat or submit another creation. Read `pendingCreations()` again to
+observe any updated receipts. An unavailable host leaves them pending. Mobile
+coalesces same-page creation calls. For an existing receipt it first checks
+status; if the outcome remains unknown, only a user click on the SDK's retry
+button sends the same request again. A waiting attempt can likewise be retried
+through that button. If the earlier browser wait stops, its host request may
+still arrive; cancellation does not prove that creation failed. Never infer
+failure from `creationStatus` returning null. If the SDK cannot show its
+confirmation, or confirmation expires, it fails without submitting the retry
+and retains the unknown outcome. Browser suspension can delay timers.
 If the App revision changes, browser storage is cleared, or the original ID is
 lost, show the Chat list for the user to inspect rather than guessing a match.
 If `chats.list` reports `unavailableChats`, show those IDs as unavailable

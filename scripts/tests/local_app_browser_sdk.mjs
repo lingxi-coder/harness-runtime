@@ -176,6 +176,47 @@ function eventTarget() {
   };
 }
 
+function domElement(tagName) {
+  const node = {
+    ...eventTarget(), tagName, style: {}, children: [], attributes: {}, isConnected: false,
+    setAttribute(name, value) { this.attributes[name] = value; },
+    append(...children) {
+      for (const child of children) {
+        child.parent = this;
+        child.isConnected = this.isConnected;
+        this.children.push(child);
+      }
+    },
+    replaceChildren(...children) {
+      for (const child of this.children) child.focused = false;
+      this.children = [];
+      this.append(...children);
+    },
+    focus() { this.focused = true; },
+    remove() {
+      if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
+      this.parent = null;
+      this.isConnected = false;
+    },
+    attachShadow() {
+      this.testShadow = domElement('#shadow-root');
+      return this.testShadow;
+    }
+  };
+  return node;
+}
+
+function recoveryPanel(b) {
+  const container = b.document.body?.children.find(element => element.tagName === 'div');
+  const panel = container?.testShadow?.children[0];
+  return panel ? {container, panel, message: panel.children[0], open: panel.children[1], dismiss: panel.children[2],
+    expand: panel.children[3], retries: panel.children[4]} : null;
+}
+
+function retryButton(b, requestId) {
+  return recoveryPanel(b)?.retries.children.find(button => button.textContent === `Retry Chat creation ${requestId}`);
+}
+
 class BrowserCustomEvent {
   constructor(type, options = {}) {
     this.type = type;
@@ -268,9 +309,10 @@ function browser({child = false, existing = false, hostPlatform = 'android', app
   }
   const document = eventTarget();
   document.visibilityState = 'visible';
-  document.body = {children: [], append(inputElement) { this.children.push(inputElement); }};
+  document.body = domElement('body');
+  document.body.isConnected = true;
   document.createElement = name => {
-    assert.equal(name, 'input');
+    if (name !== 'input') return domElement(name);
     const handlers = new Map();
     const inputElement = {
       style: {}, files: [],
@@ -332,7 +374,7 @@ function browser({child = false, existing = false, hostPlatform = 'android', app
   vm.runInContext(source.replace('__LINGXI_APP_CONFIGURATION__', JSON.stringify(config)), context);
 
   return {
-    api: window.localApp, requests, inputs, listeners, location, window, document, history, indexedDb,
+    api: window.localApp, requests, inputs, listeners, location, window, document, navigator, history, indexedDb,
     input: value => parseInPage(JSON.stringify(value)),
     setFetchHandler(handler) { fetchHandler = handler; },
     async flush() { await new Promise(setImmediate); await new Promise(setImmediate); },
@@ -552,6 +594,7 @@ test('read-only facade calls time out waiting for headers after five seconds', a
     const promise = call(b, handle);
     let settled = false;
     void promise.then(() => { settled = true; }, () => { settled = true; });
+    await waitFor(() => b.requests.at(-1)?.envelope.method === method, `missing ${method} request`);
     const request = b.requests.at(-1);
     assert.equal(request.envelope.method, method);
     assert.deepEqual(clock.pending(), [5000]);
@@ -708,28 +751,51 @@ test('mutating control calls keep their 120-second budget', async () => {
   }
 });
 
-test('Chat creation saves identity before POST and shares concurrent same-ID calls', async () => {
-  const b = browser();
+test('same-page Chat calls coalesce until a trusted SDK retry stops the old browser wait', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
   const requestId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const options = b.input({requestId, title: '  Exact title  '});
-  const reply = deferred();
+  const replies = [deferred(), deferred()];
   b.setFetchHandler(request => {
     assert.equal(request.envelope.method, 'agent.chats.create');
     const saved = b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId);
     assert.equal(saved.state, 'pending');
     assert.equal(saved.options.title, '  Exact title  ');
-    return reply.promise;
+    return replies[b.requests.length - 1].promise;
   });
   const first = b.api.agent.chats.create(options);
   await waitFor(() => b.requests.length === 1, 'Chat creation never reached the host');
-  const second = b.api.agent.chats.create(options);
+  const firstToken = b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId).attemptToken;
   await assert.rejects(b.api.agent.chats.create(b.input({requestId, title: 'Exact title'})),
     error => error.code === 'chat_create_conflict');
   assert.equal(b.requests.length, 1);
-  reply.resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
+  assert.equal(b.requests[0].options.signal.aborted, false, 'conflicting input must not cancel the original');
+  const second = b.api.agent.chats.create(options);
+  await b.flush();
+  assert.equal(b.requests.length, 1, 'duplicate calls must share the current attempt');
+  clock.advance(5000);
+  const button = retryButton(b, requestId);
+  assert.ok(button);
+  button.dispatchEvent({type: 'click', isTrusted: false});
+  await b.flush();
+  assert.equal(b.requests.length, 1, 'synthetic retry must not submit');
+  button.dispatchEvent({type: 'click', isTrusted: true});
+  await waitFor(() => b.requests.length === 2, 'the trusted retry never reached the host');
+  assert.equal(b.requests[0].options.signal.aborted, true);
+  assert.deepEqual(b.requests[1].envelope, b.requests[0].envelope);
+  const newer = b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId);
+  assert.equal(newer.state, 'pending');
+  assert.notEqual(newer.attemptToken, firstToken);
+  // A late response cannot resolve the already-cancelled browser wait or
+  // change the pending receipt while the explicit retry remains in flight.
+  replies[0].resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
+  await b.flush();
+  assert.equal(b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId).state, 'pending');
+  replies[1].resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
   assert.equal((await first).id, requestId);
   assert.equal((await second).id, requestId);
-  assert.equal(b.requests.length, 1);
+  assert.equal(b.requests.length, 2);
   assert.equal(b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId).state, 'accepted');
   assert.deepEqual(JSON.parse(JSON.stringify(await b.api.agent.chats.pendingCreations())),
     [{requestId, title: '  Exact title  ', state: 'accepted'}]);
@@ -746,17 +812,610 @@ test('Chat creation recovery is read-only after response loss and page reopen', 
     error.code === 'host_unavailable' && error.definitive === false && error.requestId === requestId);
   await assert.rejects(b.api.agent.chats.forgetCreation(requestId), error => error.code === 'chat_creation_unresolved');
   const reopened = browser({indexedDb: b.indexedDb});
+  // A transient activation elsewhere in the page is not itself retry consent.
+  reopened.navigator.userActivation = {isActive: true};
   const saved = JSON.parse(JSON.stringify(await reopened.api.agent.chats.pendingCreations()));
   assert.deepEqual(saved, [{requestId, state: 'pending'}]);
-  assert.equal(reopened.requests.length, 0, 'opening the page must not replay create');
+  await waitFor(() => reopened.requests.length === 1, 'page reload did not perform its read-only check');
+  assert.deepEqual(reopened.requests.map(request => request.envelope.method), ['agent.chats.creationStatus']);
   const recoveredOptions = reopened.input({requestId});
   assert.equal(await reopened.api.agent.chats.creationStatus(recoveredOptions), null);
-  assert.deepEqual(reopened.requests.map(request => request.envelope.method), ['agent.chats.creationStatus']);
-  // The caller explicitly decides to retry using the exact stored identity.
-  const handle = await reopened.api.agent.chats.create(recoveredOptions);
+  assert.deepEqual(reopened.requests.map(request => request.envelope.method), ['agent.chats.creationStatus', 'agent.chats.creationStatus']);
+  // The SDK still requires a trusted confirmation before an unknown retry.
+  const retry = reopened.api.agent.chats.create(recoveredOptions);
+  await waitFor(() => retryButton(reopened, requestId), 'retry confirmation was not shown');
+  retryButton(reopened, requestId).dispatchEvent({type: 'click', isTrusted: false});
+  assert.equal(reopened.requests.filter(request => request.envelope.method === 'agent.chats.create').length, 0);
+  retryButton(reopened, requestId).dispatchEvent({type: 'click', isTrusted: true});
+  const handle = await retry;
   assert.equal(handle.id, requestId);
   assert.deepEqual(reopened.requests.map(request => request.envelope.method),
-    ['agent.chats.creationStatus', 'agent.chats.create']);
+    ['agent.chats.creationStatus', 'agent.chats.creationStatus', 'agent.chats.creationStatus', 'agent.chats.create']);
+});
+
+test('reload reconciles the exact saved Chat creation with one read-only host query', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'aaaaaaaa-1111-4111-8111-111111111111';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId, title: ' Exact '})),
+    error => error.code === 'host_unavailable');
+  const restored = browser({indexedDb: original.indexedDb});
+  restored.setFetchHandler(request => {
+    assert.equal(request.envelope.method, 'agent.chats.creationStatus');
+    assert.deepEqual(JSON.parse(JSON.stringify(request.envelope.args)), {requestId, title: ' Exact '});
+    return {ok: true, json: async () => restored.input({ok: true, value: {chatId: requestId}})};
+  });
+  await waitFor(() => restored.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3',
+    'creations', requestId)?.state === 'accepted', 'the read-only recovery did not save acceptance');
+  assert.deepEqual(restored.requests.map(request => request.envelope.method), ['agent.chats.creationStatus']);
+  assert.deepEqual(JSON.parse(JSON.stringify(await restored.api.agent.chats.pendingCreations())),
+    [{requestId, title: ' Exact ', state: 'accepted'}]);
+  assert.equal(recoveryPanel(restored), null);
+  assert.equal(restored.location.href, 'http://127.0.0.1:24131/__run/epoch-one/index.html');
+});
+
+test('silent reload recovery keeps pending on unavailable host and does not retry on page events', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'bbbbbbbb-1111-4111-8111-111111111111';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})),
+    error => error.code === 'host_unavailable');
+  const restored = browser({indexedDb: original.indexedDb});
+  restored.setFetchHandler(() => { throw new Error('host unavailable'); });
+  await waitFor(() => restored.requests.length === 1, 'the saved creation was not checked');
+  await restored.flush();
+  assert.equal(recoveryPanel(restored), null, 'automatic read-only recovery must be silent');
+  assert.equal(restored.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3',
+    'creations', requestId).state, 'pending');
+  restored.window.dispatchEvent({type: 'pageshow'});
+  restored.document.dispatchEvent({type: 'visibilitychange'});
+  await restored.flush();
+  assert.deepEqual(restored.requests.map(request => request.envelope.method), ['agent.chats.creationStatus']);
+  assert.equal(restored.location.href, 'http://127.0.0.1:24131/__run/epoch-one/index.html');
+});
+
+test('automatic Chat recovery never reads receipts from another App or revision', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'dddddddd-1111-4111-8111-111111111111';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})),
+    error => error.code === 'host_unavailable');
+  for (const options of [{appId: 'app-two'}, {appId: 'app-one', revision: 4}]) {
+    const other = browser({...options, indexedDb: original.indexedDb});
+    assert.deepEqual(JSON.parse(JSON.stringify(await other.api.agent.chats.pendingCreations())), []);
+    await other.flush();
+    assert.equal(other.requests.length, 0);
+    assert.equal(recoveryPanel(other), null);
+  }
+  assert.equal(original.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3',
+    'creations', requestId).state, 'pending');
+});
+
+test('reload recovery is sequential and leaves null, host errors and mismatched IDs pending', async () => {
+  const original = browser();
+  await original.flush();
+  const ids = [
+    '11111111-2222-4222-8222-222222222221',
+    '11111111-2222-4222-8222-222222222222',
+    '11111111-2222-4222-8222-222222222223'
+  ];
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  for (const requestId of ids) {
+    await assert.rejects(original.api.agent.chats.create(original.input({requestId})),
+      error => error.code === 'host_unavailable');
+  }
+  const gate = deferred();
+  const restored = browser({indexedDb: original.indexedDb});
+  restored.setFetchHandler(request => {
+    assert.equal(request.envelope.method, 'agent.chats.creationStatus');
+    if (request.envelope.args.requestId === ids[0]) return gate.promise;
+    if (request.envelope.args.requestId === ids[1]) {
+      return {ok: true, json: async () => restored.input({ok: false, error: {code: 'chat_create_deleted'}})};
+    }
+    return {ok: true, json: async () => restored.input({ok: true, value: {chatId: ids[0]}})};
+  });
+  await waitFor(() => restored.requests.length === 1, 'first recovery check did not start');
+  await restored.flush();
+  assert.equal(restored.requests.length, 1, 'recovery checks must be sequential');
+  gate.resolve({ok: true, json: async () => restored.input({ok: true, value: null})});
+  await waitFor(() => restored.requests.length === 3, 'recovery did not continue after the first check');
+  await restored.flush();
+  assert.deepEqual(restored.requests.map(request => request.envelope.args.requestId), ids);
+  assert.deepEqual(JSON.parse(JSON.stringify(await restored.api.agent.chats.pendingCreations())),
+    ids.map(requestId => ({requestId, state: 'pending'})));
+  assert.equal(recoveryPanel(restored), null);
+});
+
+test('a stale automatic status result cannot overwrite a newer cross-tab receipt state', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'cccccccc-1111-4111-8111-111111111111';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})),
+    error => error.code === 'host_unavailable');
+  const gate = deferred();
+  const restored = browser({indexedDb: original.indexedDb});
+  restored.setFetchHandler(() => gate.promise);
+  await waitFor(() => restored.requests.length === 1, 'status check was not in flight');
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  const newer = restored.indexedDb.getRecord(db, 'creations', requestId);
+  restored.indexedDb.setRecord(db, 'creations', requestId, {...newer, state: 'deleted'});
+  gate.resolve({ok: true, json: async () => restored.input({ok: true, value: {chatId: requestId}})});
+  await restored.flush();
+  await restored.flush();
+  assert.equal(restored.indexedDb.getRecord(db, 'creations', requestId).state, 'deleted');
+  assert.deepEqual(restored.requests.map(request => request.envelope.method), ['agent.chats.creationStatus']);
+});
+
+test('a stale automatic status cannot resolve a newer cross-tab retry or make it forgettable', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'eeeeeeee-1111-4111-8111-111111111111';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})),
+    error => error.code === 'host_unavailable');
+  const oldStatus = deferred();
+  const reader = browser({indexedDb: original.indexedDb});
+  reader.setFetchHandler(() => oldStatus.promise);
+  await waitFor(() => reader.requests.length === 1, 'the old status read did not start');
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  const oldToken = reader.indexedDb.getRecord(db, 'creations', requestId).attemptToken;
+
+  const newerCreate = deferred();
+  const writer = browser({indexedDb: original.indexedDb});
+  writer.setFetchHandler(request => request.envelope.method === 'agent.chats.creationStatus'
+    ? {ok: true, json: async () => writer.input({ok: true, value: null})}
+    : newerCreate.promise);
+  const retry = writer.api.agent.chats.create(writer.input({requestId}));
+  await waitFor(() => retryButton(writer, requestId), 'new retry confirmation was not shown');
+  retryButton(writer, requestId).dispatchEvent({type: 'click', isTrusted: true});
+  await waitFor(() => writer.requests.some(request => request.envelope.method === 'agent.chats.create'),
+    'confirmed newer retry did not start');
+  const newToken = writer.indexedDb.getRecord(db, 'creations', requestId).attemptToken;
+  assert.notEqual(newToken, oldToken);
+  oldStatus.resolve({ok: true, json: async () => reader.input({ok: true, value: {chatId: requestId}})});
+  await reader.flush();
+  await reader.flush();
+  assert.equal(reader.indexedDb.getRecord(db, 'creations', requestId).state, 'pending');
+  await assert.rejects(reader.api.agent.chats.forgetCreation(requestId), error => error.code === 'chat_creation_unresolved');
+  newerCreate.resolve({ok: true, json: async () => writer.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await retry).id, requestId);
+});
+
+test('a late create acknowledgement cannot overwrite a newer deleted receipt', async () => {
+  const creator = browser();
+  await creator.flush();
+  const requestId = 'ffffffff-1111-4111-8111-111111111111';
+  const reply = deferred();
+  creator.setFetchHandler(() => reply.promise);
+  const pending = creator.api.agent.chats.create(creator.input({requestId}));
+  await waitFor(() => creator.requests.length === 1, 'create did not start');
+  const checker = browser({indexedDb: creator.indexedDb});
+  checker.setFetchHandler(() => ({ok: true, json: async () => checker.input({
+    ok: false, error: {code: 'chat_create_deleted', message: 'deleted'}
+  })}));
+  await assert.rejects(checker.api.agent.chats.creationStatus(checker.input({requestId})),
+    error => error.code === 'chat_create_deleted');
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  assert.equal(checker.indexedDb.getRecord(db, 'creations', requestId).state, 'deleted');
+  reply.resolve({ok: true, json: async () => creator.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await pending).id, requestId);
+  assert.equal(checker.indexedDb.getRecord(db, 'creations', requestId).state, 'deleted');
+});
+
+test('a stale explicit status cannot overwrite a newer cross-tab pending attempt', async () => {
+  const reader = browser();
+  await reader.flush();
+  const requestId = 'aaaaaaaa-3333-4333-8333-333333333333';
+  reader.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(reader.api.agent.chats.create(reader.input({requestId})), error => error.code === 'host_unavailable');
+  const oldStatus = deferred();
+  reader.setFetchHandler(() => oldStatus.promise);
+  const status = reader.api.agent.chats.creationStatus(reader.input({requestId}));
+  await waitFor(() => reader.requests.some(request => request.envelope.method === 'agent.chats.creationStatus'),
+    'explicit status did not start');
+
+  const newCreate = deferred();
+  const writer = browser({indexedDb: reader.indexedDb});
+  writer.setFetchHandler(request => request.envelope.method === 'agent.chats.creationStatus'
+    ? {ok: true, json: async () => writer.input({ok: true, value: null})}
+    : newCreate.promise);
+  const retry = writer.api.agent.chats.create(writer.input({requestId}));
+  await waitFor(() => retryButton(writer, requestId), 'retry confirmation missing');
+  retryButton(writer, requestId).dispatchEvent({type: 'click', isTrusted: true});
+  await waitFor(() => writer.requests.some(request => request.envelope.method === 'agent.chats.create'),
+    'new attempt did not start');
+  oldStatus.resolve({ok: true, json: async () => reader.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await status).id, requestId);
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  assert.equal(reader.indexedDb.getRecord(db, 'creations', requestId).state, 'pending');
+  await assert.rejects(reader.api.agent.chats.forgetCreation(requestId), error => error.code === 'chat_creation_unresolved');
+  newCreate.resolve({ok: true, json: async () => writer.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await retry).id, requestId);
+});
+
+test('newer same-attempt status deletion is not overwritten by an older success', async () => {
+  const b = browser();
+  await b.flush();
+  const requestId = 'aaaaaaaa-4444-4444-8444-444444444444';
+  b.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(b.api.agent.chats.create(b.input({requestId})), error => error.code === 'host_unavailable');
+  const oldReply = deferred();
+  b.setFetchHandler(() => oldReply.promise);
+  const oldStatus = b.api.agent.chats.creationStatus(b.input({requestId}));
+  await waitFor(() => b.requests.some(request => request.envelope.method === 'agent.chats.creationStatus'),
+    'old status did not start');
+  b.setFetchHandler(() => ({ok: true, json: async () => b.input({
+    ok: false, error: {code: 'chat_create_deleted', message: 'deleted'}
+  })}));
+  await assert.rejects(b.api.agent.chats.creationStatus(b.input({requestId})),
+    error => error.code === 'chat_create_deleted');
+  oldReply.resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await oldStatus).id, requestId);
+  assert.equal(b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3',
+    'creations', requestId).state, 'deleted');
+});
+
+test('a newer confirmed deletion may update a same-attempt accepted receipt', async () => {
+  const b = browser();
+  await b.flush();
+  const requestId = 'bbbbbbbb-4444-4444-8444-444444444444';
+  assert.equal((await b.api.agent.chats.create(b.input({requestId}))).id, requestId);
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  assert.equal(b.indexedDb.getRecord(db, 'creations', requestId).state, 'accepted');
+  b.setFetchHandler(() => ({ok: true, json: async () => b.input({
+    ok: false, error: {code: 'chat_create_deleted', message: 'deleted'}
+  })}));
+  await assert.rejects(b.api.agent.chats.creationStatus(b.input({requestId})), error => error.code === 'chat_create_deleted');
+  assert.equal(b.indexedDb.getRecord(db, 'creations', requestId).state, 'deleted');
+});
+
+test('a later status deletion wins after an in-flight create acknowledgement', async () => {
+  const b = browser();
+  await b.flush();
+  const requestId = 'cccccccc-4444-4444-8444-444444444444';
+  const createReply = deferred();
+  const statusReply = deferred();
+  b.setFetchHandler(request => request.envelope.method === 'agent.chats.create' ? createReply.promise : statusReply.promise);
+  const create = b.api.agent.chats.create(b.input({requestId}));
+  await waitFor(() => b.requests.some(request => request.envelope.method === 'agent.chats.create'), 'create did not start');
+  const status = b.api.agent.chats.creationStatus(b.input({requestId}));
+  const statusResult = status.then(() => null, error => error);
+  await waitFor(() => b.requests.some(request => request.envelope.method === 'agent.chats.creationStatus'), 'status did not start');
+  createReply.resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await create).id, requestId);
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  assert.equal(b.indexedDb.getRecord(db, 'creations', requestId).state, 'accepted');
+  statusReply.resolve({ok: true, json: async () => b.input({
+    ok: false, error: {code: 'chat_create_deleted', message: 'deleted'}
+  })});
+  assert.equal((await statusResult).code, 'chat_create_deleted');
+  assert.equal(b.indexedDb.getRecord(db, 'creations', requestId).state, 'deleted');
+});
+
+test('known Chat creation returns from status without a retry prompt or POST', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'bbbbbbbb-3333-4333-8333-333333333333';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})), error => error.code === 'host_unavailable');
+  const restored = browser({indexedDb: original.indexedDb});
+  restored.setFetchHandler(() => ({ok: true, json: async () => restored.input({ok: true, value: {chatId: requestId}})}));
+  const handle = await restored.api.agent.chats.create(restored.input({requestId}));
+  assert.equal(handle.id, requestId);
+  assert.ok(restored.requests.length >= 1);
+  assert.ok(restored.requests.every(request => request.envelope.method === 'agent.chats.creationStatus'));
+  assert.equal(retryButton(restored, requestId), undefined);
+});
+
+test('without a DOM, unknown retries fail closed even when userActivation is unavailable', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'cccccccc-3333-4333-8333-333333333333';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})), error => error.code === 'host_unavailable');
+  const restored = browser({indexedDb: original.indexedDb});
+  restored.document.body = null;
+  restored.setFetchHandler(() => ({ok: true, json: async () => restored.input({ok: true, value: null})}));
+  await assert.rejects(restored.api.agent.chats.create(restored.input({requestId})),
+    error => error.code === 'chat_retry_confirmation_required' && error.requestId === requestId);
+  assert.ok(restored.requests.every(request => request.envelope.method === 'agent.chats.creationStatus'));
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  assert.equal(restored.indexedDb.getRecord(db, 'creations', requestId).state, 'pending');
+});
+
+test('first Chat creation needs no userActivation and cancelling an unknown retry never posts', async () => {
+  const first = browser();
+  first.document.body = null;
+  const firstId = 'dddddddd-3333-4333-8333-333333333333';
+  assert.equal((await first.api.agent.chats.create(first.input({requestId: firstId}))).id, firstId);
+  assert.deepEqual(first.requests.map(request => request.envelope.method), ['agent.chats.create']);
+
+  const original = browser();
+  await original.flush();
+  const requestId = 'eeeeeeee-3333-4333-8333-333333333333';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})), error => error.code === 'host_unavailable');
+  const restored = browser({indexedDb: original.indexedDb});
+  restored.navigator.userActivation = {isActive: false};
+  restored.setFetchHandler(() => ({ok: true, json: async () => restored.input({ok: true, value: null})}));
+  const retry = restored.api.agent.chats.create(restored.input({requestId}));
+  const result = retry.then(() => null, error => error);
+  await waitFor(() => retryButton(restored, requestId), 'retry confirmation was not shown');
+  const cancel = recoveryPanel(restored).retries.children.find(button => button.textContent === `Cancel retry ${requestId}`);
+  assert.ok(cancel);
+  cancel.dispatchEvent({type: 'click', isTrusted: false});
+  assert.ok(retryButton(restored, requestId));
+  cancel.dispatchEvent({type: 'click', isTrusted: true});
+  const error = await result;
+  assert.equal(error.code, 'chat_retry_cancelled');
+  assert.equal(error.requestId, requestId);
+  assert.ok(restored.requests.every(request => request.envelope.method === 'agent.chats.creationStatus'));
+  assert.equal(restored.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3',
+    'creations', requestId).state, 'pending');
+});
+
+test('reload recovery fails closed on excess or malformed receipts without host requests', async () => {
+  for (const kind of ['excess', 'malformed']) {
+    const original = browser();
+    await original.api.agent.chats.pendingCreations(); // create the app/revision database
+    const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+    const count = kind === 'excess' ? 65 : 1;
+    const ids = [];
+    for (let index = 0; index < count; index++) {
+      const requestId = `${index.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`;
+      ids.push(requestId);
+      original.indexedDb.setRecord(db, 'creations', requestId, {
+        key: requestId, appId: 'app-one', revision: 3, requestId,
+        options: {requestId}, state: kind === 'malformed' ? 'invalid' : 'pending',
+        attemptToken: index.toString(16).padStart(32, '0')
+      });
+    }
+    const restored = browser({indexedDb: original.indexedDb});
+    await assert.rejects(restored.api.agent.chats.pendingCreations(), error => error.code === 'storage_unavailable');
+    await restored.flush();
+    assert.equal(restored.requests.length, 0, `${kind} receipts must not be sent`);
+    for (const requestId of ids) {
+      assert.equal(restored.indexedDb.getRecord(db, 'creations', requestId).state,
+        kind === 'malformed' ? 'invalid' : 'pending');
+    }
+    assert.equal(recoveryPanel(restored), null);
+  }
+});
+
+test('a receipt missing its required attempt token is retained and never auto-recovered', async () => {
+  const original = browser();
+  await original.api.agent.chats.pendingCreations();
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  const requestId = 'ffffffff-4444-4444-8444-444444444444';
+  const damaged = {key: requestId, appId: 'app-one', revision: 3, requestId,
+    options: {requestId}, state: 'pending'};
+  original.indexedDb.setRecord(db, 'creations', requestId, damaged);
+  const restored = browser({indexedDb: original.indexedDb});
+  await assert.rejects(restored.api.agent.chats.pendingCreations(), error => error.code === 'storage_unavailable');
+  await restored.flush();
+  assert.equal(restored.requests.length, 0);
+  assert.deepEqual(restored.indexedDb.getRecord(db, 'creations', requestId), damaged);
+});
+
+test('retry confirmation expires without submitting and the old button cannot submit later', async () => {
+  const original = browser();
+  await original.flush();
+  const requestId = 'aaaaaaaa-5555-4555-8555-555555555555';
+  original.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(original.api.agent.chats.create(original.input({requestId})), error => error.code === 'host_unavailable');
+  const clock = fakeClock();
+  const restored = browser({indexedDb: original.indexedDb, clock});
+  restored.setFetchHandler(() => ({ok: true, json: async () => restored.input({ok: true, value: null})}));
+  const retry = restored.api.agent.chats.create(restored.input({requestId}));
+  const result = retry.then(() => null, error => error);
+  await waitFor(() => retryButton(restored, requestId), 'retry confirmation missing');
+  const oldButton = retryButton(restored, requestId);
+  clock.advance(120000);
+  const error = await result;
+  assert.equal(error.code, 'chat_retry_confirmation_timeout');
+  assert.equal(error.definitive, false);
+  assert.equal(error.requestId, requestId);
+  oldButton.dispatchEvent({type: 'click', isTrusted: true});
+  await restored.flush();
+  assert.ok(restored.requests.every(request => request.envelope.method === 'agent.chats.creationStatus'));
+  assert.equal(restored.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3',
+    'creations', requestId).state, 'pending');
+});
+
+test('resolved receipts do not trigger a new POST solely because the current read is unavailable or null', async () => {
+  const b = browser();
+  await b.flush();
+  const requestId = 'bbbbbbbb-5555-4555-8555-555555555555';
+  assert.equal((await b.api.agent.chats.create(b.input({requestId}))).id, requestId);
+  const before = b.requests.length;
+  b.setFetchHandler(() => ({ok: true, json: async () => b.input({ok: true, value: null})}));
+  await assert.rejects(b.api.agent.chats.create(b.input({requestId})), error => error.code === 'chat_storage_uncertain');
+  assert.ok(b.requests.slice(before).every(request => request.envelope.method === 'agent.chats.creationStatus'));
+  assert.equal(retryButton(b, requestId), undefined);
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  const record = b.indexedDb.getRecord(db, 'creations', requestId);
+  b.indexedDb.setRecord(db, 'creations', requestId, {...record, state: 'deleted'});
+  const after = b.requests.length;
+  await assert.rejects(b.api.agent.chats.create(b.input({requestId})), error => error.code === 'chat_create_deleted');
+  assert.equal(b.requests.length, after);
+});
+
+test('forgetting a malformed resolved receipt fails closed without deleting it', async () => {
+  const b = browser();
+  await b.api.agent.chats.pendingCreations();
+  const db = 'lingxi-local-app-chat-creates-app-one-revision-3';
+  const requestId = 'ffffffff-3333-4333-8333-333333333333';
+  const damaged = {key: requestId, appId: 'app-one', revision: 3, requestId,
+    options: {requestId}, state: 'accepted', attemptToken: 'invalid'};
+  b.indexedDb.setRecord(db, 'creations', requestId, damaged);
+  await assert.rejects(b.api.agent.chats.forgetCreation(requestId), error => error.code === 'storage_unavailable');
+  assert.deepEqual(b.indexedDb.getRecord(db, 'creations', requestId), damaged);
+});
+
+test('Chat creation pending UI appears only after saving the exact request and never navigates automatically', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  const requestId = 'abababab-abab-4bab-8bab-abababababab';
+  const reply = deferred();
+  b.setFetchHandler(() => reply.promise);
+  const create = b.api.agent.chats.create(b.input({requestId, title: ' Exact '}));
+  const result = create.then(value => value, error => error);
+  await waitFor(() => b.requests.length === 1, 'Chat creation was not sent');
+  assert.equal(recoveryPanel(b), null);
+  assert.equal(b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId).options.title, ' Exact ');
+  const initialUrl = b.location.href;
+  clock.advance(5000);
+  const view = recoveryPanel(b);
+  assert.ok(view);
+  assert.match(view.message.textContent, /still waiting/i);
+  assert.equal(view.panel.attributes.role, 'status');
+  assert.equal(view.panel.attributes['aria-live'], 'polite');
+  assert.equal(view.open.type, 'button');
+  assert.equal(b.location.href, initialUrl);
+  view.open.dispatchEvent({type: 'click', isTrusted: false});
+  assert.equal(b.location.href, initialUrl, 'synthetic clicks must not open the host');
+  assert.equal(b.requests.length, 1, 'the prompt must not retry create');
+  reply.resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await result).id, requestId);
+  assert.equal(recoveryPanel(b), null);
+});
+
+test('background polling preserves the focused retry control for the same attempt', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  const requestId = 'aaaaaaaa-6666-4666-8666-666666666666';
+  const reply = deferred();
+  b.setFetchHandler(() => reply.promise);
+  const create = b.api.agent.chats.create(b.input({requestId}));
+  await waitFor(() => b.requests.length === 1, 'create did not start');
+  clock.advance(5000);
+  const button = retryButton(b, requestId);
+  assert.ok(button);
+  button.focus();
+  b.setFetchHandler(() => { throw new Error('host unavailable'); });
+  await assert.rejects(b.api.agent.chats.list(), error => error.code === 'host_unavailable');
+  await assert.rejects(b.api.agent.chats.list(), error => error.code === 'host_unavailable');
+  assert.equal(retryButton(b, requestId), button);
+  assert.equal(button.focused, true);
+  reply.resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await create).id, requestId);
+});
+
+test('read-only host failures share one dismissible recovery UI and a trusted open action', async () => {
+  for (const method of ['get', 'list', 'history', 'status']) {
+    const b = browser({appId: 'app-two'});
+    const chat = method === 'history' ? await b.api.agent.chats.open('chat-one') : null;
+    b.setFetchHandler(() => { throw new Error('host unavailable'); });
+    const call = () => {
+      if (method === 'get') return b.api.agent.chats.open('chat-one');
+      if (method === 'list') return b.api.agent.chats.list();
+      if (method === 'history') return chat.history();
+      return b.api.agent.chats.creationStatus(b.input({requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'}));
+    };
+    await assert.rejects(call(), error => error.code === 'host_unavailable');
+    const view = recoveryPanel(b);
+    assert.ok(view, method);
+    assert.match(view.message.textContent, /unavailable or paused/i);
+    assert.equal(view.panel.attributes.role, 'status');
+    assert.equal(view.open.textContent, 'Open LingXi');
+    await assert.rejects(call(), error => error.code === 'host_unavailable');
+    assert.equal(recoveryPanel(b).container, view.container, 'repeated failure must not stack prompts');
+    const before = b.location.href;
+    const count = b.requests.length;
+    view.open.dispatchEvent({type: 'click', isTrusted: false});
+    assert.equal(b.location.href, before);
+    view.open.dispatchEvent({type: 'click', isTrusted: true});
+    assert.equal(b.location.href, 'lingxi://apps/app-two?review=agent');
+    assert.equal(b.requests.length, count, 'opening LingXi must not submit or retry any request');
+  }
+});
+
+test('dismissed recovery UI does not loop on repeated failures and can return after a healthy read', async () => {
+  const b = browser();
+  b.setFetchHandler(() => { throw new Error('host unavailable'); });
+  const call = () => b.api.agent.chats.list();
+  await assert.rejects(call(), error => error.code === 'host_unavailable');
+  const view = recoveryPanel(b);
+  view.dismiss.dispatchEvent({type: 'click', isTrusted: false});
+  assert.ok(recoveryPanel(b));
+  view.dismiss.dispatchEvent({type: 'click', isTrusted: true});
+  assert.equal(recoveryPanel(b).message.hidden, true);
+  assert.equal(recoveryPanel(b).open.hidden, undefined, 'a minimized prompt must retain the host button');
+  await assert.rejects(call(), error => error.code === 'host_unavailable');
+  assert.equal(recoveryPanel(b).container, view.container);
+  assert.equal(recoveryPanel(b).message.hidden, true, 'polling errors must not expand a minimized prompt');
+  const requests = b.requests.length;
+  b.window.dispatchEvent({type: 'pageshow'});
+  b.document.dispatchEvent({type: 'visibilitychange'});
+  await b.flush();
+  assert.equal(b.requests.length, requests, 'page return must not retry or submit');
+  recoveryPanel(b).expand.dispatchEvent({type: 'click', isTrusted: true});
+  assert.equal(recoveryPanel(b).message.hidden, false, 'the user can reopen recovery options');
+  b.setFetchHandler(null);
+  await call();
+  b.setFetchHandler(() => { throw new Error('host unavailable again'); });
+  await assert.rejects(call(), error => error.code === 'host_unavailable');
+  assert.ok(recoveryPanel(b), 'a later outage may be shown after a successful read');
+});
+
+test('a valid host rejection clears an earlier connection warning without hiding the error', async () => {
+  const b = browser();
+  b.setFetchHandler(() => { throw new Error('host unavailable'); });
+  await assert.rejects(b.api.agent.chats.list(), error => error.code === 'host_unavailable');
+  assert.ok(recoveryPanel(b));
+  b.setFetchHandler(() => ({ok: true, json: async () => b.input({
+    ok: false, error: {code: 'chat_create_deleted', message: 'deleted'}
+  })}));
+  await assert.rejects(b.api.agent.chats.creationStatus(b.input({requestId: '11111111-1111-4111-8111-111111111111'})),
+    error => error.code === 'chat_create_deleted' && error.message === 'deleted');
+  assert.equal(recoveryPanel(b), null, 'a structured host rejection proves the connection is available');
+});
+
+test('subscription polling does not re-expand a minimized prompt and a later user action keeps recovery reachable', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  const chat = await b.api.agent.chats.open('chat-one');
+  b.setFetchHandler(() => { throw new Error('host unavailable'); });
+  const unsubscribe = chat.subscribe(() => {});
+  await waitFor(() => recoveryPanel(b), 'subscription did not show recovery');
+  const view = recoveryPanel(b);
+  view.dismiss.dispatchEvent({type: 'click', isTrusted: true});
+  assert.equal(view.message.hidden, true);
+  clock.advance(1000);
+  await waitFor(() => b.requests.filter(request => request.envelope.method === 'agent.chats.history').length >= 2,
+    'subscription did not poll again');
+  assert.equal(recoveryPanel(b).container, view.container);
+  assert.equal(recoveryPanel(b).message.hidden, true);
+  await assert.rejects(chat.history(), error => error.code === 'host_unavailable');
+  assert.equal(recoveryPanel(b).message.hidden, true);
+  assert.equal(recoveryPanel(b).open.textContent, 'Open LingXi');
+  recoveryPanel(b).expand.dispatchEvent({type: 'click', isTrusted: true});
+  assert.equal(recoveryPanel(b).message.hidden, false);
+  unsubscribe();
+});
+
+test('recovery UI tolerates missing or late DOM and remains isolated between pages', async () => {
+  const first = browser({appId: 'app-one'});
+  const second = browser({appId: 'app-two', indexedDb: first.indexedDb});
+  const body = first.document.body;
+  first.document.body = null;
+  first.setFetchHandler(() => { throw new Error('host unavailable'); });
+  await assert.rejects(first.api.agent.chats.list(), error => error.code === 'host_unavailable');
+  assert.equal(recoveryPanel(second), null);
+  first.document.body = body;
+  first.document.dispatchEvent({type: 'DOMContentLoaded'});
+  assert.ok(recoveryPanel(first));
+  assert.equal(recoveryPanel(second), null);
+
+  const noDom = browser();
+  noDom.document.createElement = undefined;
+  noDom.document.body = null;
+  noDom.setFetchHandler(() => { throw new Error('host unavailable'); });
+  await assert.rejects(noDom.api.agent.chats.list(), error => error.code === 'host_unavailable');
 });
 
 test('Chat creation never sends when identity cannot be saved or is invalid', async () => {
@@ -765,6 +1424,7 @@ test('Chat creation never sends when identity cannot be saved or is invalid', as
   b.indexedDb.failNextGet();
   await assert.rejects(b.api.agent.chats.create(b.input({requestId})), error => error.code === 'storage_unavailable');
   assert.equal(b.requests.length, 0);
+  assert.equal(recoveryPanel(b), null, 'a failed receipt must not create a handoff prompt');
   for (const options of [{}, {requestId: requestId.toUpperCase()}, {requestId, title: null}, {requestId, extra: 1}]) {
     await assert.rejects(b.api.agent.chats.create(b.input(options)), error => error.code === 'invalid_chat');
   }

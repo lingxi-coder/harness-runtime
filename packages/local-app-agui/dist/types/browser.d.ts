@@ -72,9 +72,20 @@ interface LocalAppCommonChats {
 
 /** LingXi host extension, separate from the AG-UI run protocol. */
 export interface LocalAppChats extends LocalAppCommonChats {
+  /**
+   * Invoke only for a user-requested creation or explicit same-input retry.
+   * Mobile saves the request before submission and coalesces same-page calls.
+   * For an unknown prior outcome, a trusted SDK confirmation is required to
+   * send a retry. Stopping a browser wait does not determine the host outcome.
+   */
   create(options: LocalAppChatCreationOptions): Promise<LocalAppChatHandle>;
   /** Null means not currently observed; an earlier request may still arrive. */
   creationStatus(options: LocalAppChatCreationOptions): Promise<LocalAppChatHandle | null>;
+  /**
+   * Reads receipts for this App and revision. On Mobile, a fresh page may
+   * reconcile pending receipts through bounded, read-only status queries;
+   * this list can be read again after those queries complete.
+   */
   pendingCreations(): Promise<LocalAppPendingChatCreation[]>;
   /** Removes a resolved browser receipt, not the host Chat. */
   forgetCreation(requestId: string): Promise<void>;
