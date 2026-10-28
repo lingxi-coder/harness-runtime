@@ -173,6 +173,41 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash Stop did not execute exactly once' }
           exit 0
+      - name: Real typed Bash timeout retains output and stops the held descendant
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'typed-timeout.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows real_typed_bash_timeout_cannot_report_success_with_live_writer -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash timeout did not execute exactly once' }
+          exit 0
+      - name: Reproduce the old typed Bash timeout defect
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'typed-timeout-legacy.log'
+          $env:LINGXI_TYPED_LEGACY_FOREGROUND = '1'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows real_typed_bash_timeout_cannot_report_success_with_live_writer -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          $testExit = $LASTEXITCODE
+          Remove-Item Env:LINGXI_TYPED_LEGACY_FOREGROUND
+          if ($testExit -eq 0) { throw 'known typed Bash timeout defect did not reproduce; reassess this negative control' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'typed-timeout-probe: result=Ok(Ok(Ok(')) { throw 'typed Bash did not report foreground success in the expected fixture' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'held_before_release=Some(true); signaled_before_release=false; held_after_release=true')) { throw 'negative control did not retain and later signal the real descendant handle' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'negative control did not execute exactly once' }
+          exit 0
+      - name: Verify actual desktop typed Bash entry rejects Windows before spawn
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'typed-entry.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows desktop_typed_bash_entry_rejects_windows_before_spawn -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash entry test did not execute exactly once' }
+          exit 0
       - name: Verify legacy supervisor retains the caller output pipe
         timeout-minutes: 2
         shell: pwsh
@@ -240,41 +275,6 @@ jobs:
             $probe.Refresh()
             if (-not $probe.HasExited) { $probe.Kill(); $probe.WaitForExit() }
           }
-      - name: Real typed Bash timeout retains output and stops the held descendant
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $log = Join-Path $env:RUNNER_TEMP 'typed-timeout.log'
-          cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows real_typed_bash_timeout_cannot_report_success_with_live_writer -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash timeout did not execute exactly once' }
-          exit 0
-      - name: Reproduce the old typed Bash timeout defect
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $log = Join-Path $env:RUNNER_TEMP 'typed-timeout-legacy.log'
-          $env:LINGXI_TYPED_LEGACY_FOREGROUND = '1'
-          cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows real_typed_bash_timeout_cannot_report_success_with_live_writer -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
-          $testExit = $LASTEXITCODE
-          Remove-Item Env:LINGXI_TYPED_LEGACY_FOREGROUND
-          if ($testExit -eq 0) { throw 'known typed Bash timeout defect did not reproduce; reassess this negative control' }
-          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'typed-timeout-probe: result=Ok(Ok(Ok(')) { throw 'typed Bash did not report foreground success in the expected fixture' }
-          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'held_before_release=Some(true); signaled_before_release=false; held_after_release=true')) { throw 'negative control did not retain and later signal the real descendant handle' }
-          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'negative control did not execute exactly once' }
-          exit 0
-      - name: Verify actual desktop typed Bash entry rejects Windows before spawn
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $log = Join-Path $env:RUNNER_TEMP 'typed-entry.log'
-          cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows desktop_typed_bash_entry_rejects_windows_before_spawn -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash entry test did not execute exactly once' }
-          exit 0
       - name: Preserve typed Bash diagnostics
         if: always()
         uses: actions/upload-artifact@v4

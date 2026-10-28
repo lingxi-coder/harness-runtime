@@ -202,13 +202,16 @@ async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
         token.clone(),
     );
     let cmd = command(fixture.0.path(), Duration::from_secs(30));
-    let running = tokio::spawn(async move {
+    let mut running = tokio::spawn(async move {
         process
             .run_foreground_with_output_limit(&cmd, Some(1024))
             .await
     });
     eprintln!("typed-stop-stage: waiting for child marker");
-    let held = held_child(fixture.0.path()).await;
+    let held = tokio::select! {
+        child = held_child(fixture.0.path()) => child,
+        result = &mut running => panic!("typed process ended before child startup: {result:?}"),
+    };
     eprintln!("typed-stop-stage: opened original child handle");
     assert_eq!(held.is_alive(), Some(true));
     token.cancel();
