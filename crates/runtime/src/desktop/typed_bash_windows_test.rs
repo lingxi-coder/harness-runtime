@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tool_api::bash_runner::BashRunner;
 
 struct SourceSink;
 #[async_trait::async_trait]
@@ -99,6 +100,34 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::write(self.0.path().join("release"), "release");
     }
+}
+
+#[tokio::test]
+async fn desktop_typed_bash_entry_rejects_windows_before_spawn() {
+    let fixture = Fixture(tempfile::tempdir().unwrap());
+    let mut ctx = tool_api::test_support::shell_test_ctx_in(
+        mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        },
+        fixture.0.path().to_path_buf(),
+    );
+    ctx.process = Arc::new(platform_windows::process::WindowsProcess::new());
+    let runner = DesktopBashRunner { ctx };
+    let result = runner
+        .run_with_cancel(
+            "echo spawned > should-not-exist",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+    assert_ne!(result.exit_code, 0);
+    assert!(
+        result.stderr.contains("Bash is not supported on Windows"),
+        "{result:?}"
+    );
+    assert!(!fixture.0.path().join("should-not-exist").exists());
 }
 
 #[tokio::test]

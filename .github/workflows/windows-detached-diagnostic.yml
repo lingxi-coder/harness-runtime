@@ -157,6 +157,15 @@ jobs:
           "HARNESS_WINDOWS_TYPED_FIXTURE=$env:GITHUB_WORKSPACE\target\debug\examples\typed_bash_fixture.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build the desktop typed Bash tests
         run: cargo test --locked -p harness-runtime --no-default-features --features desktop --lib --no-run
+      - name: Verify actual desktop typed Bash entry rejects Windows before spawn
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'typed-entry.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop --lib desktop::typed_bash_windows_tests::desktop_typed_bash_entry_rejects_windows_before_spawn -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash entry test did not execute exactly once' }
+          exit 0
       - name: Real typed Bash Stop with a retained Windows process handle
         shell: pwsh
         run: |
