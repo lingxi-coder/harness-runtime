@@ -302,7 +302,10 @@ jobs:
             mobile::unified_local_apps::gateway::agent_json_tests:: -- --test-threads=1 \
             2>&1 | tee "$RUNNER_TEMP/local-app-gateway-tests.log"
           grep -Fqx 'test mobile::unified_local_apps::gateway::agent_json_tests::pending_request_spools_are_private_and_close_after_timeout_eof_or_cancellation ... ok' "$RUNNER_TEMP/local-app-gateway-tests.log"
-          grep -Fqx 'test mobile::unified_local_apps::gateway::agent_json_tests::private_spool_rejection_is_a_server_error_without_dispatch_or_sensitive_details ... ok' "$RUNNER_TEMP/local-app-gateway-tests.log"
+          cargo test --locked -p harness-runtime --no-default-features --features mobile --lib \
+            mobile::unified_local_apps::gateway::agent_control_lane_tests::private_spool_rejection_is_a_server_error_without_dispatch_or_sensitive_details \
+            -- --exact --test-threads=1 2>&1 | tee "$RUNNER_TEMP/local-app-gateway-control-tests.log"
+          grep -Fqx 'test mobile::unified_local_apps::gateway::agent_control_lane_tests::private_spool_rejection_is_a_server_error_without_dispatch_or_sensitive_details ... ok' "$RUNNER_TEMP/local-app-gateway-control-tests.log"
 
   harness-desktop-native:
     name: Harness desktop (${{ matrix.os }})
