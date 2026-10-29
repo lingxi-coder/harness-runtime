@@ -2158,6 +2158,14 @@ impl AppAgentHost {
                 result = Err(error);
             }
         }
+        self.finish_execution(&control, result).await;
+    }
+
+    async fn finish_execution(
+        &self,
+        control: &Control,
+        result: Result<(TaskResult, Value), String>,
+    ) {
         let recorded_usage = control.usage.lock().await.clone();
         let (state, output, usage, error) = match result {
             Ok((result, usage)) => (State::Succeeded, Some(result), Some(usage), None),
@@ -2169,31 +2177,42 @@ impl AppAgentHost {
         // A failed foreground reap keeps admission occupied. Do not release the
         // app or remove its workspace while a tool may still have effects.
         if error.as_deref() != Some("tool_cleanup_incomplete") {
-            match control.commit_terminal(state, output, usage, error) {
+            let committed = control.commit_terminal(state, output, usage, error);
+            // The orchestrator owns this Control as its output/permission sink.
+            // Break that strong cycle only after cleanup and terminal commit
+            // have finished, while the Chat is still busy. Dropping its writer
+            // releases the transcript lease before another turn can start.
+            let orchestrator = control
+                .chat_orchestrator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(orchestrator);
+            match committed {
                 Ok((task, event_storage_failed)) => {
-                    self.active.lock().await.remove(&id);
                     if let Some(chat_id) = &control.chat_id {
                         if event_storage_failed || task.state != State::Succeeded {
-                            let _ = control.chats.interrupt_turn(chat_id, &id);
+                            let _ = control.chats.interrupt_turn(chat_id, &control.id);
                         } else {
-                            let _ = control.chats.finish_turn(chat_id, &id);
+                            let _ = control.chats.finish_turn(chat_id, &control.id);
                         }
                     }
-                    self.clear_wake_run(&id);
+                    self.active.lock().await.remove(&control.id);
+                    self.clear_wake_run(&control.id);
                 }
                 Err(_) => {
                     // The executor returned only after the tools and lease
                     // cleanup completed. Storage quarantine protects the
                     // unresolved record; retaining this finished Control
                     // would prevent stop/reopen recovery.
-                    self.active.lock().await.remove(&id);
-                    self.clear_wake_run(&id);
+                    self.active.lock().await.remove(&control.id);
+                    self.clear_wake_run(&control.id);
                 }
             }
         } else {
             let _ = control.store.update(
-                &owner,
-                &id,
+                &control.owner,
+                &control.id,
                 State::Running,
                 None,
                 usage,
@@ -4441,7 +4460,9 @@ mod progress_tests {
         control
     }
 
-    async fn test_wake_host(root: &Path) -> (Arc<AppAgentHost>, Arc<MobileLocalAppServiceHandle>) {
+    pub(super) async fn test_wake_host(
+        root: &Path,
+    ) -> (Arc<AppAgentHost>, Arc<MobileLocalAppServiceHandle>) {
         use crate::mobile::test_support::{
             test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
         };
@@ -7063,6 +7084,163 @@ mod accepted_projection_tests {
             after_final_ledger_error_barrier: Mutex::new(None),
         };
         (root, state, control, user, chat.chat_id)
+    }
+
+    #[tokio::test]
+    async fn chat_completion_releases_transcript_authority_unless_tool_cleanup_is_incomplete() {
+        use orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, NoOpPermissionGate, StaticMemoryProvider,
+        };
+        use session::jsonl::JsonlWriter;
+
+        for outcome in [
+            "success",
+            "failed",
+            "cancelled",
+            "commit_failed",
+            "cleanup_incomplete",
+        ] {
+            let (root, state, control, _user, chat_id) = setup();
+            let (host, _service) = super::progress_tests::test_wake_host(root.path()).await;
+            let control = Arc::new(control);
+            let session_id = SessionId::from_uuid(
+                uuid::Uuid::parse_str(&state.chats.session_id(&chat_id).unwrap()).unwrap(),
+            );
+            let path = state.chats.transcript_path(&chat_id).unwrap();
+            let fs = host.factory.context.fs.clone();
+            let writer = Arc::new(
+                JsonlWriter::open_persistent_chat(path.clone(), fs.clone(), None)
+                    .await
+                    .unwrap(),
+            );
+            let api = Arc::new(MockApiClient::new(Vec::new()));
+            let orchestrator = Arc::new(
+                ConversationOrchestrator::new_side_chat(
+                    OrchestratorConfig::default(),
+                    api.clone(),
+                    api,
+                    Arc::new(ToolRegistry::new()),
+                    noop_hook_executor(),
+                    Arc::new(NoOpPermissionGate),
+                    control.clone(),
+                    Arc::new(StaticMemoryProvider::empty()),
+                    root.path().to_path_buf(),
+                )
+                .with_session_id(session_id)
+                .with_jsonl_writer(writer.clone()),
+            );
+            orchestrator
+                .append_external_history_message(ConversationMessage::user(
+                    MessageId::from_uuid(uuid::Uuid::parse_str(&control.id).unwrap()),
+                    "hello".into(),
+                ))
+                .await;
+            let assistant_id = MessageId::new();
+            orchestrator
+                .append_external_history_message(assistant(assistant_id, "answer"))
+                .await;
+            let captured = orchestrator
+                .verify_persistent_chat_checkpoint(true)
+                .await
+                .unwrap();
+            let checkpoint = captured.checkpoint().clone();
+            state
+                .store
+                .record_chat_transcript_checkpoint(
+                    &control.owner,
+                    &control.id,
+                    &chat_id,
+                    ChatTranscriptCheckpoint {
+                        byte_len: checkpoint.byte_len,
+                        sha256: checkpoint.sha256.clone(),
+                    },
+                )
+                .unwrap();
+            let weak_orchestrator = Arc::downgrade(&orchestrator);
+            let weak_writer = Arc::downgrade(&writer);
+            let weak_control = Arc::downgrade(&control);
+            *control.chat_orchestrator.lock().unwrap() = Some(orchestrator);
+            drop(writer);
+            host.active
+                .lock()
+                .await
+                .insert(control.id.clone(), control.clone());
+            assert!(
+                JsonlWriter::open_persistent_chat(
+                    path.clone(),
+                    fs.clone(),
+                    Some(checkpoint.clone())
+                )
+                .await
+                .is_err(),
+                "the transcript must stay owned before terminal commit"
+            );
+
+            let execution = match outcome {
+                "success" => Ok((
+                    result(&chat_id, assistant_id.to_string(), "answer".into(), None),
+                    json!({}),
+                )),
+                "cancelled" => Err("cancelled".into()),
+                "cleanup_incomplete" => Err("tool_cleanup_incomplete".into()),
+                _ => Err("model_execution_failed".into()),
+            };
+            if outcome == "commit_failed" {
+                control
+                    .protocol_events_failed
+                    .store(true, Ordering::Release);
+            }
+            host.finish_execution(&control, execution).await;
+            assert!(control.finished.load(Ordering::Acquire));
+            if outcome == "cleanup_incomplete" {
+                assert!(host.active.lock().await.contains_key(&control.id));
+                assert!(control.chat_orchestrator.lock().unwrap().is_some());
+                assert!(weak_orchestrator.upgrade().is_some());
+                assert_eq!(
+                    state.store.get(&control.owner, &control.id).unwrap().state,
+                    State::Running
+                );
+                assert_eq!(state.chats.get(&chat_id).unwrap().state, ChatState::Running);
+                assert!(
+                    JsonlWriter::open_persistent_chat(
+                        path.clone(),
+                        fs.clone(),
+                        Some(checkpoint.clone())
+                    )
+                    .await
+                    .is_err(),
+                    "unfinished tool cleanup must retain the transcript lease"
+                );
+                // This fixture has no actual tool. Tear down its deliberately
+                // retained authority so the test itself does not leak the cycle.
+                control.chat_orchestrator.lock().unwrap().take();
+                host.active.lock().await.remove(&control.id);
+            } else {
+                assert!(!host.active.lock().await.contains_key(&control.id));
+                assert!(control.chat_orchestrator.lock().unwrap().is_none());
+                if outcome == "commit_failed" {
+                    assert!(state.store.get(&control.owner, &control.id).is_err());
+                } else {
+                    let expected = match outcome {
+                        "success" => State::Succeeded,
+                        "cancelled" => State::Cancelled,
+                        _ => State::Failed,
+                    };
+                    assert_eq!(
+                        state.store.get(&control.owner, &control.id).unwrap().state,
+                        expected
+                    );
+                }
+            }
+            assert!(weak_orchestrator.upgrade().is_none(), "{outcome}");
+            assert!(weak_writer.upgrade().is_none(), "{outcome}");
+            let reopened = JsonlWriter::open_persistent_chat(path, fs, Some(checkpoint))
+                .await
+                .unwrap();
+            drop(reopened);
+            drop(control);
+            assert!(weak_control.upgrade().is_none(), "{outcome}");
+        }
     }
 
     #[test]
