@@ -3853,6 +3853,7 @@ fn commit_agent_terminal_for_test(
                 .map_err(|_| "agent_storage_unavailable")
         })
         .map_err(|_| "agent_storage_unavailable")?
+        .map_err(str::to_owned)
 }
 
 // The native history is authoritative for acceptance and fallback retraction.
@@ -4381,6 +4382,7 @@ fn usage_value(cost: &CostSnapshot) -> Value {
 
 #[cfg(test)]
 mod progress_tests {
+    use super::protocol_retry_tests::{chat_control, settings, test_host};
     use super::*;
 
     fn running_control(root: &Path) -> Control {
@@ -4977,7 +4979,7 @@ mod progress_tests {
         }
     }
 
-    fn complete_protocol_chat_turn(
+    pub(super) fn complete_protocol_chat_turn(
         state: &AppAgentState,
         owner: &Owner,
         chat_id: &str,
@@ -8182,10 +8184,13 @@ mod wake_tests {
 
 #[cfg(test)]
 mod protocol_retry_tests {
+    use super::progress_tests::{complete_protocol_chat_turn, test_wake_host};
     use super::*;
     use local_app::v2::agent::{Model, Settings, TaskResult};
 
-    async fn test_host(root: &Path) -> (Arc<AppAgentHost>, Arc<MobileLocalAppServiceHandle>) {
+    pub(super) async fn test_host(
+        root: &Path,
+    ) -> (Arc<AppAgentHost>, Arc<MobileLocalAppServiceHandle>) {
         use crate::mobile::test_support::{
             test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
         };
@@ -8217,7 +8222,7 @@ mod protocol_retry_tests {
         }
     }
 
-    fn settings() -> Settings {
+    pub(super) fn settings() -> Settings {
         Settings {
             model: Model {
                 provider_id: "provider".into(),
@@ -8231,7 +8236,7 @@ mod protocol_retry_tests {
         }
     }
 
-    fn chat_control(
+    pub(super) fn chat_control(
         owner: Owner,
         revision: u64,
         request_id: String,
