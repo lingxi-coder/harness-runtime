@@ -1949,17 +1949,56 @@ async fn streaming_turn_aborts_pending_startup_prewarm_before_opening_stream() {
     );
     api.wait_inactive().await;
     assert!(
-        orch.lifecycle_runtime
+        !orch
+            .lifecycle_runtime
             .startup_responses_websocket_prewarm
-            .lock()
-            .expect("startup responses websocket prewarm")
-            .is_none(),
+            .is_running(),
         "turn start must clear the pending startup prewarm handle"
     );
     assert_eq!(
         streaming.captured_calls().await.len(),
         1,
         "the real streaming turn should still open normally"
+    );
+}
+
+#[tokio::test]
+async fn host_shutdown_joins_blocked_startup_prewarm_and_rejects_late_registration() {
+    let api = Arc::new(BlockingPrewarmApiClient::new());
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+    let weak = Arc::downgrade(&orch);
+    orch.spawn_startup_responses_websocket_prewarm();
+    api.wait_started().await;
+    orch.close_background_producer_admission();
+    orch.shutdown_startup_responses_websocket_prewarm()
+        .await
+        .unwrap();
+    assert!(
+        !api.active.load(Ordering::SeqCst),
+        "shutdown must join the work future's drop"
+    );
+    // Retaining the root allocation cannot restore startup-producer authority.
+    orch.spawn_startup_responses_websocket_prewarm();
+    assert!(!orch
+        .lifecycle_runtime
+        .startup_responses_websocket_prewarm
+        .is_running());
+    orch.shutdown_startup_responses_websocket_prewarm()
+        .await
+        .unwrap();
+    drop(orch);
+    assert!(
+        weak.upgrade().is_none(),
+        "joined prewarm cannot retain the closed root"
     );
 }
 

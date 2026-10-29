@@ -192,6 +192,7 @@ pub struct SandboxedCommand {
     auto_background_on_timeout: bool,
     background_timeout: Option<std::time::Duration>,
     process_owner: Option<String>,
+    start_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// Provenance of a [`SandboxedCommand`].
@@ -223,6 +224,23 @@ impl SandboxedCommand {
         self.process_owner.as_deref()
     }
 
+    /// Prevent a request-owned supervisor from accepting a new shell after its
+    /// request is cancelled. This token is local and is never serialized.
+    #[must_use]
+    pub fn with_start_cancellation(
+        mut self,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Self {
+        self.start_cancel = cancel;
+        self
+    }
+
+    /// Cancellation fence for the supervised shell's spawn admission.
+    #[must_use]
+    pub fn start_cancellation(&self) -> Option<&tokio_util::sync::CancellationToken> {
+        self.start_cancel.as_ref()
+    }
+
     /// INTERNAL constructor for [`Sandbox`] implementations.
     ///
     /// Only [`Sandbox::prepare`] and [`Sandbox::bypass_with_audit`] impls
@@ -240,6 +258,7 @@ impl SandboxedCommand {
             auto_background_on_timeout: true,
             background_timeout: None,
             process_owner: None,
+            start_cancel: None,
         }
     }
 
@@ -261,6 +280,7 @@ impl SandboxedCommand {
             auto_background_on_timeout: true,
             background_timeout: None,
             process_owner: None,
+            start_cancel: None,
         }
     }
 

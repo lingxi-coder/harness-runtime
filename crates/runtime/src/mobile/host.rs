@@ -1205,11 +1205,11 @@ pub struct MobileEngineHandle {
     /// publish this only after their SessionStarted/SessionResumed (or
     /// SessionEnded for ClearSession) event has entered the shared sink.
     session_lifecycle_tx: tokio::sync::watch::Sender<String>,
-    /// The platform filesystem handle the JSONL reader reads each session file
-    /// through (`list_recent_sessions`' `Arc<dyn FileSystem>` argument). The SAME
-    /// `fs` the orchestrator's tools use — captured from the `Platform` so the
-    /// session listing reads through the device's real backend.
+    /// Model-visible filesystem, including the guest path fence.
     fs: Arc<dyn lingxi_core::host::FileSystem>,
+    /// Host-coordinate access for paths derived from the trusted configuration,
+    /// transcript catalog, and already validated workspace directory.
+    host_fs: Arc<dyn lingxi_core::host::FileSystem>,
     /// The deterministic build recipe, captured so the cron firing path
     /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
@@ -1220,6 +1220,13 @@ pub struct MobileEngineHandle {
     /// cron firing path can call `build_mobile_inner` (and reach `filesystem()` /
     /// `clock()`) without re-deriving the device handles.
     firer_platform: Arc<dyn Platform>,
+}
+
+impl Drop for MobileRuntime {
+    fn drop(&mut self) {
+        // Also covers short-lived cron runtimes that have no MobileEngineHandle.
+        self.orchestrator.close_background_producer_admission();
+    }
 }
 
 impl MobileRuntime {
@@ -1383,8 +1390,25 @@ impl Drop for MobileEngineHandle {
         let session_cron = self.session_cron.clone();
         let side_chats = self.side_chats.clone();
         let orchestrator = self.inner.orchestrator.clone();
+        orchestrator.close_background_producer_admission();
         orchestrator.cancel_idle_compaction();
+        let runtime = self.runtime.take();
         mobile_automation_runtime().spawn(async move {
+            // Keep the originating executor alive until its prewarm future is
+            // actually dropped. Never block the native/UI thread in Drop.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                orchestrator.shutdown_startup_responses_websocket_prewarm(),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "mobile startup prewarm teardown failed"),
+                Err(_) => tracing::warn!("mobile startup prewarm teardown timed out"),
+            }
+            if let Some(runtime) = runtime {
+                runtime.shutdown_background();
+            }
             // Cancel an in-flight model/tool request before the owner sweep.
             // The process-lifetime runtime remains available after this
             // handle's runtime begins shutting down, so waiting here never
@@ -1468,9 +1492,6 @@ impl Drop for MobileEngineHandle {
             }
             lsp_registry.shutdown_all().await;
         });
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
     }
 }
 
@@ -3889,8 +3910,8 @@ impl MobileEngineHandle {
     pub async fn cron_store(&self) -> Result<Arc<MobileCronStoreHandle>, ClientError> {
         let cfg = self.current_mobile_config()?;
         Ok(Arc::new(MobileCronStoreHandle::new(
-            cfg.cwd,
-            self.firer_platform.filesystem(),
+            cfg.logical_cwd.unwrap_or(cfg.cwd),
+            self.fs.clone(),
             self.firer_platform.clock(),
         )))
     }
@@ -3906,8 +3927,8 @@ impl MobileEngineHandle {
             cfg: cfg.clone(),
             platform: self.firer_platform.clone(),
         };
-        let fs = self.firer_platform.filesystem();
-        let cwd = cfg.cwd.clone();
+        let fs = self.fs.clone();
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let clock = self.firer_platform.clock();
         let claim_fs = fs.clone();
         let claim_cwd = cwd.clone();
@@ -4091,7 +4112,7 @@ impl MobileEngineHandle {
         if let Some(scheduler) = &self.session_cron {
             scheduler
                 .set_tasks_file(cron::tasks_file::session_scheduled_tasks_path(
-                    &self.current_mobile_config()?.cwd,
+                    std::path::Path::new(&self.session_cwd()),
                 ))
                 .await
                 .map_err(|error| ClientError::Internal {
@@ -4293,7 +4314,7 @@ impl MobileEngineHandle {
         title: &str,
     ) -> Result<(), ClientError> {
         let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
-        let writer = session::jsonl::JsonlWriter::new(path, self.fs.clone());
+        let writer = session::jsonl::JsonlWriter::new(path, self.host_fs.clone());
         writer
             .append_mobile_empty_session(
                 &session_id.to_string(),
@@ -4345,7 +4366,7 @@ impl MobileEngineHandle {
                 session::jsonl::load_routed_session_from_path_with_source(
                     path,
                     uuid,
-                    self.fs.clone(),
+                    self.host_fs.clone(),
                 )
                 .await
             }
@@ -4354,7 +4375,7 @@ impl MobileEngineHandle {
                     &self.lingxi_home,
                     &cwd,
                     uuid,
-                    self.fs.clone(),
+                    self.host_fs.clone(),
                 )
                 .await
             }
@@ -4366,7 +4387,11 @@ impl MobileEngineHandle {
             let path = selected_path.clone().unwrap_or_else(|| {
                 session::jsonl::session_path(&self.lingxi_home, &cwd, &uuid.to_string())
             });
-            if let Ok(file) = self.fs.read_file(&path.to_string_lossy(), None, None).await {
+            if let Ok(file) = self
+                .host_fs
+                .read_file(&path.to_string_lossy(), None, None)
+                .await
+            {
                 let loaded = session::jsonl::route_lines(&file.content);
                 if loaded.mobile_empty_sessions.contains(&uuid.to_string()) {
                     captured = Ok((path, file.content, loaded));
@@ -7550,7 +7575,7 @@ impl MobileEngineHandle {
                     &self.session_cwd(),
                     source_uuid,
                     None,
-                    self.fs.clone(),
+                    self.host_fs.clone(),
                 )
                 .await
                 .map_err(|error| ClientError::Rejected {
@@ -7561,7 +7586,7 @@ impl MobileEngineHandle {
                     &self.session_cwd(),
                     &result.new_session_id.to_string(),
                 );
-                let writer = session::jsonl::JsonlWriter::new(fork_path, self.fs.clone());
+                let writer = session::jsonl::JsonlWriter::new(fork_path, self.host_fs.clone());
                 let target_mode = match target_mode {
                     SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
                     SessionModeDto::Code => session::jsonl::SessionMode::Code,
@@ -8800,7 +8825,7 @@ impl MobileEngineHandle {
                 &self.lingxi_home,
                 &self.session_cwd(),
                 uuid,
-                self.fs.clone(),
+                self.host_fs.clone(),
             )
             .await
             .map_err(|error| ClientError::Rejected {
@@ -8863,7 +8888,7 @@ impl MobileEngineHandle {
                     }
                 })?;
                 let next_message_index =
-                    read_session_agent_next_message_index(self.fs.as_ref(), &path).await?;
+                    read_session_agent_next_message_index(self.host_fs.as_ref(), &path).await?;
                 (
                     messages,
                     session_agent_transcript_revision(&raw),
@@ -9389,8 +9414,9 @@ impl MobileEngineHandle {
     ) -> Option<FiredCronJobDto> {
         let _transition = self.loop_transition.lock().await;
         let cfg = self.current_mobile_config().ok()?;
-        let fs = self.firer_platform.filesystem();
-        let existing = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
+        let existing = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()
@@ -9406,10 +9432,10 @@ impl MobileEngineHandle {
                 .await;
         }
         let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd)
+        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd)
             .await
             .ok()?;
-        let mut document = read_cron_tasks(fs.as_ref(), &cfg.cwd).await;
+        let mut document = read_cron_tasks(fs.as_ref(), &cwd).await;
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -9438,7 +9464,7 @@ impl MobileEngineHandle {
             finalize_cron_occurrence(&mut document, &task.id, now_ms);
             let _ = cron::tasks_file::write_automation_tasks_body(
                 fs.as_ref(),
-                &cfg.cwd,
+                &cwd,
                 &cron::serialize_tasks(&document),
             )
             .await;
@@ -9453,13 +9479,14 @@ impl MobileEngineHandle {
             Ok(cfg) => cfg,
             Err(_) => return false,
         };
-        let fs = self.firer_platform.filesystem();
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
         let _process_guard = cron::lock_cron_file().await;
-        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd).await
+        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd).await
         else {
             return false;
         };
-        let mut document = read_cron_tasks(fs.as_ref(), &cfg.cwd).await;
+        let mut document = read_cron_tasks(fs.as_ref(), &cwd).await;
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -9478,7 +9505,7 @@ impl MobileEngineHandle {
         finalize_cron_occurrence(&mut document, &task_id, now_ms);
         cron::tasks_file::write_automation_tasks_body(
             fs.as_ref(),
-            &cfg.cwd,
+            &cwd,
             &cron::serialize_tasks(&document),
         )
         .await
@@ -9494,8 +9521,9 @@ impl MobileEngineHandle {
     ) -> Option<FiredCronJobDto> {
         let _transition = self.loop_transition.lock().await;
         let cfg = self.current_mobile_config().ok()?;
-        let fs = self.firer_platform.filesystem();
-        let task = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
+        let task = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()
@@ -9514,8 +9542,9 @@ impl MobileEngineHandle {
     pub async fn run_cron_task_now(&self, task_id: String) -> Option<FiredCronJobDto> {
         let _transition = self.loop_transition.lock().await;
         let cfg = self.current_mobile_config().ok()?;
-        let fs = self.firer_platform.filesystem();
-        let existing = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
+        let existing = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()
@@ -9529,10 +9558,10 @@ impl MobileEngineHandle {
             return self.fire_automation_task(task_id, None, None).await;
         }
         let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd)
+        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd)
             .await
             .ok()?;
-        let task = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let task = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()

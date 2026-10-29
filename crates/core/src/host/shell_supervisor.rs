@@ -165,6 +165,7 @@ struct Receipt {
     exit_code: Option<i32>,
     #[serde(default)]
     stop_cause: Option<String>,
+    runner_settled: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "response")]
@@ -175,6 +176,8 @@ enum Response {
     Started {
         result: ForegroundRunResult,
         handoff: Option<ShellProcessHandoff>,
+        foreground_settled: bool,
+        foreground_settlement_error: Option<String>,
     },
     Inspect {
         handoff: ShellProcessHandoff,
@@ -182,6 +185,7 @@ enum Response {
         exit_code: Option<i32>,
         #[serde(default)]
         stop_cause: Option<String>,
+        settlement_error: Option<String>,
     },
     Ack,
     Error {
@@ -264,6 +268,7 @@ async fn inspect(
             terminal,
             exit_code,
             stop_cause,
+            ..
         })) if same_identity(handoff, &actual) => Ok(terminal.then_some((exit_code, stop_cause))),
         _ => {
             // Exact receipt remains valid after its supervisor exits. Read by
@@ -369,6 +374,7 @@ async fn recover_failed_output(
             handoff,
             exit_code: Some(-1),
             stop_cause: None,
+            runner_settled: false,
         };
         crate::host::rooted_fs::atomic_write_pinned(
             &receipt_root,
@@ -508,6 +514,106 @@ pub async fn kill(handle: &ProcessHandle) -> Option<Result<(), ProcessError>> {
     }
     Some(stop_handoff(&handoff).await)
 }
+fn has_settled_receipt(handoff: &ShellProcessHandoff) -> Result<bool, ProcessError> {
+    let identity = handoff
+        .supervisor_directory_identity
+        .as_ref()
+        .ok_or(ProcessError::Unsupported)?;
+    let path = Path::new(&handoff.receipt_path);
+    let parent = path.parent().ok_or(ProcessError::Unsupported)?;
+    if path.file_name() != Some(std::ffi::OsStr::new("receipt")) {
+        return Err(error("invalid shell receipt path"));
+    }
+    let text = match crate::host::rooted_fs::read_to_string_pinned(
+        parent,
+        Path::new("receipt"),
+        Some(identity),
+    ) {
+        Ok(text) => text,
+        Err(crate::host::FsError::NotFound(_)) => return Ok(false),
+        Err(cause) => return Err(error(cause)),
+    };
+    let receipt: Receipt = serde_json::from_str(&text).map_err(error)?;
+    if !same_identity(handoff, &receipt.handoff) {
+        return Err(error("shell receipt identity mismatch"));
+    }
+    if !receipt.runner_settled {
+        return Err(error(
+            "shell recovery receipt does not prove runner settlement",
+        ));
+    }
+    Ok(true)
+}
+
+/// Stop a supervised background shell and wait for its identity-checked
+/// terminal status. A successful kill RPC alone only acknowledges the signal;
+/// this method does not return success until the supervisor has reaped it.
+/// Unsupervised or relinquished handles are rejected rather than signalled by PID.
+pub async fn stop_and_wait(handle: &ProcessHandle) -> Result<(), ProcessError> {
+    let handoff = jobs()
+        .lock()
+        .map_err(error)?
+        .get(&handle.task_id)
+        .filter(|job| job.handoff.pid == handle.pid && job.backgrounded && !job.released)
+        .map(|job| job.handoff.clone())
+        .ok_or(ProcessError::Unsupported)?;
+
+    loop {
+        if has_settled_receipt(&handoff)? {
+            break;
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            rpc(
+                &handoff,
+                Request::Inspect {
+                    nonce: handoff.nonce.clone(),
+                },
+            ),
+        )
+        .await;
+        match response {
+            Ok(Ok(Response::Inspect {
+                handoff: actual,
+                terminal,
+                settlement_error,
+                ..
+            })) if same_identity(&handoff, &actual) => {
+                if let Some(cause) = settlement_error {
+                    return Err(error(cause));
+                }
+                // Once a runner is terminal, do not signal its former PID;
+                // wait for its durable receipt or its reported write error.
+                if !terminal {
+                    let _ = stop_handoff(&handoff).await;
+                }
+            }
+            _ if supervisor_liveness(&handoff) == SupervisorLiveness::Dead => {
+                // A receipt can race process death; check it once more before failing.
+                if has_settled_receipt(&handoff)? {
+                    break;
+                }
+                return Err(error("shell supervisor exited without a settled receipt"));
+            }
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    release(&handoff).await
+}
+
+const REQUEST_CANCELLED_BEFORE_START: &str = "host request cancelled before shell start";
+
+/// True only for cancellation outcomes whose supervisor joined the child-owning
+/// runner, or whose start was fenced before any child could be launched.
+#[must_use]
+pub fn is_settled_request_cancellation(error: &ProcessError) -> bool {
+    matches!(error, ProcessError::Io(message)
+        if message == REQUEST_CANCELLED_BEFORE_START
+            || message == "io: supervisor command cancelled"
+            || message == "io: shell capability cancelled before acceptance")
+}
+
 async fn stop_handoff(handoff: &ShellProcessHandoff) -> Result<(), ProcessError> {
     match rpc(
         handoff,
@@ -683,6 +789,29 @@ async fn recover_dead_foreground(handoff: &ShellProcessHandoff) -> bool {
     }
     true
 }
+
+/// A child exit alone does not prove the supervisor has stopped writing. An
+/// exact receipt, read from its pinned directory, proves the writer finished.
+fn has_authenticated_receipt(handoff: &ShellProcessHandoff) -> bool {
+    let Some(identity) = handoff.supervisor_directory_identity.as_ref() else {
+        return false;
+    };
+    let path = Path::new(&handoff.receipt_path);
+    if path.file_name() != Some(std::ffi::OsStr::new("receipt")) {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(text) =
+        crate::host::rooted_fs::read_to_string_pinned(parent, Path::new("receipt"), Some(identity))
+    else {
+        return false;
+    };
+    serde_json::from_str::<Receipt>(&text)
+        .is_ok_and(|receipt| same_identity(handoff, &receipt.handoff))
+}
+
 #[derive(Default)]
 struct ForegroundRecoveryGuard {
     handoff: Option<ShellProcessHandoff>,
@@ -704,17 +833,16 @@ impl Drop for ForegroundRecoveryGuard {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        runtime.spawn(async move{
+        runtime.spawn(async move {
             loop {
                 // Ordinary source cancellation closes the control stream and
                 // lets the live supervisor kill its group. Do not steal its writer.
                 // Recovery can be cancelled after killing the child but before
                 // appending its terminal receipt. Finish that receipt whenever
                 // supervisor death is proven, even if the child is already gone.
-                if recover_dead_foreground(&handoff).await{break;}
-                let current=platform().process_start_identity(handoff.pid);
-                if matches!((&handoff.process_start_identity,current.as_ref()),(Some(expected),Some(actual)) if expected!=actual)
-                    || (current.is_none()&&platform().process_is_alive(handoff.pid)==Some(false)){break;}
+                if recover_dead_foreground(&handoff).await || has_authenticated_receipt(&handoff) {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
         });
@@ -729,6 +857,10 @@ pub async fn execute(
     explicit: bool,
 ) -> Result<ForegroundRunResult, ProcessError> {
     let binding = command.background_task().ok_or(ProcessError::Unsupported)?;
+    let start_cancel = command.start_cancellation();
+    if start_cancel.is_some_and(CancellationToken::is_cancelled) {
+        return Err(error(REQUEST_CANCELLED_BEFORE_START));
+    }
     let nonce = platform().nonce()?;
     let directory = platform().create_directory(&nonce)?;
     let supervisor_directory_identity =
@@ -769,25 +901,47 @@ pub async fn execute(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     platform().detach(&mut process);
+    if start_cancel.is_some_and(CancellationToken::is_cancelled) {
+        return Err(error(REQUEST_CANCELLED_BEFORE_START));
+    }
     let mut supervisor = process.spawn().map_err(error)?;
-    let mut stream = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match platform()
-                .connect(&socket, supervisor.id().unwrap_or(0))
-                .await
-            {
-                Ok(stream) => return Ok(stream),
-                Err(_) => {
-                    if supervisor.try_wait().map_err(error)?.is_some() {
-                        return Err(error("shell supervisor exited during bootstrap"));
+    let connected = {
+        let connecting = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match platform()
+                    .connect(&socket, supervisor.id().unwrap_or(0))
+                    .await
+                {
+                    Ok(stream) => return Ok(stream),
+                    Err(_) => {
+                        if supervisor.try_wait().map_err(error)?.is_some() {
+                            return Err(error("shell supervisor exited during bootstrap"));
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
+        });
+        tokio::pin!(connecting);
+        tokio::select! {
+            biased;
+            () = async {
+                if let Some(cancel) = start_cancel { cancel.cancelled().await; }
+            }, if start_cancel.is_some() => None,
+            result = &mut connecting => Some(result),
         }
-    })
-    .await
-    .map_err(error)??;
+    };
+    let Some(connected) = connected else {
+        supervisor.kill().await.map_err(error)?;
+        let _ = supervisor.wait().await.map_err(error)?;
+        return Err(error(REQUEST_CANCELLED_BEFORE_START));
+    };
+    let mut stream = connected.map_err(error)??;
+    if start_cancel.is_some_and(CancellationToken::is_cancelled) {
+        supervisor.kill().await.map_err(error)?;
+        let _ = supervisor.wait().await.map_err(error)?;
+        return Err(error(REQUEST_CANCELLED_BEFORE_START));
+    }
     let request = Start {
         supervisor_directory_identity,
         output_root_identity,
@@ -832,8 +986,17 @@ pub async fn execute(
         tokio::pin!(response_future, spawned_future);
         let mut spawned = false;
         let mut backgrounded = false;
+        let mut cancelling_start = false;
         loop {
+            if start_cancel.is_some_and(CancellationToken::is_cancelled) {
+                cancelling_start = true;
+            }
             tokio::select! {
+                () = async {
+                    if let Some(cancel) = start_cancel { cancel.cancelled().await; }
+                }, if start_cancel.is_some() && !cancelling_start => {
+                    cancelling_start = true;
+                }
                 response=&mut response_future=>break response,
                 spawn=&mut spawned_future,if !spawned=>{
                     spawned=true;
@@ -841,15 +1004,40 @@ pub async fn execute(
                         Ok(Response::Spawned{handoff}) => {
                             recovery_guard.handoff=Some(handoff.clone());
                             live=Some(track(handoff.clone(),false));
-                            if let Err(cause)=rpc(&handoff,Request::SpawnAccepted{nonce:nonce.clone()}).await {
-                                break Err(cause);
+                            if cancelling_start || start_cancel.is_some_and(CancellationToken::is_cancelled) {
+                                cancelling_start = true;
+                                continue;
+                            }
+                            let acceptance = rpc(&handoff,Request::SpawnAccepted{nonce:nonce.clone()});
+                            tokio::pin!(acceptance);
+                            let accepted = tokio::select! {
+                                biased;
+                                () = async {
+                                    if let Some(cancel) = start_cancel { cancel.cancelled().await; }
+                                }, if start_cancel.is_some() => None,
+                                result = &mut acceptance => Some(result),
+                            };
+                            match accepted {
+                                None => cancelling_start = true,
+                                Some(Err(cause)) => break Err(cause),
+                                Some(Ok(_)) => {}
                             }
                         },
+                        Ok(_) if cancelling_start => {},
+                        Err(_) if cancelling_start => {},
                         Ok(_) => break Err(error("invalid spawn capability response")),
                         Err(cause) => break Err(cause),
                     }
                 },
-                ()=async{if let Some(notify)=binding.on_demand.as_ref(){notify.notified().await;}else{std::future::pending::<()>().await;}},if !backgrounded=>{backgrounded=true;let _=rpc(&temporary,Request::Background{nonce:nonce.clone()}).await;}
+                ()=tokio::time::sleep(Duration::from_millis(10)), if cancelling_start => {
+                    // Start may still be installing its nonce. Retry the same
+                    // capability-scoped kill until its runner has joined.
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        rpc(&temporary, Request::Kill { nonce: nonce.clone() }),
+                    ).await;
+                },
+                ()=async{if let Some(notify)=binding.on_demand.as_ref(){notify.notified().await;}else{std::future::pending::<()>().await;}},if !backgrounded && !cancelling_start=>{backgrounded=true;let _=rpc(&temporary,Request::Background{nonce:nonce.clone()}).await;}
             }
         }
     };
@@ -866,7 +1054,24 @@ pub async fn execute(
         let _ = supervisor.wait().await;
     });
     match response {
-        Response::Started { result, handoff } => {
+        Response::Started {
+            result,
+            handoff,
+            foreground_settled,
+            foreground_settlement_error,
+        } => {
+            if start_cancel.is_some_and(CancellationToken::is_cancelled)
+                && matches!(&result.outcome, ForegroundOutcome::Completed(_))
+            {
+                if foreground_settled {
+                    recovery_guard.handoff = None;
+                    return Err(error("io: supervisor command cancelled"));
+                }
+                recovery_guard.recover_error().await;
+                return Err(error(foreground_settlement_error.unwrap_or_else(|| {
+                    "foreground runner did not prove terminal settlement".into()
+                })));
+            }
             if let (Some(handoff), Some(sink)) = (handoff, binding.on_exit.clone()) {
                 sink.on_supervised_start(&binding.task_id).await;
                 let live = live.unwrap_or_else(|| track(handoff.clone(), false));
@@ -908,6 +1113,11 @@ struct ServerState {
     exit_code: Option<Option<i32>>,
     delivered: bool,
     receipt_persisted: bool,
+    receipt_error: Option<ProcessError>,
+    runner_settlement: Option<Result<Option<i32>, ProcessError>>,
+    cleanup_pending: bool,
+    retain_reaper_on_error: bool,
+    reaper_finished: bool,
     killed: bool,
     stop_cause: Option<String>,
     backgrounded: bool,
@@ -947,6 +1157,33 @@ impl BackgroundExitSink for ServerSink {
     fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
         Some(self.stop.clone())
     }
+    async fn on_supervised_runner_settled(
+        &self,
+        id: &str,
+        settlement: Result<Option<i32>, ProcessError>,
+    ) {
+        if id == self.template.task_id {
+            self.state.lock().await.runner_settlement = Some(settlement);
+        }
+    }
+    async fn on_supervised_cleanup_pending(&self, id: &str) {
+        if id == self.template.task_id {
+            self.state.lock().await.cleanup_pending = true;
+        }
+    }
+    async fn on_supervised_cleanup_finished(&self, id: &str) {
+        if id != self.template.task_id {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        state.cleanup_pending = false;
+        if state.delivered
+            && (!state.backgrounded || state.reaper_finished)
+            && (!state.retain_reaper_on_error || state.reaper_finished)
+        {
+            self.done.cancel();
+        }
+    }
     async fn finalize_persisted_output(
         &self,
         id: &str,
@@ -969,20 +1206,48 @@ impl BackgroundExitSink for ServerSink {
         self.on_exit(id, code).await;
     }
     async fn on_exit(&self, id: &str, code: Option<i32>) {
-        let killed = self.state.lock().await.killed;
+        let (killed, proven_exit) = {
+            let mut state = self.state.lock().await;
+            state.reaper_finished = true;
+            (
+                state.killed,
+                match &state.runner_settlement {
+                    Some(Ok(code)) => Some(*code),
+                    _ => None,
+                },
+            )
+        };
+        let Some(exit_code) = proven_exit else {
+            // No terminal proof: leave recovery to the surviving host after
+            // the supervisor exits, instead of publishing a false completion.
+            let current = self.state.lock().await;
+            if current.delivered && !current.cleanup_pending {
+                self.done.cancel();
+            }
+            return;
+        };
         self.inner.on_exit_with_status(id, code, killed).await;
         let mut state = self.state.lock().await;
-        state.exit_code = Some(code);
+        state.exit_code = Some(exit_code);
         if let Some(handoff) = state.handoff.clone() {
-            state.receipt_persisted = write_receipt(
+            match write_receipt(
                 &self.directory,
                 &Receipt {
                     handoff,
-                    exit_code: code,
+                    exit_code,
                     stop_cause: state.stop_cause.clone(),
+                    runner_settled: true,
                 },
-            )
-            .is_ok();
+            ) {
+                Ok(()) => {
+                    state.receipt_persisted = true;
+                    state.receipt_error = None;
+                }
+                Err(error) => {
+                    state.receipt_persisted = false;
+                    state.receipt_error = Some(error);
+                }
+            }
             if state.delivered && state.receipt_persisted {
                 self.done.cancel();
             }
@@ -1008,6 +1273,91 @@ fn write_receipt(directory: &Path, receipt: &Receipt) -> Result<(), ProcessError
         identity,
     )
     .map_err(error)
+}
+
+fn persist_settled_foreground(
+    state: &mut ServerState,
+    directory: &Path,
+    result: &Result<ForegroundRunResult, ProcessError>,
+    stop_cause: &str,
+) {
+    // A presentation result can contain a synthetic timeout code, while an
+    // error can follow a successful cancel/reap. Only the runner callback
+    // proves the OS wait and output drain, and a handoff has its own reaper.
+    if matches!(
+        result,
+        Ok(ForegroundRunResult {
+            outcome: ForegroundOutcome::MovedToBackground(_),
+            ..
+        })
+    ) {
+        return;
+    }
+    let Some(Ok(exit_code)) = state.runner_settlement.as_ref() else {
+        return;
+    };
+    if !state.receipt_persisted {
+        if let Some(handoff) = state.handoff.clone() {
+            match write_receipt(
+                directory,
+                &Receipt {
+                    handoff,
+                    exit_code: *exit_code,
+                    stop_cause: Some(stop_cause.into()),
+                    runner_settled: true,
+                },
+            ) {
+                Ok(()) => {
+                    state.receipt_persisted = true;
+                    state.receipt_error = None;
+                }
+                Err(cause) => {
+                    state.receipt_error = Some(cause);
+                }
+            }
+        }
+    }
+}
+
+async fn settle_promoted_runner(
+    state: &Arc<tokio::sync::Mutex<ServerState>>,
+    handle: &ProcessHandle,
+    stop: &tokio::sync::Notify,
+) -> Result<(), ProcessError> {
+    loop {
+        let current = state.lock().await;
+        let handoff = current
+            .handoff
+            .as_ref()
+            .ok_or_else(|| error("runner did not report shell spawn"))?;
+        if handoff.task_id != handle.task_id
+            || handoff.pid != handle.pid
+            || handoff.process_start_identity.is_none()
+        {
+            return Err(error("runner returned a mismatched shell handle"));
+        }
+        match &current.runner_settlement {
+            Some(Err(cause)) => return Err(cause.clone()),
+            Some(Ok(_)) if current.receipt_persisted => {
+                return if has_settled_receipt(handoff)? {
+                    Ok(())
+                } else {
+                    Err(error("shell receipt identity mismatch"))
+                };
+            }
+            Some(Ok(_)) if current.receipt_error.is_some() => {
+                return Err(current
+                    .receipt_error
+                    .as_ref()
+                    .expect("checked receipt error")
+                    .clone());
+            }
+            Some(Ok(_)) => { /* The reaper has finished: never signal its former PID. */ }
+            None => stop.notify_one(),
+        }
+        drop(current);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Early executable bootstrap. The factory provides the same bounded output
@@ -1055,7 +1405,7 @@ pub async fn run_at(
     let bootstrap_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let mut stream = tokio::select! { accepted=listener.accept()=>accepted.map_err(error)?,
-        _=retry.tick()=>{let mut current=state.lock().await;if !current.receipt_persisted {if let (Some(handoff),Some(code))=(current.handoff.clone(),current.exit_code){current.receipt_persisted=write_receipt(&directory,&Receipt{handoff,exit_code:code,stop_cause:current.stop_cause.clone()}).is_ok();if current.receipt_persisted&&current.delivered{done.cancel();}}}continue;}, ()=tokio::time::sleep_until(bootstrap_deadline), if state.lock().await.nonce.is_none()=>{let _=std::fs::remove_file(&socket);return Ok(());}, ()=done.cancelled()=>{let _=std::fs::remove_file(&socket);return Ok(());} };
+        _=retry.tick()=>{let mut current=state.lock().await;if !current.receipt_persisted && current.exit_code.is_some() {if let (Some(handoff),Some(Ok(code)))=(current.handoff.clone(),current.runner_settlement.as_ref()){let code=*code;current.receipt_persisted=write_receipt(&directory,&Receipt{handoff,exit_code:code,stop_cause:current.stop_cause.clone(),runner_settled: true, }).is_ok();if current.receipt_persisted&&current.delivered{done.cancel();}}}continue;}, ()=tokio::time::sleep_until(bootstrap_deadline), if state.lock().await.nonce.is_none()=>{let _=std::fs::remove_file(&socket);return Ok(());}, ()=done.cancelled()=>{let _=std::fs::remove_file(&socket);return Ok(());} };
         let state = state.clone();
         let background = background.clone();
         let stop = stop.clone();
@@ -1186,10 +1536,39 @@ pub async fn run_at(
                     let result = tokio::select! {
                         result = &mut run => result,
                         () = stop.cancelled() => {
-                            let settled = cancel_and_join_runner(run.as_mut(), || { kill.notify_one(); platform().cancel_active_processes(); }).await;
-                            match settled {
-                                Ok(_) => Err(error("supervisor command cancelled")),
-                                Err(cause) => Err(cause),
+                            { let mut current = state.lock().await; current.killed = true; current.stop_cause = Some("request_cancelled".into()); }
+                            let settled = cancel_and_join_runner(run.as_mut(), || kill.notify_one()).await;
+                            let promotion = if let Ok(ForegroundRunResult { outcome: ForegroundOutcome::MovedToBackground(handle), .. }) = &settled {
+                                settle_promoted_runner(&state, handle, &kill).await
+                            } else { Ok(()) };
+                            if promotion.is_err() && matches!(&settled, Ok(ForegroundRunResult { outcome: ForegroundOutcome::MovedToBackground(_), .. })) {
+                                state.lock().await.retain_reaper_on_error = true;
+                            }
+                            persist_settled_foreground(&mut *state.lock().await, &directory, &settled, "request_cancelled");
+                            let foreground_proof = {
+                                let current = state.lock().await;
+                                if matches!(&settled, Ok(ForegroundRunResult { outcome: ForegroundOutcome::MovedToBackground(_), .. })) || current.handoff.is_none() {
+                                    Ok(())
+                                } else if let Some(Err(cause)) = &current.runner_settlement {
+                                    Err(cause.clone())
+                                } else if let Some(cause) = &current.receipt_error {
+                                    Err(cause.clone())
+                                } else if current.receipt_persisted && current.handoff.as_ref().is_some_and(|handoff| has_settled_receipt(handoff).unwrap_or(false)) {
+                                    Ok(())
+                                } else {
+                                    Err(error("runner did not prove terminal settlement"))
+                                }
+                            };
+                            let promotion = promotion.and(foreground_proof);
+                            match (promotion, settled) {
+                                (Err(cause), _) => Err(cause),
+                                (Ok(()), Ok(_)) => Err(error("supervisor command cancelled")),
+                                (Ok(()), Err(ProcessError::Io(message)))
+                                    if message == "shell capability cancelled before acceptance" =>
+                                {
+                                    Err(error("supervisor command cancelled"))
+                                }
+                                (Ok(()), Err(cause)) => Err(cause),
                             }
                         }
                         () = disconnected(&mut stream) => {
@@ -1197,8 +1576,22 @@ pub async fn run_at(
                             // registration yet. Cancel that acceptance wait so
                             // the platform closes its gate and joins spawn.
                             stop.cancel();
-                            let _ = cancel_and_join_runner(run.as_mut(), || { kill.notify_one(); platform().cancel_active_processes(); }).await;
-                            done.cancel();
+                            { let mut current = state.lock().await; current.killed = true; current.stop_cause = Some("source_disconnected".into()); }
+                            let settled = cancel_and_join_runner(run.as_mut(), || kill.notify_one()).await;
+                            let promotion = if let Ok(ForegroundRunResult { outcome: ForegroundOutcome::MovedToBackground(handle), .. }) = &settled {
+                                settle_promoted_runner(&state, handle, &kill).await
+                            } else { Ok(()) };
+                            persist_settled_foreground(&mut *state.lock().await, &directory, &settled, "source_disconnected");
+                            if promotion.is_err() && matches!(&settled, Ok(ForegroundRunResult { outcome: ForegroundOutcome::MovedToBackground(_), .. })) {
+                                let mut current = state.lock().await;
+                                current.retain_reaper_on_error = true;
+                                current.delivered = true;
+                                if current.reaper_finished { done.cancel(); }
+                            } else {
+                                let mut current = state.lock().await;
+                                current.delivered = true;
+                                if !current.cleanup_pending { done.cancel(); }
+                            }
                             return;
                         }
                     };
@@ -1219,13 +1612,17 @@ pub async fn run_at(
                                     return;
                                 }
                                 state.backgrounded = true;
-                                if let Some(code) = state.exit_code {
+                                if let (Some(_), Some(Ok(code))) =
+                                    (state.exit_code, &state.runner_settlement)
+                                {
+                                    let code = *code;
                                     state.receipt_persisted = write_receipt(
                                         &directory,
                                         &Receipt {
                                             handoff: handoff.clone(),
                                             exit_code: code,
                                             stop_cause: state.stop_cause.clone(),
+                                            runner_settled: true,
                                         },
                                     )
                                     .is_ok();
@@ -1234,7 +1631,19 @@ pub async fn run_at(
                             } else {
                                 None
                             };
-                            Response::Started { result, handoff }
+                            let current = state.lock().await;
+                            let (foreground_settled, foreground_settlement_error) =
+                                match &current.runner_settlement {
+                                    Some(Ok(_)) => (true, None),
+                                    Some(Err(cause)) => (false, Some(cause.to_string())),
+                                    None => (false, None),
+                                };
+                            Response::Started {
+                                result,
+                                handoff,
+                                foreground_settled,
+                                foreground_settlement_error,
+                            }
                         }
                         Err(error) => Response::Error {
                             message: error.to_string(),
@@ -1267,6 +1676,12 @@ pub async fn run_at(
                                     terminal: state.exit_code.is_some(),
                                     exit_code: state.exit_code.flatten(),
                                     stop_cause: state.stop_cause.clone(),
+                                    settlement_error: state
+                                        .runner_settlement
+                                        .as_ref()
+                                        .and_then(|result| result.as_ref().err())
+                                        .or(state.receipt_error.as_ref())
+                                        .map(ToString::to_string),
                                 },
                             ),
                             Request::SpawnAccepted { .. } => {
@@ -1334,12 +1749,22 @@ pub async fn run_at(
                     kill.notify_one();
                 }
                 current.delivered = true;
-                if current.receipt_persisted {
+                if !current.cleanup_pending
+                    && (current.receipt_persisted
+                        || (matches!(current.runner_settlement, Some(Err(_)))
+                            && current.reaper_finished))
+                {
                     done.cancel();
                 }
             }
             if finished {
-                done.cancel();
+                let mut current = state.lock().await;
+                current.delivered = true;
+                if !current.cleanup_pending
+                    && (!current.retain_reaper_on_error || current.reaper_finished)
+                {
+                    done.cancel();
+                }
             }
         });
     }
@@ -1365,6 +1790,23 @@ mod registration_tests {
             nonce: String::new(),
         }
     }
+    #[tokio::test]
+    async fn request_stop_rejects_a_mismatched_handle_without_signalling() {
+        let owner = "request-stop-mismatched-handle";
+        let live = track(handoff("request-stop-handle", owner), true);
+        let wrong = ProcessHandle {
+            task_id: "request-stop-handle".into(),
+            pid: 98766,
+        };
+        assert!(matches!(
+            stop_and_wait(&wrong).await,
+            Err(ProcessError::Unsupported)
+        ));
+        assert!(!live.cancel.is_cancelled());
+        drop(live);
+        jobs().lock().unwrap().remove("request-stop-handle");
+    }
+
     #[tokio::test]
     async fn old_supervised_tombstone_does_not_shadow_reused_pid_registration() {
         let owner = "supervisor-registration-generation";
@@ -1422,6 +1864,208 @@ mod recovery_tests {
             nonce: "a".repeat(48),
         }
     }
+
+    #[test]
+    fn foreground_recovery_only_accepts_a_matching_receipt_in_the_pinned_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let handoff = fixture(dir.path(), "body");
+        let receipt_path = Path::new(&handoff.receipt_path);
+        let parent = receipt_path.parent().unwrap();
+        assert!(!has_authenticated_receipt(&handoff));
+
+        let mut forged = handoff.clone();
+        forged.process_start_identity = Some("other-child-birth".into());
+        write_receipt(
+            parent,
+            &Receipt {
+                handoff: forged,
+                exit_code: Some(0),
+                stop_cause: None,
+                runner_settled: true,
+            },
+        )
+        .unwrap();
+        assert!(!has_authenticated_receipt(&handoff));
+
+        let matching = Receipt {
+            handoff: handoff.clone(),
+            exit_code: Some(0),
+            stop_cause: None,
+            runner_settled: true,
+        };
+        write_receipt(parent, &matching).unwrap();
+        assert!(has_authenticated_receipt(&handoff));
+
+        std::fs::rename(parent, dir.path().join("saved-supervisor")).unwrap();
+        std::fs::create_dir(parent).unwrap();
+        std::fs::write(receipt_path, serde_json::to_vec(&matching).unwrap()).unwrap();
+        assert!(!has_authenticated_receipt(&handoff));
+    }
+
+    #[test]
+    fn stop_proof_rejects_recovery_and_unmarked_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let handoff = fixture(dir.path(), "body");
+        let parent = Path::new(&handoff.receipt_path).parent().unwrap();
+        assert!(!has_settled_receipt(&handoff).unwrap());
+        write_receipt(
+            parent,
+            &Receipt {
+                handoff: handoff.clone(),
+                exit_code: Some(-1),
+                stop_cause: None,
+                runner_settled: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            has_settled_receipt(&handoff).is_err(),
+            "synthetic recovery is not wait proof"
+        );
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&handoff.receipt_path).unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("runner_settled");
+        std::fs::write(&handoff.receipt_path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(
+            has_settled_receipt(&handoff).is_err(),
+            "missing proof marker is not accepted"
+        );
+        write_receipt(
+            parent,
+            &Receipt {
+                handoff: handoff.clone(),
+                exit_code: None,
+                stop_cause: None,
+                runner_settled: true,
+            },
+        )
+        .unwrap();
+        assert!(has_settled_receipt(&handoff).unwrap());
+    }
+
+    #[test]
+    fn foreground_receipt_requires_typed_settlement_and_preserves_actual_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let handoff = fixture(dir.path(), "body");
+        let parent = Path::new(&handoff.receipt_path).parent().unwrap();
+        let mut state = ServerState {
+            handoff: Some(handoff.clone()),
+            ..ServerState::default()
+        };
+        let failed = Err(ProcessError::Io("runner failed".into()));
+        let completed = Ok(ForegroundRunResult {
+            outcome: ForegroundOutcome::Completed(mobile_linux_api::ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 143,
+                timed_out: true,
+            }),
+            output_file: None,
+        });
+        persist_settled_foreground(&mut state, parent, &failed, "request_cancelled");
+        persist_settled_foreground(&mut state, parent, &completed, "request_cancelled");
+        assert!(
+            !state.receipt_persisted,
+            "a presentation timeout is not proof"
+        );
+        state.runner_settlement = Some(Err(ProcessError::Io("wait failed".into())));
+        persist_settled_foreground(&mut state, parent, &completed, "request_cancelled");
+        assert!(!state.receipt_persisted, "failed wait is not proof");
+        state.runner_settlement = Some(Ok(None));
+        let moved = Ok(ForegroundRunResult {
+            outcome: ForegroundOutcome::MovedToBackground(ProcessHandle {
+                task_id: handoff.task_id.clone(),
+                pid: handoff.pid,
+            }),
+            output_file: None,
+        });
+        persist_settled_foreground(&mut state, parent, &moved, "request_cancelled");
+        assert!(!state.receipt_persisted, "handoff must wait for its reaper");
+        persist_settled_foreground(&mut state, parent, &failed, "request_cancelled");
+        assert!(state.receipt_persisted);
+        assert!(has_authenticated_receipt(&handoff));
+        let receipt: Receipt =
+            serde_json::from_slice(&std::fs::read(&handoff.receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt.exit_code, None);
+        assert_eq!(receipt.stop_cause.as_deref(), Some("request_cancelled"));
+    }
+
+    #[tokio::test]
+    async fn promotion_stop_waits_for_proven_settlement_and_matching_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let handoff = fixture(dir.path(), "body");
+        let parent = Path::new(&handoff.receipt_path).parent().unwrap();
+        let state = Arc::new(tokio::sync::Mutex::new(ServerState {
+            handoff: Some(handoff.clone()),
+            ..ServerState::default()
+        }));
+        let stop = tokio::sync::Notify::new();
+        let wrong = ProcessHandle {
+            task_id: handoff.task_id.clone(),
+            pid: handoff.pid + 1,
+        };
+        assert!(settle_promoted_runner(&state, &wrong, &stop).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), stop.notified())
+                .await
+                .is_err()
+        );
+        let handle = ProcessHandle {
+            task_id: handoff.task_id.clone(),
+            pid: handoff.pid,
+        };
+        let settling = settle_promoted_runner(&state, &handle, &stop);
+        tokio::pin!(settling);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut settling)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), stop.notified())
+                .await
+                .is_ok()
+        );
+        state.lock().await.runner_settlement = Some(Ok(None));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut settling)
+                .await
+                .is_err()
+        );
+        write_receipt(
+            parent,
+            &Receipt {
+                handoff: handoff.clone(),
+                exit_code: None,
+                stop_cause: Some("request_cancelled".into()),
+                runner_settled: true,
+            },
+        )
+        .unwrap();
+        state.lock().await.receipt_persisted = true;
+        assert!(tokio::time::timeout(Duration::from_secs(1), settling)
+            .await
+            .unwrap()
+            .is_ok());
+        state.lock().await.runner_settlement = Some(Err(ProcessError::Io("reap failed".into())));
+        assert!(settle_promoted_runner(&state, &handle, &stop)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("reap failed"));
+        {
+            let mut current = state.lock().await;
+            current.runner_settlement = Some(Ok(None));
+            current.receipt_persisted = false;
+            current.receipt_error = Some(ProcessError::Io("receipt write failed".into()));
+        }
+        assert!(settle_promoted_runner(&state, &handle, &stop)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("receipt write failed"));
+    }
+
     #[tokio::test]
     async fn background_deadline_survives_receipt_recovery_and_supervised_delivery() {
         struct Sink(std::sync::atomic::AtomicBool);
@@ -1443,6 +2087,7 @@ mod recovery_tests {
                 handoff: h.clone(),
                 exit_code: None,
                 stop_cause: Some("deadline".into()),
+                runner_settled: true,
             },
         )
         .unwrap();
@@ -1465,6 +2110,7 @@ mod recovery_tests {
                 handoff: h.clone(),
                 exit_code: Some(7),
                 stop_cause: None,
+                runner_settled: true,
             },
         )
         .unwrap();
@@ -1523,6 +2169,7 @@ mod recovery_tests {
                             handoff: conflict,
                             exit_code: Some(0),
                             stop_cause: None,
+                            runner_settled: true,
                         },
                     )
                     .unwrap();

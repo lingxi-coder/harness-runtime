@@ -2116,7 +2116,7 @@ mod tests {
                     "capture must observe the authenticated, sealed request"
                 );
                 if scheduled {
-                    assert!(body.get("thinking").is_none());
+                    assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
                     // The native 4.0 model rejects effort even when scheduled
                     // settings select a level; context-hint policy still applies.
                     assert!(body.pointer("/output_config/effort").is_none());
@@ -2548,7 +2548,19 @@ mod tests {
         );
         let hook: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
         assert!(hook.get("tool_choice").is_none());
-        assert!(hook.get("thinking").is_none());
+        // The frozen 2.1.295 Stop prompt-hook capture uses an explicit
+        // disabled block; it does not inherit either main or scheduled policy.
+        let native_hook: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/parity/current-alignment/fixtures/stop-prompt-hook/native-baseline/2.1.295/requests/request-02.raw.json"
+        ))
+        .unwrap();
+        assert_eq!(hook["thinking"], native_hook["thinking"]);
+        assert_eq!(hook["thinking"], serde_json::json!({"type": "disabled"}));
+        assert_eq!(native_hook["temperature"].as_f64(), Some(1.0));
+        assert_eq!(
+            hook["temperature"].as_f64(),
+            native_hook["temperature"].as_f64()
+        );
         assert_eq!(hook["output_config"]["format"]["type"], "json_schema");
         assert_eq!(
             hook["output_config"]["format"]["schema"]["required"],

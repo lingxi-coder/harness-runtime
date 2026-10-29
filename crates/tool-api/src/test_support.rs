@@ -328,6 +328,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         session: None,
         subagent_registry: None,
         cancel: None,
+        cancellation_scope: crate::context::ToolCancellationScope::ModelTurn,
         fork_parent_system_prompt: None,
         cwd: None,
         depth: 0,

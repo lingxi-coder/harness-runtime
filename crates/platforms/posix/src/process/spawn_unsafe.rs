@@ -147,7 +147,26 @@ pub(super) async fn spawn_with_capability(
         .await
     {
         drop(parent);
-        let _ = spawn.await;
+        // The gate returns ECANCELED before exec. std::process::Command::spawn
+        // waits for the failed pre-exec child before returning that OS error;
+        // the payload never ran and therefore produced no output to drain.
+        let settlement = match spawn.await {
+            Ok(Err(cause)) if cause.raw_os_error() == Some(libc::ECANCELED) => Ok(None),
+            Ok(Err(cause)) => Err(ProcessError::Io(cause.to_string())),
+            Ok(Ok(mut child)) => {
+                // Unexpected successful exec is not evidence of a drained
+                // runner; terminate and reap it but fail the settlement.
+                let stopped = child.id().map(super::kill_tree::kill_tree_force);
+                let waited = child.wait().await;
+                Err(ProcessError::Io(format!(
+                    "capability gate unexpectedly spawned child: stop={stopped:?}, wait={waited:?}"
+                )))
+            }
+            Err(cause) => Err(ProcessError::Io(cause.to_string())),
+        };
+        sink.expect("gated sink")
+            .on_supervised_runner_settled(&binding.task_id, settlement)
+            .await;
         return Err(error);
     }
     parent

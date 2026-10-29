@@ -227,12 +227,26 @@ fn side_payloads_do_not_enter_enabled_otel_or_tracing_exports() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(exported.contains("MAIN_PROMPT_EXPORT_MARKER"), "{exported}");
+    // The outbound OTEL allowlist removes prompt and tool payloads even when
+    // legacy content opt-ins are enabled. Check the records themselves so
+    // absence of the private markers cannot pass with telemetry disabled.
+    assert!(
+        exported.contains("EventName: \"user_prompt\""),
+        "{exported}"
+    );
+    assert!(
+        exported.contains("EventName: \"tool_decision\""),
+        "{exported}"
+    );
+    assert!(
+        !exported.contains("MAIN_PROMPT_EXPORT_MARKER"),
+        "{exported}"
+    );
     assert!(
         exported.contains("MAIN_RESPONSE_EXPORT_MARKER"),
         "{exported}"
     );
-    assert!(exported.contains("MAIN_TOOL_EXPORT_MARKER"), "{exported}");
+    assert!(!exported.contains("MAIN_TOOL_EXPORT_MARKER"), "{exported}");
     assert!(!exported.contains("SIDE_TOOL_PRIVATE_MARKER"), "{exported}");
     assert!(
         !exported.contains("SIDE_PROMPT_PRIVATE_MARKER"),

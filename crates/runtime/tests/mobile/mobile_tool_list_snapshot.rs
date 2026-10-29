@@ -93,7 +93,7 @@ fn mobile_tool_list_snapshot() {
     names.sort();
 
     // Removed tools must be absent on every host, including mobile.
-    for removed in ["TeamCreate", "TeamDelete"] {
+    for removed in ["TeamCreate", "TeamDelete", "camera", "voice", "speech"] {
         assert!(!names.iter().any(|name| name == removed));
     }
 
@@ -118,9 +118,8 @@ fn mobile_tool_list_snapshot() {
             "mobile tool set must not include `{forbidden}`"
         );
     }
-    // Only wired native tools are advertised. LSP is part of the
-    // production UniFFI profile; the default host-only test build intentionally
-    // omits its optional runtime dependency.
+    // The production mobile profile registers the complete media catalog.
+    // Live capabilities filter which registered tools are advertised.
     for required in [
         "media_sources",
         "media_status",
@@ -142,7 +141,6 @@ fn mobile_tool_list_snapshot() {
         );
     }
     for unavailable in [
-        "camera",
         "notification",
         "clipboard",
         "share",
@@ -158,14 +156,10 @@ fn mobile_tool_list_snapshot() {
             "unwired {unavailable} must be absent"
         );
     }
-    #[cfg(feature = "mobile")]
     assert!(
         names.iter().any(|name| name == "LSP"),
         "the production mobile tool set must include `LSP`"
     );
 
-    #[cfg(feature = "mobile")]
     insta::assert_yaml_snapshot!("mobile_tool_list", names);
-    #[cfg(not(feature = "mobile"))]
-    insta::assert_yaml_snapshot!("mobile_tool_list_host_only", names);
 }

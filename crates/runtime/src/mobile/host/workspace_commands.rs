@@ -283,7 +283,7 @@ impl MobileEngineHandle {
         if let Some(scheduler) = &self.session_cron {
             scheduler
                 .set_tasks_file(cron::tasks_file::session_scheduled_tasks_path(
-                    &self.current_mobile_config()?.cwd,
+                    std::path::Path::new(&self.session_cwd()),
                 ))
                 .await
                 .map_err(|error| ClientError::Internal {
@@ -420,7 +420,7 @@ impl MobileEngineHandle {
                 &self.session_cwd(),
                 scope,
                 limit as usize,
-                self.fs.clone(),
+                self.host_fs.clone(),
                 &roots,
             )
             .await
@@ -431,7 +431,7 @@ impl MobileEngineHandle {
                 &self.session_cwd(),
                 scope,
                 limit as usize,
-                self.fs.clone(),
+                self.host_fs.clone(),
             )
             .await
         };
@@ -501,17 +501,6 @@ impl MobileEngineHandle {
         transcript_path: String,
     ) -> Result<(), ClientError> {
         let _transition = self.loop_transition.lock().await;
-        let path = self
-            .fs
-            .translate_model_path(&transcript_path, false)
-            .map_err(|error| ClientError::Rejected {
-                message: error.to_string(),
-            })?
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(&transcript_path));
-        let path = path.canonicalize().map_err(|error| ClientError::Rejected {
-            message: format!("session source unavailable: {error}"),
-        })?;
         let catalog = self
             .lingxi_home
             .join("projects")
@@ -519,6 +508,28 @@ impl MobileEngineHandle {
             .map_err(|error| ClientError::Rejected {
                 message: error.to_string(),
             })?;
+        // Catalog entries can be returned in host coordinates. Only accept a
+        // host path directly after canonicalizing it inside the catalog; all
+        // other inputs still pass through the guest path fence.
+        let native_catalog_path = Path::new(&transcript_path)
+            .canonicalize()
+            .ok()
+            .filter(|path| path.starts_with(&catalog));
+        let path = match native_catalog_path {
+            Some(path) => path,
+            None => self
+                .fs
+                .translate_model_path(&transcript_path, false)
+                .map_err(|error| ClientError::Rejected {
+                    message: error.to_string(),
+                })?
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(&transcript_path))
+                .canonicalize()
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("session source unavailable: {error}"),
+                })?,
+        };
         let relative = path
             .strip_prefix(catalog)
             .map_err(|_| ClientError::Rejected {
@@ -846,6 +857,52 @@ mod tests {
                 .join(branding::DOT_DIR)
                 .join("scheduled_tasks.json")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn read_only_workspace_denies_public_cron_mutation_and_run_claim() {
+        let (_temp, directories, cfg, platform) = fixture();
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform.clone(),
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        handle.runtime().block_on(async {
+            let store = handle.cron_store().await.unwrap();
+            let task = store
+                .create("0 9 * * *".into(), "original".into(), true)
+                .await
+                .unwrap();
+            let path = Path::new(&directories.projects)
+                .join("a")
+                .join(branding::DOT_DIR)
+                .join("scheduled_tasks.json");
+            let before = std::fs::read(&path).unwrap();
+            let linux = platform.mobile_linux().unwrap();
+            let mut mounts = linux.current_mounts();
+            for mount in &mut mounts {
+                mount.read_only = true;
+            }
+            linux.configure_mounts(mounts).await.unwrap();
+            assert!(store
+                .create("0 9 * * *".into(), "new".into(), true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("read-only"));
+            assert!(store
+                .update(task.id.clone(), "0 9 * * *".into(), "changed".into(), true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("read-only"));
+            assert!(!store.delete(task.id.clone()).await);
+            assert!(handle.run_cron_task_now(task.id).await.is_none());
+            assert_eq!(std::fs::read(path).unwrap(), before);
         });
     }
     #[test]

@@ -179,6 +179,132 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
 }
 
 #[tokio::test]
+async fn mounted_workspace_scheduled_run_reuses_the_selected_host_transcript() {
+    use crate::mobile::test_support::{test_config, HostFakePlatform};
+    use mobile_linux_api::MobileLinuxRuntime;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("runtime");
+    let dirs = crate::mobile::mobile_user_directories(root.display().to_string()).unwrap();
+    dirs.prepare().unwrap();
+    let workspace = std::path::Path::new(&dirs.projects).join("scheduled-test");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let guest = format!("{}/scheduled-test", dirs.projects_guest_path);
+    let linux = Arc::new(mobile_linux_android::AndroidProotRuntime::new(
+        mobile_linux_android::AndroidProotRuntimeConfig {
+            managed_root: root,
+            brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
+            app_sandbox_root: temp.path().to_path_buf(),
+            abi: "arm64-v8a".into(),
+            rootfs_version: "test".into(),
+            archive_sha256: None,
+            native_library_dir: None,
+        },
+    ));
+    linux
+        .configure_mounts(vec![mobile_linux_api::MountSpec {
+            host_path: std::path::PathBuf::from(&dirs.projects),
+            guest_path: dirs.projects_guest_path.clone(),
+            read_only: false,
+            purpose: mobile_linux_api::MountPurpose::Workspace,
+        }])
+        .await
+        .unwrap();
+    let platform: Arc<dyn Platform> =
+        Arc::new(HostFakePlatform::new(temp.path().to_path_buf()).with_mobile_linux(linux.clone()));
+    let model_fs = platform.filesystem();
+    assert!(model_fs
+        .write_file("/tmp/unmounted-guest-file", "forbidden")
+        .await
+        .is_err());
+    let host_fs = model_fs.host_filesystem().unwrap();
+    let mut cfg = test_config(&workspace);
+    cfg.logical_cwd = Some(guest.clone().into());
+    cfg.lingxi_home = dirs.config_home.into();
+    let session = uuid::Uuid::new_v4();
+    let path = session::jsonl::session_path(&cfg.lingxi_home, &guest, &session.to_string());
+    let writer = session::jsonl::JsonlWriter::new(path.clone(), host_fs.clone());
+    writer
+        .append_mobile_empty_session(&session.to_string(), "Scheduled source", &guest)
+        .await
+        .unwrap();
+    writer.append_session_mode("code").await.unwrap();
+    let original_source = std::fs::read(&path).unwrap();
+    let mut scheduled = task("active");
+    scheduled.recurring = Some(true);
+    let automation = scheduled.automation.as_mut().unwrap();
+    automation.run_mode = cron::RunMode::SelectedSession;
+    automation.target_session_id = Some(session.to_string());
+    // Fail after binding and before model I/O, so the test stays deterministic.
+    automation.reasoning = serde_json::json!({"type":"invalid-test-reasoning"});
+    let mut doc = cron::ScheduledTasks::default();
+    doc.tasks.push(scheduled);
+    cron::tasks_file::write_automation_tasks_body(
+        host_fs.as_ref(),
+        &workspace,
+        &cron::serialize_tasks(&doc),
+    )
+    .await
+    .unwrap();
+    let request = cron::claim_automation_run_now(
+        host_fs.as_ref(),
+        &workspace,
+        "d12345678",
+        std::time::SystemTime::now(),
+    )
+    .await
+    .unwrap();
+    let firer = MobileTurnFirer { cfg, platform };
+    let expected_error = format!(
+        "paused: {}",
+        serde_json::from_value::<lingxi_core::host::ReasoningSelection>(
+            request.task.automation.as_ref().unwrap().reasoning.clone(),
+        )
+        .unwrap_err()
+    );
+    for _ in 0..2 {
+        let error = firer
+            .fire_session(
+                "scheduled".into(),
+                request.task.automation.as_ref(),
+                Some(&request),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, expected_error);
+        let stored = read_cron_tasks(host_fs.as_ref(), &workspace).await;
+        let run = &stored.tasks[0].automation.as_ref().unwrap().runs[0];
+        assert_eq!(
+            run.session_id.as_deref(),
+            Some(session.to_string().as_str())
+        );
+        assert!(std::fs::read(&path).unwrap().starts_with(&original_source));
+    }
+    let before = std::fs::read(cron::scheduled_tasks_path(&workspace)).unwrap();
+    linux
+        .configure_mounts(vec![mobile_linux_api::MountSpec {
+            host_path: std::path::PathBuf::from(&dirs.projects),
+            guest_path: dirs.projects_guest_path.clone(),
+            read_only: true,
+            purpose: mobile_linux_api::MountPurpose::Workspace,
+        }])
+        .await
+        .unwrap();
+    let error = firer
+        .fire_session(
+            "scheduled".into(),
+            request.task.automation.as_ref(),
+            Some(&request),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("read-only"), "{error}");
+    assert_eq!(
+        std::fs::read(cron::scheduled_tasks_path(&workspace)).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
 async fn binding_cancelled_claim_returns_durable_cancellation_to_native_host() {
     for expired in [false, true] {
         let (temp, fs, request) = claimed_test_run().await;

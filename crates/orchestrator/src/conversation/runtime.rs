@@ -1701,10 +1701,10 @@ pub(crate) struct LifecycleRuntime {
         Option<Arc<dyn crate::stop_hook_snapshot::StopHookSnapshotProvider>>,
     /// Best-effort startup Responses WebSocket prewarm task.
     ///
-    /// Lifecycle operations abort this before clearing or exiting the session so
-    /// a stale prewarm cannot later seed `previous_response_id`.
+    /// Lifecycle operations abort this before clearing or exiting the session;
+    /// host shutdown permanently closes admission and joins every retired task.
     pub(crate) startup_responses_websocket_prewarm:
-        std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+        super::model_impl::startup_prewarm::StartupPrewarm,
     /// Weak self-link installed after a production builder wraps the
     /// orchestrator in `Arc`. It lets clear/resume transfer their commit to an
     /// owned task without creating a reference cycle.
@@ -1733,7 +1733,7 @@ impl LifecycleRuntime {
             goal_checkin_idle_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_checkin_idle_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             stop_hook_snapshot: None,
-            startup_responses_websocket_prewarm: std::sync::Mutex::new(None),
+            startup_responses_websocket_prewarm: Default::default(),
             session_switch_owner: std::sync::OnceLock::new(),
             session_switch_supervisor: SessionSwitchSupervisor::new(),
             session_activation_observer: None,

@@ -7175,7 +7175,7 @@ mod pre_tool_hook_tests {
     async fn pre_tool_hook_ctx_carries_current_trace_context() {
         let trace_context = telemetry::otel::SerializedTraceContext {
             traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
-            tracestate: Some("foo=bar".into()),
+            tracestate: Some("private=PRIVATE_PAYLOAD".into()),
         };
 
         let seen = Arc::new(std::sync::Mutex::new(None));
@@ -7208,7 +7208,10 @@ mod pre_tool_hook_tests {
             trace_context.traceparent,
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         );
-        assert_eq!(trace_context.tracestate.as_deref(), Some("foo=bar"));
+        assert!(
+            trace_context.tracestate.is_none(),
+            "vendor state may contain private data and must not reach hooks"
+        );
     }
 
     #[tokio::test]

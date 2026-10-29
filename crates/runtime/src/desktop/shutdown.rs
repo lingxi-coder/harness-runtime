@@ -177,6 +177,49 @@ impl DesktopSessionLifecycle {
         // still holds its own guard and settles on its own.
         let stage =
             |budget: std::time::Duration| deadline.min(tokio::time::Instant::now() + budget);
+        // Fork publication is not a task-registry child. Close its admission
+        // and prewarm registration synchronously before the first drain await.
+        self.orchestrator.close_background_producer_admission();
+        match tokio::time::timeout_at(
+            stage(std::time::Duration::from_secs(2)),
+            self.orchestrator.drain_background_session_launches(),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                producers_drained = false;
+                report
+                    .errors
+                    .push(format!("background session launch drain failed: {error}"));
+            }
+            Err(_) => {
+                producers_drained = false;
+                report.errors.push(
+                    "background session launches did not drain within the shutdown budget".into(),
+                );
+            }
+        }
+        match tokio::time::timeout_at(
+            stage(std::time::Duration::from_secs(2)),
+            self.orchestrator
+                .shutdown_startup_responses_websocket_prewarm(),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                producers_drained = false;
+                report.errors.push(error);
+            }
+            Err(_) => {
+                producers_drained = false;
+                report
+                    .errors
+                    .push("startup prewarm did not drain within the shutdown budget".into());
+            }
+        }
+        let background_producers_drained = producers_drained;
         match tokio::time::timeout_at(
             stage(std::time::Duration::from_secs(2)),
             self.orchestrator.shutdown_idle_compaction(),
@@ -255,6 +298,18 @@ impl DesktopSessionLifecycle {
             let _ = startup.await;
         }
         self.mcp_registry.abort_background_connects();
+        if !background_producers_drained {
+            // A fork may still be completing shell export/rollback, and a
+            // prewarm may still be dropping its tool context. Stop independent
+            // producers above, but keep registry handlers and persistence open
+            // until a later waiter has observed their real completion.
+            if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
+                report
+                    .errors
+                    .push(format!("cost settlement failed: {error}"));
+            }
+            return report;
+        }
         match tokio::time::timeout_at(
             stage(std::time::Duration::from_secs(2)),
             self.task_registry.shutdown_background_tasks(),
