@@ -121,6 +121,9 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@1.94.0
@@ -249,6 +252,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
+      - name: Enable long Git paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@1.94.0
