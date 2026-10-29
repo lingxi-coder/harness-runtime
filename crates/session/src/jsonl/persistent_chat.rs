@@ -113,7 +113,7 @@ pub(super) fn identity_io_guard<'a>(
     Ok(Some(state))
 }
 
-fn validate_dedicated_path(path: &Path) -> Result<(), WriterError> {
+fn dedicated_chat_root(path: &Path) -> Result<PathBuf, WriterError> {
     let text = path
         .to_str()
         .ok_or_else(|| unavailable("non-UTF-8 Chat path"))?;
@@ -124,14 +124,28 @@ fn validate_dedicated_path(path: &Path) -> Result<(), WriterError> {
     {
         return Err(unavailable("Chat path is not an absolute dedicated path"));
     }
-    let chat = path
+    let parent = path
         .parent()
         .ok_or_else(|| unavailable("missing Chat directory"))?;
-    let chat_id = chat
-        .file_name()
-        .and_then(|part| part.to_str())
-        .ok_or_else(|| unavailable("missing Chat identity"))?;
-    if !uuid::Uuid::parse_str(chat_id).is_ok_and(|id| id.to_string() == chat_id) {
+    let canonical = |directory: &Path| {
+        directory
+            .file_name()
+            .and_then(|part| part.to_str())
+            .is_some_and(|value| {
+                uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value)
+            })
+    };
+    let chat = if parent.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("chats")) {
+        parent
+    } else {
+        if !canonical(parent) {
+            return Err(unavailable("invalid Chat generation"));
+        }
+        parent
+            .parent()
+            .ok_or_else(|| unavailable("missing Chat identity"))?
+    };
+    if !canonical(chat) {
         return Err(unavailable("noncanonical Chat directory"));
     }
     let chats = chat
@@ -151,7 +165,11 @@ fn validate_dedicated_path(path: &Path) -> Result<(), WriterError> {
             "transcript is outside the dedicated AppAgent Chat layout",
         ));
     }
-    Ok(())
+    Ok(chat.to_path_buf())
+}
+
+fn validate_dedicated_path(path: &Path) -> Result<(), WriterError> {
+    dedicated_chat_root(path).map(|_| ())
 }
 
 impl PersistentChatWriter {
@@ -396,6 +414,188 @@ impl IdentityIoTestGate {
 }
 
 impl JsonlWriter {
+    /// Stage an immutable recovery generation from only the last committed
+    /// prefix. This never opens an orchestrator or dispatches model/tool work.
+    /// Both physical writer leases are held through copying and identity sync;
+    /// the original file, including an unknown tail, is never modified.
+    pub async fn stage_persistent_chat_recovery(
+        source: PathBuf,
+        target: PathBuf,
+        expected: Option<ChatTranscriptCheckpoint>,
+    ) -> Result<Option<CapturedChatTranscript>, WriterError> {
+        tokio::task::spawn_blocking(move || {
+            let chat_root = dedicated_chat_root(&source)?;
+            if dedicated_chat_root(&target)? != chat_root
+                || source == target
+                || source.file_name() != target.file_name()
+                || target.parent() == Some(chat_root.as_path())
+            {
+                return Err(unavailable("invalid recovery generation target"));
+            }
+            let session_id = target
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .ok_or_else(|| unavailable("invalid recovery session identity"))?;
+            let source_root = source
+                .parent()
+                .ok_or_else(|| unavailable("missing source parent"))?;
+            let source_identity = rooted_fs::root_identity(source_root)?;
+            let _source_lease = rooted_fs::try_lock_exclusive(
+                source_root,
+                &message_identity::lock_path(&source)?,
+                rooted_fs::PRIVATE_DIR_MODE,
+                rooted_fs::PRIVATE_FILE_MODE,
+            )?;
+            let bytes = if let Some(proof) = &expected {
+                if proof.byte_len == 0 || proof.byte_len > MAX_CHAT_TRANSCRIPT_BYTES {
+                    return Err(unavailable("invalid recovery checkpoint length"));
+                }
+                let relative = PathBuf::from(
+                    source
+                        .file_name()
+                        .ok_or_else(|| unavailable("missing source name"))?,
+                );
+                let file = rooted_fs::open_read_file_pinned(
+                    source_root,
+                    &relative,
+                    Some(&source_identity),
+                )?;
+                rooted_fs::validate_file_single_link(source_root, &relative)?;
+                let identity = rooted_fs::opened_file_identity(&file)?;
+                let before = file
+                    .metadata()
+                    .map_err(|error| unavailable(&error.to_string()))?
+                    .len();
+                if before < proof.byte_len {
+                    return Err(unavailable("committed prefix was truncated"));
+                }
+                let mut bytes = Vec::new();
+                (&file)
+                    .take(proof.byte_len)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| unavailable(&error.to_string()))?;
+                let verified = rooted_fs::open_recovery_file(
+                    source_root,
+                    &relative,
+                    &source_identity,
+                    &identity,
+                )?;
+                if verified
+                    .metadata()
+                    .map_err(|error| unavailable(&error.to_string()))?
+                    .len()
+                    != before
+                    || checkpoint(&bytes) != *proof
+                    || !bytes.ends_with(b"\n")
+                {
+                    return Err(unavailable("committed recovery prefix changed"));
+                }
+                bytes
+            } else {
+                Vec::new()
+            };
+            let root_identity = rooted_fs::root_identity(&chat_root)?;
+            let relative = target
+                .strip_prefix(&chat_root)
+                .map_err(|_| unavailable("recovery target escaped Chat"))?;
+            // Create only the new generation directory. Never overwrite an
+            // earlier preparation, even when a crash left its bytes behind.
+            let existing =
+                rooted_fs::open_read_file_pinned(&chat_root, relative, Some(&root_identity));
+            match existing {
+                Ok(mut file) => {
+                    let mut previous = Vec::new();
+                    (&mut file)
+                        .take(MAX_CHAT_TRANSCRIPT_BYTES + 1)
+                        .read_to_end(&mut previous)
+                        .map_err(|error| unavailable(&error.to_string()))?;
+                    if previous != bytes {
+                        return Err(unavailable("prepared recovery generation conflicts"));
+                    }
+                }
+                Err(FsError::NotFound(_)) => rooted_fs::atomic_write_pinned(
+                    &chat_root,
+                    relative,
+                    &bytes,
+                    rooted_fs::AtomicWriteOptions {
+                        overwrite: false,
+                        create_parents: true,
+                        dir_mode: rooted_fs::PRIVATE_DIR_MODE,
+                        file_mode: rooted_fs::PRIVATE_FILE_MODE,
+                    },
+                    &root_identity,
+                )?,
+                Err(error) => return Err(error.into()),
+            }
+            let target_root = target
+                .parent()
+                .ok_or_else(|| unavailable("missing recovery parent"))?;
+            let target_identity = rooted_fs::root_identity(target_root)?;
+            let _target_lease = rooted_fs::try_lock_exclusive(
+                target_root,
+                &message_identity::lock_path(&target)?,
+                rooted_fs::PRIVATE_DIR_MODE,
+                rooted_fs::PRIVATE_FILE_MODE,
+            )?;
+            rooted_fs::validate_file_single_link(
+                target_root,
+                &PathBuf::from(
+                    target
+                        .file_name()
+                        .ok_or_else(|| unavailable("missing target name"))?,
+                ),
+            )?;
+            let target_relative = PathBuf::from(
+                target
+                    .file_name()
+                    .ok_or_else(|| unavailable("missing recovery file name"))?,
+            );
+            let mut target_file = rooted_fs::open_read_file_pinned(
+                target_root,
+                &target_relative,
+                Some(&target_identity),
+            )?;
+            let mut target_bytes = Vec::new();
+            (&mut target_file)
+                .take(MAX_CHAT_TRANSCRIPT_BYTES + 1)
+                .read_to_end(&mut target_bytes)
+                .map_err(|error| unavailable(&error.to_string()))?;
+            if target_bytes != bytes {
+                return Err(unavailable("recovery generation changed before sealing"));
+            }
+            target_file
+                .sync_all()
+                .map_err(|error| unavailable(&error.to_string()))?;
+            message_identity::bootstrap_at(
+                &Default::default(),
+                &target,
+                target_root,
+                &target_identity,
+            )?;
+            rooted_fs::sync_parent_pinned(&chat_root, relative, Some(&root_identity))?;
+            std::fs::File::open(&chat_root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| unavailable(&error.to_string()))?;
+            if rooted_fs::root_identity(&chat_root)? != root_identity {
+                return Err(unavailable("Chat changed while staging recovery"));
+            }
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            let source = String::from_utf8(bytes)
+                .map_err(|_| unavailable("recovery transcript is not UTF-8"))?;
+            Ok(Some(CapturedChatTranscript {
+                path: target,
+                session_id,
+                checkpoint: checkpoint(source.as_bytes()),
+                source,
+            }))
+        })
+        .await
+        .map_err(|error| unavailable(&error.to_string()))?
+    }
+
     /// Open an exclusively owned physical Chat transcript. The parent must
     /// already exist, under `agent/agui-v1/chats/<canonical Chat UUID>/`.
     /// `None` accepts only an empty/new file; recovery requires
@@ -832,5 +1032,126 @@ mod tests {
         assert!(writer.capture_persistent_chat_snapshot(true).await.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement\n");
         assert!(std::fs::read_to_string(old).unwrap().contains("original"));
+    }
+    #[tokio::test]
+    async fn recovery_forks_only_committed_prefix_and_preserves_unknown_tail_idempotently() {
+        let (_root, path, fs) = fixture();
+        let writer = JsonlWriter::open_persistent_chat(path.clone(), fs.clone(), None)
+            .await
+            .unwrap();
+        append_user(&writer, "committed").await;
+        let committed = writer.capture_persistent_chat_snapshot(true).await.unwrap();
+        let target = path
+            .parent()
+            .unwrap()
+            .join(uuid::Uuid::new_v4().to_string())
+            .join(path.file_name().unwrap());
+        assert!(
+            JsonlWriter::stage_persistent_chat_recovery(
+                path.clone(),
+                target.clone(),
+                Some(committed.checkpoint().clone())
+            )
+            .await
+            .is_err(),
+            "a live writer retains ownership"
+        );
+        drop(writer);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"unknown-uncommitted-tool\"}\n")
+            .unwrap();
+        let original_evidence = std::fs::read(&path).unwrap();
+        for _ in 0..2 {
+            let staged = JsonlWriter::stage_persistent_chat_recovery(
+                path.clone(),
+                target.clone(),
+                Some(committed.checkpoint().clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(staged.source(), committed.source());
+            assert_eq!(std::fs::read(&path).unwrap(), original_evidence);
+        }
+        let resumed = JsonlWriter::open_persistent_chat(
+            target.clone(),
+            fs,
+            Some(committed.checkpoint().clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resumed
+                .capture_persistent_chat_snapshot(false)
+                .await
+                .unwrap()
+                .source(),
+            committed.source()
+        );
+        drop(resumed);
+        std::fs::write(&target, b"conflicting prepared bytes\n").unwrap();
+        assert!(JsonlWriter::stage_persistent_chat_recovery(
+            path.clone(),
+            target.clone(),
+            Some(committed.checkpoint().clone())
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"conflicting prepared bytes\n"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original_evidence);
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_other_chat_and_missing_or_corrupt_committed_prefix() {
+        let (_root, path, fs) = fixture();
+        let writer = JsonlWriter::open_persistent_chat(path.clone(), fs, None)
+            .await
+            .unwrap();
+        append_user(&writer, "committed").await;
+        let committed = writer.capture_persistent_chat_snapshot(true).await.unwrap();
+        drop(writer);
+        let target = path
+            .parent()
+            .unwrap()
+            .join(uuid::Uuid::new_v4().to_string())
+            .join(path.file_name().unwrap());
+        let foreign = path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(uuid::Uuid::new_v4().to_string())
+            .join(uuid::Uuid::new_v4().to_string())
+            .join(path.file_name().unwrap());
+        assert!(JsonlWriter::stage_persistent_chat_recovery(
+            path.clone(),
+            foreign,
+            Some(committed.checkpoint().clone())
+        )
+        .await
+        .is_err());
+        std::fs::write(&path, b"corrupt\n").unwrap();
+        assert!(JsonlWriter::stage_persistent_chat_recovery(
+            path.clone(),
+            target.clone(),
+            Some(committed.checkpoint().clone())
+        )
+        .await
+        .is_err());
+        assert!(!target.exists());
+        std::fs::remove_file(&path).unwrap();
+        assert!(JsonlWriter::stage_persistent_chat_recovery(
+            path,
+            target,
+            Some(committed.checkpoint().clone())
+        )
+        .await
+        .is_err());
     }
 }

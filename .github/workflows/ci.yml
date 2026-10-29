@@ -255,6 +255,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Test persistent Chat and mobile Agent lifecycle
         run: |
+          cargo test --locked -p local-app --lib v2::agent::
           cargo test --locked -p session --lib persistent_chat
           cargo test --locked -p orchestrator --lib persistent_chat
           cargo test --locked -p harness-runtime --no-default-features --features mobile --lib mobile::app_agent::service::

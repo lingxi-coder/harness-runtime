@@ -2229,3 +2229,118 @@ test('a valid zero elapsed measurement remains distinct from unknown timing', as
   assert.equal(b.requests.length, 1);
   assert.deepEqual(clock.pending(), []);
 });
+
+test('recovered Chat history emits one generation notice and only reads retained attempts', async () => {
+  const b = browser();
+  const chat = await b.api.agent.chats.open('chat-one');
+  const notices = [];
+  b.window.addEventListener('localApp:chat-recovered', event => notices.push(event.detail));
+  b.setFetchHandler(request => {
+    const {method, args} = request.envelope;
+    const value = method === 'agent.chats.history'
+      ? {messages: [{id: 'committed-user', role: 'user', content: 'committed'}], recoveryGeneration: 'generation-one'}
+      : args.runId
+        ? {messages: [{id: 'interrupted-user', role: 'user', content: 'retained interrupted input'}]}
+        : {attempts: [{runId: 'old-run', state: 'interrupted'}]};
+    return {ok: true, json: async () => b.input({ok: true, value})};
+  });
+  assert.equal((await chat.history()).messages[0].id, 'committed-user');
+  await chat.history();
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].chatId, 'chat-one');
+  assert.equal((await chat.attempts()).attempts[0].state, 'interrupted');
+  assert.equal((await chat.attempts(b.input({runId: 'old-run'}))).messages[0].content, 'retained interrupted input');
+  assert.ok(b.requests.every(request => ['agent.chats.get', 'agent.chats.history', 'agent.chats.attempts'].includes(request.envelope.method)),
+    'reading recovery and attempts must never submit the old run or call the model');
+});
+
+test('Chat recovery metadata and attempt history reject malformed host data', async () => {
+  const b = browser();
+  const chat = await b.api.agent.chats.open('chat-one');
+  b.setFetchHandler(() => ({ok: true, json: async () => b.input({ok: true, value: {messages: [], recoveryGeneration: 7}})}));
+  await assert.rejects(chat.history(), error => error.code === 'invalid_host_response');
+  b.setFetchHandler(() => ({ok: true, json: async () => b.input({ok: true, value: {messages: [{id: 'x', role: 'invented', content: 'x'}]}})}));
+  await assert.rejects(chat.attempts(b.input({runId: 'old-run'})));
+  await assert.rejects(chat.attempts(b.input({path: '/host/private'})), error => error.name === 'TypeError');
+  assert.ok(b.requests.every(request => !['agent.tasks.start', 'agent.chats.send'].includes(request.envelope.method)));
+});
+
+test('Chat subscription resets an archived cursor and observes later canonical messages without resubmission', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  const chat = await b.api.agent.chats.open('chat-one');
+  const messages = [];
+  const errors = [];
+  const recovered = [];
+  b.window.addEventListener('localApp:chat-history-error', event => errors.push(event.detail));
+  b.window.addEventListener('localApp:chat-recovered', event => recovered.push(event.detail));
+  let phase = 0;
+  b.setFetchHandler(request => {
+    const cursor = request.envelope.args.cursor;
+    let value;
+    if (phase === 0) {
+      value = {messages: [{id:'committed',role:'user',content:'committed'}, {id:'failed-user',role:'user',content:'failed'}]};
+    } else if (cursor === 'failed-user') {
+      value = {messages: [{id:'committed',role:'user',content:'committed'}],recoveryGeneration:'recovery-one',cursorReset:true};
+    } else if (phase === 2) {
+      assert.equal(cursor, 'committed');
+      value = {messages: [{id:'later-answer',role:'assistant',content:'later'}],recoveryGeneration:'recovery-one'};
+    } else {
+      value = {messages: [],recoveryGeneration:'recovery-one'};
+    }
+    return {ok:true,json:async()=>b.input({ok:true,value})};
+  });
+  const stop = chat.subscribe(message => messages.push(message.id));
+  await waitFor(() => messages.length === 2, 'initial failed cursor was not observed');
+  phase = 1; clock.advance(1000); await b.flush();
+  await waitFor(() => recovered.length === 1, 'recovery reset was not observed');
+  phase = 2; clock.advance(1000); await b.flush();
+  await waitFor(() => messages.includes('later-answer'), 'subscription remained stuck on the old cursor');
+  stop();
+  assert.equal(errors.length, 0);
+  assert.ok(b.requests.every(request => ['agent.chats.get','agent.chats.history'].includes(request.envelope.method)));
+});
+
+test('empty recovered frontier clears the subscription cursor instead of retrying a hidden user forever', async () => {
+  const clock = fakeClock(); const b = browser({clock});
+  const chat = await b.api.agent.chats.open('chat-one');
+  let phase = 0; let resetObserved = false; const seen = [];
+  b.setFetchHandler(request => {
+    let value;
+    if (phase === 0) value = {messages:[{id:'failed-only',role:'user',content:'failed'}]};
+    else if (request.envelope.args.cursor === 'failed-only') {
+      resetObserved = true; value = {messages:[],recoveryGeneration:'empty-recovery',cursorReset:true};
+    } else {
+      assert.equal(request.envelope.args.cursor, undefined);
+      value = {messages:[{id:'new-user',role:'user',content:'fresh'}],recoveryGeneration:'empty-recovery'};
+    }
+    return {ok:true,json:async()=>b.input({ok:true,value})};
+  });
+  const stop = chat.subscribe(message => seen.push(message.id));
+  await waitFor(() => seen.includes('failed-only'), 'initial message missing');
+  phase = 1; clock.advance(1000); await b.flush();
+  await waitFor(() => resetObserved, 'empty reset missing');
+  clock.advance(1000); await b.flush();
+  await waitFor(() => seen.includes('new-user'), 'empty reset did not restart at the beginning');
+  stop();
+  assert.ok(b.requests.every(request => request.envelope.method !== 'agent.chats.send'));
+});
+
+test('a frontier change between history pages restarts canonical traversal once', async () => {
+  const b = browser(); const chat = await b.api.agent.chats.open('chat-one');
+  let calls = 0; const seen = [];
+  b.setFetchHandler(request => {
+    calls++;
+    let value;
+    if (calls === 1) value = {messages:[{id:'old-prefix',role:'user',content:'old'}],nextCursor:'old-prefix'};
+    else if (calls === 2) value = {messages:[{id:'new-tail',role:'assistant',content:'new'}],recoveryGeneration:'next-frontier'};
+    else {
+      assert.equal(request.envelope.args.cursor, undefined);
+      value = {messages:[{id:'canonical-prefix',role:'user',content:'current'},{id:'new-tail',role:'assistant',content:'new'}],recoveryGeneration:'next-frontier'};
+    }
+    return {ok:true,json:async()=>b.input({ok:true,value})};
+  });
+  const stop = chat.subscribe(message => seen.push(message.id));
+  await waitFor(() => seen.includes('canonical-prefix'), 'canonical traversal was not restarted');
+  stop(); assert.equal(calls, 3);
+});

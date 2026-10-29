@@ -3,7 +3,9 @@
 //! from persisted records. All methods are synchronous; call off the UI thread.
 mod chat_store;
 pub mod protocol;
+mod recovery;
 pub use chat_store::{ChatListPage, ChatMessageMetadata, ChatStore};
+pub use recovery::ChatRecoveryFrontier;
 
 use super::AppError;
 use serde::{Deserialize, Serialize};
@@ -679,6 +681,8 @@ struct Ledger {
     epoch: u64,
     grants: BTreeMap<String, Grant>,
     runs: BTreeMap<String, Record>,
+    #[serde(default)]
+    chat_recoveries: BTreeMap<String, recovery::ChatRecoveryRecord>,
 }
 
 /// One instance per native app service. Its caller owns the library RuntimeLease.
@@ -1109,6 +1113,7 @@ impl AgentStore {
             }))
             .map_err(|_| protocol_schema_unavailable())?;
         }
+        recovery::validate_records(&ledger)?;
         let mut pending_terminal_events = Vec::new();
         for record in ledger.runs.values_mut() {
             if let Some(candidate) = record.protocol_commit_pending.take() {
@@ -1707,10 +1712,24 @@ impl AgentStore {
                     chat_id: record.chat_id.clone(),
                 });
             }
+            if chat_id.is_some_and(|chat| {
+                ledger.runs.values().any(|record| {
+                    record.owner.app_id == owner.app_id
+                        && record.chat_id.as_deref() == Some(chat)
+                        && record.task.request_id == input.request_id
+                        && recovery::archived(ledger, chat, &record.task.run_id)
+                })
+            }) {
+                return Err(invalid("requestId conflicts with an earlier request"));
+            }
             check()?;
+            if chat_id.is_some_and(|id| recovery::pending(ledger, id)) {
+                return Err(Self::storage_unavailable());
+            }
             if chat_id.is_some_and(|chat_id| {
                 ledger.runs.values().any(|record| {
                     record.chat_id.as_deref() == Some(chat_id)
+                        && !recovery::archived(ledger, chat_id, &record.task.run_id)
                         && (record.protocol_commit_pending.is_some()
                             || protocol_storage_failed(record)
                             || matches!(
@@ -1879,6 +1898,7 @@ impl AgentStore {
                         && previous.owner.app_id == owner.app_id
                         && previous.chat_id.as_deref() == Some(chat_id)
                         && previous.protocol_thread_id.as_deref() == Some(chat_id)
+                        && !recovery::archived(ledger, chat_id, &previous.task.run_id)
                 }) {
                     if previous.task.state != State::Succeeded {
                         return Err(Self::storage_unavailable());
@@ -1921,6 +1941,9 @@ impl AgentStore {
         }
         let latest_id = {
             let ledger = self.lock_ledger()?;
+            if recovery::pending(&ledger, chat_id) {
+                return Err(Self::storage_unavailable());
+            }
             let records = ledger
                 .runs
                 .values()
@@ -1929,6 +1952,7 @@ impl AgentStore {
                         && record.chat_id.as_deref() == Some(chat_id)
                         && record.protocol_thread_id.as_deref() == Some(chat_id)
                         && record.task.run_id != exclude_task_id
+                        && !recovery::archived(&ledger, chat_id, &record.task.run_id)
                 })
                 .collect::<Vec<_>>();
             if records

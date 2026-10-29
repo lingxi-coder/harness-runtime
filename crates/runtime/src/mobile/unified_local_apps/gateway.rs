@@ -441,6 +441,7 @@ fn is_page_method_allowed(method: &str) -> bool {
             | "agent.chats.archive"
             | "agent.chats.delete"
             | "agent.chats.history"
+            | "agent.chats.attempts"
             | "agent.chats.send"
             | "agent.chats.cancel"
     )
@@ -2687,6 +2688,8 @@ mod agent_json_tests {
         assert!(is_page_method_allowed("agent.tasks.events"));
         assert!(is_page_method_allowed("agent.tasks.start"));
         assert!(is_page_method_allowed("agent.chats.send"));
+        assert!(is_page_method_allowed("agent.chats.attempts"));
+        assert!(!is_page_method_allowed("agent.chats.attemptsOther"));
         assert!(!is_page_method_allowed("eventsNative"));
         assert!(!is_page_method_allowed("agent.eventsNative"));
         assert!(!is_page_method_allowed("agent.run"));

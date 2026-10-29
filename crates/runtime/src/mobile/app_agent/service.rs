@@ -1,5 +1,7 @@
 //! Process-owned task service. The page and native control APIs are separate:
 //! only the latter can configure grants or resolve permissions/questions.
+#[path = "chat_recovery.rs"]
+mod chat_recovery;
 use super::*;
 use crate::mobile::unified_local_apps::MobileLocalAppServiceHandle;
 use lingxi_core::{
@@ -33,6 +35,10 @@ pub struct AppAgentHost {
     active: AsyncMutex<HashMap<String, Arc<Control>>>,
     admission: AsyncMutex<()>,
     shutdown: AtomicBool,
+    host_generation: u64,
+    generation_lock: Arc<AsyncMutex<u64>>,
+    #[cfg(test)]
+    recovery_before_generation: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     #[cfg(test)]
     force_wake_policy: AtomicBool,
     #[cfg(test)]
@@ -313,6 +319,13 @@ impl AppAgentState {
             .map_err(|_| "agent_storage_unavailable")?;
         chats
             .set_committed_assistants(&committed_assistants)
+            .map_err(chat_store_open_error)?;
+        chats
+            .install_recovery_authority(
+                store
+                    .committed_chat_recoveries(app_id)
+                    .map_err(|_| "agent_storage_unavailable")?,
+            )
             .map_err(chat_store_open_error)?;
         let task_states = store
             .recovery_states(app_id)
@@ -891,11 +904,29 @@ impl OutputStream for Control {
     }
 }
 impl AppAgentHost {
+    #[cfg(test)]
     pub fn new(
         service: &Arc<MobileLocalAppServiceHandle>,
         factory: Arc<AppAgentFactory>,
-        _config_home: &std::path::Path,
+        config_home: &std::path::Path,
     ) -> Result<Arc<Self>, String> {
+        let mut generation = service
+            .agent_generation
+            .try_lock()
+            .map_err(|_| "agent_host_busy")?;
+        Self::new_in_generation(service, factory, config_home, &mut generation)
+    }
+
+    pub(crate) fn new_in_generation(
+        service: &Arc<MobileLocalAppServiceHandle>,
+        factory: Arc<AppAgentFactory>,
+        _config_home: &std::path::Path,
+        generation: &mut u64,
+    ) -> Result<Arc<Self>, String> {
+        *generation = generation
+            .checked_add(1)
+            .ok_or("agent_host_generation_exhausted")?;
+        let host_generation = *generation;
         let apps_root = service.library.root().join("apps");
         let mut apps = HashMap::new();
         for record in service
@@ -924,6 +955,10 @@ impl AppAgentHost {
             active: AsyncMutex::new(HashMap::new()),
             admission: AsyncMutex::new(()),
             shutdown: AtomicBool::new(false),
+            host_generation,
+            generation_lock: service.agent_generation.clone(),
+            #[cfg(test)]
+            recovery_before_generation: Mutex::new(None),
             #[cfg(test)]
             force_wake_policy: AtomicBool::new(false),
             #[cfg(test)]
@@ -1210,6 +1245,11 @@ impl AppAgentHost {
         args: Value,
     ) -> Result<Value, String> {
         let (owner, revision, declared, declared_skills) = self.owner(app, invocation).await?;
+        let recovery_cancel = self
+            .service()
+            .await?
+            .agent_invocation_token(app, invocation)
+            .await?;
         match method {
             "agent.tasks.start" => {
                 reject_unknown(&args, &["input"])?;
@@ -1240,6 +1280,10 @@ impl AppAgentHost {
                     .await?
                 {
                     return Ok(json!({"runId":run_id}));
+                }
+                if let Some(thread_id) = raw_input.get("threadId").and_then(Value::as_str) {
+                    self.recover_chat_if_needed(&state, &owner, thread_id, Some(&recovery_cancel))
+                        .await?;
                 }
                 let (normalized, chat_id) = normalize_page_run_input(&state, raw_input, None)?;
                 let duplicate_only = normalized.message_already_persisted;
@@ -1327,6 +1371,8 @@ impl AppAgentHost {
             "agent.chats.get" => {
                 let chat_id = required_string(&args, "chatId")?;
                 let state = self.app_state(app)?;
+                self.recover_chat_if_needed(&state, &owner, chat_id, Some(&recovery_cancel))
+                    .await?;
                 serde_json::to_value(state.chats.get(chat_id).map_err(|_| "chat_not_found")?)
                     .map_err(|_| "invalid_chat".into())
             }
@@ -1363,11 +1409,43 @@ impl AppAgentHost {
                 let cursor = args.get("cursor").and_then(Value::as_str);
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
                 let state = self.app_state(app)?;
+                self.recover_chat_if_needed(&state, &owner, chat_id, Some(&recovery_cancel))
+                    .await?;
                 let history = state
                     .chats
                     .protocol_history_page(chat_id, cursor, limit)
                     .map_err(|_| "invalid_chat_history")?;
                 serde_json::to_value(history).map_err(|_| "invalid_chat_history".into())
+            }
+            "agent.chats.attempts" => {
+                reject_unknown(&args, &["chatId", "runId", "cursor", "limit"])?;
+                let chat_id = required_string(&args, "chatId")?;
+                let state = self.app_state(app)?;
+                let attempts = state
+                    .store
+                    .archived_chat_attempts(&owner, chat_id)
+                    .map_err(|_| "chat_storage_unavailable")?;
+                if let Some(run_id) = args.get("runId").and_then(Value::as_str) {
+                    let matches = attempts
+                        .iter()
+                        .filter(|task| task.request_id == run_id)
+                        .collect::<Vec<_>>();
+                    if matches.len() != 1 {
+                        return Err("chat_attempt_not_found".into());
+                    }
+                    let cursor = args.get("cursor").and_then(Value::as_str);
+                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+                    let page = state
+                        .chats
+                        .protocol_attempt_history_page(chat_id, &matches[0].run_id, cursor, limit)
+                        .map_err(|_| "invalid_chat_history")?;
+                    return serde_json::to_value(page).map_err(|_| "invalid_chat_history".into());
+                }
+                let values = attempts
+                    .iter()
+                    .map(|task| public_task_value(task, chat_id.to_owned()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(json!({"attempts":values}))
             }
             "agent.chats.send" => {
                 reject_unknown(&args, &["chatId", "input"])?;
@@ -1400,6 +1478,8 @@ impl AppAgentHost {
                 {
                     return Ok(json!({"runId":run_id}));
                 }
+                self.recover_chat_if_needed(&state, &owner, &chat_id, Some(&recovery_cancel))
+                    .await?;
                 let (normalized, chat_id) =
                     normalize_page_run_input(&state, raw_input, Some(&chat_id))?;
                 let duplicate_only = normalized.message_already_persisted;
@@ -2581,8 +2661,17 @@ impl AppAgentHost {
     }
 
     pub async fn stop_all(&self) -> Result<(), String> {
-        let _serial = self.admission.lock().await;
         self.shutdown.store(true, Ordering::Release);
+        let generation = self.generation_lock.lock().await;
+        self.stop_all_in_generation(&generation).await
+    }
+
+    pub(crate) async fn stop_all_in_generation(&self, generation: &u64) -> Result<(), String> {
+        self.shutdown.store(true, Ordering::Release);
+        let _serial = self.admission.lock().await;
+        if *generation != self.host_generation {
+            return Err("agent_host_replaced".into());
+        }
         let ids = self.active.lock().await.keys().cloned().collect::<Vec<_>>();
         self.cancel_ids(&ids).await;
         if !self.active.lock().await.is_empty() {
@@ -2775,6 +2864,10 @@ impl AppAgentHost {
                     .await?
                 {
                     return Ok(json!({"runId":run_id}));
+                }
+                if let Some(thread_id) = raw_input.get("threadId").and_then(Value::as_str) {
+                    self.recover_chat_if_needed(&state, &owner, thread_id, None)
+                        .await?;
                 }
                 let (normalized, chat_id) = normalize_page_run_input(&state, raw_input, None)?;
                 let duplicate_only = normalized.message_already_persisted;
@@ -3221,12 +3314,37 @@ fn recover_chat_message_metadata(
     current_task_id: Option<&str>,
     current_user_message_id: Option<&str>,
 ) -> Result<(), String> {
-    let known = chats
-        .message_metadata(chat_id)
-        .map_err(|_| "chat_storage_unavailable")?
-        .into_iter()
-        .map(|message| (message.message_id.clone(), message))
-        .collect::<HashMap<_, _>>();
+    check_chat_message_metadata(
+        chats,
+        chat_id,
+        replayed,
+        store,
+        owner,
+        current_task_id,
+        current_user_message_id,
+        true,
+    )
+}
+
+fn check_chat_message_metadata(
+    chats: &ChatStore,
+    chat_id: &str,
+    replayed: &orchestrator::resume::ReplayedSession,
+    store: &AgentStore,
+    owner: &Owner,
+    current_task_id: Option<&str>,
+    current_user_message_id: Option<&str>,
+    apply: bool,
+) -> Result<(), String> {
+    let known = (if apply {
+        chats.message_metadata(chat_id)
+    } else {
+        chats.recovery_message_metadata(chat_id)
+    })
+    .map_err(|_| "chat_storage_unavailable")?
+    .into_iter()
+    .map(|message| (message.message_id.clone(), message))
+    .collect::<HashMap<_, _>>();
     let mut current_run: Option<String> = None;
     let mut tool_use_owners = HashMap::<String, String>::new();
     let mut saw_current_task_user = false;
@@ -3381,6 +3499,9 @@ fn recover_chat_message_metadata(
     }
     if current_task_id.is_some() && !saw_current_task_user {
         return Err("chat_transcript_unavailable".into());
+    }
+    if !apply {
+        return Ok(());
     }
     // Only mutate the host index after validating the complete transcript.
     // A bad row late in the file must not leave a partially repaired prefix.
@@ -8447,7 +8568,7 @@ mod protocol_retry_tests {
         (host, service)
     }
 
-    async fn launch_agent_page(
+    pub(super) async fn launch_agent_page(
         service: &Arc<MobileLocalAppServiceHandle>,
         published: &Value,
     ) -> String {

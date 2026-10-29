@@ -5,12 +5,21 @@ import type {LocalAppAgent} from './client.js';
 export interface ChatHistoryPage {
   messages: Message[];
   nextCursor?: string;
+  /** Mobile host recovery frontier; changed values require refreshing canonical history. */
+  recoveryGeneration?: string;
+  /** The host proved that the supplied cursor belonged to a sealed attempt. */
+  cursorReset?: true;
 }
 
 export interface LocalAppChatHandle {
   id: string;
   send(input: RunAgentInput): Promise<RunAgentResult>;
   history(options?: {cursor?: string; limit?: number}): Promise<ChatHistoryPage>;
+  /** Mobile hosts expose retained failed-attempt inputs without resubmitting the run. */
+  attempts?: {
+    (options: {runId: string; cursor?: string; limit?: number}): Promise<ChatHistoryPage>;
+    (options?: {cursor?: string; limit?: number}): Promise<{attempts: LocalAppTask[]}>;
+  };
   subscribe(listener: (message: Message) => void): () => void;
   cancel(): Promise<void>;
 }

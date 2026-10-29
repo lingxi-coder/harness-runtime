@@ -23,7 +23,7 @@
   const pendingPrefix = config.appId + ':' + config.revision + ':';
   const readOnlyMethods = new Set([
     'agent.tasks.get', 'agent.tasks.list', 'agent.tasks.events',
-    'agent.chats.get', 'agent.chats.list', 'agent.chats.history', 'agent.chats.creationStatus'
+    'agent.chats.get', 'agent.chats.list', 'agent.chats.history', 'agent.chats.attempts', 'agent.chats.creationStatus'
   ]);
   const inFlight = new Map();
   const chatCreateFlights = new Map();
@@ -1159,6 +1159,7 @@
     chatIds.add(id);
     if (!chatMessageIds.has(id)) chatMessageIds.set(id, new Set());
     const knownMessages = chatMessageIds.get(id);
+    let recoveryGeneration;
     const handle = {
       id,
       async send(input) {
@@ -1174,20 +1175,64 @@
             || (page.nextCursor !== undefined && typeof page.nextCursor !== 'string')) {
           throw makeError('The host returned invalid chat history.', 'invalid_host_response');
         }
+        if (page.recoveryGeneration !== undefined && typeof page.recoveryGeneration !== 'string') {
+          throw makeError('The host returned invalid Chat recovery state.', 'invalid_host_response');
+        }
+        if ((page.cursorReset !== undefined && page.cursorReset !== true)
+            || (page.cursorReset === true && !page.recoveryGeneration)) {
+          throw makeError('The host returned invalid Chat recovery cursor state.', 'invalid_host_response');
+        }
         const messages = page.messages.map(message => agui.validateMessage(message));
+        if (page.recoveryGeneration && page.recoveryGeneration !== recoveryGeneration) {
+          recoveryGeneration = page.recoveryGeneration;
+          knownMessages.clear();
+          window.dispatchEvent(new CustomEvent('localApp:chat-recovered', {
+            detail: {chatId: id, generation: recoveryGeneration}
+          }));
+        }
         for (const message of messages) knownMessages.add(message.id);
         return {...page, messages};
+      },
+      async attempts(options = {}) {
+        if (!isRecord(options) || Object.keys(options).some(key => !['runId', 'cursor', 'limit'].includes(key))) {
+          throw new TypeError('Chat attempt options may contain only runId, cursor and limit.');
+        }
+        const page = await invoke('agent.chats.attempts', {...options, chatId: id});
+        if (options.runId !== undefined) {
+          if (!isRecord(page) || !Array.isArray(page.messages)) {
+            throw makeError('The host returned invalid Chat attempt history.', 'invalid_host_response');
+          }
+          return {...page, messages: page.messages.map(message => agui.validateMessage(message))};
+        }
+        if (!isRecord(page) || !Array.isArray(page.attempts)) {
+          throw makeError('The host returned invalid Chat attempts.', 'invalid_host_response');
+        }
+        return page;
       },
       subscribe(listener) {
         if (typeof listener !== 'function') throw new TypeError('A listener is required.');
         let active = true;
         let timer = null;
         let cursor;
+        let subscriptionGeneration;
         const seen = new Set();
         const poll = async () => {
           try {
             let page = await handle.history({limit: 50, ...(cursor ? {cursor} : {})});
             while (active) {
+              const generationChanged = page.recoveryGeneration !== subscriptionGeneration;
+              subscriptionGeneration = page.recoveryGeneration;
+              if (page.cursorReset === true) {
+                cursor = undefined;
+                seen.clear();
+              } else if (generationChanged && (cursor !== undefined || seen.size > 0)) {
+                // A still-visible old cursor is valid as a message selector,
+                // but it cannot continue a page traversal from another frontier.
+                cursor = undefined;
+                seen.clear();
+                page = await handle.history({limit: 50});
+                continue;
+              }
               for (const message of page.messages) {
                 if (!seen.has(message.id)) {
                   seen.add(message.id);

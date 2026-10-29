@@ -125,6 +125,7 @@ struct AppOperation {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileLocalAppServiceHandle {
     agent: Mutex<Option<Result<Arc<super::app_agent::AppAgentHost>, String>>>,
+    pub(crate) agent_generation: Arc<AsyncMutex<u64>>,
     pub(super) library: Arc<AppLibrary>,
     _runtime_owner: RuntimeLease,
     pub(super) config_home: PathBuf,
@@ -170,18 +171,26 @@ impl MobileLocalAppServiceHandle {
         self: &Arc<Self>,
         factory: Arc<super::app_agent::AppAgentFactory>,
     ) -> Result<(), String> {
-        // Native model-host creation is serialized. Revoke and reap the old
-        // executor before loading the durable ledger into its replacement.
+        // One service-owned lock spans every host generation. Recovery may
+        // await filesystem work, so a per-host admission lock cannot protect
+        // its cached ledger from a replacement loading and changing that file.
+        let mut generation = self.agent_generation.lock().await;
+        // Revoke and reap the old executor before opening the new ledger.
         let previous = self
             .agent
             .lock()
             .map_err(|_| "agent_host_unavailable")?
             .clone();
         if let Some(Ok(previous)) = previous {
-            previous.stop_all().await?;
+            previous.stop_all_in_generation(&generation).await?;
         }
         let mut slot = self.agent.lock().map_err(|_| "agent_host_unavailable")?;
-        let replacement = super::app_agent::AppAgentHost::new(self, factory, &self.config_home);
+        let replacement = super::app_agent::AppAgentHost::new_in_generation(
+            self,
+            factory,
+            &self.config_home,
+            &mut generation,
+        );
         let result = replacement.as_ref().map(|_| ()).map_err(Clone::clone);
         *slot = Some(replacement);
         result
@@ -244,6 +253,7 @@ impl MobileLocalAppServiceHandle {
             .map_err(|e| fail(e.to_string()))?;
         let service = Arc::new(Self {
             agent: Mutex::new(None),
+            agent_generation: Arc::new(AsyncMutex::new(0)),
             library,
             _runtime_owner: runtime_owner,
             config_home: config_home.clone(),

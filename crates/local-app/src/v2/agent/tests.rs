@@ -1302,3 +1302,138 @@ fn protocol_finalization_blocks_readers_until_terminal_event_is_durable() {
     writer.join().unwrap();
     reader.join().unwrap();
 }
+
+fn failed_recovery_turn(store: &AgentStore, chat_id: &str, run_id: &str) -> (Input, Task) {
+    let normalized = protocol::normalize_run_input(
+        &json!({
+            "threadId":chat_id,"runId":run_id,"protocolVersion":"1.0",
+            "messages":[{"id":format!("user-{run_id}"),"role":"user","content":"retained input"}]
+        }),
+        &[],
+    )
+    .unwrap();
+    let admission = store
+        .admit_scoped(&owner(), &normalized.input, &[], &[], Some(chat_id), true)
+        .unwrap();
+    store
+        .append_event(
+            &owner(),
+            &admission.task.run_id,
+            json!({
+                "type":"RUN_STARTED","protocolVersion":"1.0","threadId":chat_id,"runId":run_id
+            }),
+        )
+        .unwrap();
+    let task = commit_protocol_terminal_for_test(
+        store,
+        &owner(),
+        &admission.task.run_id,
+        State::Failed,
+        None,
+        Some("model_error".into()),
+    )
+    .unwrap();
+    (normalized.input, task)
+}
+
+#[test]
+fn prepared_chat_recovery_survives_restart_and_only_committed_authority_allows_new_run() {
+    let (directory, store) = store();
+    let chat_id = uuid::Uuid::new_v4().to_string();
+    let (old_input, old_task) = failed_recovery_turn(&store, &chat_id, "failed-before-recovery");
+    let event_path = store.event_path(&old_task.run_id).unwrap();
+    let event_evidence = fs::read(&event_path).unwrap();
+    let plan = store.prepare_chat_recovery(&owner(), &chat_id).unwrap();
+    assert!(store
+        .committed_chat_recoveries(&owner().app_id)
+        .unwrap()
+        .is_empty());
+    drop(store);
+    let store = AgentStore::open(directory.path()).unwrap();
+    assert_eq!(
+        store.prepare_chat_recovery(&owner(), &chat_id).unwrap(),
+        plan
+    );
+    let mut next = old_input.clone();
+    next.request_id = "after-recovery".into();
+    assert!(store
+        .admit_scoped(&owner(), &next, &[], &[], Some(&chat_id), true)
+        .is_err());
+    // This is the ledger-only contract: physical staging is independently
+    // tested by Session, and production commits only after its proof checks.
+    store.commit_chat_recovery(&plan).unwrap();
+    store.commit_chat_recovery(&plan).unwrap();
+    assert!(
+        store
+            .admit_scoped(&owner(), &next, &[], &[], Some(&chat_id), true)
+            .unwrap()
+            .start
+    );
+    let duplicate = store
+        .admit_scoped(&owner(), &old_input, &[], &[], Some(&chat_id), true)
+        .unwrap();
+    assert!(!duplicate.start);
+    assert_eq!(duplicate.task.state, State::Failed);
+    assert_eq!(duplicate.task.run_id, old_task.run_id);
+    assert_eq!(fs::read(event_path).unwrap(), event_evidence);
+}
+
+#[test]
+fn recovery_commit_rename_failure_requires_reopen_without_rewriting_attempt_outcome() {
+    let (directory, store) = store();
+    let chat_id = uuid::Uuid::new_v4().to_string();
+    let (_, original) = failed_recovery_turn(&store, &chat_id, "rename-fault");
+    let plan = store.prepare_chat_recovery(&owner(), &chat_id).unwrap();
+    store
+        .fail_next_persist_after_rename
+        .store(true, Ordering::Release);
+    assert!(store.commit_chat_recovery(&plan).is_err());
+    assert!(store.committed_chat_recoveries(&owner().app_id).is_err());
+    drop(store);
+    let store = AgentStore::open(directory.path()).unwrap();
+    assert_eq!(
+        store
+            .committed_chat_recoveries(&owner().app_id)
+            .unwrap()
+            .get(&chat_id),
+        Some(&plan)
+    );
+    assert_eq!(
+        store.get(&owner(), &original.run_id).unwrap().state,
+        State::Failed
+    );
+}
+
+#[test]
+fn recovery_does_not_restore_revoked_grants_or_allow_old_run_ids_on_a_new_release() {
+    let (_directory, store) = store();
+    let chat_id = uuid::Uuid::new_v4().to_string();
+    let (old_input, _) = failed_recovery_turn(&store, &chat_id, "old-public-run");
+    let plan = store.prepare_chat_recovery(&owner(), &chat_id).unwrap();
+    store.commit_chat_recovery(&plan).unwrap();
+    let next_owner = Owner {
+        release_digest: "3".repeat(64),
+        ..owner()
+    };
+    assert!(store.prepare_chat_recovery(&next_owner, &chat_id).is_err());
+    store
+        .configure(next_owner.clone(), Some(settings()))
+        .unwrap();
+    assert!(store
+        .admit_scoped(&next_owner, &old_input, &[], &[], Some(&chat_id), true)
+        .is_err());
+    store.configure(next_owner.clone(), None).unwrap();
+    let mut next = old_input;
+    next.request_id = "fresh-after-revoke".into();
+    assert!(store
+        .admit_scoped(&next_owner, &next, &[], &[], Some(&chat_id), true)
+        .is_err());
+    let foreign_owner = Owner {
+        app_id: format!("a{}", "9".repeat(32)),
+        ..next_owner
+    };
+    assert!(store
+        .archived_chat_attempts(&foreign_owner, &chat_id)
+        .unwrap()
+        .is_empty());
+}
