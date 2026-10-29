@@ -17,8 +17,12 @@ impl DesktopBuiltinSkillPromptFn {
 }
 
 impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
-    fn build(&self, _args: &Utf16JsonProjection) -> Utf16JsonProjection {
-        skill::desktop_builtin_skill_content(self.name)
+    fn skip_shell_expansion(&self) -> bool {
+        matches!(self.name, "lingxi-api" | "docs")
+    }
+
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+        skill::desktop_builtin_skill_prompt(self.name, args)
             .expect("slash builtin is registered in the desktop SkillRegistry")
     }
 }
@@ -30,7 +34,8 @@ mod tests {
     #[test]
     fn slash_bodies_share_the_registered_skill_source() {
         for (name, expected_marker) in [
-            ("claude-api", "Anthropic 1.x SDK surface"),
+            ("docs", "Documents in LingXi"),
+            ("lingxi-api", "LingXi API guide"),
             ("plugin-authoring", ".lingxi-plugin/\n    plugin.json"),
         ] {
             let prompt = DesktopBuiltinSkillPromptFn::new(name).build(&"".into());

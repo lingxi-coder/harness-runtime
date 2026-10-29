@@ -208,6 +208,30 @@ fn fixture_root() -> PathBuf {
     PathBuf::from(COMMAND_FIXTURES)
 }
 
+// User-directed product customization: the captured Native fixture stays
+// immutable, while LingXi replaces its Claude SDK prompt and adds document
+// authoring to the end of the shared bundled prompt group.
+fn product_command_names(native: &[&str]) -> Vec<String> {
+    let mut names = native
+        .iter()
+        .map(|name| {
+            if *name == "claude-api" {
+                "lingxi-api"
+            } else {
+                name
+            }
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let index = names
+        .iter()
+        .position(|name| name == "plugin-authoring")
+        .unwrap()
+        + 1;
+    names.insert(index, "docs".into());
+    names
+}
+
 fn exact_text_needle(text: &str) -> Vec<u8> {
     let encoded = serde_json::to_string(text).expect("fixture text is valid UTF-8");
     format!("\"text\":{encoded}").into_bytes()
@@ -1166,7 +1190,10 @@ async fn native_295_commands_fixture_replay_body() {
                 .filter(|command| !command.is_hidden)
                 .map(|command| command.name.string_at("").unwrap().to_owned())
                 .collect::<Vec<_>>();
-            assert_eq!(available_names, NATIVE_AVAILABLE_COMMAND_NAMES);
+            assert_eq!(
+                available_names,
+                product_command_names(NATIVE_AVAILABLE_COMMAND_NAMES)
+            );
             assert_eq!(
                 available_names.len(),
                 current_catalog.available_command_count
@@ -1184,16 +1211,13 @@ async fn native_295_commands_fixture_replay_body() {
             drop(command_registry);
             assert_eq!(
                 current_catalog_names,
-                NATIVE_UNKNOWN_COMMAND_NAMES
-                    .iter()
-                    .map(|name| (*name).to_owned())
-                    .collect::<Vec<_>>(),
-                "Harness model-invocable prompt names must match the captured Native 2.1.295 list; differences remain a strict parity failure"
+                product_command_names(NATIVE_UNKNOWN_COMMAND_NAMES),
+                "Prompt names match Native with only the deliberate LingXi guide replacement"
             );
             assert_eq!(
                 current_catalog.available_command_count,
-                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT,
-                "the ordinary headless command pool must match Native, including the enabled local policy prompts"
+                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT + 1,
+                "the ordinary headless pool adds only the product document skill"
             );
 
             let reminder_marker = "The user's message starts with the slash command";
@@ -1249,10 +1273,13 @@ async fn native_295_commands_fixture_replay_body() {
                 "The user's message starts with the slash command /__native_unknown_295__",
             )];
             assert_eq!(native_reminder.matches("and 28 more").count(), 1);
+            assert_eq!(native_reminder.matches("claude-api").count(), 1);
             assert_eq!(
                 outbound_reminder,
-                *native_reminder,
-                "all unknown-command reminder bytes, including the available-command remainder, match Native"
+                native_reminder
+                    .replacen("claude-api", "lingxi-api", 1)
+                    .replacen("/plugin-authoring", "/plugin-authoring, /docs", 1),
+                "unknown-command reminder adds only the product API name and document skill"
             );
             let harness_prompt_index = transcript_prompt_index(&harness_jsonl, case.prompt)
                 .expect("Harness JSONL persists the exact unknown-command prompt");

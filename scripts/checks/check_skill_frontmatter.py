@@ -47,6 +47,7 @@ MAX_DESCRIPTION_COLUMNS = 180
 # host's own.
 SKILL_ROOTS = [
     "crates/runtime/src/mobile/device_skills",
+    "crates/skill/src/builtin",
 ]
 
 # Agent 用同一套 frontmatter 判据,但形状不同:agent 是 `agents/<name>.md`

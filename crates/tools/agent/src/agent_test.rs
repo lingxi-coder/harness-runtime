@@ -1280,12 +1280,18 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     }
 
     #[test]
-    fn four_builtin_subagent_types_byte_aligned() {
+    fn native_subagent_types_plus_lingxi_guide() {
         assert_eq!(
             BUILTIN_SUBAGENT_TYPES,
-            &["general-purpose", "Plan", "Explore", "statusline-setup"]
+            &[
+                "general-purpose",
+                "Plan",
+                "Explore",
+                "statusline-setup",
+                "lingxi-code-guide"
+            ]
         );
-        assert_eq!(BUILTIN_SUBAGENT_TYPES.len(), 4);
+        assert_eq!(BUILTIN_SUBAGENT_TYPES.len(), 5);
     }
 
     fn sample_fusion_result(

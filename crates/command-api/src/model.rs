@@ -59,6 +59,13 @@ pub type BundledPromptAvailabilityProvider =
 
 /// A context-aware dynamic bundled skill prompt.
 pub trait BundledPromptFn: Send + Sync {
+    /// Treat generated instructions and user text as literal content instead
+    /// of executing embedded shell markup. Existing executable prompts retain
+    /// their behavior unless their builder opts out.
+    fn skip_shell_expansion(&self) -> bool {
+        false
+    }
+
     /// Whether expansion consumes the selected model. Stateless templates do
     /// not need route lookup merely to produce their fixed instructions.
     fn needs_model_context(&self) -> bool {

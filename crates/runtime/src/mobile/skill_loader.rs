@@ -116,7 +116,9 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: Vec::new(),
             shell: frontmatter.shell,
-            skip_shell_expansion: false,
+            skip_shell_expansion: prompt_fn
+                .as_ref()
+                .is_some_and(|prompt| prompt.skip_shell_expansion()),
             skill_root: None,
             context: frontmatter.context.clone(),
             background: frontmatter.background,
@@ -860,6 +862,34 @@ mod tests {
 
         assert!(body.contains("PLUGIN-OWNED-BODY"));
         assert!(!body.contains("USER SHORT-NAME SKILL"));
+    }
+
+    #[tokio::test]
+    async fn product_guide_is_available_in_chat_and_code_without_shell_or_fork() {
+        let mut reg = CommandRegistry::new();
+        super::super::register_mobile_bundled_prompt_commands(&mut reg);
+        let registry = Arc::new(RwLock::new(reg));
+        for mode in [SessionMode::Chat, SessionMode::Code] {
+            let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
+            for (name, args) in [("lingxi-api", "media"), ("docs", "Write a report")] {
+                let guide = loader.load(&name.into()).await.unwrap().unwrap();
+                assert_eq!(guide.command_type, SkillCommandType::Prompt);
+                assert!(!guide.disable_model_invocation);
+                assert!(guide.allowed_tools.is_empty());
+                assert!(guide.skip_shell_expansion);
+                assert!(guide.context.is_none());
+                assert!(guide.agent.is_none());
+                assert!(guide.shell.is_none());
+                let prompt = guide.dynamic_body.unwrap().build(&args.into());
+                assert_eq!(
+                    prompt,
+                    skill::desktop_builtin_skill_prompt(name, &args.into()).unwrap()
+                );
+                assert!(loader.list_names().await.contains(&name.into()));
+            }
+            assert!(loader.load(&"claude-api".into()).await.unwrap().is_none());
+            assert!(loader.load(&"lingxi".into()).await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]

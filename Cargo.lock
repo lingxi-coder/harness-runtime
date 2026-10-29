@@ -52,6 +52,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sidequery",
+ "skill",
  "telemetry",
  "tempfile",
  "test-harness",

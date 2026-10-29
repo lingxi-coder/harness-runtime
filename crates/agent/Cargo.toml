@@ -16,6 +16,7 @@ memory = { path = "../memory" }
 hooks = { path = "../hooks" }
 permission = { path = "../permission" }
 sidequery = { path = "../sidequery" }
+skill = { path = "../skill" }
 # Agent-hooks ORIGIN TRUST (cc 2.1.218 `mvo`): reads the global config's
 # `projects[<dir>].hasTrustDialogAccepted` before registering an agent
 # definition's frontmatter hooks. Acyclic — `migrations` depends only on

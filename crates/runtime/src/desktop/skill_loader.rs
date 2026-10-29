@@ -97,7 +97,9 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: Vec::new(),
             shell: frontmatter.shell,
-            skip_shell_expansion: false,
+            skip_shell_expansion: prompt_fn
+                .as_ref()
+                .is_some_and(|prompt| prompt.skip_shell_expansion()),
             skill_root: None,
             context: frontmatter.context.clone(),
             background: frontmatter.background,
@@ -488,6 +490,28 @@ mod tests {
             .expect("present");
         assert!(desc.session_id.is_none());
         assert!(desc.skill_root.is_none());
+    }
+
+    #[tokio::test]
+    async fn product_guide_uses_the_same_topic_prompt_as_slash_invocation() {
+        let mut reg = CommandRegistry::new();
+        command_api::builtins::register_bundled_skills(&mut reg, false);
+        let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
+        for (name, args) in [("lingxi-api", "bots"), ("docs", "Write a report")] {
+            let guide = loader.load(&name.into()).await.unwrap().unwrap();
+            assert_eq!(guide.command_type, SkillCommandType::Prompt);
+            assert!(!guide.disable_model_invocation);
+            assert!(guide.allowed_tools.is_empty());
+            assert!(guide.skip_shell_expansion);
+            assert!(guide.skill_root.is_none());
+            let prompt = guide.dynamic_body.unwrap().build(&args.into());
+            assert_eq!(
+                prompt,
+                skill::desktop_builtin_skill_prompt(name, &args.into()).unwrap()
+            );
+        }
+        assert!(loader.load(&"claude-api".into()).await.unwrap().is_none());
+        assert!(loader.load(&"lingxi".into()).await.unwrap().is_none());
     }
 
     #[tokio::test]

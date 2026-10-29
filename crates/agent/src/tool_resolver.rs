@@ -1131,6 +1131,32 @@ mod tests {
     }
 
     #[test]
+    fn lingxi_code_guide_does_not_inherit_parent_execution_or_mcp_tools() {
+        let guide = crate::builtins::builtin_agent_definitions_gated(false)
+            .into_iter()
+            .find(|agent| agent.agent_type == "lingxi-code-guide")
+            .unwrap();
+        let parent = [
+            "Read",
+            "Grep",
+            "Glob",
+            "Write",
+            "Edit",
+            "Bash",
+            "Skill",
+            "Agent",
+            "media_capture",
+            "mcp__bots__delegate_task",
+        ]
+        .into_iter()
+        .map(tool)
+        .collect::<Vec<_>>();
+        let resolved = AgentToolResolver::resolve(&guide, &parent, &[], 1, false);
+        let actual = names(&resolved);
+        assert_eq!(actual, vec!["Read", "Grep", "Glob"]);
+    }
+
+    #[test]
     fn core_denies_session_tools_and_keeps_workflow() {
         let set = AgentToolResolver::all_agent_disallowed_tools();
         assert!(!set.contains(&"Agent"), "Agent is depth-gated");

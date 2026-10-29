@@ -75,7 +75,7 @@ fn agent_task_tool_names_match_production_constants() {
 }
 
 #[test]
-fn four_builtin_subagent_types_match_production() {
+fn native_subagent_types_match_production_apart_from_lingxi_guide() {
     // Re-captured 2026-08-06 from the REAL 2.1.220/221/223 binaries: the old
     // 2026-03-31 TS snapshot's `verification` agent is a phantom (0-hit in
     // every local oracle), and the oracle's `claude-code-guide` + `claude`
@@ -83,10 +83,12 @@ fn four_builtin_subagent_types_match_production() {
     let f = fx();
     let prod: Vec<String> = tool_agent::agent::BUILTIN_SUBAGENT_TYPES
         .iter()
+        .filter(|name| **name != "lingxi-code-guide")
         .map(|s| (*s).to_string())
         .collect();
     assert_eq!(f.builtin_subagent_types, prod);
     assert_eq!(f.builtin_subagent_types.len(), 4);
+    assert!(tool_agent::agent::BUILTIN_SUBAGENT_TYPES.contains(&"lingxi-code-guide"));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! Compiled-in desktop builtin skill templates and their registration entry point.
 
 mod bundled;
+mod lingxi_api;
 
 use crate::model::{LoadedFrom, SkillSource};
 use crate::{parse_skill_markdown, Skill, SkillRegistry};
@@ -28,6 +29,44 @@ pub fn desktop_builtin_skill(name: &str) -> Option<Skill> {
 #[must_use]
 pub fn desktop_builtin_skill_content(name: &str) -> Option<Utf16JsonProjection> {
     desktop_builtin_skill(name).map(|skill| skill.content)
+}
+
+/// Expand a builtin prompt, loading only the requested product-guide topic.
+/// Other builtins retain their existing body expansion behavior.
+#[must_use]
+pub fn desktop_builtin_skill_prompt(
+    name: &str,
+    args: &Utf16JsonProjection,
+) -> Option<Utf16JsonProjection> {
+    let body = desktop_builtin_skill_content(name)?;
+    Some(match name {
+        "lingxi-api" => lingxi_api::render(body, args),
+        "docs" => {
+            let request = args.string_units("").unwrap_or_default();
+            if request
+                .iter()
+                .all(|unit| char::from_u32(u32::from(*unit)).is_some_and(char::is_whitespace))
+            {
+                return Some(body);
+            }
+            let mut units = body.string_units("").expect("builtin prompt is text");
+            units.extend("\n\n## User Request\n\n".encode_utf16());
+            units.extend(request);
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("document prompt preserves request source")
+        }
+        _ => body,
+    })
+}
+
+/// Offline reference context for the dedicated read-only product guide agent.
+/// It uses the same sources as the on-demand API skill without requiring the
+/// agent to receive an executable Skill or shell tool.
+#[must_use]
+pub fn lingxi_api_guide_context() -> Utf16JsonProjection {
+    lingxi_api::guide_context(
+        desktop_builtin_skill_content("lingxi-api").expect("builtin API guide"),
+    )
 }
 
 fn register_slice(reg: &mut SkillRegistry, slice: &[BundledSkill]) {
@@ -81,35 +120,63 @@ mod tests {
         assert_eq!(r.names().len(), BUILTIN_DESKTOP.len());
         let mut names = r.names();
         names.sort_unstable();
-        assert_eq!(names, vec!["claude-api", "plugin-authoring"]);
-        let skill = r.get("claude-api").expect("registered bundled skill");
+        assert_eq!(names, vec!["docs", "lingxi-api", "plugin-authoring"]);
+        assert!(r.get("claude-api").is_none());
+        let skill = r.get("lingxi-api").expect("registered bundled skill");
         assert_eq!(skill.source, SkillSource::Bundled);
         assert_eq!(skill.loaded_from, LoadedFrom::Bundled);
-        assert_eq!(skill.frontmatter.name, "claude-api");
+        assert_eq!(skill.frontmatter.name, "lingxi-api");
         assert!(skill
             .description
             .string_at("")
-            .is_some_and(|description| description.contains("Anthropic SDKs")));
+            .is_some_and(|description| description.contains("LingXi (灵犀)")));
         assert!(skill
             .content
             .string_at("")
-            .is_some_and(|content| content.contains("/claude-api upgrade python")));
-        assert!(skill
-            .content
-            .string_at("")
-            .is_some_and(|content| content.contains("anthropic.Timeout")));
+            .is_some_and(|content| content.contains("/lingxi-api <topic>")));
     }
 
     #[test]
-    fn claude_api_desktop_skill_is_discoverable_for_python_upgrade() {
+    fn product_guide_discovery_stays_specific_to_lingxi() {
         let mut r = SkillRegistry::new();
         register_desktop(&mut r);
-        assert!(
-            r.discover("/claude-api upgrade python")
+        for query in [
+            "/lingxi-api media",
+            "Configure LingXi MCP",
+            "灵犀的 Bot 如何使用",
+        ] {
+            assert!(r
+                .discover(query)
                 .iter()
-                .any(|skill| skill.name == "claude-api"),
-            "claude-api should be discoverable from its builtin command surface"
+                .any(|skill| skill.name == "lingxi-api"));
+        }
+        for query in ["upgrade anthropic python", "write a report", "take a photo"] {
+            assert!(!r
+                .discover(query)
+                .iter()
+                .any(|skill| skill.name == "lingxi-api"));
+        }
+    }
+
+    #[test]
+    fn document_skill_preserves_literal_request_and_has_no_connector_dependency() {
+        let root = desktop_builtin_skill_content("docs").unwrap();
+        assert_eq!(
+            desktop_builtin_skill_prompt("docs", &"".into()).unwrap(),
+            root
         );
+        let request = "Update the existing report; keep !`literal example` as text.";
+        let prompt = desktop_builtin_skill_prompt("docs", &request.into()).unwrap();
+        assert!(prompt.string_at("").unwrap().ends_with(request));
+        let mut r = SkillRegistry::new();
+        register_desktop(&mut r);
+        for query in ["/docs", "create a document", "创建文档"] {
+            assert!(r.discover(query).iter().any(|skill| skill.name == "docs"));
+        }
+        assert!(!r
+            .discover("Explain OpenAI API docs")
+            .iter()
+            .any(|skill| skill.name == "docs"));
     }
 
     #[test]

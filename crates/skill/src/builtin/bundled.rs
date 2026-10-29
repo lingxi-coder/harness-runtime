@@ -1,8 +1,8 @@
 //! Compiled-in builtin skill templates.
 //!
-//! The mobile product's skills are file-backed Plugin components. Keeping only the
-//! unrelated desktop catalog here prevents a second mobile body/reference
-//! source from drifting away from the plugin tree.
+//! Shared prompt sources for the builtin Skill and slash-command registries.
+//! Product guidance also reaches mobile through the shared bundled commands;
+//! device-specific skills remain with their owning runtime/plugin components.
 
 /// A compiled-in skill template and its registry-only discovery phrases.
 pub(crate) struct BundledSkill {
@@ -21,15 +21,21 @@ pub(crate) struct BundledResource {
 /// Desktop builtin skill templates.
 pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
     BundledSkill {
-        name: "claude-api",
-        raw: include_str!("claude-api.md"),
+        name: "docs",
+        raw: include_str!("docs/SKILL.md"),
         triggers: &[
-            "claude-api",
-            "/claude-api",
-            "/claude-api upgrade python",
-            "claude api upgrade python",
-            "anthropic sdk migration",
+            "/docs",
+            "create a document",
+            "edit a document",
+            "创建文档",
+            "修改文档",
         ],
+        references: &[],
+    },
+    BundledSkill {
+        name: "lingxi-api",
+        raw: include_str!("lingxi-api/SKILL.md"),
+        triggers: &["lingxi-api", "lingxi", "灵犀"],
         references: &[],
     },
     BundledSkill {

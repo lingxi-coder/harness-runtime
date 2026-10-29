@@ -1219,7 +1219,9 @@ impl Tool for SkillTool {
         // return sentence ("A skill that runs in the background…") was added in
         // cc 2.1.218. Unlike Bash/Agent this text is NOT model-conditional
         // (identical for opus-4-8 and opus-5 in 2.1.220), so a single string
-        // suffices. MUST NOT be changed without a binary re-audit.
+        // suffices. The final reference-loading clarification is a deliberate
+        // product extension for the on-demand LingXi guide; the Native text
+        // stays locked separately in the prompt regression test.
         "Invoke a skill.\n\
 \n\
 A skill is a packaged set of instructions the user or project has set up for a particular \
@@ -1240,7 +1242,10 @@ contains the files you're working on (most specific wins; unscoped otherwise).\n
 \n\
 Only names from the listing (or that the user typed explicitly) are valid. Built-in CLI \
 commands (`/help`, `/clear`, …) aren't skills. If a `<command-name>` block is already \
-present this turn, the skill is loaded — follow it directly rather than calling again.\n"
+present this turn, the skill is loaded — follow it directly rather than calling again.\n\
+\n\
+When a skill explicitly loads reference topics through `args`, calling it with \
+a topic not yet loaded retrieves new material; do not repeat a topic already present.\n"
             .into()
     }
 

@@ -50,11 +50,12 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_checkup_skill(reg);
     register_explain_usage_skill(reg);
     register_loop_skill(reg, cron_enabled);
-    register_claude_api_skill(reg);
+    register_lingxi_api_skill(reg);
     register_workflow_authoring_skill(reg);
     register_run_skill(reg);
     register_run_skill_generator_skill(reg);
     register_plugin_authoring_skill(reg);
+    register_docs_skill(reg);
 
     // LingXi's explicit scheduler extension is outside Native's factory list.
     register_cron_skill(reg, cron_enabled);
@@ -85,9 +86,9 @@ fn register_commit_skill(reg: &mut CommandRegistry) {
 
 /// Register a desktop Skill API builtin as a slash command using the shared
 /// name, description, and prompt body.
-fn register_claude_api_skill(reg: &mut CommandRegistry) {
-    let skill = skill::desktop_builtin_skill("claude-api")
-        .expect("claude-api is registered as a desktop builtin Skill");
+fn register_lingxi_api_skill(reg: &mut CommandRegistry) {
+    let skill = skill::desktop_builtin_skill("lingxi-api")
+        .expect("lingxi-api is registered as a builtin Skill");
     reg.register_command(SlashCommand {
         name: skill.name.into(),
         description: skill.description,
@@ -95,20 +96,43 @@ fn register_claude_api_skill(reg: &mut CommandRegistry) {
         native_source: Some("built-in".into()),
         native_type: Some(crate::model::NativeCommandType::Prompt),
         kind: SlashCommandKind::Bundled {
-            frontmatter: CommandFrontmatter::default(),
+            frontmatter: CommandFrontmatter {
+                session_modes: Some(vec!["chat".into(), "code".into()]),
+                ..CommandFrontmatter::default()
+            },
             prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
-                "claude-api",
+                "lingxi-api",
             ))),
         },
         loaded_from: Some("bundled".into()),
         user_invocable: Some(true),
-        // SEe @204097258 checks the typed M.bool env value, not JS
-        // truthiness of the raw process.env string.
-        is_enabled: !lingxi_core::host::env::is_env_truthy(
-            std::env::var("CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL")
-                .ok()
-                .as_deref(),
-        ),
+        argument_hint: Some("[topic] [question]".into()),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+/// Document authoring through the actual file/service capabilities of the host.
+fn register_docs_skill(reg: &mut CommandRegistry) {
+    let skill = skill::desktop_builtin_skill("docs").expect("builtin document skill");
+    reg.register_command(SlashCommand {
+        name: skill.name.into(),
+        description: skill.description,
+        source: CommandSource::Bundled,
+        native_source: Some("built-in".into()),
+        native_type: Some(crate::model::NativeCommandType::Prompt),
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                session_modes: Some(vec!["chat".into(), "code".into()]),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
+                "docs",
+            ))),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        argument_hint: Some("[document request]".into()),
         has_user_specified_description: true,
         ..SlashCommand::default()
     });
@@ -642,13 +666,13 @@ mod tests {
 
         let want = vec![
             "batch".to_string(),
-            "claude-api".to_string(),
             "code-review".to_string(),
             "commit".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),
             // Ported 2026-09-10, once the session debug log it reads existed.
             "debug".to_string(),
+            "docs".to_string(),
             "doctor".to_string(),
             // Ported 2026-09-10.
             "explain-usage".to_string(),
@@ -656,6 +680,7 @@ mod tests {
             // Ported 2026-09-10: model-invocable only (`userInvocable:!1`), so
             // it never shows in the slash menu; the user route is /keybindings.
             "keybindings-help".to_string(),
+            "lingxi-api".to_string(),
             "loop".to_string(),
             "plugin-authoring".to_string(),
             "run".to_string(),
