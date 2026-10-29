@@ -563,12 +563,23 @@ mod tests {
     use super::*;
     use crate::mobile::test_support::{
         new_engine_with_streaming, test_config, CollectingPermissionSink, FakeListener,
-        HostFakePlatform,
+        HostFakePlatform, MountTableRuntime,
     };
     use mobile_linux_api::MobileLinuxRuntime;
     use std::sync::Arc;
 
     fn fixture() -> (
+        tempfile::TempDir,
+        crate::mobile::MobileUserDirectories,
+        super::super::MobileConfig,
+        Arc<dyn lingxi_core::host::Platform>,
+    ) {
+        fixture_with_runtime(None)
+    }
+
+    fn fixture_with_runtime(
+        runtime: Option<Arc<dyn MobileLinuxRuntime>>,
+    ) -> (
         tempfile::TempDir,
         crate::mobile::MobileUserDirectories,
         super::super::MobileConfig,
@@ -583,17 +594,19 @@ mod tests {
         let b = Path::new(&directories.projects).join("b");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        let runtime = Arc::new(mobile_linux_android::AndroidProotRuntime::new(
-            mobile_linux_android::AndroidProotRuntimeConfig {
-                managed_root: root,
-                brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
-                app_sandbox_root: temp.path().to_path_buf(),
-                abi: "arm64-v8a".into(),
-                rootfs_version: "test".into(),
-                archive_sha256: None,
-                native_library_dir: None,
-            },
-        ));
+        let runtime = runtime.unwrap_or_else(|| {
+            Arc::new(mobile_linux_android::AndroidProotRuntime::new(
+                mobile_linux_android::AndroidProotRuntimeConfig {
+                    managed_root: root,
+                    brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
+                    app_sandbox_root: temp.path().to_path_buf(),
+                    abi: "arm64-v8a".into(),
+                    rootfs_version: "test".into(),
+                    archive_sha256: None,
+                    native_library_dir: None,
+                },
+            ))
+        });
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(runtime.configure_mounts(vec![mobile_linux_api::MountSpec {
             host_path: PathBuf::from(&directories.projects),
@@ -862,7 +875,8 @@ mod tests {
 
     #[test]
     fn read_only_workspace_denies_public_cron_mutation_and_run_claim() {
-        let (_temp, directories, cfg, platform) = fixture();
+        let (_temp, directories, cfg, platform) =
+            fixture_with_runtime(Some(Arc::new(MountTableRuntime::default())));
         let handle = new_engine_with_streaming(
             cfg,
             platform.clone(),

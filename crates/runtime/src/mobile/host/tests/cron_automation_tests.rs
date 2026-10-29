@@ -180,7 +180,7 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
 
 #[tokio::test]
 async fn mounted_workspace_scheduled_run_reuses_the_selected_host_transcript() {
-    use crate::mobile::test_support::{test_config, HostFakePlatform};
+    use crate::mobile::test_support::{test_config, HostFakePlatform, MountTableRuntime};
     use mobile_linux_api::MobileLinuxRuntime;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");
@@ -189,17 +189,7 @@ async fn mounted_workspace_scheduled_run_reuses_the_selected_host_transcript() {
     let workspace = std::path::Path::new(&dirs.projects).join("scheduled-test");
     std::fs::create_dir_all(&workspace).unwrap();
     let guest = format!("{}/scheduled-test", dirs.projects_guest_path);
-    let linux = Arc::new(mobile_linux_android::AndroidProotRuntime::new(
-        mobile_linux_android::AndroidProotRuntimeConfig {
-            managed_root: root,
-            brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
-            app_sandbox_root: temp.path().to_path_buf(),
-            abi: "arm64-v8a".into(),
-            rootfs_version: "test".into(),
-            archive_sha256: None,
-            native_library_dir: None,
-        },
-    ));
+    let linux = Arc::new(MountTableRuntime::default());
     linux
         .configure_mounts(vec![mobile_linux_api::MountSpec {
             host_path: std::path::PathBuf::from(&dirs.projects),

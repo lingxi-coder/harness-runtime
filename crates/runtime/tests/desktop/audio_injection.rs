@@ -140,9 +140,17 @@ impl client::adapter::PermissionRequestSink for NoopPermissionSink {
 #[tokio::test]
 async fn desktop_build_exposes_the_injected_app_media_service() {
     let tmp = tempfile::tempdir().unwrap();
+    // Exercise the real policy gate without depending on an Auto-mode classifier.
+    let settings_dir = tmp.path().join(".lingxi");
+    std::fs::create_dir_all(&settings_dir).unwrap();
+    std::fs::write(
+        settings_dir.join("settings.local.json"),
+        r#"{"permissions":{"defaultMode":"default","allow":["media_sources"]}}"#,
+    )
+    .unwrap();
     let mut cfg = DesktopConfig::default();
     cfg.cwd = tmp.path().to_path_buf();
-    cfg.lingxi_home = tmp.path().join(".lingxi");
+    cfg.lingxi_home = settings_dir;
     cfg.isolated_credential_storage = true;
     cfg.session_persistence = false;
     cfg.use_noop_permission_gate = true;
