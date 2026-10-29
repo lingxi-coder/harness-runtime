@@ -321,7 +321,11 @@ async fn session_prompt_suggestion_streams_with_parent_prefix_candidates_and_htt
                 "fork must inherit live thinking changes"
             );
         } else {
-            assert!(wire.get("thinking").is_none());
+            assert_eq!(
+                wire["thinking"],
+                json!({"type": "disabled"}),
+                "fork must preserve the explicit disabled thinking policy"
+            );
         }
         assert_eq!(wire["model"], "claude-sonnet-4-6");
         assert_eq!(wire["tools"][0]["name"], "Read");
