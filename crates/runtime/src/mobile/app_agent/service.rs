@@ -4874,6 +4874,7 @@ mod progress_tests {
         let (host, _service) = test_wake_host(root.path()).await;
         let (owner, input, key, state) = configured_wake_fixture(&host);
         let events = state.root.join("tasks/protocol-events");
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
         // The ledger remains writable; the actual RUN_STARTED event file does not.
         std::fs::set_permissions(&events, std::fs::Permissions::from_mode(0o500)).unwrap();
         let result = host
@@ -4898,16 +4899,27 @@ mod progress_tests {
             .unwrap()
             .reservations
             .contains_key(&key));
-        let task = state.store.get_by_request(&owner, &key.request_id).unwrap();
+        assert!(
+            state.store.get_by_request(&owner, &key.request_id).is_err(),
+            "an event write failure fences the original in-memory authority"
+        );
+        // The failed append may have changed disk state. Recovery must reopen
+        // the ledger rather than trust a later write through the fenced store.
+        let recovered = AgentStore::open(&state.root.join("tasks")).unwrap();
+        let task = recovered.get_by_request(&owner, &key.request_id).unwrap();
         assert_eq!(task.state, State::Interrupted);
         assert_eq!(
             task.error.as_ref().unwrap().code,
             "protocol_event_storage_failed"
         );
-        assert!(state
-            .store
+        assert!(recovered
             .protocol_events(&owner, &key.request_id, 0)
             .is_err());
+        assert_eq!(
+            std::fs::read_dir(&events).unwrap().count(),
+            0,
+            "recovery must not invent RUN_STARTED or terminal event bytes"
+        );
         assert!(host.active.lock().await.is_empty());
     }
 
@@ -6418,6 +6430,12 @@ mod progress_tests {
 
     #[tokio::test]
     async fn deferred_chat_tool_fails_after_admission_without_replaying_it() {
+        use orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, MockStreamingApiClient, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use session::jsonl::JsonlWriter;
+
         let root = tempfile::tempdir().unwrap();
         let (host, service) = test_wake_host(root.path()).await;
         let source = root.path().join("agent-app");
@@ -6461,31 +6479,226 @@ mod progress_tests {
             .create(&chat_id, None, &session_id.to_string())
             .unwrap();
         let path = state.chats.transcript_path(&chat_id).unwrap();
-        let user_id = uuid::Uuid::new_v4();
+        // Commit one valid turn through the same engine checkpoint and terminal
+        // publication gates as production before simulating an unfinished tail.
+        let previous_user =
+            json!({"id":"previous-user", "role":"user", "content":"previous request"});
+        let (previous, previous_chat) = normalize_page_run_input(
+            &state,
+            json!({"threadId":chat_id, "runId":"previous-run", "protocolVersion":"1.0",
+                "messages":[previous_user.clone()]}),
+            Some(&chat_id),
+        )
+        .unwrap();
+        let previous_task = state
+            .store
+            .admit_scoped(
+                &owner,
+                &previous.input,
+                &[],
+                &[],
+                previous_chat.as_deref(),
+                true,
+            )
+            .unwrap()
+            .task;
+        state
+            .store
+            .update(
+                &owner,
+                &previous_task.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .append_event(
+                &owner,
+                &previous_task.run_id,
+                json!({"type":"RUN_STARTED", "protocolVersion":"1.0", "threadId":chat_id,
+                "runId":previous_task.request_id}),
+            )
+            .unwrap();
+        state
+            .chats
+            .start_turn(&chat_id, &previous_task.run_id)
+            .unwrap();
+        let user_id = MessageId::from_uuid(uuid::Uuid::parse_str(&previous_task.run_id).unwrap());
+        state
+            .chats
+            .record_message(
+                &chat_id,
+                ChatMessageMetadata {
+                    message_id: user_id.to_string(),
+                    run_id: previous_task.run_id.clone(),
+                    role: ChatRole::User,
+                    created_at: now_millis(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        state
+            .chats
+            .record_protocol_message(&chat_id, &previous_task.run_id, &previous_user)
+            .unwrap();
+        let (persisted, _) = watch::channel(None);
+        let previous_control = Arc::new(chat_control(
+            owner.clone(),
+            revision,
+            previous_task.request_id.clone(),
+            previous_task.run_id.clone(),
+            chat_id.clone(),
+            user_id.to_string(),
+            state.store.clone(),
+            state.chats.clone(),
+            persisted,
+        ));
+        let fs = host.factory.context.fs.clone();
+        let writer = Arc::new(
+            JsonlWriter::open_persistent_chat(path.clone(), fs.clone(), None)
+                .await
+                .unwrap(),
+        );
+        let orchestrator = Arc::new(
+            ConversationOrchestrator::new_side_chat(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::empty()),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                previous_control.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            )
+            .with_session_id(SessionId::from_uuid(session_id))
+            .with_jsonl_writer(writer.clone()),
+        );
+        orchestrator
+            .append_external_history_message(ConversationMessage::user(
+                user_id,
+                "previous request".into(),
+            ))
+            .await;
+        let accepted_id = MessageId::new();
+        orchestrator
+            .append_external_history_message(ConversationMessage::Assistant {
+                id: accepted_id,
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "previous answer".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("stop_sequence".into()),
+                resumable: None,
+                per_turn_effort: None,
+            })
+            .await;
+        previous_control
+            .emit_assistant_message_identity(&accepted_id)
+            .await;
+        let committed = orchestrator
+            .verify_persistent_chat_checkpoint(true)
+            .await
+            .unwrap();
+        let checkpoint = committed.checkpoint().clone();
+        state
+            .store
+            .record_chat_transcript_checkpoint(
+                &owner,
+                &previous_task.run_id,
+                &chat_id,
+                ChatTranscriptCheckpoint {
+                    byte_len: checkpoint.byte_len,
+                    sha256: checkpoint.sha256.clone(),
+                },
+            )
+            .unwrap();
+        *previous_control.chat_orchestrator.lock().unwrap() = Some(orchestrator);
+        drop(writer);
+        host.active
+            .lock()
+            .await
+            .insert(previous_task.run_id.clone(), previous_control.clone());
+        host.finish_execution(
+            &previous_control,
+            Ok((
+                TaskResult {
+                    text: "previous answer".into(),
+                    output: None,
+                    attachments: Vec::new(),
+                    chat_id: Some(chat_id.clone()),
+                    message_id: Some(accepted_id.to_string()),
+                },
+                json!({}),
+            )),
+        )
+        .await;
+        let (previous_task, committed_checkpoint) = state
+            .store
+            .successful_chat_history_task(&owner.app_id, &chat_id, &previous_task.run_id)
+            .unwrap();
+        assert_eq!(previous_task.state, State::Succeeded);
+        assert_eq!(committed_checkpoint.sha256, checkpoint.sha256);
+        let previous_assistant =
+            json!({"id":accepted_id.to_string(), "role":"assistant", "content":"previous answer"});
+        let previous_metadata = state.chats.message_metadata(&chat_id).unwrap();
+
+        // The next writer uses the committed proof and the real identity
+        // journal, but its deferred rows never receive a terminal commit.
+        let writer = JsonlWriter::open_persistent_chat(path.clone(), fs, Some(checkpoint))
+            .await
+            .unwrap();
         let assistant_id = uuid::Uuid::new_v4();
         let attachment_id = uuid::Uuid::new_v4();
         let cwd = root.path().to_string_lossy().to_string();
+        let forbidden = root.path().join("forbidden");
+        let command = format!("touch '{}'", forbidden.display());
         let rows = [
-            json!({"type":"user", "uuid":user_id, "parentUuid":null, "sessionId":session_id,
-                "timestamp":"2026-10-27T01:00:00.000Z", "cwd":cwd,
-                "message":{"role":"user","content":"previous request"}}),
-            json!({"type":"assistant", "uuid":assistant_id, "parentUuid":user_id, "sessionId":session_id,
-                "timestamp":"2026-10-27T01:00:01.000Z", "cwd":cwd,
-                "message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_pending",
-                    "name":"Shell","input":{"command":"touch forbidden"}}]}}),
+            json!({"type":"assistant", "uuid":assistant_id, "parentUuid":accepted_id.as_uuid(), "sessionId":session_id,
+                "timestamp":"2026-10-27T01:00:01.000Z", "cwd":cwd, "version":"test", "isSidechain":false,
+                "message":{"id":assistant_id, "role":"assistant", "stop_reason":"tool_use", "content":[{"type":"tool_use","id":"toolu_pending",
+                    "name":"Shell","input":{"command":command}}]}}),
             json!({"type":"attachment", "uuid":attachment_id, "parentUuid":assistant_id,
                 "sessionId":session_id, "timestamp":"2026-10-27T01:00:02.000Z", "cwd":cwd,
+                "version":"test", "isSidechain":false, "message":null,
                 "attachment":{"type":"hook_deferred_tool","toolUseID":"toolu_pending",
-                    "toolName":"Shell","toolInput":{"command":"touch forbidden"},
+                    "toolName":"Shell","toolInput":{"command":command},
                     "hookName":"PreToolUse:Shell","hookEvent":"PreToolUse","permissionMode":"default"}}),
         ];
-        let transcript = rows
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        std::fs::write(&path, &transcript).unwrap();
+        for row in rows {
+            let row: session::JsonlMessage = serde_json::from_value(row).unwrap();
+            writer.append(&row).await.unwrap();
+        }
+        let captured = writer.capture_persistent_chat_snapshot(true).await.unwrap();
+        let transcript = captured.source().to_owned();
+        assert!(transcript.starts_with(committed.source()));
+        assert!(captured.checkpoint().byte_len > committed.checkpoint().byte_len);
+        let replayed = orchestrator::resume::replay_captured_session(
+            path.clone(),
+            transcript.clone(),
+            session::jsonl::route_lines(&transcript),
+            session_id,
+        )
+        .unwrap();
+        assert_eq!(replayed.runtime_metadata.deferred_tools.len(), 1);
+        assert_eq!(
+            replayed.runtime_metadata.deferred_tools[0].tool_name,
+            "Shell"
+        );
+        assert_eq!(
+            super::super::validate_local_app_chat_resume(&replayed).unwrap_err(),
+            "chat_deferred_tools_pending"
+        );
+        assert_eq!(
+            ConversationOrchestrator::replay_persistent_chat_snapshot(&captured)
+                .err()
+                .as_deref(),
+            Some("chat_transcript_unavailable")
+        );
+        drop(writer);
         let mut input: Input =
             serde_json::from_value(json!({"requestId":"deferred-run", "prompt":"new request"}))
                 .unwrap();
@@ -6511,25 +6724,28 @@ mod progress_tests {
         )
         .await
         .expect("deferred guard must complete without starting the model");
-        assert_eq!(result.unwrap_err(), "chat_deferred_tools_pending");
+        assert_eq!(result.unwrap_err(), "chat_transcript_unavailable");
         let task = state
             .store
             .get_by_request(&owner, &input.request_id)
             .unwrap();
         assert_eq!(task.state, State::Failed);
-        let error = task.error.unwrap();
-        assert_eq!(error.code, "chat_deferred_tools_pending");
-        assert!(error.message.contains("Review its effects"));
+        assert!(task.result.is_none());
+        assert!(task.progress.is_none());
+        let error = task.error.as_ref().unwrap();
+        assert_eq!(error.code, "chat_transcript_unavailable");
+        assert!(error.message.contains("saved data"));
         assert!(error.message.contains("not be replayed automatically"));
         let events = state
             .store
             .protocol_events(&owner, &input.request_id, 0)
             .unwrap();
+        assert_eq!(events.events.len(), 2, "no model output may be published");
         assert_eq!(events.events.first().unwrap()["type"], "RUN_STARTED");
         assert_eq!(events.events.last().unwrap()["type"], "RUN_ERROR");
         assert_eq!(
             events.events.last().unwrap()["code"],
-            "chat_deferred_tools_pending"
+            "chat_transcript_unavailable"
         );
         let history = state
             .chats
@@ -6537,16 +6753,33 @@ mod progress_tests {
             .unwrap();
         assert_eq!(
             history.messages,
-            vec![new_user],
+            vec![previous_user, previous_assistant, new_user],
             "Current user input may already be saved on rejection"
         );
+        let metadata = state.chats.message_metadata(&chat_id).unwrap();
         assert_eq!(
-            state.chats.message_metadata(&chat_id).unwrap().len(),
-            1,
+            metadata.len(),
+            previous_metadata.len() + 1,
             "Existing transcript rows must not be imported before the guard"
         );
+        assert_eq!(
+            metadata
+                .iter()
+                .filter(|message| message.run_id == previous_task.run_id)
+                .cloned()
+                .collect::<Vec<_>>(),
+            previous_metadata,
+            "the previously committed message index must remain unchanged"
+        );
+        assert_eq!(
+            metadata
+                .iter()
+                .filter(|message| message.run_id == task.run_id && message.role == ChatRole::User)
+                .count(),
+            1
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), transcript);
-        assert!(!root.path().join("forbidden").exists());
+        assert!(!forbidden.exists());
         assert!(host.active.lock().await.is_empty());
     }
 
@@ -8214,6 +8447,38 @@ mod protocol_retry_tests {
         (host, service)
     }
 
+    async fn launch_agent_page(
+        service: &Arc<MobileLocalAppServiceHandle>,
+        published: &Value,
+    ) -> String {
+        let app_id = published["record"]["appId"].as_str().unwrap();
+        let revision = published["record"]["currentRevision"].as_u64().unwrap();
+        // The service defaults to a plain web host. Page calls also require a
+        // real running invocation, unlike the detached native-intent owner.
+        service
+            .request_value(json!({
+                "op":"configureTarget",
+                "target":{"platform":"ios","environment":"web","capabilities":["agent"]}
+            }))
+            .await
+            .unwrap();
+        service
+            .request_value(json!({
+                "op":"grant",
+                "appId":app_id,
+                "digest":published["release"]["digest"]
+            }))
+            .await
+            .unwrap();
+        let launch = service
+            .request_value(json!({"op":"start","appId":app_id,"revision":revision}))
+            .await
+            .unwrap();
+        assert_eq!(launch["run"]["phase"], "running");
+        assert_eq!(launch["run"]["revision"], revision);
+        launch["run"]["runId"].as_str().unwrap().to_owned()
+    }
+
     fn owner(app_id: &str) -> Owner {
         Owner {
             app_id: app_id.to_owned(),
@@ -8664,19 +8929,7 @@ mod protocol_retry_tests {
             .unwrap();
         let app_id = published["record"]["appId"].as_str().unwrap().to_owned();
         let revision = published["record"]["currentRevision"].as_u64().unwrap();
-        service
-            .request_value(json!({
-                "op":"grant",
-                "appId":app_id,
-                "digest":published["release"]["digest"]
-            }))
-            .await
-            .unwrap();
-        let launch = service
-            .request_value(json!({"op":"start","appId":app_id,"revision":revision}))
-            .await
-            .unwrap();
-        let invocation_id = launch["run"]["runId"].as_str().unwrap().to_owned();
+        let invocation_id = launch_agent_page(&service, &published).await;
         let (owner, _, _) = host
             .current_release(&app_id, revision, &invocation_id)
             .await
@@ -9023,6 +9276,7 @@ mod protocol_retry_tests {
                 .unwrap_err(),
             "request_conflict"
         );
+        let invocation_id = launch_agent_page(&service, &published).await;
         let other_chat = state
             .chats
             .create(
@@ -9035,6 +9289,18 @@ mod protocol_retry_tests {
             host.page(
                 &app_id,
                 "native-intent",
+                "agent.chats.send",
+                json!({"chatId":other_chat.chat_id,"input":raw.clone()}),
+            )
+            .await
+            .unwrap_err(),
+            "stale_app_invocation",
+            "a detached native owner cannot impersonate a running page invocation"
+        );
+        assert_eq!(
+            host.page(
+                &app_id,
+                &invocation_id,
                 "agent.chats.send",
                 json!({"chatId":other_chat.chat_id,"input":raw.clone()}),
             )
@@ -9071,7 +9337,7 @@ mod protocol_retry_tests {
             reopened_host
                 .page(
                     &app_id,
-                    "native-intent",
+                    &invocation_id,
                     "agent.chats.send",
                     json!({"chatId":chat.chat_id,"input":json!({
                         "threadId":chat.chat_id,
@@ -9133,6 +9399,10 @@ mod protocol_retry_tests {
             duplicate.await.unwrap().unwrap_err(),
             "agent_not_authorized"
         );
+        service
+            .request_value(json!({"op":"stop","appId":app_id}))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
