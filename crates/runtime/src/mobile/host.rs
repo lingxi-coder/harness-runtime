@@ -178,7 +178,7 @@ use lingxi_core::host::audio::{
 use lingxi_core::host::{AuthHandle, OrchestratorHandle, Platform, SlashCommandDispatcher};
 
 use secret::CredentialManager;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, OwnedMutexGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::ToolRegistry;
 use tool_workflow::WorkflowLauncher as _;
@@ -5171,7 +5171,7 @@ impl MobileEngineHandle {
         raw: ClientTextDto,
         images: Vec<ImageRefDto>,
         client_turn_id: Option<u64>,
-        transition: tokio::sync::MutexGuard<'_, ()>,
+        transition: OwnedMutexGuard<()>,
     ) -> Result<(), ClientError> {
         if let Ok(raw_text) = String::from_utf16(&raw.code_units) {
             let _ = self
@@ -5828,7 +5828,7 @@ impl MobileEngineHandle {
         command: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         client_turn_id: Option<u64>,
-        transition: tokio::sync::MutexGuard<'_, ()>,
+        transition: OwnedMutexGuard<()>,
     ) -> Result<(), ClientError> {
         if let Some(active) = self.active_cancel.lock().await.clone() {
             self.persist_and_enqueue_mobile_prompt(
@@ -6716,7 +6716,9 @@ impl MobileEngineHandle {
     /// Poll engine commands on the owned runtime. Foreign executors, including
     /// Swift's cooperative pool, can have much smaller stacks than our workers.
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
-        let owned_selection = matches!(&command, ClientCommand::SetSessionMode { .. });
+        if matches!(&command, ClientCommand::SetSessionMode { .. }) {
+            return self.submit_owned_mode(command).await;
+        }
         let handle = self
             .self_weak
             .upgrade()
@@ -6733,10 +6735,7 @@ impl MobileEngineHandle {
                 self.0.abort();
             }
         }
-        // A selection includes durable writes and projection publication. It
-        // owns the handle until that transaction settles even if the foreign
-        // caller or account closes while awaiting it.
-        let _abort = (!owned_selection).then(|| AbortCommand(task.abort_handle()));
+        let _abort = AbortCommand(task.abort_handle());
         task.await.map_err(|error| ClientError::Internal {
             message: format!("mobile command task failed: {error}"),
         })?
@@ -6765,8 +6764,44 @@ impl MobileEngineHandle {
     }
 
     async fn submit_impl(&self, command: ClientCommand) -> Result<(), ClientError> {
+        // This entry is also exposed by UniFFI. Mode selections use the same
+        // claim-before-detach path even when called through that entry.
+        if matches!(&command, ClientCommand::SetSessionMode { .. }) {
+            return self.submit_owned_mode(command).await;
+        }
+        let transition = self.loop_transition.clone().lock_owned().await;
+        self.submit_impl_with_transition(command, transition).await
+    }
+}
+
+impl MobileEngineHandle {
+    async fn submit_owned_mode(&self, command: ClientCommand) -> Result<(), ClientError> {
+        let handle = self
+            .self_weak
+            .upgrade()
+            .ok_or_else(|| ClientError::Internal {
+                message: "mobile engine is shutting down".into(),
+            })?;
+        // Until this guard is acquired, cancellation drops the waiter without
+        // leaving a task that can mutate a later selection or session owner.
+        let transition = self.loop_transition.clone().lock_owned().await;
+        // Once claimed, the task owns both the handle and guard until durable
+        // persistence and publication finish, even if its caller disappears.
+        let task = self.runtime().spawn(async move {
+            handle.submit_impl_with_transition(command, transition).await
+        });
+        task.await.map_err(|error| ClientError::Internal {
+            message: format!("mobile command task failed: {error}"),
+        })?
+    }
+
+    async fn submit_impl_with_transition(
+        &self,
+        command: ClientCommand,
+        transition: OwnedMutexGuard<()>,
+    ) -> Result<(), ClientError> {
         // Serialize session mutation and turn reservation with wakeup publication.
-        let _transition = self.loop_transition.lock().await;
+        let _transition = transition;
         if (matches!(
             &command,
             ClientCommand::ClearSession
@@ -8116,7 +8151,10 @@ impl MobileEngineHandle {
             }
         }
     }
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl MobileEngineHandle {
     /// Test a provider endpoint without exposing a stored credential to the
     /// foreign host or mutating the live engine configuration.
     ///

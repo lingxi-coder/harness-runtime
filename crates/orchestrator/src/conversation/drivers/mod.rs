@@ -3139,6 +3139,30 @@ impl ConversationOrchestrator {
         .await
     }
 
+    async fn recover_streaming_query_storage(
+        &self,
+        in_human_turn: bool,
+    ) -> Result<(), OrchestratorError> {
+        if in_human_turn {
+            self.recover_session_storage().await?;
+        } else {
+            self.check_storage_pause().await?;
+        }
+        Ok(())
+    }
+
+    async fn admit_streaming_query(
+        &self,
+        in_human_turn: bool,
+        turn_guard: &ProfileTurnGuard,
+    ) -> Result<(), OrchestratorError> {
+        self.recover_streaming_query_storage(in_human_turn).await?;
+        // The turn gate remains held through the profile transaction and the
+        // whole query, so later selections can only affect the next query.
+        self.admit_conversation_profile(turn_guard).await?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn try_run_turn_streaming_inputs(
         &self,
@@ -3153,15 +3177,35 @@ impl ConversationOrchestrator {
         projected_content: Option<ProjectedUserContent>,
         turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        if in_human_turn {
-            self.recover_session_storage().await?;
-        } else {
-            self.check_storage_pause().await?;
-        }
-        // Each call admits one fresh query, including a metadata re-wake. The
-        // StreamingTurnDriver retains these IDs through internal retries and
-        // tool continuations without re-entering this wrapper.
-        self.admit_conversation_profile(turn_guard).await?;
+        self.admit_streaming_query(in_human_turn, turn_guard).await?;
+        self.run_admitted_streaming_query(
+            prompt,
+            images,
+            user_cancel,
+            message_id,
+            transient_rewake,
+            in_human_turn,
+            queued_inputs,
+            row_token,
+            projected_content,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_admitted_streaming_query(
+        &self,
+        prompt: &str,
+        images: Vec<lingxi_core::types::ImageSource>,
+        user_cancel: Option<CancellationToken>,
+        message_id: Option<MessageId>,
+        transient_rewake: bool,
+        in_human_turn: bool,
+        queued_inputs: Option<Vec<QueuedPromptInput>>,
+        row_token: Option<String>,
+        projected_content: Option<ProjectedUserContent>,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
+        // Internal retries and tool continuations stay in this admitted query.
         self.prompt_runtime.begin_native_query();
         let suggestion_origin = queued_inputs
             .as_ref()
@@ -3868,6 +3912,7 @@ impl ConversationOrchestrator {
             None,
             None,
             Some(content),
+            None,
         )
         .await
     }
@@ -3925,10 +3970,10 @@ impl ConversationOrchestrator {
     }
 
     /// As [`Self::run_turn_streaming_with_cancel_image_sources`], notifying the
-    /// host once this request has acquired the orchestrator turn gate. Hosts
-    /// that move pending input into this call can use the callback as the
-    /// ownership boundary: cancellation before the gate leaves the input with
-    /// the caller; cancellation or errors after admission belong to this turn.
+    /// host once the turn gate, storage recovery and conversation profile
+    /// admission have succeeded. Hosts can use the callback as the input
+    /// ownership boundary: cancellation or failure before it leaves the
+    /// input with the caller; later outcomes belong to this turn.
     pub fn run_turn_streaming_with_cancel_image_sources_and_admission(
         &self,
         prompt: impl Into<Utf16JsonProjection>,
@@ -4062,8 +4107,7 @@ impl ConversationOrchestrator {
             let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
                 return Ok(TurnOutcome::Cancelled);
             };
-            on_admitted();
-            self.run_turn_streaming_source_with_origin_locked(
+            self.run_turn_streaming_source_with_origin_locked_and_admission(
                 &turn_guard,
                 prompt,
                 images,
@@ -4071,6 +4115,7 @@ impl ConversationOrchestrator {
                 message_id,
                 in_human_turn,
                 row_token,
+                Some(on_admitted),
             )
             .await
         })
@@ -4086,9 +4131,10 @@ impl ConversationOrchestrator {
         self.run_queued_prompt_batch_with_admission(inputs, cancel, Box::new(|| {}))
     }
 
-    /// Deliver a queued batch while reporting when it has acquired the
-    /// orchestrator turn gate. The callback runs exactly once after admission;
-    /// an empty batch or cancellation while waiting returns without calling it.
+    /// Deliver a queued batch and report when the turn gate, storage recovery
+    /// and conversation profile admission have succeeded. The callback runs
+    /// exactly once after admission; an empty batch, cancellation or failure
+    /// before admission returns without calling it.
     #[inline(never)]
     pub fn run_queued_prompt_batch_with_admission(
         &self,
@@ -4119,7 +4165,6 @@ impl ConversationOrchestrator {
                 };
                 turn_guard
             };
-            on_admitted();
             let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
             let prompt = inputs[primary]
                 .text
@@ -4138,6 +4183,7 @@ impl ConversationOrchestrator {
                 Some(inputs),
                 None,
                 None,
+                Some(on_admitted),
             )
             .await
         })
@@ -4152,6 +4198,31 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         in_human_turn: bool,
         row_token: Option<String>,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_streaming_source_with_origin_locked_and_admission(
+            turn_guard,
+            prompt,
+            images,
+            cancel,
+            message_id,
+            in_human_turn,
+            row_token,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_streaming_source_with_origin_locked_and_admission(
+        &self,
+        turn_guard: &ProfileTurnGuard,
+        prompt: Utf16JsonProjection,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
+        in_human_turn: bool,
+        row_token: Option<String>,
+        on_admitted: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
         let display = prompt.string_at("").unwrap_or_default().to_owned();
         let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
@@ -4181,6 +4252,7 @@ impl ConversationOrchestrator {
             }]),
             row_token,
             None,
+            on_admitted,
         )
         .await
     }
@@ -4197,7 +4269,51 @@ impl ConversationOrchestrator {
         queued_inputs: Option<Vec<QueuedPromptInput>>,
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
+        on_admitted: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        let direct_bash = queued_inputs
+            .as_ref()
+            .is_some_and(|inputs| queued_inputs_are_direct_bash(inputs));
+        if cancel.is_cancelled() && !direct_bash {
+            return self.cancel_unstarted_streaming_query().await;
+        }
+        self.recover_streaming_query_storage(in_human_turn).await?;
+        if cancel.is_cancelled() && !direct_bash {
+            return self.cancel_unstarted_streaming_query().await;
+        }
+        // A goal-only batch can become stale while storage recovery waits.
+        // Check immediately before profile admission without consuming valid
+        // retries, so a failed profile append leaves them available for retry.
+        if let Some(inputs) = queued_inputs.as_ref().filter(|inputs| {
+            !inputs.is_empty() && inputs.iter().all(|input| input.goal_retry_id.is_some())
+        }) {
+            let mut valid = false;
+            for id in inputs.iter().filter_map(|input| input.goal_retry_id.as_deref()) {
+                if self.goal_retry_is_valid(id).await {
+                    valid = true;
+                    break;
+                }
+            }
+            if !valid {
+                for id in inputs.iter().filter_map(|input| input.goal_retry_id.as_deref()) {
+                    valid |= self.recheck_goal_retry_or_discard_stale(id).await;
+                }
+            }
+            if !valid {
+                self.emit_turn_terminal("end_turn", &self.snapshot_cost_real().await).await;
+                return Ok(TurnOutcome::EndTurn);
+            }
+        }
+        self.admit_conversation_profile(turn_guard).await?;
+        // Recovery and durable profile publication can wait. If cancellation
+        // won during that work, ownership of ordinary input stays with the
+        // caller; direct Bash already has a durable side effect to settle.
+        if cancel.is_cancelled() && !direct_bash {
+            return self.cancel_unstarted_streaming_query().await;
+        }
+        if let Some(on_admitted) = on_admitted {
+            on_admitted();
+        }
         if in_human_turn {
             self.reset_goal_interruption();
         }
@@ -4256,14 +4372,7 @@ impl ConversationOrchestrator {
             prompt_len = prompt.len()
         );
         if cancel.is_cancelled() && !cancelled_direct_bash_no_query {
-            self.abort_startup_responses_websocket_prewarm();
-            if let Err(err) = self.api.close_responses_websocket_session().await {
-                tracing::warn!(
-                    error = %err,
-                    "failed to close responses websocket session after pre-cancelled streaming turn"
-                );
-            }
-            return Ok(TurnOutcome::Cancelled);
+            return self.cancel_unstarted_streaming_query().await;
         }
         // DEFERRED-3: GRANULAR user-ESC interrupt — do NOT race-drop the turn.
         // Previously this `select!`'d `try_run_turn_streaming` against
@@ -4286,7 +4395,7 @@ impl ConversationOrchestrator {
             async {
                 self.scope_api_session(
                     !self.prompt_is_interactive(),
-                    Box::pin(self.try_run_turn_streaming_inputs(
+                    Box::pin(self.run_admitted_streaming_query(
                         prompt,
                         images,
                         Some(cancel.clone()),
@@ -4296,7 +4405,6 @@ impl ConversationOrchestrator {
                         queued_inputs,
                         row_token,
                         projected_content,
-                        turn_guard,
                     )),
                 )
                 .await
@@ -4349,6 +4457,17 @@ impl ConversationOrchestrator {
                 Err(self.enrich_api_error(e))
             }
         }
+    }
+
+    async fn cancel_unstarted_streaming_query(&self) -> Result<TurnOutcome, OrchestratorError> {
+        self.abort_startup_responses_websocket_prewarm();
+        if let Err(err) = self.api.close_responses_websocket_session().await {
+            tracing::warn!(
+                error = %err,
+                "failed to close responses websocket session after pre-cancelled streaming turn"
+            );
+        }
+        Ok(TurnOutcome::Cancelled)
     }
 
     /// Load + base64-encode each pasted image path into an [`ImageSource`].

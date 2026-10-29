@@ -491,3 +491,233 @@ async fn busy_selection_never_interrupts_the_turn_and_next_query_admits_new_mode
     assert_eq!(calls.len(), 3);
     assert!(calls[2].system.as_ref().unwrap().display_text().contains("research, writing, learning"));
 }
+
+fn streaming_turn_with_admission<'a>(
+    orch: &'a ConversationOrchestrator,
+    batch: bool,
+    cancel: CancellationToken,
+    on_admitted: Box<dyn FnOnce() + Send + 'static>,
+) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
+    if batch {
+        orch.run_queued_prompt_batch_with_admission(
+            vec![crate::QueuedPromptInput {
+                text: "first".into(),
+                ..Default::default()
+            }],
+            cancel,
+            on_admitted,
+        )
+    } else {
+        orch.run_turn_streaming_with_cancel_image_sources_and_admission(
+            "first",
+            Vec::new(),
+            cancel,
+            on_admitted,
+        )
+    }
+}
+
+async fn wait_for_owned_turn_gate(orch: &ConversationOrchestrator) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while orch.turn_gate.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("turn acquired its gate");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_admission_callback_matches_profile_across_multiple_switches() {
+    use crate::test_support_stream::{content_block_start_text, content_block_start_tool_use,
+        content_block_stop, input_json_delta, message_delta_stop, message_start, message_stop, text_delta};
+    let model = crate::config::DEFAULT_MODEL;
+    let finish = |id| vec![message_start(id, model), content_block_start_text(0), text_delta(0, "done"),
+        content_block_stop(0), message_delta_stop("end_turn"), message_stop()];
+    for batch in [false, true] {
+        let stream = Arc::new(PausedFirstStream {
+            inner: crate::test_support_stream::MockStreamingApiClient::with_turns(vec![
+                vec![message_start("first", model), content_block_start_tool_use(0, lingxi_core::types::ToolUseId::new(), "ObserveProfile"),
+                    input_json_delta(0, "{}"), content_block_stop(0), message_delta_stop("tool_use"), message_stop()],
+                finish("follow-up"), finish("second-turn"),
+            ]),
+            calls: std::sync::atomic::AtomicUsize::new(0), entered: Default::default(), release: Default::default(),
+        });
+        let tool = Arc::new(ObserveProfileTool::default());
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool.clone());
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+            crate::OrchestratorConfig::default(), Arc::new(MockApiClient::new(Vec::new())), stream.clone(),
+            Arc::new(registry), noop_hook_executor(), Arc::new(NoOpPermissionGate), Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()), std::env::temp_dir(),
+        ));
+        assert!(tool.owner.set(Arc::downgrade(&orch)).is_ok());
+        let storage = orch.transcript.storage_append_lock.lock().await;
+        let (admitted_tx, mut admitted_rx) = tokio::sync::oneshot::channel();
+        let first_owner = orch.clone();
+        let first = tokio::spawn(async move {
+            streaming_turn_with_admission(&first_owner, batch, CancellationToken::new(), Box::new(move || {
+                let _ = admitted_tx.send(());
+            })).await
+        });
+        wait_for_owned_turn_gate(&orch).await;
+        assert!(matches!(admitted_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+
+        // A selection before query admission can still become the query's
+        // profile, but the host is not told it owns the input until that is so.
+        let selected = orch.set_conversation_mode(ConversationMode::Chat).await.unwrap();
+        assert_eq!((selected.active, selected.selected, selected.pending),
+            (ConversationMode::Code, ConversationMode::Chat, true));
+        drop(storage);
+        tokio::time::timeout(std::time::Duration::from_secs(5), admitted_rx).await.unwrap().unwrap();
+        assert_eq!((orch.conversation_mode().await.active, orch.profile_epoch().await), (ConversationMode::Chat, 1));
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream.entered.notified()).await.unwrap();
+
+        // After that callback, repeated selections affect only the next outer
+        // query, including the tool continuation of this one.
+        assert!(orch.set_conversation_mode(ConversationMode::Code).await.unwrap().pending);
+        assert!(!orch.set_conversation_mode(ConversationMode::Chat).await.unwrap().pending);
+        assert!(orch.set_conversation_mode(ConversationMode::Code).await.unwrap().pending);
+        stream.release.notify_one();
+        assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), first).await.unwrap().unwrap().unwrap(), TurnOutcome::EndTurn));
+        assert_eq!(*tool.observed.lock().await, vec![(ConversationMode::Chat, 1)]);
+        let calls = stream.inner.captured_calls().await;
+        assert_eq!(calls.len(), 2);
+        for call in &calls {
+            assert!(call.system.as_ref().unwrap().display_text().contains("research, writing, learning"));
+        }
+        orch.run_turn_streaming_with_cancel("second", CancellationToken::new()).await.unwrap();
+        assert_eq!((orch.conversation_mode().await.active, orch.profile_epoch().await), (ConversationMode::Code, 4));
+        let calls = stream.inner.captured_calls().await;
+        assert_eq!(calls.len(), 3);
+        assert!(calls[2].system.as_ref().unwrap().display_text().contains("command-line coding assistant"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_admission_callback_is_not_sent_for_cancelled_storage_waiter() {
+    for batch in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (orch, _, _) = durable_orchestrator(root.path());
+        let turn = orch.turn_gate.lock().await;
+        assert!(orch.set_conversation_mode(ConversationMode::Chat).await.unwrap().pending);
+        drop(turn);
+        let storage = orch.transcript.storage_append_lock.lock().await;
+        let (admitted_tx, mut admitted_rx) = tokio::sync::oneshot::channel();
+        let cancel = CancellationToken::new();
+        let waiter_cancel = cancel.clone();
+        let owner = orch.clone();
+        let waiter = tokio::spawn(async move {
+            streaming_turn_with_admission(&owner, batch, waiter_cancel, Box::new(move || {
+                let _ = admitted_tx.send(());
+            })).await
+        });
+        wait_for_owned_turn_gate(&orch).await;
+        assert!(matches!(admitted_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        cancel.cancel();
+        drop(storage);
+        assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), waiter).await.unwrap().unwrap().unwrap(), TurnOutcome::Cancelled));
+        assert!(matches!(admitted_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)));
+        assert!(orch.snapshot_history().await.is_empty());
+        let state = orch.conversation_mode().await;
+        assert_eq!((state.active, state.selected, state.pending), (ConversationMode::Code, ConversationMode::Chat, true));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_admission_callback_waits_for_profile_publication_after_cancellation() {
+    for batch in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (orch, _, path) = durable_orchestrator(root.path());
+        let turn = orch.turn_gate.lock().await;
+        assert!(orch.set_conversation_mode(ConversationMode::Chat).await.unwrap().pending);
+        drop(turn);
+        let snapshot = orch.prompt_runtime.prompt_snapshot.lock().await;
+        let (admitted_tx, mut admitted_rx) = tokio::sync::oneshot::channel();
+        let cancel = CancellationToken::new();
+        let waiter_cancel = cancel.clone();
+        let owner = orch.clone();
+        let waiter = tokio::spawn(async move {
+            streaming_turn_with_admission(&owner, batch, waiter_cancel, Box::new(move || {
+                let _ = admitted_tx.send(());
+            })).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let source = std::fs::read_to_string(&path).unwrap_or_default();
+                if source.lines().any(|line| line.contains("\"admittedMode\":\"chat\"") && line.contains("\"pending\":false")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(matches!(admitted_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        cancel.cancel();
+        assert!(orch.turn_gate.try_lock().is_err());
+        drop(snapshot);
+        assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), waiter).await.unwrap().unwrap().unwrap(), TurnOutcome::Cancelled));
+        assert!(matches!(admitted_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)));
+        assert!(orch.snapshot_history().await.is_empty());
+        let state = orch.conversation_mode().await;
+        assert_eq!((state.active, state.selected, state.pending), (ConversationMode::Chat, ConversationMode::Chat, false));
+        let cold = session::JsonlWriter::session_mode_transition_from_source(
+            &std::fs::read_to_string(path).unwrap(), &state.session_id,
+        ).unwrap();
+        assert_eq!((cold.active, cold.pending), (ConversationMode::Chat, false));
+    }
+}
+
+#[tokio::test]
+async fn streaming_admission_failure_keeps_input_with_caller_and_profile_pending() {
+    for batch in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (orch, _, path) = durable_orchestrator(root.path());
+        let turn = orch.turn_gate.lock().await;
+        assert!(orch.set_conversation_mode(ConversationMode::Chat).await.unwrap().pending);
+        drop(turn);
+        let backup = path.with_extension("backup");
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let (admitted_tx, mut admitted_rx) = tokio::sync::oneshot::channel();
+        let result = streaming_turn_with_admission(&orch, batch, CancellationToken::new(), Box::new(move || {
+            let _ = admitted_tx.send(());
+        })).await;
+        assert!(result.is_err());
+        assert!(matches!(admitted_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)));
+        assert!(orch.snapshot_history().await.is_empty());
+        let state = orch.conversation_mode().await;
+        assert_eq!((state.active, state.selected, state.pending), (ConversationMode::Code, ConversationMode::Chat, true));
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&backup, &path).unwrap();
+        let cancel = CancellationToken::new();
+        let admitted_cancel = cancel.clone();
+        let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+        assert!(matches!(streaming_turn_with_admission(&orch, batch, cancel, Box::new(move || {
+            let _ = admitted_tx.send(());
+            admitted_cancel.cancel();
+        })).await.unwrap(), TurnOutcome::Cancelled));
+        admitted_rx.await.unwrap();
+        assert_eq!((orch.conversation_mode().await.active, orch.profile_epoch().await), (ConversationMode::Chat, 1));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_direct_bash_admits_and_persists_its_source_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let (orch, _, path) = durable_orchestrator(root.path());
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+    let inputs = vec![
+        crate::QueuedPromptInput { text: "<system-reminder>direct Bash result follows</system-reminder>".into(), is_meta: true, ..Default::default() },
+        crate::QueuedPromptInput { text: "<bash-input>printf done</bash-input>".into(),
+            prompt_ingress_kind: Some(crate::request_context::PromptIngressKind::DirectBash), ..Default::default() },
+    ];
+    let outcome = orch.run_queued_prompt_batch_with_admission(inputs, cancel, Box::new(move || {
+        let _ = admitted_tx.send(());
+    })).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Cancelled));
+    admitted_rx.await.unwrap();
+    assert_eq!(orch.snapshot_history().await.len(), 2);
+    let source = std::fs::read_to_string(path).unwrap();
+    assert!(source.contains("direct Bash result follows"));
+    assert!(source.contains("printf done"));
+}

@@ -11987,6 +11987,116 @@ fn mobile_profile_cancellation_keeps_the_owned_handle_until_durable_commit() {
     });
 }
 
+fn assert_cancelled_mode_waiter_cannot_overwrite_later_selection(
+    replace_session: bool,
+    direct_entry: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let (handle, listener) = build_submit_handle(root.path());
+    let foreign = tokio::runtime::Runtime::new().unwrap();
+    foreign.block_on(async {
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Code,
+            })
+            .await
+            .unwrap();
+        let old_session = handle.inner().orchestrator.current_session_id().await;
+        let transition = handle.loop_transition.clone().lock_owned().await;
+        let owners_before = Arc::strong_count(&handle);
+
+        // Poll once while the host transition is held. Dropping the foreign
+        // caller at this point must not leave a detached mode transaction.
+        let command = ClientCommand::SetSessionMode {
+            mode: SessionModeDto::Chat,
+        };
+        let mut cancelled: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), ClientError>> + '_>,
+        > = if direct_entry {
+            Box::pin(handle.submit_impl(command))
+        } else {
+            Box::pin(handle.submit(command))
+        };
+        assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        drop(cancelled);
+        assert_eq!(
+            Arc::strong_count(&handle),
+            owners_before,
+            "a cancelled selection waiting for the host lock must not retain a detached handle"
+        );
+        drop(transition);
+
+        if replace_session {
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+                .unwrap();
+        }
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Code,
+            })
+            .await
+            .unwrap();
+        let state = handle.inner().orchestrator.conversation_mode().await;
+        assert_eq!(state.selected, session::jsonl::SessionMode::Code);
+        assert!(!state.pending);
+        if replace_session {
+            assert_ne!(state.session_id, old_session.as_uuid().to_string());
+        } else {
+            assert_eq!(state.session_id, old_session.as_uuid().to_string());
+        }
+        assert!(
+            drained(&listener).await.iter().all(|event| !matches!(
+                event,
+                Ev::SessionModeChanged {
+                    mode: SessionModeDto::Chat,
+                    ..
+                }
+            )),
+            "the cancelled selection must never publish to either owner"
+        );
+    });
+}
+
+#[test]
+fn mobile_cancelled_unclaimed_mode_cannot_overwrite_a_newer_selection() {
+    for direct_entry in [false, true] {
+        assert_cancelled_mode_waiter_cannot_overwrite_later_selection(false, direct_entry);
+    }
+}
+
+#[test]
+fn mobile_cancelled_unclaimed_mode_cannot_mutate_a_replacement_session() {
+    for direct_entry in [false, true] {
+        assert_cancelled_mode_waiter_cannot_overwrite_later_selection(true, direct_entry);
+    }
+}
+
+#[test]
+fn foreign_small_stack_can_select_session_mode_without_a_tokio_runtime() {
+    let root = tempfile::tempdir().expect("foreign mode root");
+    let (handle, _) = build_submit_handle(root.path());
+    std::thread::Builder::new()
+        .name("foreign-mode-selection".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            futures::executor::block_on(handle.submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            }))
+            .expect("a foreign executor can select the session mode");
+            let state =
+                futures::executor::block_on(handle.inner().orchestrator.conversation_mode());
+            assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn mobile_initialized_long_session_does_not_reread_identity_on_commands() {
     use std::io::Write;
