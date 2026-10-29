@@ -103,7 +103,7 @@ pub use transcript_compact::{
     TRANSCRIPT_LOCAL_GC_ENV,
 };
 pub use uuid::validate_uuid;
-pub use writer::JsonlWriter;
+pub use writer::{CapturedChatTranscript, ChatTranscriptCheckpoint, JsonlWriter};
 
 // New M5-08 public surface.
 pub use loader::{

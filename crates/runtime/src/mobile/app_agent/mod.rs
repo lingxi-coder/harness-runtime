@@ -43,6 +43,7 @@ pub struct AppAgentChatResume {
     pub session_id: SessionId,
     pub transcript_path: PathBuf,
     pub replayed: Option<orchestrator::resume::ReplayedSession>,
+    pub writer: Arc<session::jsonl::JsonlWriter>,
 }
 const BUILTINS: &[&str] = &[
     "Read",
@@ -494,16 +495,9 @@ impl AppAgentFactory {
         .with_read_state_map(context.read_file_state.clone())
         .with_model_resolution_context_provider(self.model_resolution.clone());
         if let Some(chat) = &chat {
-            let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
-                chat.transcript_path.clone(),
-                context.fs.clone(),
-            ));
-            let (compactor, cache_slot) =
-                crate::side_chat::composition::compaction(api.clone(), &model.model_id);
-            builder = builder
-                .with_jsonl_writer(writer)
-                .with_compaction(compactor)
-                .with_cache_safe_slot(cache_slot);
+            // Persistent Chats use an exclusively owned, non-rewriting
+            // writer. Compaction cannot preserve the sealed transcript proof.
+            builder = builder.with_jsonl_writer(chat.writer.clone());
         }
         let orch = ConversationOrchestrator::into_shared(builder);
         orch.switch_model(&model.model_id, Some(&model.provider_id))

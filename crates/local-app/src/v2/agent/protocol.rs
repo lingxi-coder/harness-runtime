@@ -58,6 +58,14 @@ pub struct ProtocolMessageDigest {
     pub sha256: String,
 }
 
+/// Fingerprint the ordered, committed Chat history used to normalize a run.
+/// The digest is host-owned admission evidence and is never part of the
+/// browser request or persisted task input.
+pub fn history_fingerprint(messages: &[ProtocolMessageDigest]) -> String {
+    let bytes = serde_json::to_vec(messages).expect("ProtocolMessageDigest is serializable");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 /// Normalized run data after schema, options and canonical-history checks.
 #[derive(Clone, Debug)]
 pub struct NormalizedInput {
@@ -404,16 +412,6 @@ pub fn normalize_run_input(
     let message_already_persisted = verify_history_suffix(&submitted, canonical_history)?;
     let user_digest = submitted.last().expect("nonempty AG-UI messages");
     let input_digest = run_input_fingerprint(value)?;
-    if message_already_persisted
-        && canonical_history
-            .last()
-            .is_none_or(|stored| stored.id != user_digest.id)
-    {
-        return Err(error(
-            "agui_message_already_used",
-            "The AG-UI user message is already present earlier in this thread.",
-        ));
-    }
     let input = normalize_user_message(
         &run_id,
         &thread_id,
@@ -772,6 +770,7 @@ fn normalize_user_message(
         protocol_parent_run_id: parent_run_id.map(str::to_owned),
         protocol_input_digest: Some(input_digest.to_owned()),
         protocol_message_sha256: Some(message_sha256.to_owned()),
+        protocol_history_digest: None,
         prompt: text,
         attachments: Vec::new(),
         content_parts: parts,

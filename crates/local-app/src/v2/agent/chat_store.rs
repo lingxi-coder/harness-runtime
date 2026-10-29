@@ -87,6 +87,9 @@ struct IndexState {
     /// A failed index write may already have renamed the new index. Never
     /// serve or overwrite stale in-memory state after that point.
     uncertain: bool,
+    // Host task authority, not persisted Chat metadata. Until the task ledger
+    // confirms a terminal commit, an assistant is evidence only.
+    committed_assistants: BTreeMap<String, (String, String, String)>,
 }
 
 #[derive(Default)]
@@ -364,6 +367,7 @@ impl ChatStore {
             index: Mutex::new(IndexState {
                 index,
                 uncertain: false,
+                committed_assistants: BTreeMap::new(),
             }),
             cleanup_diagnostics: Mutex::new(CleanupDiagnostics::default()),
             #[cfg(test)]
@@ -467,13 +471,23 @@ impl ChatStore {
         }
     }
 
-    /// Reconcile interrupted Chat metadata only after the durable task ledger
-    /// has completed its own startup recovery. A Task that terminalized before
-    /// Chat finish metadata was written closes the Chat as Idle; interrupted,
-    /// missing, or previously in-flight tasks leave the Chat Interrupted.
+    /// Reconcile Chat metadata only after the durable task ledger has completed
+    /// its own startup recovery. Every protocol turn must belong to a successful
+    /// task; transcript rows are checked against their task and tool-use owners
+    /// before a resumed request reaches the model.
     pub fn reconcile_startup(&self, task_states: &BTreeMap<String, State>) -> Result<(), AppError> {
         self.change(|index| {
             for record in index.chats.values_mut() {
+                let has_unverified_protocol_turn = record
+                    .protocol_messages
+                    .iter()
+                    .any(|message| task_states.get(&message.run_id) != Some(&State::Succeeded));
+                if has_unverified_protocol_turn {
+                    record.summary.state = ChatState::Interrupted;
+                    record.summary.updated_at = now();
+                    record.active_run_id = None;
+                    continue;
+                }
                 if record.summary.state != ChatState::Running {
                     continue;
                 }
@@ -482,10 +496,15 @@ impl ChatStore {
                     .as_deref()
                     .and_then(|run_id| task_states.get(run_id));
                 record.summary.state = match task_state {
-                    Some(State::Succeeded | State::Failed | State::Cancelled) => ChatState::Idle,
-                    Some(State::Queued | State::Running | State::Interrupted) | None => {
-                        ChatState::Interrupted
-                    }
+                    Some(State::Succeeded) => ChatState::Idle,
+                    Some(
+                        State::Queued
+                        | State::Running
+                        | State::Failed
+                        | State::Cancelled
+                        | State::Interrupted,
+                    )
+                    | None => ChatState::Interrupted,
                 };
                 record.summary.updated_at = now();
                 record.active_run_id = None;
@@ -518,6 +537,84 @@ impl ChatStore {
             return Err(AppError::ChatStorageUncertain);
         }
         Ok(state)
+    }
+
+    /// Fence cached instances immediately after an uncertain cross-store write.
+    /// No rollback or second successful disk write is required to hide results.
+    pub fn quarantine_storage(&self) {
+        if let Ok(mut state) = self.index.lock() {
+            state.uncertain = true;
+        }
+    }
+
+    fn assistant_matches(record: &ChatRecord, run_id: &str, message_id: &str, text: &str) -> bool {
+        record.protocol_messages.iter().any(|entry| {
+            entry.run_id == run_id
+                && entry.id == message_id
+                && entry.role == "assistant"
+                && entry.message == json!({"id":message_id,"role":"assistant","content":text})
+        })
+    }
+
+    /// Verify bytes already committed to ChatStore before the task authority can
+    /// publish success. This does not make the assistant publicly visible.
+    pub fn verify_protocol_assistant(
+        &self,
+        chat_id: &str,
+        run_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<(), AppError> {
+        let mut state = self.lock_index()?;
+        if !state
+            .chats
+            .get(chat_id)
+            .is_some_and(|record| Self::assistant_matches(record, run_id, message_id, text))
+        {
+            state.uncertain = true;
+            return Err(AppError::ChatStorageUncertain);
+        }
+        Ok(())
+    }
+
+    /// Install the task ledger's committed assistant authority at startup or
+    /// after terminal commit. Never infer commitment from Chat active_run.
+    pub fn set_committed_assistants(
+        &self,
+        accepted: &BTreeMap<String, (String, String, String)>,
+    ) -> Result<(), AppError> {
+        let mut state = self.lock_index()?;
+        for (run_id, (chat_id, message_id, text)) in accepted {
+            if state
+                .creations
+                .get(chat_id)
+                .is_some_and(|creation| creation.deleted)
+            {
+                continue;
+            }
+            if !state
+                .chats
+                .get(chat_id)
+                .is_some_and(|record| Self::assistant_matches(record, run_id, message_id, text))
+            {
+                state.uncertain = true;
+                return Err(AppError::ChatStorageUncertain);
+            }
+        }
+        state.committed_assistants = accepted.clone();
+        Ok(())
+    }
+
+    fn message_visible(state: &IndexState, chat_id: &str, message: &StoredProtocolMessage) -> bool {
+        message.role != "assistant"
+            || state
+                .committed_assistants
+                .get(&message.run_id)
+                .is_some_and(|(chat, id, text)| {
+                    chat == chat_id
+                        && id == &message.id
+                        && message.message == json!({"id":id,"role":"assistant","content":text})
+                })
     }
 
     fn commit_index(&self, state: &mut IndexState, next: ChatIndex) -> Result<(), AppError> {
@@ -832,6 +929,49 @@ impl ChatStore {
         })
     }
 
+    /// Correct one recovered user row to its trusted task owner. The expected
+    /// old run ID makes this repair conditional on the row read by the caller.
+    pub fn repair_recovered_message_run_id(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        expected_run_id: &str,
+        tool_owner_run_id: &str,
+    ) -> Result<(), AppError> {
+        if !safe_id(chat_id)
+            || message_id.is_empty()
+            || message_id.len() > 128
+            || expected_run_id.is_empty()
+            || tool_owner_run_id.is_empty()
+            || expected_run_id.len() > 128
+            || tool_owner_run_id.len() > 128
+        {
+            return Err(invalid("invalid Chat message selector"));
+        }
+        self.change(|index| {
+            let record = index
+                .chats
+                .get_mut(chat_id)
+                .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
+            let message = record
+                .messages
+                .get_mut(message_id)
+                .ok_or_else(|| AppError::NotFound("App Chat message".into()))?;
+            if message.role != ChatRole::User {
+                return Err(invalid("recovered task rows must be Chat user messages"));
+            }
+            if message.run_id == tool_owner_run_id {
+                return Ok(());
+            }
+            if message.run_id != expected_run_id {
+                return Err(invalid("Chat message identity conflict"));
+            }
+            message.run_id = tool_owner_run_id.to_owned();
+            record.summary.updated_at = now();
+            Ok(())
+        })
+    }
+
     pub fn message_metadata(&self, chat_id: &str) -> Result<Vec<ChatMessageMetadata>, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -1032,6 +1172,7 @@ impl ChatStore {
         Ok(record
             .protocol_messages
             .iter()
+            .filter(|message| Self::message_visible(&index, chat_id, message))
             .map(|message| ProtocolMessageDigest {
                 id: message.id.clone(),
                 role: message.role.clone(),
@@ -1052,7 +1193,9 @@ impl ChatStore {
                 .ok_or_else(|| AppError::NotFound("App Chat".into()))?
                 .protocol_messages
                 .iter()
-                .find(|message| message.id == message_id)
+                .find(|message| {
+                    message.id == message_id && Self::message_visible(&index, chat_id, message)
+                })
                 .map(|message| message.message.clone())
                 .ok_or_else(|| AppError::NotFound("AG-UI chat message".into()))?
         };
@@ -1088,9 +1231,13 @@ impl ChatStore {
                 .chats
                 .get(chat_id)
                 .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
+            let visible = record
+                .protocol_messages
+                .iter()
+                .filter(|message| Self::message_visible(&index, chat_id, message))
+                .collect::<Vec<_>>();
             let start = if let Some(cursor) = cursor {
-                record
-                    .protocol_messages
+                visible
                     .iter()
                     .position(|message| message.id == cursor)
                     .map(|position| position + 1)
@@ -1098,9 +1245,13 @@ impl ChatStore {
             } else {
                 0
             };
-            let remaining = &record.protocol_messages[start..];
+            let remaining = &visible[start..];
             (
-                remaining.iter().take(limit).cloned().collect::<Vec<_>>(),
+                remaining
+                    .iter()
+                    .take(limit)
+                    .map(|entry| (**entry).clone())
+                    .collect::<Vec<_>>(),
                 remaining.len() > limit,
             )
         };
@@ -2334,6 +2485,79 @@ mod tests {
     }
 
     #[test]
+    fn startup_blocks_protocol_history_without_a_successful_ledger_task() {
+        for task_state in [
+            None,
+            Some(State::Failed),
+            Some(State::Cancelled),
+            Some(State::Interrupted),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = ChatStore::open(root.path()).unwrap();
+            let chat = store
+                .create(
+                    &uuid::Uuid::new_v4().to_string(),
+                    None,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .unwrap();
+            store
+                .record_protocol_message(
+                    &chat.chat_id,
+                    "task-run",
+                    &json!({"id":"user-1","role":"user","content":"question"}),
+                )
+                .unwrap();
+            drop(store);
+
+            let recovered = ChatStore::open(root.path()).unwrap();
+            let mut task_states = BTreeMap::new();
+            if let Some(state) = task_state {
+                task_states.insert("task-run".into(), state);
+            }
+            recovered.reconcile_startup(&task_states).unwrap();
+            assert_eq!(
+                recovered.get(&chat.chat_id).unwrap().state,
+                ChatState::Interrupted,
+                "history without a confirmed successful task must remain untrusted"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_only_legacy_history_stays_unavailable_to_protocol_turns() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let chat = store
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        store
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: "assistant-id".into(),
+                    run_id: "missing-task".into(),
+                    role: ChatRole::Assistant,
+                    created_at: 1,
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        drop(store);
+
+        let recovered = ChatStore::open(root.path()).unwrap();
+        recovered.reconcile_startup(&BTreeMap::new()).unwrap();
+        assert_eq!(recovered.get(&chat.chat_id).unwrap().state, ChatState::Idle);
+        assert!(recovered
+            .has_legacy_history_without_protocol(&chat.chat_id)
+            .unwrap());
+    }
+
+    #[test]
     fn messages_are_deduplicated_and_listed_in_creation_order() {
         let root = tempfile::tempdir().unwrap();
         let store = ChatStore::open(root.path()).unwrap();
@@ -2434,5 +2658,103 @@ mod tests {
             recovered.protocol_history_digests(&chat.chat_id).unwrap(),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn assistant_history_is_hidden_until_task_ledger_commits_it() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let chat = store
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let run_id = "private-run-id";
+        let user = json!({"id":"user-1","role":"user","content":"question"});
+        let assistant = json!({"id":"assistant-1","role":"assistant","content":"answer"});
+        store
+            .record_protocol_message(&chat.chat_id, run_id, &user)
+            .unwrap();
+        store
+            .record_protocol_message(&chat.chat_id, run_id, &assistant)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .protocol_history_page(&chat.chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![user.clone()]
+        );
+        assert_eq!(
+            store.protocol_history_digests(&chat.chat_id).unwrap().len(),
+            1
+        );
+        assert!(store
+            .protocol_message(&chat.chat_id, "assistant-1")
+            .is_err());
+        store
+            .verify_protocol_assistant(&chat.chat_id, run_id, "assistant-1", "answer")
+            .unwrap();
+
+        store
+            .set_committed_assistants(&BTreeMap::from([(
+                run_id.to_owned(),
+                (chat.chat_id.clone(), "assistant-1".into(), "answer".into()),
+            )]))
+            .unwrap();
+        assert_eq!(
+            store
+                .protocol_history_page(&chat.chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![user, assistant]
+        );
+    }
+
+    #[test]
+    fn uncertain_assistant_index_write_stays_hidden_after_reopen() {
+        for stage in [PersistStage::BeforeRename, PersistStage::AfterRename] {
+            let root = tempfile::tempdir().unwrap();
+            let store = ChatStore::open(root.path()).unwrap();
+            let chat = store
+                .create(
+                    &uuid::Uuid::new_v4().to_string(),
+                    None,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .unwrap();
+            let run_id = "task-private-uuid";
+            let user = json!({"id":"user-1","role":"user","content":"question"});
+            let assistant =
+                json!({"id":"assistant-1","role":"assistant","content":"private answer"});
+            store
+                .record_protocol_message(&chat.chat_id, run_id, &user)
+                .unwrap();
+            *store.injected_persist_failure.lock().unwrap() = Some(stage);
+            assert!(matches!(
+                store.record_protocol_message(&chat.chat_id, run_id, &assistant),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(matches!(
+                store.protocol_history_page(&chat.chat_id, None, 10),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            drop(store);
+
+            let recovered = ChatStore::open(root.path()).unwrap();
+            assert_eq!(
+                recovered
+                    .protocol_history_page(&chat.chat_id, None, 10)
+                    .unwrap()
+                    .messages,
+                vec![user]
+            );
+            assert!(recovered
+                .protocol_message(&chat.chat_id, "assistant-1")
+                .is_err());
+        }
     }
 }

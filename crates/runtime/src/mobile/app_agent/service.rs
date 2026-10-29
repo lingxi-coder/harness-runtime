@@ -7,8 +7,9 @@ use lingxi_core::{
     types::{ConversationMessage, MessageId, ToolUseId},
 };
 use local_app::v2::agent::{
-    AgentStore, AttachmentMetadata, ChatMessageMetadata, ChatRole, ChatState, ChatStore, Input,
-    Owner, ProtocolEventPage, Settings, State, TaskResult,
+    AgentStore, AttachmentMetadata, ChatMessageMetadata, ChatRole, ChatState, ChatStore,
+    ChatTranscriptCheckpoint, Input, Owner, ProtocolCommitPermit, ProtocolEventPage, Settings,
+    State, TaskResult,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -38,6 +39,16 @@ pub struct AppAgentHost {
     before_started_event: Mutex<Option<Box<dyn FnOnce(&Path, &str) + Send>>>,
     #[cfg(test)]
     fail_started_event_schema: AtomicBool,
+    #[cfg(test)]
+    duplicate_chat_wait_started: Mutex<Option<oneshot::Sender<()>>>,
+    #[cfg(test)]
+    duplicate_pre_admission_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    #[cfg(test)]
+    duplicate_probe_none_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    chat_executor_init_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    #[cfg(test)]
+    duplicate_task_snapshot_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 struct AppAgentState {
     store: Arc<AgentStore>,
@@ -184,6 +195,7 @@ struct Control {
     chats: Arc<ChatStore>,
     chat_id: Option<String>,
     user_message_id: Option<String>,
+    chat_orchestrator: Mutex<Option<Arc<orchestrator::ConversationOrchestrator>>>,
     chat_persisted: watch::Sender<Option<Result<(), String>>>,
     chat_commit: AsyncMutex<Option<oneshot::Receiver<()>>>,
     attachment_metadata: Vec<AttachmentMetadata>,
@@ -196,6 +208,10 @@ struct Control {
     model_failure: Mutex<Option<String>>,
     timed_out: AtomicBool,
     usage: AsyncMutex<Option<Value>>,
+    #[cfg(test)]
+    fail_after_final_ledger_before_chat_authority: AtomicBool,
+    #[cfg(test)]
+    after_final_ledger_error_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 // JSON numbers remain exact in both the JavaScript bridge and the native host.
 const MAX_NATIVE_OUTPUT_BYTES: u64 = 9_007_199_254_740_991;
@@ -292,6 +308,12 @@ impl AppAgentState {
             AgentStore::open(&root.join("tasks")).map_err(|_| "agent_storage_unavailable")?,
         );
         let chats = Arc::new(ChatStore::open(&root).map_err(chat_store_open_error)?);
+        let committed_assistants = store
+            .committed_protocol_assistants()
+            .map_err(|_| "agent_storage_unavailable")?;
+        chats
+            .set_committed_assistants(&committed_assistants)
+            .map_err(chat_store_open_error)?;
         let task_states = store
             .recovery_states(app_id)
             .map_err(|_| "agent_storage_unavailable")?;
@@ -452,13 +474,37 @@ impl Control {
     }
 
     fn append_protocol_event(&self, event: Value) -> Result<(), String> {
+        self.append_protocol_event_inner(event, None)
+    }
+
+    fn append_protocol_commit_event(
+        &self,
+        permit: &ProtocolCommitPermit<'_>,
+        event: Value,
+    ) -> Result<(), String> {
+        self.append_protocol_event_inner(event, Some(permit))
+    }
+
+    fn append_protocol_event_inner(
+        &self,
+        event: Value,
+        permit: Option<&ProtocolCommitPermit<'_>>,
+    ) -> Result<(), String> {
         let Some(_) = self.protocol_thread_id else {
             return Ok(());
         };
-        match self.store.append_event(&self.owner, &self.id, event) {
+        let append = if let Some(permit) = permit {
+            self.store
+                .append_protocol_commit_event(permit, &self.owner, &self.id, event)
+        } else {
+            self.store.append_event(&self.owner, &self.id, event)
+        };
+        match append {
             Ok(_) => Ok(()),
             Err(_) => {
                 self.protocol_events_failed.store(true, Ordering::Release);
+                self.store.quarantine_storage();
+                self.chats.quarantine_storage();
                 if let Ok(mut failure) = self.model_failure.lock() {
                     *failure = Some("agent_storage_unavailable".into());
                 }
@@ -471,7 +517,11 @@ impl Control {
 
     // Only a successfully committed task may publish its one accepted answer.
     // The same value is stored in chat history and emitted to the pinned SDK.
-    fn publish_accepted_result(&self, result: &TaskResult) -> Result<(), String> {
+    fn publish_accepted_result(
+        &self,
+        permit: &ProtocolCommitPermit<'_>,
+        result: &TaskResult,
+    ) -> Result<(), String> {
         if self.protocol_thread_id.is_none() {
             return Ok(());
         }
@@ -484,18 +534,27 @@ impl Control {
             self.chats
                 .record_protocol_message(chat_id, &self.id, &message)
                 .map_err(|_| "chat_storage_unavailable")?;
+            self.chats
+                .verify_protocol_assistant(chat_id, &self.id, message_id, &result.text)
+                .map_err(|_| "chat_storage_unavailable")?;
         }
-        self.append_protocol_event(json!({
-            "type":"TEXT_MESSAGE_START", "messageId":message_id, "role":"assistant"
-        }))?;
+        self.append_protocol_commit_event(
+            permit,
+            json!({
+                "type":"TEXT_MESSAGE_START", "messageId":message_id, "role":"assistant"
+            }),
+        )?;
         // Keep each event below the serialized 3 MiB limit even when every
         // byte requires JSON escaping. Never split a UTF-8 character.
         // Empty deltas are valid and preserve structured-only messages.
         const CHUNK_BYTES: usize = 256 * 1024;
         if result.text.is_empty() {
-            self.append_protocol_event(json!({
-                "type":"TEXT_MESSAGE_CONTENT", "messageId":message_id, "delta":""
-            }))?;
+            self.append_protocol_commit_event(
+                permit,
+                json!({
+                    "type":"TEXT_MESSAGE_CONTENT", "messageId":message_id, "delta":""
+                }),
+            )?;
         } else {
             let mut start = 0;
             while start < result.text.len() {
@@ -503,16 +562,22 @@ impl Control {
                 while !result.text.is_char_boundary(end) {
                     end -= 1;
                 }
-                self.append_protocol_event(json!({
-                    "type":"TEXT_MESSAGE_CONTENT", "messageId":message_id,
-                    "delta":&result.text[start..end]
-                }))?;
+                self.append_protocol_commit_event(
+                    permit,
+                    json!({
+                        "type":"TEXT_MESSAGE_CONTENT", "messageId":message_id,
+                        "delta":&result.text[start..end]
+                    }),
+                )?;
                 start = end;
             }
         }
-        self.append_protocol_event(json!({
-            "type":"TEXT_MESSAGE_END", "messageId":message_id
-        }))
+        self.append_protocol_commit_event(
+            permit,
+            json!({
+                "type":"TEXT_MESSAGE_END", "messageId":message_id
+            }),
+        )
     }
 
     fn commit_terminal(
@@ -522,67 +587,108 @@ impl Control {
         usage: Option<Value>,
         error: Option<String>,
     ) -> Result<(local_app::v2::agent::Task, bool), String> {
-        self.store
-            .with_protocol_commit(|| {
-                // Once any event write has failed, its bytes may be partial or
-                // fully written without a successful sync. Never append another
-                // event before persisting this run as interrupted.
-                if self.protocol_events_failed.load(Ordering::Acquire) {
-                    let task = self
+        let commit = self.store.with_protocol_commit_permit(|permit| {
+            let result: Result<(local_app::v2::agent::Task, bool), String> = (|| {
+                if self.protocol_thread_id.is_none() {
+                    let (state, output, error) =
+                        if state == State::Succeeded && self.cancel.is_cancelled() {
+                            (State::Cancelled, None, Some("cancelled".into()))
+                        } else {
+                            (state, output, error)
+                        };
+                    return self
                         .store
-                        .interrupt_after_protocol_failure(
-                            &self.owner,
-                            &self.id,
-                            "protocol_event_storage_failed",
-                        )
-                        .map_err(|_| "agent_storage_unavailable")?;
-                    return Ok((task, true));
+                        .update(&self.owner, &self.id, state, output, usage, error)
+                        .map(|task| (task, false))
+                        .map_err(|_| "agent_storage_unavailable".to_owned());
                 }
-                // This check is inside the same guard as durable cancellation and
-                // success commit. It also covers direct parent-token revocation.
+
+                if self.protocol_events_failed.load(Ordering::Acquire) {
+                    return Err("agent_storage_unavailable".to_owned());
+                }
                 let (state, output, error) =
                     if state == State::Succeeded && self.cancel.is_cancelled() {
                         (State::Cancelled, None, Some("cancelled".into()))
                     } else {
                         (state, output, error)
                     };
+                let candidate = self
+                    .store
+                    .prepare_protocol_terminal(
+                        permit,
+                        &self.owner,
+                        &self.id,
+                        state,
+                        output,
+                        usage,
+                        error,
+                    )
+                    .map_err(|_| "agent_storage_unavailable".to_owned())?;
+                if candidate.state == State::Succeeded {
+                    let result = candidate
+                        .result
+                        .as_ref()
+                        .ok_or_else(|| "agent_storage_unavailable".to_owned())?;
+                    self.publish_accepted_result(permit, result)?;
+                }
+                let thread_id = self
+                    .protocol_thread_id
+                    .as_deref()
+                    .expect("protocol task has a thread ID");
+                let terminal = protocol_terminal_event(&candidate, thread_id)
+                    .ok_or_else(|| "agent_storage_unavailable".to_owned())?;
+                self.store
+                    .append_protocol_commit_event(permit, &self.owner, &self.id, terminal)
+                    .map_err(|_| "agent_storage_unavailable".to_owned())?;
                 let task = self
                     .store
-                    .update(&self.owner, &self.id, state, output, usage, error)
-                    .map_err(|_| "agent_storage_unavailable")?;
-                let mut event_storage_failed = if task.state == State::Succeeded {
-                    match task.result.as_ref() {
-                        Some(result) => self.publish_accepted_result(result).is_err(),
-                        None => true,
-                    }
-                } else {
-                    false
-                };
-                if !event_storage_failed {
-                    if let Some(thread_id) = &self.protocol_thread_id {
-                        if let Some(event) = protocol_terminal_event(&task, thread_id) {
-                            event_storage_failed = self
-                                .store
-                                .append_event(&self.owner, &self.id, event)
-                                .is_err();
-                        }
-                    }
-                }
-                if event_storage_failed {
-                    self.protocol_events_failed.store(true, Ordering::Release);
-                    let interrupted = self
+                    .finalize_protocol_terminal(permit, &self.owner, &self.id)
+                    .map_err(|_| "agent_storage_unavailable".to_owned())?;
+                if task.state == State::Succeeded && self.chat_id.is_some() {
+                    let accepted = self
                         .store
-                        .interrupt_after_protocol_failure(
-                            &self.owner,
-                            &self.id,
-                            "protocol_event_storage_failed",
-                        )
-                        .map_err(|_| "agent_storage_unavailable")?;
-                    return Ok((interrupted, true));
+                        .committed_protocol_assistants()
+                        .map_err(|_| "agent_storage_unavailable".to_owned())?;
+                    #[cfg(test)]
+                    if self
+                        .fail_after_final_ledger_before_chat_authority
+                        .swap(false, Ordering::AcqRel)
+                    {
+                        if let Some(barrier) =
+                            self.after_final_ledger_error_barrier.lock().unwrap().take()
+                        {
+                            barrier.wait();
+                            barrier.wait();
+                        }
+                        self.chats.quarantine_storage();
+                    }
+                    self.chats
+                        .set_committed_assistants(&accepted)
+                        .map_err(|_| "chat_storage_unavailable".to_owned())?;
                 }
                 Ok((task, false))
-            })
-            .map_err(|_| "agent_storage_unavailable")?
+            })();
+
+            if result.is_err() {
+                // Readers queue on the Agent commit lock. Fence both stores
+                // before releasing it so no reader can observe half a commit.
+                self.store.quarantine_storage();
+                self.chats.quarantine_storage();
+                self.protocol_events_failed.store(true, Ordering::Release);
+            }
+            result
+        });
+
+        match commit {
+            Ok(Ok(committed)) => Ok(committed),
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                self.store.quarantine_storage();
+                self.chats.quarantine_storage();
+                self.protocol_events_failed.store(true, Ordering::Release);
+                Err("agent_storage_unavailable".into())
+            }
+        }
     }
 
     fn native_output_for(&self, owner: &Owner, revision: u64) -> u64 {
@@ -824,6 +930,16 @@ impl AppAgentHost {
             before_started_event: Mutex::new(None),
             #[cfg(test)]
             fail_started_event_schema: AtomicBool::new(false),
+            #[cfg(test)]
+            duplicate_chat_wait_started: Mutex::new(None),
+            #[cfg(test)]
+            duplicate_pre_admission_pause: Mutex::new(None),
+            #[cfg(test)]
+            duplicate_probe_none_barrier: Mutex::new(None),
+            #[cfg(test)]
+            chat_executor_init_pause: Mutex::new(None),
+            #[cfg(test)]
+            duplicate_task_snapshot_pause: Mutex::new(None),
         }))
     }
     fn app_state(&self, app: &str) -> Result<Arc<AppAgentState>, String> {
@@ -947,6 +1063,118 @@ impl AppAgentHost {
             .unwrap_or_default();
         Ok((owner, tools, skills))
     }
+    async fn duplicate_before_normalization(
+        &self,
+        state: &AppAgentState,
+        owner: &Owner,
+        input: &Value,
+        required_chat: Option<&str>,
+        owner_cancel: &CancellationToken,
+        detached: bool,
+    ) -> Result<Option<String>, String> {
+        #[cfg(test)]
+        let test_pause = self.duplicate_pre_admission_pause.lock().unwrap().take();
+        #[cfg(test)]
+        if let Some((ready, release)) = test_pause {
+            let _ = ready.send(());
+            let _ = release.await;
+        }
+        let serial = self.admission.lock().await;
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err("agent_host_replaced".into());
+        }
+        if !detached && owner_cancel.is_cancelled() {
+            return Err("app_invocation_closed".into());
+        }
+        self.validate_current_release(owner).await?;
+        if state
+            .store
+            .settings(owner)
+            .map_err(|_| "agent_storage_unavailable")?
+            .is_none()
+        {
+            return Err("agent_not_authorized".into());
+        }
+
+        let duplicate = protocol_duplicate_run(state, owner, input, required_chat)?;
+        let Some(run_id) = duplicate else {
+            drop(serial);
+            #[cfg(test)]
+            let barrier = { self.duplicate_probe_none_barrier.lock().unwrap().clone() };
+            #[cfg(test)]
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
+            return Ok(None);
+        };
+        let mut persisted = None;
+        if let Some(chat_id) = state
+            .store
+            .protocol_chat_id_for_request(owner, &run_id)
+            .map_err(|_| "agent_storage_unavailable")?
+        {
+            let task_id = state
+                .store
+                .task_id_for_request(owner, &run_id)
+                .map_err(|_| "agent_storage_unavailable")?;
+            let _task = state
+                .store
+                .get(owner, &task_id)
+                .map_err(|_| "agent_storage_unavailable")?;
+            #[cfg(test)]
+            let snapshot_pause = { self.duplicate_task_snapshot_pause.lock().unwrap().take() };
+            #[cfg(test)]
+            if let Some((ready, release)) = snapshot_pause {
+                let _ = ready.send(());
+                let _ = release.await;
+            }
+            let active = self.active.lock().await.get(&task_id).cloned();
+            if let Some(control) = active {
+                if control.owner.app_id != owner.app_id
+                    || control.owner.release_digest != owner.release_digest
+                    || control.id != task_id
+                    || control.request_id != run_id
+                    || control.chat_id.as_deref() != Some(chat_id.as_str())
+                {
+                    return Err("chat_storage_unavailable".into());
+                }
+                persisted = Some((control.chat_persisted.subscribe(), control));
+                #[cfg(test)]
+                if let Some(ready) = self.duplicate_chat_wait_started.lock().unwrap().take() {
+                    let _ = ready.send(());
+                }
+            } else {
+                let task = state
+                    .store
+                    .get(owner, &task_id)
+                    .map_err(|_| "agent_storage_unavailable")?;
+                if task.state != State::Succeeded {
+                    return Err("chat_storage_unavailable".into());
+                }
+                state
+                    .store
+                    .successful_chat_history_task(&owner.app_id, &chat_id, &task_id)
+                    .map_err(|_| "chat_storage_unavailable")?;
+            }
+        }
+
+        // Admission stays serialized through identity and authorization checks,
+        // but a duplicate must not hold this lock while waiting for the original
+        // executor's transcript durability handshake.
+        drop(serial);
+        if let Some((mut persisted, control)) = persisted {
+            #[cfg(test)]
+            if let Some(ready) = self.duplicate_chat_wait_started.lock().unwrap().take() {
+                let _ = ready.send(());
+            }
+            wait_for_duplicate_chat_persistence(&mut persisted, &control, owner_cancel, detached)
+                .await?;
+        }
+        if !detached && owner_cancel.is_cancelled() {
+            return Err("app_invocation_closed".into());
+        }
+        Ok(Some(run_id))
+    }
     async fn validate_current_release(&self, owner: &Owner) -> Result<(), String> {
         let service = self.service().await?;
         let record = service
@@ -987,36 +1215,61 @@ impl AppAgentHost {
                 reject_unknown(&args, &["input"])?;
                 let state = self.app_state(app)?;
                 let raw_input = args.get("input").cloned().ok_or("invalid_agent_input")?;
-                if let Some(run_id) = protocol_duplicate_run(&state, &owner, &raw_input)? {
-                    return Ok(json!({"runId":run_id}));
+                if state
+                    .store
+                    .settings(&owner)
+                    .map_err(|_| "agent_storage_unavailable")?
+                    .is_none()
+                {
+                    return Err("agent_not_authorized".into());
                 }
-                let (normalized, chat_id) = normalize_page_run_input(&state, raw_input, None)?;
-                if normalized.message_already_persisted {
-                    return Err("agui_message_already_submitted".into());
-                }
-                let input = normalized.input;
-                let user_message = normalized.user_message;
                 let owner_cancel = self
                     .service()
                     .await?
                     .agent_invocation_token(app, invocation)
                     .await?;
-                let allow_new = !cfg!(target_os = "ios")
-                    || self.has_wake_reservation(app, revision, &input.request_id);
-                self.start_task(
-                    owner,
-                    revision,
-                    &declared,
-                    &declared_skills,
-                    input,
-                    Some(user_message),
-                    chat_id,
-                    owner_cancel,
-                    allow_new,
-                    false,
-                )
-                .await?;
-                Ok(json!({"runId":normalized.run_id}))
+                if let Some(run_id) = self
+                    .duplicate_before_normalization(
+                        &state,
+                        &owner,
+                        &raw_input,
+                        None,
+                        &owner_cancel,
+                        false,
+                    )
+                    .await?
+                {
+                    return Ok(json!({"runId":run_id}));
+                }
+                let (normalized, chat_id) = normalize_page_run_input(&state, raw_input, None)?;
+                let duplicate_only = normalized.message_already_persisted;
+                let public_run_id = normalized.run_id;
+                let input = normalized.input;
+                let user_message = normalized.user_message;
+                let allow_new = !duplicate_only
+                    && (!cfg!(target_os = "ios")
+                        || self.has_wake_reservation(app, revision, &input.request_id));
+                let started = self
+                    .start_task(
+                        owner,
+                        revision,
+                        &declared,
+                        &declared_skills,
+                        input,
+                        Some(user_message),
+                        chat_id,
+                        owner_cancel,
+                        allow_new,
+                        false,
+                    )
+                    .await;
+                match started {
+                    Ok(_) => Ok(json!({"runId":public_run_id})),
+                    Err(error) if duplicate_only && error == "host_wake_required" => {
+                        Err("agui_message_already_submitted".into())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             "agent.tasks.get" => {
                 let id = only_run_id(&args)?;
@@ -1121,37 +1374,62 @@ impl AppAgentHost {
                 let chat_id = required_string(&args, "chatId")?.to_owned();
                 let state = self.app_state(app)?;
                 let raw_input = args.get("input").cloned().ok_or("invalid_agent_input")?;
-                if let Some(run_id) = protocol_duplicate_run(&state, &owner, &raw_input)? {
-                    return Ok(json!({"runId":run_id}));
+                if state
+                    .store
+                    .settings(&owner)
+                    .map_err(|_| "agent_storage_unavailable")?
+                    .is_none()
+                {
+                    return Err("agent_not_authorized".into());
                 }
-                let (normalized, chat_id) =
-                    normalize_page_run_input(&state, raw_input, Some(&chat_id))?;
-                if normalized.message_already_persisted {
-                    return Err("agui_message_already_submitted".into());
-                }
-                let input = normalized.input;
-                let user_message = normalized.user_message;
                 let owner_cancel = self
                     .service()
                     .await?
                     .agent_invocation_token(app, invocation)
                     .await?;
-                let allow_new = !cfg!(target_os = "ios")
-                    || self.has_wake_reservation(app, revision, &input.request_id);
-                self.start_task(
-                    owner,
-                    revision,
-                    &declared,
-                    &declared_skills,
-                    input,
-                    Some(user_message),
-                    chat_id,
-                    owner_cancel,
-                    allow_new,
-                    false,
-                )
-                .await?;
-                Ok(json!({"runId":normalized.run_id}))
+                if let Some(run_id) = self
+                    .duplicate_before_normalization(
+                        &state,
+                        &owner,
+                        &raw_input,
+                        Some(&chat_id),
+                        &owner_cancel,
+                        false,
+                    )
+                    .await?
+                {
+                    return Ok(json!({"runId":run_id}));
+                }
+                let (normalized, chat_id) =
+                    normalize_page_run_input(&state, raw_input, Some(&chat_id))?;
+                let duplicate_only = normalized.message_already_persisted;
+                let public_run_id = normalized.run_id;
+                let input = normalized.input;
+                let user_message = normalized.user_message;
+                let allow_new = !duplicate_only
+                    && (!cfg!(target_os = "ios")
+                        || self.has_wake_reservation(app, revision, &input.request_id));
+                let started = self
+                    .start_task(
+                        owner,
+                        revision,
+                        &declared,
+                        &declared_skills,
+                        input,
+                        Some(user_message),
+                        chat_id,
+                        owner_cancel,
+                        allow_new,
+                        false,
+                    )
+                    .await;
+                match started {
+                    Ok(_) => Ok(json!({"runId":public_run_id})),
+                    Err(error) if duplicate_only && error == "host_wake_required" => {
+                        Err("agui_message_already_submitted".into())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             "agent.chats.cancel" => {
                 let chat_id = required_string(&args, "chatId")?;
@@ -1196,11 +1474,19 @@ impl AppAgentHost {
         }
         let state = self.app_state(&owner.app_id)?;
         if let Some(chat_id) = chat_id.as_deref() {
-            let summary = state.chats.get(chat_id).map_err(|_| "chat_not_found")?;
+            let summary = match state.chats.get(chat_id) {
+                Ok(summary) => summary,
+                Err(local_app::v2::AppError::NotFound(_)) => return Err("chat_not_found".into()),
+                Err(_) => return Err("chat_storage_unavailable".into()),
+            };
+            if summary.state == ChatState::Interrupted {
+                return Err("agui_history_unavailable".into());
+            }
             if summary.archived {
                 return Err("chat_archived".into());
             }
         }
+        validate_chat_output_mode(chat_id.as_deref(), &input)?;
         // Validate the exact generated event and initialize the pinned schema
         // before persisting a run or claiming a wake. Schema initialization
         // failure is a host availability problem, not a damaged run log.
@@ -1234,18 +1520,33 @@ impl AppAgentHost {
         let wake_required = is_ios && !native_detached;
         let claimed_wake =
             wake_required && self.claim_wake(&owner.app_id, revision, &input.request_id);
-        let allow_new = if wake_required {
-            claimed_wake
-        } else {
-            allow_new
-        };
-        let admitted = match state.store.admit_scoped(
+        let allow_new = allow_new && (!wake_required || claimed_wake);
+        let history_digest = input.protocol_history_digest.clone();
+        let admission_chats = state.chats.clone();
+        let admission_chat_id = chat_id.clone();
+        let admitted = match state.store.admit_scoped_with_check(
             &owner,
             &input,
             declared_tools,
             declared_skills,
             chat_id.as_deref(),
             allow_new,
+            move || {
+                if let Some(chat_id) = admission_chat_id.as_deref() {
+                    let expected = history_digest.as_deref().ok_or_else(|| {
+                        local_app::v2::AppError::Invalid(
+                            "AG-UI Chat history snapshot is missing".into(),
+                        )
+                    })?;
+                    let current = admission_chats.protocol_history_digests(chat_id)?;
+                    if local_app::v2::agent::protocol::history_fingerprint(&current) != expected {
+                        return Err(local_app::v2::AppError::Invalid(
+                            "AG-UI Chat history changed during Agent admission".into(),
+                        ));
+                    }
+                }
+                Ok(())
+            },
         ) {
             Ok(admitted) => admitted,
             Err(error) => {
@@ -1260,14 +1561,82 @@ impl AppAgentHost {
             if claimed_wake {
                 self.unclaim_wake(&owner.app_id, revision, &input.request_id);
             }
+            // The first duplicate probe runs before normalization. A caller
+            // can still have normalized while another admission was pending,
+            // so validate the complete durable initialization here too.
+            // This prevents an interrupted/rolled-back first initializer from
+            // being acknowledged as a successful duplicate.
+            if let Some(thread_id) = input.protocol_thread_id.as_deref() {
+                validate_duplicate_initialization(
+                    &state,
+                    &owner,
+                    &input,
+                    protocol_user_message.as_ref(),
+                    chat_id.as_deref(),
+                    thread_id,
+                    &id,
+                )?;
+            }
+            let task = state
+                .store
+                .get(&owner, &id)
+                .map_err(|_| "agent_storage_unavailable")?;
+            #[cfg(test)]
+            let snapshot_pause = { self.duplicate_task_snapshot_pause.lock().unwrap().take() };
+            #[cfg(test)]
+            if let Some((ready, release)) = snapshot_pause {
+                let _ = ready.send(());
+                let _ = release.await;
+            }
+            let mut persisted = None;
             if let Some(chat_id) = chat_id.as_deref() {
-                let control = self.active.lock().await.get(&id).cloned();
+                let control = { self.active.lock().await.get(&id).cloned() };
                 if let Some(control) = control {
-                    if control.chat_id.as_deref() == Some(chat_id) {
-                        let mut persisted = control.chat_persisted.subscribe();
-                        wait_for_chat_persistence(&mut persisted, &owner_cancel, false).await?;
+                    if control.owner.app_id != owner.app_id
+                        || control.owner.release_digest != owner.release_digest
+                        || control.id != id
+                        || control.request_id != input.request_id
+                        || control.protocol_thread_id.as_deref()
+                            != input.protocol_thread_id.as_deref()
+                        || control.chat_id.as_deref() != Some(chat_id)
+                    {
+                        return Err("chat_storage_unavailable".into());
                     }
+                    persisted = Some((control.chat_persisted.subscribe(), control));
+                    #[cfg(test)]
+                    if let Some(ready) = self.duplicate_chat_wait_started.lock().unwrap().take() {
+                        let _ = ready.send(());
+                    }
+                } else {
+                    let task = state
+                        .store
+                        .get(&owner, &id)
+                        .map_err(|_| "agent_storage_unavailable")?;
+                    // A terminal run can outlive its Control, but a queued or
+                    // running task without an owner cannot prove that Chat
+                    // initialization reached the executor handshake.
+                    if task.state != State::Succeeded {
+                        return Err("chat_storage_unavailable".into());
+                    }
+                    state
+                        .store
+                        .successful_chat_history_task(&owner.app_id, chat_id, &id)
+                        .map_err(|_| "chat_storage_unavailable")?;
                 }
+            } else if !task.state.terminal() {
+                return Err("task_unavailable".into());
+            }
+            // Never retain admission while waiting for the original writer.
+            // wake.clear, revoke and stop paths all need this same lock.
+            drop(_serial);
+            if let Some((mut persisted, control)) = persisted {
+                wait_for_duplicate_chat_persistence(
+                    &mut persisted,
+                    &control,
+                    &owner_cancel,
+                    native_detached,
+                )
+                .await?;
             }
             return Ok(id);
         }
@@ -1417,6 +1786,7 @@ impl AppAgentHost {
             chats: state.chats.clone(),
             chat_id,
             user_message_id,
+            chat_orchestrator: Mutex::new(None),
             chat_persisted: chat_persisted_tx,
             chat_commit: AsyncMutex::new(if is_chat { Some(chat_commit_rx) } else { None }),
             attachment_metadata,
@@ -1429,6 +1799,10 @@ impl AppAgentHost {
             model_failure: Mutex::new(None),
             timed_out: AtomicBool::new(false),
             usage: AsyncMutex::new(None),
+            #[cfg(test)]
+            fail_after_final_ledger_before_chat_authority: AtomicBool::new(false),
+            #[cfg(test)]
+            after_final_ledger_error_barrier: Mutex::new(None),
         });
         if let Some(started) = started_event {
             #[cfg(test)]
@@ -1479,6 +1853,16 @@ impl AppAgentHost {
         let app_root = state.root.clone();
         let execute_control = control.clone();
         tokio::spawn(async move {
+            #[cfg(test)]
+            let init_pause = { host.chat_executor_init_pause.lock().unwrap().take() };
+            #[cfg(test)]
+            if let Some((started, release)) = init_pause {
+                let _ = started.send(());
+                tokio::select! {
+                    _ = execute_control.cancel.cancelled() => {},
+                    _ = release => {},
+                }
+            }
             host.execute(execute_control, admitted, input, app_root)
                 .await;
         });
@@ -1671,6 +2055,109 @@ impl AppAgentHost {
         // signal for the finalization guard's last cancellation check.
         control.revoke_lease();
         control.interaction.lock().await.take();
+        if control.chat_id.is_some()
+            && result
+                .as_ref()
+                .err()
+                .is_none_or(|error| error != "tool_cleanup_incomplete")
+        {
+            let is_success = result.is_ok();
+            let checkpoint_result: Result<Option<ChatTranscriptCheckpoint>, String> = async {
+                let chat_id = control
+                    .chat_id
+                    .as_deref()
+                    .ok_or("chat_transcript_unavailable")?;
+                let orchestrator = control
+                    .chat_orchestrator
+                    .lock()
+                    .map_err(|_| "chat_transcript_unavailable")?
+                    .clone();
+                let Some(orchestrator) = orchestrator else {
+                    return if is_success {
+                        Err("chat_transcript_unavailable".into())
+                    } else {
+                        Ok(None)
+                    };
+                };
+                // Tool and executor cleanup has completed at this point. The
+                // orchestrator captures and seals one exact writer revision
+                // under its turn and append gates; successful output is
+                // accepted only from a replay of those same bytes.
+                let captured = match orchestrator.verify_persistent_chat_checkpoint(true).await {
+                    Ok(captured) => captured,
+                    Err(_) if !is_success => return Ok(None),
+                    Err(_) => return Err("chat_transcript_unavailable".into()),
+                };
+                if !is_success {
+                    // Failed/cancelled turns remain sealed but have no
+                    // resumable transcript authority. Their original terminal
+                    // reason is preserved while the ledger blocks later turns.
+                    return Ok(None);
+                }
+                let transcript_path = control
+                    .chats
+                    .transcript_path(chat_id)
+                    .map_err(|_| "chat_storage_unavailable")?;
+                let session_id = control
+                    .chats
+                    .session_id(chat_id)
+                    .map_err(|_| "chat_storage_unavailable")?;
+                let session_id = uuid::Uuid::parse_str(&session_id)
+                    .map_err(|_| "chat_transcript_unavailable")?;
+                if captured.path() != transcript_path.as_path()
+                    || captured.session_id() != session_id
+                {
+                    return Err("chat_transcript_unavailable".into());
+                }
+                let (task_result, _) =
+                    result.as_ref().map_err(|_| "chat_transcript_unavailable")?;
+                let replayed =
+                    orchestrator::ConversationOrchestrator::replay_persistent_chat_snapshot(
+                        &captured,
+                    )
+                    .map_err(|_| "chat_transcript_unavailable")?;
+                super::validate_local_app_chat_resume(&replayed)?;
+                if task_result.chat_id.as_deref() != Some(chat_id) {
+                    return Err("chat_transcript_unavailable".into());
+                }
+                validate_chat_result_in_transcript(&replayed, task_result)?;
+                let user_message_id = control
+                    .user_message_id
+                    .as_deref()
+                    .ok_or("chat_transcript_unavailable")?;
+                recover_chat_message_metadata(
+                    &control.chats,
+                    chat_id,
+                    &replayed,
+                    &control.store,
+                    &control.owner,
+                    Some(&control.id),
+                    Some(user_message_id),
+                )?;
+                if control.cancel.is_cancelled() {
+                    return Err("cancelled".into());
+                }
+                let checkpoint = captured.checkpoint();
+                let checkpoint = ChatTranscriptCheckpoint {
+                    byte_len: checkpoint.byte_len,
+                    sha256: checkpoint.sha256.clone(),
+                };
+                control
+                    .store
+                    .record_chat_transcript_checkpoint(
+                        &control.owner,
+                        &control.id,
+                        chat_id,
+                        checkpoint.clone(),
+                    )
+                    .map_err(|_| "agent_storage_unavailable")?;
+                Ok(Some(checkpoint))
+            }
+            .await;
+            if let Err(error) = checkpoint_result {
+                result = Err(error);
+            }
+        }
         let recorded_usage = control.usage.lock().await.clone();
         let (state, output, usage, error) = match result {
             Ok((result, usage)) => (State::Succeeded, Some(result), Some(usage), None),
@@ -1682,18 +2169,26 @@ impl AppAgentHost {
         // A failed foreground reap keeps admission occupied. Do not release the
         // app or remove its workspace while a tool may still have effects.
         if error.as_deref() != Some("tool_cleanup_incomplete") {
-            if let Ok((_task, event_storage_failed)) =
-                control.commit_terminal(state, output, usage, error)
-            {
-                self.active.lock().await.remove(&id);
-                if let Some(chat_id) = &control.chat_id {
-                    if event_storage_failed {
-                        let _ = control.chats.interrupt_turn(chat_id, &id);
-                    } else {
-                        let _ = control.chats.finish_turn(chat_id, &id);
+            match control.commit_terminal(state, output, usage, error) {
+                Ok((task, event_storage_failed)) => {
+                    self.active.lock().await.remove(&id);
+                    if let Some(chat_id) = &control.chat_id {
+                        if event_storage_failed || task.state != State::Succeeded {
+                            let _ = control.chats.interrupt_turn(chat_id, &id);
+                        } else {
+                            let _ = control.chats.finish_turn(chat_id, &id);
+                        }
                     }
+                    self.clear_wake_run(&id);
                 }
-                self.clear_wake_run(&id);
+                Err(_) => {
+                    // The executor returned only after the tools and lease
+                    // cleanup completed. Storage quarantine protects the
+                    // unresolved record; retaining this finished Control
+                    // would prevent stop/reopen recovery.
+                    self.active.lock().await.remove(&id);
+                    self.clear_wake_run(&id);
+                }
             }
         } else {
             let _ = control.store.update(
@@ -1705,6 +2200,7 @@ impl AppAgentHost {
                 Some("tool_cleanup_incomplete".into()),
             );
         }
+        control.report_chat_persisted(Err("task_unavailable".into()));
         control.revoke();
         control.finished.store(true, Ordering::Release);
         control.done.notify_waiters();
@@ -1762,19 +2258,50 @@ impl AppAgentHost {
                 .chats
                 .transcript_path(chat_id)
                 .map_err(|_| "chat_storage_unavailable")?;
-            let replayed = if checked_chat_transcript_exists(&transcript_path)? {
-                let replayed = orchestrator::resume::replay_session_state_from_path(
-                    &transcript_path,
-                    session_uuid,
+            let previous_checkpoint = control
+                .store
+                .latest_chat_transcript_checkpoint(&control.owner.app_id, chat_id, &control.id)
+                .map_err(|_| "chat_transcript_unavailable")?
+                .map(|(_, checkpoint)| session::jsonl::ChatTranscriptCheckpoint {
+                    byte_len: checkpoint.byte_len,
+                    sha256: checkpoint.sha256,
+                });
+            let has_previous_checkpoint = previous_checkpoint.is_some();
+            let writer = Arc::new(
+                session::jsonl::JsonlWriter::open_persistent_chat(
+                    transcript_path.clone(),
                     self.factory.context.fs.clone(),
+                    previous_checkpoint,
                 )
                 .await
-                .map_err(|_| "chat_transcript_unavailable")?;
+                .map_err(|_| "chat_transcript_unavailable")?,
+            );
+            let replayed = if has_previous_checkpoint {
+                let captured = writer
+                    .capture_persistent_chat_snapshot(false)
+                    .await
+                    .map_err(|_| "chat_transcript_unavailable")?;
+                if captured.path() != transcript_path || captured.session_id() != session_uuid {
+                    return Err("chat_transcript_unavailable".into());
+                }
+                let replayed =
+                    orchestrator::ConversationOrchestrator::replay_persistent_chat_snapshot(
+                        &captured,
+                    )
+                    .map_err(|_| "chat_transcript_unavailable")?;
                 // A generic orchestrator resume can replay unresolved deferred
                 // hook tools. Refuse before even reconciling transcript rows
                 // into Chat metadata; a user must review the saved history.
                 super::validate_local_app_chat_resume(&replayed)?;
-                recover_chat_message_metadata(&control.chats, chat_id, &replayed)?;
+                recover_chat_message_metadata(
+                    &control.chats,
+                    chat_id,
+                    &replayed,
+                    &control.store,
+                    &control.owner,
+                    None,
+                    None,
+                )?;
                 Some(replayed)
             } else {
                 None
@@ -1783,6 +2310,7 @@ impl AppAgentHost {
                 session_id: SessionId::from_uuid(session_uuid),
                 transcript_path,
                 replayed,
+                writer,
             })
         } else {
             None
@@ -1800,6 +2328,12 @@ impl AppAgentHost {
             skill_prompt,
         );
         let session = tokio::select! {biased;_=control.cancel.cancelled()=>return Err("cancelled".into()),result=building=>result?};
+        if control.chat_id.is_some() {
+            *control
+                .chat_orchestrator
+                .lock()
+                .map_err(|_| "task_unavailable")? = Some(session.orchestrator.clone());
+        }
         *control.lease.lock().map_err(|_| "task_unavailable")? = Some(session.lease.clone());
         if !control.store.lease_valid(&control.owner, &control.id) || control.cancel.is_cancelled()
         {
@@ -1831,7 +2365,10 @@ impl AppAgentHost {
                 chat_id,
                 user_message_id,
                 prepared.blocks.clone(),
-                self.factory.context.fs.clone(),
+                &control.store,
+                &control.owner,
+                &control.id,
+                user_message_id,
             )
             .await?;
             if !control.store.lease_valid(&control.owner, &control.id)
@@ -2207,28 +2744,44 @@ impl AppAgentHost {
                 {
                     return Err("agent_not_authorized".into());
                 }
-                if let Some(run_id) = protocol_duplicate_run(&state, &owner, &raw_input)? {
+                if let Some(run_id) = self
+                    .duplicate_before_normalization(
+                        &state,
+                        &owner,
+                        &raw_input,
+                        None,
+                        &CancellationToken::new(),
+                        true,
+                    )
+                    .await?
+                {
                     return Ok(json!({"runId":run_id}));
                 }
                 let (normalized, chat_id) = normalize_page_run_input(&state, raw_input, None)?;
-                if normalized.message_already_persisted {
-                    return Err("agui_message_already_submitted".into());
-                }
+                let duplicate_only = normalized.message_already_persisted;
+                let public_run_id = normalized.run_id;
                 validate_request_id(&normalized.run_id)?;
-                self.start_task(
-                    owner,
-                    revision,
-                    &tools,
-                    &skills,
-                    normalized.input,
-                    Some(normalized.user_message),
-                    chat_id,
-                    CancellationToken::new(),
-                    true,
-                    true,
-                )
-                .await?;
-                Ok(json!({"runId":normalized.run_id}))
+                let started = self
+                    .start_task(
+                        owner,
+                        revision,
+                        &tools,
+                        &skills,
+                        normalized.input,
+                        Some(normalized.user_message),
+                        chat_id,
+                        CancellationToken::new(),
+                        !duplicate_only,
+                        true,
+                    )
+                    .await;
+                match started {
+                    Ok(_) => Ok(json!({"runId":public_run_id})),
+                    Err(error) if duplicate_only && error == "host_wake_required" => {
+                        Err("agui_message_already_submitted".into())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             "eventsNative" => {
                 reject_unknown(
@@ -2536,18 +3089,46 @@ async fn wait_for_chat_persistence(
     }
 }
 
+async fn wait_for_duplicate_chat_persistence(
+    receiver: &mut watch::Receiver<Option<Result<(), String>>>,
+    control: &Control,
+    owner_cancel: &CancellationToken,
+    detached: bool,
+) -> Result<(), String> {
+    loop {
+        if let Some(result) = receiver.borrow().clone() {
+            return result;
+        }
+        if control.finished.load(Ordering::Acquire) {
+            return Err("task_unavailable".into());
+        }
+        tokio::select! {
+            biased;
+            _ = control.cancel.cancelled() => return Err("cancelled".into()),
+            _ = owner_cancel.cancelled(), if !detached => return Err("app_invocation_closed".into()),
+            changed = receiver.changed() => {
+                if changed.is_err() {
+                    return Err("task_unavailable".into());
+                }
+            }
+        }
+    }
+}
+
 /// The one pre-admission Chat persistence step. The task executor appends the
 /// stable user row to the App-owned Harness session before it acknowledges
 /// `{runId}`; only then may the caller release the executor to make a model
-/// request. Replaying the transcript verifies that the best-effort Harness
-/// writer actually committed the row.
+/// request. The strict writer capture is replayed directly to verify the row.
 async fn persist_chat_user_row(
     orchestrator: &orchestrator::ConversationOrchestrator,
     chats: &ChatStore,
     chat_id: &str,
     message_id: &str,
     blocks: Vec<lingxi_core::types::ContentBlock>,
-    fs: Arc<dyn lingxi_core::host::FileSystem>,
+    store: &AgentStore,
+    owner: &Owner,
+    current_task_id: &str,
+    current_user_message_id: &str,
 ) -> Result<(), String> {
     let message_id =
         lingxi_core::types::MessageId::parse_prefixed(message_id).ok_or("invalid_chat_message")?;
@@ -2578,9 +3159,15 @@ async fn persist_chat_user_row(
     }
     let session_id = chats.session_id(chat_id).map_err(|_| "chat_not_found")?;
     let session_uuid = uuid::Uuid::parse_str(&session_id).map_err(|_| "invalid_chat")?;
+    let captured = orchestrator
+        .verify_persistent_chat_checkpoint(false)
+        .await
+        .map_err(|_| "chat_transcript_unavailable")?;
+    if captured.path() != transcript_path.as_path() || captured.session_id() != session_uuid {
+        return Err("chat_transcript_unavailable".into());
+    }
     let replayed =
-        orchestrator::resume::replay_session_state_from_path(&transcript_path, session_uuid, fs)
-            .await
+        orchestrator::ConversationOrchestrator::replay_persistent_chat_snapshot(&captured)
             .map_err(|_| "chat_transcript_unavailable")?;
     super::validate_local_app_chat_resume(&replayed)?;
     let persisted_user_rows = replayed
@@ -2591,7 +3178,15 @@ async fn persist_chat_user_row(
     if persisted_user_rows != 1 {
         return Err("chat_transcript_unavailable".into());
     }
-    recover_chat_message_metadata(chats, chat_id, &replayed)
+    recover_chat_message_metadata(
+        chats,
+        chat_id,
+        &replayed,
+        store,
+        owner,
+        Some(current_task_id),
+        Some(current_user_message_id),
+    )
 }
 
 /// Reconcile transcript rows with the host-owned Chat index. Harness writes
@@ -2602,68 +3197,258 @@ fn recover_chat_message_metadata(
     chats: &ChatStore,
     chat_id: &str,
     replayed: &orchestrator::resume::ReplayedSession,
+    store: &AgentStore,
+    owner: &Owner,
+    current_task_id: Option<&str>,
+    current_user_message_id: Option<&str>,
 ) -> Result<(), String> {
-    let mut known = chats
+    let known = chats
         .message_metadata(chat_id)
         .map_err(|_| "chat_storage_unavailable")?
         .into_iter()
         .map(|message| (message.message_id.clone(), message))
         .collect::<HashMap<_, _>>();
     let mut current_run: Option<String> = None;
+    let mut tool_use_owners = HashMap::<String, String>::new();
+    let mut saw_current_task_user = false;
+    let mut seen_transcript_rows = HashSet::new();
+    let mut planned = Vec::new();
     for row in &replayed.display_history {
-        if row.is_meta()
-            || row.is_compact_summary()
-            || row.role() == lingxi_core::types::MessageRole::System
-        {
+        // Compact summaries have no durable per-run provenance. They could
+        // contain text from a failed or cancelled turn, so they cannot be
+        // replayed as a trusted substitute for the original successful rows.
+        if row.is_compact_summary() {
+            return Err("chat_transcript_unavailable".into());
+        }
+        if row.is_meta() || row.role() == lingxi_core::types::MessageRole::System {
             continue;
         }
         let message_id = row.id().to_string();
-        if let Some(metadata) = known.get(&message_id) {
-            current_run = Some(metadata.run_id.clone());
-            continue;
+        if !seen_transcript_rows.insert(message_id.clone()) {
+            return Err("chat_transcript_unavailable".into());
         }
-        let run_id = match row.role() {
-            lingxi_core::types::MessageRole::User => {
-                let Some(message_id) = lingxi_core::types::MessageId::parse_prefixed(&message_id)
-                else {
-                    current_run = None;
-                    continue;
-                };
-                message_id.as_uuid().to_string()
+        let (role, content) = match row {
+            ConversationMessage::User { content, .. } => (ChatRole::User, content.as_slice()),
+            ConversationMessage::Assistant { content, .. } => {
+                (ChatRole::Assistant, content.as_slice())
             }
-            lingxi_core::types::MessageRole::Assistant => {
-                let Some(run_id) = current_run.clone() else {
-                    continue;
-                };
-                run_id
+            ConversationMessage::System { .. } => continue,
+        };
+        let existing = known.get(&message_id).cloned();
+        if existing
+            .as_ref()
+            .is_some_and(|metadata| metadata.role != role)
+        {
+            return Err("chat_transcript_unavailable".into());
+        }
+        let tool_result_ids = content
+            .iter()
+            .filter_map(|block| match block {
+                lingxi_core::types::ContentBlock::ToolResult { tool_use_id, .. } => {
+                    Some(tool_use_id.to_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let is_tool_result = role == ChatRole::User && !tool_result_ids.is_empty();
+        let run_id = match role {
+            ChatRole::User if !tool_result_ids.is_empty() => {
+                let mut owner_run_id: Option<String> = None;
+                for tool_use_id in &tool_result_ids {
+                    let tool_owner = tool_use_owners
+                        .get(tool_use_id)
+                        .ok_or("chat_transcript_unavailable")?;
+                    if owner_run_id
+                        .as_ref()
+                        .is_some_and(|owner| owner != tool_owner)
+                    {
+                        return Err("chat_transcript_unavailable".into());
+                    }
+                    owner_run_id = Some(tool_owner.clone());
+                }
+                owner_run_id.expect("tool result IDs were checked")
             }
-            lingxi_core::types::MessageRole::System => continue,
+            ChatRole::User
+                if current_task_id.is_some()
+                    && current_user_message_id == Some(message_id.as_str()) =>
+            {
+                current_task_id.unwrap().to_owned()
+            }
+            ChatRole::User => {
+                let message_task_id = lingxi_core::types::MessageId::parse_prefixed(&message_id)
+                    .map(|message_id| message_id.as_uuid().to_string());
+                if let (Some(existing), Some(message_task_id)) =
+                    (existing.as_ref(), message_task_id.as_ref())
+                {
+                    if &existing.run_id != message_task_id {
+                        return Err("chat_transcript_unavailable".into());
+                    }
+                }
+                message_task_id
+                    .or_else(|| existing.as_ref().map(|metadata| metadata.run_id.clone()))
+                    .ok_or("chat_transcript_unavailable")?
+            }
+            ChatRole::Assistant => current_run.clone().ok_or("chat_transcript_unavailable")?,
         };
-        let role = match row.role() {
-            lingxi_core::types::MessageRole::User => ChatRole::User,
-            lingxi_core::types::MessageRole::Assistant => ChatRole::Assistant,
-            lingxi_core::types::MessageRole::System => continue,
-        };
+        if existing
+            .as_ref()
+            .is_some_and(|metadata| metadata.run_id != run_id && !is_tool_result)
+        {
+            return Err("chat_transcript_unavailable".into());
+        }
+        if is_tool_result
+            && existing
+                .as_ref()
+                .is_some_and(|metadata| metadata.run_id != run_id)
+        {
+            let previous_run_id = lingxi_core::types::MessageId::parse_prefixed(&message_id)
+                .map(|message_id| message_id.as_uuid().to_string());
+            if previous_run_id.as_deref()
+                != existing.as_ref().map(|metadata| metadata.run_id.as_str())
+            {
+                return Err("chat_transcript_unavailable".into());
+            }
+        }
+        if current_task_id == Some(run_id.as_str()) {
+            if role == ChatRole::User && current_user_message_id == Some(message_id.as_str()) {
+                if saw_current_task_user {
+                    return Err("chat_transcript_unavailable".into());
+                }
+                saw_current_task_user = true;
+            } else if role == ChatRole::Assistant || is_tool_result {
+                if !saw_current_task_user {
+                    return Err("chat_transcript_unavailable".into());
+                }
+            } else {
+                return Err("chat_transcript_unavailable".into());
+            }
+        } else {
+            let (task, _checkpoint) = store
+                .successful_chat_history_task(&owner.app_id, chat_id, &run_id)
+                .map_err(|_| "chat_transcript_unavailable")?;
+            if task.state != State::Succeeded || saw_current_task_user {
+                return Err("chat_transcript_unavailable".into());
+            }
+        }
         let created_at = replayed
             .display_timestamps
             .get(&message_id)
             .copied()
             .unwrap_or_else(|| now_millis() as i64)
             .max(0) as u64;
-        let metadata = ChatMessageMetadata {
-            message_id: message_id.clone(),
-            run_id: run_id.clone(),
+        planned.push((
+            message_id.clone(),
+            run_id.clone(),
             role,
             created_at,
-            attachments: Vec::new(),
-        };
-        chats
-            .record_message(chat_id, metadata.clone())
-            .map_err(|_| "chat_storage_unavailable")?;
+            existing,
+            is_tool_result,
+        ));
+        if role == ChatRole::Assistant {
+            for block in content {
+                if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
+                    let tool_use_id = id.to_string();
+                    if tool_use_owners
+                        .insert(tool_use_id, run_id.clone())
+                        .is_some_and(|previous| previous != run_id)
+                    {
+                        return Err("chat_transcript_unavailable".into());
+                    }
+                }
+            }
+        }
         current_run = Some(run_id);
-        known.insert(message_id, metadata);
+    }
+    if current_task_id.is_some() && !saw_current_task_user {
+        return Err("chat_transcript_unavailable".into());
+    }
+    // Only mutate the host index after validating the complete transcript.
+    // A bad row late in the file must not leave a partially repaired prefix.
+    for (message_id, run_id, role, created_at, existing, is_tool_result) in planned {
+        if let Some(existing) = existing.as_ref() {
+            if existing.run_id != run_id {
+                if !is_tool_result || existing.role != ChatRole::User {
+                    return Err("chat_transcript_unavailable".into());
+                }
+                chats
+                    .repair_recovered_message_run_id(
+                        chat_id,
+                        &message_id,
+                        &existing.run_id,
+                        &run_id,
+                    )
+                    .map_err(|_| "chat_storage_unavailable")?;
+            }
+        } else {
+            let metadata = ChatMessageMetadata {
+                message_id: message_id.clone(),
+                run_id,
+                role,
+                created_at,
+                attachments: Vec::new(),
+            };
+            chats
+                .record_message(chat_id, metadata.clone())
+                .map_err(|_| "chat_storage_unavailable")?;
+        }
     }
     Ok(())
+}
+
+/// A successful TaskResult must name the last canonical assistant row in the
+/// exact captured replay, and its public text must be the text stored there.
+/// Display-hook overrides are intentionally refused because they are not part
+/// of the durable transcript and cannot serve as resumable transcript proof.
+fn validate_chat_result_in_transcript(
+    replayed: &orchestrator::resume::ReplayedSession,
+    result: &TaskResult,
+) -> Result<(), String> {
+    // Structured output is collected through StructuredOutputSlot after tool
+    // dispatch. The transcript preserves the model's proposed tool input, but
+    // managed PreToolUse may rewrite the effective input before the slot is
+    // filled. Without a durable receipt binding that effective value to this
+    // captured transcript, publishing it as resumable Chat authority is unsafe.
+    if result.output.is_some() || !result.attachments.is_empty() {
+        return Err("chat_transcript_unavailable".into());
+    }
+    let message_id = result
+        .message_id
+        .as_deref()
+        .filter(|id| {
+            lingxi_core::types::MessageId::parse_prefixed(id)
+                .is_some_and(|parsed| parsed.to_string() == *id)
+        })
+        .ok_or("chat_transcript_unavailable")?;
+    let mut matching = None;
+    let mut matching_count = 0usize;
+    let mut last_assistant = None;
+    for row in replayed
+        .display_history
+        .iter()
+        .filter(|row| !row.is_meta() && row.role() == lingxi_core::types::MessageRole::Assistant)
+    {
+        last_assistant = Some(row);
+        if row.id().to_string() == message_id {
+            matching_count += 1;
+            matching = Some(row);
+        }
+    }
+    let accepted = matching.ok_or("chat_transcript_unavailable")?;
+    if matching_count != 1
+        || last_assistant.is_none_or(|last| last.id().to_string() != message_id)
+        || accepted.text_content() != result.text
+    {
+        return Err("chat_transcript_unavailable".into());
+    }
+    Ok(())
+}
+
+fn validate_chat_output_mode(chat_id: Option<&str>, input: &Input) -> Result<(), String> {
+    if chat_id.is_some() && input.output_schema.is_some() {
+        Err("chat_structured_output_unsupported".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn normalize_page_run_input(
@@ -2690,17 +3475,24 @@ fn normalize_page_run_input(
         {
             return Err("chat_thread_mismatch".into());
         }
-        state
-            .chats
-            .get(required_chat)
-            .map_err(|_| "chat_not_found")?;
+        match state.chats.get(required_chat) {
+            Ok(summary) if summary.state != ChatState::Interrupted => {}
+            Ok(_) => return Err("agui_history_unavailable".into()),
+            Err(local_app::v2::AppError::NotFound(_)) => return Err("chat_not_found".into()),
+            Err(_) => return Err("chat_storage_unavailable".into()),
+        }
         Some(required_chat.to_owned())
-    } else if uuid::Uuid::parse_str(&thread_id).is_ok_and(|uuid| uuid.to_string() == thread_id)
-        && state.chats.get(&thread_id).is_ok()
-    {
-        Some(thread_id.clone())
     } else {
-        None
+        if !uuid::Uuid::parse_str(&thread_id).is_ok_and(|uuid| uuid.to_string() == thread_id) {
+            None
+        } else {
+            match state.chats.get(&thread_id) {
+                Ok(summary) if summary.state != ChatState::Interrupted => Some(thread_id.clone()),
+                Ok(_) => return Err("agui_history_unavailable".into()),
+                Err(local_app::v2::AppError::NotFound(_)) => None,
+                Err(_) => return Err("chat_storage_unavailable".into()),
+            }
+        }
     };
     let history = if let Some(chat_id) = chat_id.as_deref() {
         if state
@@ -2717,8 +3509,13 @@ fn normalize_page_run_input(
     } else {
         Vec::new()
     };
-    let normalized = local_app::v2::agent::protocol::normalize_run_input(&input, &history)
+    let mut normalized = local_app::v2::agent::protocol::normalize_run_input(&input, &history)
         .map_err(|error| error.code)?;
+    if chat_id.is_some() {
+        normalized.input.protocol_history_digest = Some(
+            local_app::v2::agent::protocol::history_fingerprint(&history),
+        );
+    }
     Ok((normalized, chat_id))
 }
 
@@ -2726,26 +3523,195 @@ fn protocol_duplicate_run(
     state: &AppAgentState,
     owner: &Owner,
     input: &Value,
+    required_chat: Option<&str>,
 ) -> Result<Option<String>, String> {
     use local_app::v2::{agent::protocol, AppError};
 
+    let thread_id = input
+        .get("threadId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or("invalid_agui_input")?;
+    let chat_id = if let Some(required_chat) = required_chat {
+        if required_chat != thread_id
+            || !uuid::Uuid::parse_str(required_chat)
+                .is_ok_and(|uuid| uuid.to_string() == required_chat)
+        {
+            return Err("chat_thread_mismatch".into());
+        }
+        match state.chats.get(required_chat) {
+            Ok(_) => Some(required_chat.to_owned()),
+            Err(AppError::NotFound(_)) => return Err("chat_not_found".into()),
+            Err(_) => return Err("chat_storage_unavailable".into()),
+        }
+    } else if uuid::Uuid::parse_str(thread_id).is_ok_and(|uuid| uuid.to_string() == thread_id) {
+        match state.chats.get(thread_id) {
+            Ok(_) => Some(thread_id.to_owned()),
+            Err(AppError::NotFound(_)) => None,
+            Err(_) => return Err("chat_storage_unavailable".into()),
+        }
+    } else {
+        None
+    };
     let run_id = protocol::run_id(input).map_err(|error| error.code)?;
     let fingerprint = protocol::run_input_fingerprint(input).map_err(|error| error.code)?;
     match state.store.get_by_request(owner, &run_id) {
-        Ok(_) => {
-            let original = state
-                .store
-                .protocol_input_fingerprint(owner, &run_id)
-                .map_err(|_| "request_conflict")?;
-            if original == fingerprint {
-                Ok(Some(run_id))
-            } else {
-                Err("request_conflict".into())
-            }
-        }
-        Err(AppError::NotFound(_)) => Ok(None),
-        Err(_) => Err("agent_storage_unavailable".into()),
+        Ok(_) => {}
+        Err(AppError::NotFound(_)) => return Ok(None),
+        Err(_) => return Err("agent_storage_unavailable".into()),
     }
+    let original = match state.store.protocol_input_fingerprint(owner, &run_id) {
+        Ok(fingerprint) => fingerprint,
+        Err(AppError::NotFound(_)) => return Err("request_conflict".into()),
+        Err(_) => return Err("agent_storage_unavailable".into()),
+    };
+    let stored_thread_id = state
+        .store
+        .thread_id_for_request(owner, &run_id)
+        .map_err(|_| "agent_storage_unavailable")?;
+    if original != fingerprint || stored_thread_id != thread_id {
+        return Err("request_conflict".into());
+    }
+    let task_id = state
+        .store
+        .task_id_for_request(owner, &run_id)
+        .map_err(|_| "agent_storage_unavailable")?;
+    let task_chat_id = state
+        .store
+        .protocol_chat_id_for_request(owner, &run_id)
+        .map_err(|_| "agent_storage_unavailable")?;
+    match (task_chat_id.as_deref(), chat_id.as_deref()) {
+        (Some(expected), Some(actual)) if expected == actual => {}
+        (Some(_), None) => return Err("chat_storage_unavailable".into()),
+        (Some(_), Some(_)) | (None, Some(_)) => return Err("request_conflict".into()),
+        (None, None) => {}
+    }
+    let events = state
+        .store
+        .protocol_events(owner, &run_id, 0)
+        .map_err(|_| "agent_events_unavailable")?;
+    if events
+        .events
+        .first()
+        .and_then(|event| event.get("type"))
+        .and_then(Value::as_str)
+        != Some("RUN_STARTED")
+    {
+        return Err("agent_storage_unavailable".into());
+    }
+
+    if let Some(chat_id) = chat_id {
+        let user_message = input
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| messages.last())
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .ok_or("invalid_agui_input")?;
+        let message_id = user_message
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("invalid_agui_input")?;
+        let persisted_user = state
+            .chats
+            .protocol_message(&chat_id, message_id)
+            .map_err(|_| "chat_storage_unavailable")?;
+        if &persisted_user != user_message
+            || !state
+                .chats
+                .message_metadata(&chat_id)
+                .map_err(|_| "chat_storage_unavailable")?
+                .iter()
+                .any(|message| message.run_id == task_id && message.role == ChatRole::User)
+        {
+            return Err("chat_storage_unavailable".into());
+        }
+    }
+    Ok(Some(run_id))
+}
+
+fn validate_duplicate_initialization(
+    state: &AppAgentState,
+    owner: &Owner,
+    input: &Input,
+    protocol_user_message: Option<&Value>,
+    chat_id: Option<&str>,
+    thread_id: &str,
+    task_id: &str,
+) -> Result<(), String> {
+    if state
+        .store
+        .thread_id_for_request(owner, &input.request_id)
+        .map_err(|_| "agent_storage_unavailable")?
+        != thread_id
+        || state
+            .store
+            .task_id_for_request(owner, &input.request_id)
+            .map_err(|_| "agent_storage_unavailable")?
+            != task_id
+    {
+        return Err("request_conflict".into());
+    }
+    let events = state
+        .store
+        .protocol_events(owner, &input.request_id, 0)
+        .map_err(|_| "agent_events_unavailable")?;
+    if events
+        .events
+        .first()
+        .and_then(|event| event.get("type"))
+        .and_then(Value::as_str)
+        != Some("RUN_STARTED")
+    {
+        return Err("agent_storage_unavailable".into());
+    }
+    if let Some(chat_id) = chat_id {
+        if state
+            .store
+            .protocol_chat_id_for_request(owner, &input.request_id)
+            .map_err(|_| "agent_storage_unavailable")?
+            .as_deref()
+            != Some(chat_id)
+        {
+            return Err("request_conflict".into());
+        }
+        let message = protocol_user_message.ok_or("chat_storage_unavailable")?;
+        let message_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("chat_storage_unavailable")?;
+        let persisted = state
+            .chats
+            .protocol_message(chat_id, message_id)
+            .map_err(|_| "chat_storage_unavailable")?;
+        if &persisted != message {
+            return Err("chat_storage_unavailable".into());
+        }
+        let task_message_id = MessageId::from_uuid(
+            uuid::Uuid::parse_str(task_id).map_err(|_| "agent_storage_unavailable")?,
+        )
+        .to_string();
+        if !state
+            .chats
+            .message_metadata(chat_id)
+            .map_err(|_| "chat_storage_unavailable")?
+            .iter()
+            .any(|metadata| {
+                metadata.message_id == task_message_id
+                    && metadata.run_id == task_id
+                    && metadata.role == ChatRole::User
+            })
+        {
+            return Err("chat_storage_unavailable".into());
+        }
+    } else if state
+        .store
+        .protocol_chat_id_for_request(owner, &input.request_id)
+        .map_err(|_| "agent_storage_unavailable")?
+        .is_some()
+    {
+        return Err("request_conflict".into());
+    }
+    Ok(())
 }
 
 fn protocol_terminal_event(task: &local_app::v2::agent::Task, thread_id: &str) -> Option<Value> {
@@ -2792,6 +3758,81 @@ fn protocol_terminal_event(task: &local_app::v2::agent::Task, thread_id: &str) -
         })),
         State::Queued | State::Running => None,
     }
+}
+
+#[cfg(test)]
+fn commit_agent_terminal_for_test(
+    store: &AgentStore,
+    owner: &Owner,
+    id: &str,
+    state: State,
+    result: Option<TaskResult>,
+    error: Option<String>,
+) -> Result<local_app::v2::agent::Task, String> {
+    let current = store
+        .get(owner, id)
+        .map_err(|_| "agent_storage_unavailable")?;
+    if state == State::Succeeded {
+        if let Some(chat_id) = result.as_ref().and_then(|result| result.chat_id.as_deref()) {
+            let previous_length = store
+                .latest_chat_transcript_checkpoint(&owner.app_id, chat_id, id)
+                .map_err(|_| "agent_storage_unavailable")?
+                .map(|(_, checkpoint)| checkpoint.byte_len)
+                .unwrap_or(0);
+            // Ledger-only protocol fixtures do not create a Harness JSONL
+            // transcript. A shape-valid synthetic checkpoint exercises the
+            // private ledger contract; it is never evidence of a resumable
+            // physical Chat in production.
+            store
+                .record_chat_transcript_checkpoint(
+                    owner,
+                    id,
+                    chat_id,
+                    ChatTranscriptCheckpoint {
+                        byte_len: previous_length.saturating_add(1),
+                        sha256: "0".repeat(64),
+                    },
+                )
+                .map_err(|_| "agent_storage_unavailable")?;
+        }
+    }
+    let thread_id = store
+        .thread_id_for_request(owner, &current.request_id)
+        .map_err(|_| "agent_storage_unavailable")?;
+    store
+        .with_protocol_commit_permit(|permit| {
+            let candidate = store
+                .prepare_protocol_terminal(permit, owner, id, state, result, None, error)
+                .map_err(|_| "agent_storage_unavailable")?;
+            if candidate.state == State::Succeeded {
+                let result = candidate
+                    .result
+                    .as_ref()
+                    .ok_or("agent_storage_unavailable")?;
+                let message_id = result
+                    .message_id
+                    .as_deref()
+                    .ok_or("agent_storage_unavailable")?;
+                for event in [
+                    json!({"type":"TEXT_MESSAGE_START","messageId":message_id,"role":"assistant"}),
+                    json!({"type":"TEXT_MESSAGE_CONTENT","messageId":message_id,"delta":result.text.clone()}),
+                    json!({"type":"TEXT_MESSAGE_END","messageId":message_id}),
+                ] {
+                    store
+                        .append_protocol_commit_event(permit, owner, id, event)
+                        .map_err(|_| "agent_storage_unavailable")?;
+                }
+            }
+            let terminal = protocol_terminal_event(&candidate, &thread_id)
+                .ok_or("agent_storage_unavailable")?;
+            store
+                .append_protocol_commit_event(permit, owner, id, terminal)
+                .map_err(|_| "agent_storage_unavailable")?;
+            store
+                .finalize_protocol_terminal(permit, owner, id)
+                .map_err(|_| "agent_storage_unavailable")
+        })
+        .map_err(|_| "agent_storage_unavailable")?
 }
 
 // The native history is authoritative for acceptance and fallback retraction.
@@ -2961,12 +4002,40 @@ mod inventory_page_tests {
             .update(
                 owner,
                 &admission.task.run_id,
-                State::Succeeded,
+                State::Running,
                 None,
                 None,
                 None,
             )
             .unwrap();
+        state
+            .store
+            .append_event(
+                owner,
+                &admission.task.run_id,
+                json!({
+                    "type":"RUN_STARTED",
+                    "protocolVersion":"1.0",
+                    "threadId":format!("thread-{request_id}"),
+                    "runId":request_id
+                }),
+            )
+            .unwrap();
+        commit_agent_terminal_for_test(
+            &state.store,
+            owner,
+            &admission.task.run_id,
+            State::Succeeded,
+            Some(TaskResult {
+                text: String::new(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: None,
+                message_id: Some(format!("assistant-{}", request_id)),
+            }),
+            None,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3346,6 +4415,7 @@ mod progress_tests {
             chats: state.chats,
             chat_id: None,
             user_message_id: None,
+            chat_orchestrator: Mutex::new(None),
             chat_persisted,
             chat_commit: AsyncMutex::new(None),
             attachment_metadata: Vec::new(),
@@ -3358,6 +4428,8 @@ mod progress_tests {
             model_failure: Mutex::new(None),
             timed_out: AtomicBool::new(false),
             usage: AsyncMutex::new(None),
+            fail_after_final_ledger_before_chat_authority: AtomicBool::new(false),
+            after_final_ledger_error_barrier: Mutex::new(None),
         };
         if protocol {
             control.store.append_event(
@@ -3883,10 +4955,668 @@ mod progress_tests {
         }
     }
 
-    #[cfg(unix)]
+    fn complete_protocol_chat_turn(
+        state: &AppAgentState,
+        owner: &Owner,
+        chat_id: &str,
+        input: Value,
+        assistant_id: &str,
+        answer: &str,
+    ) -> (String, Value, Value) {
+        let (normalized, normalized_chat_id) =
+            normalize_page_run_input(state, input, Some(chat_id)).unwrap();
+        let admission = state
+            .store
+            .admit_scoped(
+                owner,
+                &normalized.input,
+                &[],
+                &[],
+                normalized_chat_id.as_deref(),
+                true,
+            )
+            .unwrap();
+        let task_id = admission.task.run_id;
+        state
+            .store
+            .update(owner, &task_id, State::Running, None, None, None)
+            .unwrap();
+        state
+            .store
+            .append_event(
+                owner,
+                &task_id,
+                json!({
+                    "type":"RUN_STARTED",
+                    "protocolVersion":"1.0",
+                    "threadId":chat_id,
+                    "runId":normalized.run_id
+                }),
+            )
+            .unwrap();
+        state.chats.start_turn(chat_id, &task_id).unwrap();
+        let internal_user_id =
+            MessageId::from_uuid(uuid::Uuid::parse_str(&task_id).unwrap()).to_string();
+        state
+            .chats
+            .record_message(
+                chat_id,
+                ChatMessageMetadata {
+                    message_id: internal_user_id,
+                    run_id: task_id.clone(),
+                    role: ChatRole::User,
+                    created_at: now_millis(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        state
+            .chats
+            .record_protocol_message(chat_id, &task_id, &normalized.user_message)
+            .unwrap();
+        let assistant = json!({"id":assistant_id,"role":"assistant","content":answer});
+        state
+            .chats
+            .record_protocol_message(chat_id, &task_id, &assistant)
+            .unwrap();
+        commit_agent_terminal_for_test(
+            &state.store,
+            owner,
+            &task_id,
+            State::Succeeded,
+            Some(TaskResult {
+                text: answer.into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: Some(chat_id.into()),
+                message_id: Some(assistant_id.into()),
+            }),
+            None,
+        )
+        .unwrap();
+        let accepted = state.store.committed_protocol_assistants().unwrap();
+        state.chats.set_committed_assistants(&accepted).unwrap();
+        state.chats.finish_turn(chat_id, &task_id).unwrap();
+        (task_id, normalized.user_message, assistant)
+    }
+
     #[tokio::test]
-    async fn failed_interruption_persist_keeps_queued_run_blocking_admission() {
-        use std::os::unix::fs::PermissionsExt;
+    async fn concurrent_duplicate_waits_for_chat_initialization_and_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let app_id = format!("a{}", "9".repeat(32));
+        std::fs::create_dir_all(host.apps_root.join(&app_id)).unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "concurrent-chat-init".into(),
+        };
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},
+            "tools":{},"skills":[],"background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let raw = json!({
+            "threadId":chat.chat_id,
+            "runId":"concurrent-chat-init-run",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"concurrent-chat-user","role":"user","content":"question"}]
+        });
+        let (normalized, chat_id) =
+            normalize_page_run_input(&state, raw, Some(&chat.chat_id)).unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let chat_index = state.root.join("chats-index.json");
+        let chat_index_backup = state.root.join("chats-index.test-backup");
+        std::fs::rename(&chat_index, &chat_index_backup).unwrap();
+        std::fs::create_dir(&chat_index).unwrap();
+        let start_duplicate = |host: Arc<AppAgentHost>, barrier: Arc<tokio::sync::Barrier>| {
+            let owner = owner.clone();
+            let input = normalized.input.clone();
+            let user_message = normalized.user_message.clone();
+            let chat_id = chat_id.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                host.start_task(
+                    owner,
+                    1,
+                    &[],
+                    &[],
+                    input,
+                    Some(user_message),
+                    chat_id,
+                    CancellationToken::new(),
+                    true,
+                    true,
+                )
+                .await
+            })
+        };
+        let first = start_duplicate(host.clone(), barrier.clone());
+        let second = start_duplicate(host.clone(), barrier.clone());
+        barrier.wait().await;
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+
+        assert_eq!(first.unwrap_err(), "chat_storage_unavailable");
+        assert_eq!(second.unwrap_err(), "chat_storage_unavailable");
+        assert!(host.active.lock().await.is_empty());
+        assert!(matches!(
+            state
+                .store
+                .get_by_request(&owner, "concurrent-chat-init-run"),
+            Err(local_app::v2::AppError::NotFound(_))
+        ));
+        std::fs::remove_dir(&chat_index).unwrap();
+        std::fs::rename(&chat_index_backup, &chat_index).unwrap();
+        let recovered = AppAgentState::open(&host.apps_root, &owner.app_id).unwrap();
+        assert!(matches!(
+            recovered
+                .store
+                .get_by_request(&owner, "concurrent-chat-init-run"),
+            Err(local_app::v2::AppError::NotFound(_))
+        ));
+        assert_eq!(
+            recovered.chats.get(&chat.chat_id).unwrap().state,
+            ChatState::Idle
+        );
+        let mut unrelated = normalized.input;
+        unrelated.request_id = "unrelated-after-init-rollback".into();
+        let admitted = recovered
+            .store
+            .admit_scoped(&owner, &unrelated, &[], &[], None, true)
+            .unwrap();
+        assert!(admitted.start);
+    }
+
+    #[tokio::test]
+    async fn duplicate_start_without_active_control_rejects_failed_chat_run() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let app_id = format!("a{}", "6".repeat(32));
+        std::fs::create_dir_all(host.apps_root.join(&app_id)).unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "inactive-chat-duplicate".into(),
+        };
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let raw = json!({
+            "threadId":chat.chat_id,
+            "runId":"inactive-failed-chat-run",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"inactive-failed-user","role":"user","content":"hello"}]
+        });
+        let (normalized, normalized_chat) =
+            normalize_page_run_input(&state, raw, Some(&chat.chat_id)).unwrap();
+        let admitted = state
+            .store
+            .admit_scoped(
+                &owner,
+                &normalized.input,
+                &[],
+                &[],
+                normalized_chat.as_deref(),
+                true,
+            )
+            .unwrap();
+        state
+            .store
+            .update(
+                &owner,
+                &admitted.task.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .append_event(
+                &owner,
+                &admitted.task.run_id,
+                json!({
+                    "type":"RUN_STARTED",
+                    "protocolVersion":"1.0",
+                    "threadId":chat.chat_id,
+                    "runId":"inactive-failed-chat-run"
+                }),
+            )
+            .unwrap();
+        state
+            .chats
+            .start_turn(&chat.chat_id, &admitted.task.run_id)
+            .unwrap();
+        let user_message_id =
+            MessageId::from_uuid(uuid::Uuid::parse_str(&admitted.task.run_id).unwrap()).to_string();
+        state
+            .chats
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: user_message_id,
+                    run_id: admitted.task.run_id.clone(),
+                    role: ChatRole::User,
+                    created_at: now_millis(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        state
+            .chats
+            .record_protocol_message(
+                &chat.chat_id,
+                &admitted.task.run_id,
+                &normalized.user_message,
+            )
+            .unwrap();
+        commit_agent_terminal_for_test(
+            &state.store,
+            &owner,
+            &admitted.task.run_id,
+            State::Failed,
+            None,
+            Some("model_execution_failed".into()),
+        )
+        .unwrap();
+        let before_events = state
+            .store
+            .protocol_events(&owner, "inactive-failed-chat-run", 0)
+            .unwrap()
+            .events;
+
+        let result = host
+            .start_task(
+                owner.clone(),
+                1,
+                &[],
+                &[],
+                normalized.input,
+                Some(normalized.user_message),
+                Some(chat.chat_id.clone()),
+                CancellationToken::new(),
+                true,
+                true,
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), "chat_storage_unavailable");
+        assert_eq!(
+            state
+                .store
+                .protocol_events(&owner, "inactive-failed-chat-run", 0)
+                .unwrap()
+                .events,
+            before_events,
+            "an inactive failed run must not be acknowledged or restarted"
+        );
+        assert!(host.active.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_paths_reread_succeeded_task_after_active_control_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_host(root.path()).await;
+        let source = root.path().join("duplicate-terminal-race-source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("index.html"), "fixture").unwrap();
+        std::fs::write(
+            source.join("lingxi-app.json"),
+            json!({
+                "schema":2,
+                "name":"Duplicate terminal race test",
+                "entry":{"type":"static","path":"index.html"},
+                "targets":[{"platform":"ios","environment":"web"}],
+                "capabilities":["agent"],
+                "agent":{"tools":[]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let published = service
+            .request_value(json!({
+                "op":"publish",
+                "expectedRevision":0,
+                "sourcePath":source
+            }))
+            .await
+            .unwrap();
+        let app_id = published["record"]["appId"].as_str().unwrap().to_owned();
+        let revision = published["record"]["currentRevision"].as_u64().unwrap();
+        let (owner, _, _) = host
+            .current_release(&app_id, revision, "duplicate-terminal-race")
+            .await
+            .unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+
+        let seed_running_chat = |chat_id: &str, request_id: &str| {
+            let raw = json!({
+                "threadId":chat_id,
+                "runId":request_id,
+                "protocolVersion":"1.0",
+                "messages":[{"id":format!("{request_id}-user"),"role":"user","content":"hello"}]
+            });
+            let (normalized, normalized_chat) =
+                normalize_page_run_input(&state, raw, Some(chat_id)).unwrap();
+            let admitted = state
+                .store
+                .admit_scoped(
+                    &owner,
+                    &normalized.input,
+                    &[],
+                    &[],
+                    normalized_chat.as_deref(),
+                    true,
+                )
+                .unwrap();
+            let task_id = admitted.task.run_id;
+            state
+                .store
+                .update(&owner, &task_id, State::Running, None, None, None)
+                .unwrap();
+            state
+                .store
+                .append_event(
+                    &owner,
+                    &task_id,
+                    json!({
+                        "type":"RUN_STARTED",
+                        "protocolVersion":"1.0",
+                        "threadId":chat_id,
+                        "runId":request_id
+                    }),
+                )
+                .unwrap();
+            state.chats.start_turn(chat_id, &task_id).unwrap();
+            let user_message_id =
+                MessageId::from_uuid(uuid::Uuid::parse_str(&task_id).unwrap()).to_string();
+            state
+                .chats
+                .record_message(
+                    chat_id,
+                    ChatMessageMetadata {
+                        message_id: user_message_id.clone(),
+                        run_id: task_id.clone(),
+                        role: ChatRole::User,
+                        created_at: now_millis(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .unwrap();
+            state
+                .chats
+                .record_protocol_message(chat_id, &task_id, &normalized.user_message)
+                .unwrap();
+            (
+                task_id,
+                normalized.input,
+                normalized.user_message,
+                user_message_id,
+            )
+        };
+        let finish_chat = |chat_id: &str, task_id: &str, assistant_id: &str| {
+            let assistant = json!({
+                "id":assistant_id,
+                "role":"assistant",
+                "content":"committed answer"
+            });
+            state
+                .chats
+                .record_protocol_message(chat_id, task_id, &assistant)
+                .unwrap();
+            commit_agent_terminal_for_test(
+                &state.store,
+                &owner,
+                task_id,
+                State::Succeeded,
+                Some(TaskResult {
+                    text: "committed answer".into(),
+                    output: None,
+                    attachments: Vec::new(),
+                    chat_id: Some(chat_id.into()),
+                    message_id: Some(assistant_id.into()),
+                }),
+                None,
+            )
+            .unwrap();
+            let accepted = state.store.committed_protocol_assistants().unwrap();
+            state.chats.set_committed_assistants(&accepted).unwrap();
+            state.chats.finish_turn(chat_id, task_id).unwrap();
+        };
+
+        // Exercise the normalized !admitted.start path. Its first task read
+        // sees Running; the original commits and disappears while this caller
+        // waits before active-map lookup. It must reread the terminal record.
+        let first_chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let (first_task_id, first_input, first_user, first_user_row) =
+            seed_running_chat(&first_chat.chat_id, "fallback-task-race");
+        let (first_persisted, _) = watch::channel(Some(Ok(())));
+        let first_control = Arc::new(chat_control(
+            owner.clone(),
+            revision,
+            first_input.request_id.clone(),
+            first_task_id.clone(),
+            first_chat.chat_id.clone(),
+            first_user_row,
+            state.store.clone(),
+            state.chats.clone(),
+            first_persisted,
+        ));
+        host.active
+            .lock()
+            .await
+            .insert(first_task_id.clone(), first_control.clone());
+        let (first_snapshot_tx, first_snapshot_rx) = oneshot::channel();
+        let (first_release_tx, first_release_rx) = oneshot::channel();
+        *host.duplicate_task_snapshot_pause.lock().unwrap() =
+            Some((first_snapshot_tx, first_release_rx));
+        let host_for_start = host.clone();
+        let owner_for_start = owner.clone();
+        let first_chat_id = first_chat.chat_id.clone();
+        let first_duplicate = tokio::spawn(async move {
+            host_for_start
+                .start_task(
+                    owner_for_start,
+                    revision,
+                    &[],
+                    &[],
+                    first_input,
+                    Some(first_user),
+                    Some(first_chat_id),
+                    CancellationToken::new(),
+                    true,
+                    true,
+                )
+                .await
+        });
+        first_snapshot_rx.await.unwrap();
+        let first_assistant_id = MessageId::new().to_string();
+        finish_chat(&first_chat.chat_id, &first_task_id, &first_assistant_id);
+        first_control.finished.store(true, Ordering::Release);
+        host.active.lock().await.remove(&first_task_id);
+        first_release_tx.send(()).unwrap();
+        assert_eq!(first_duplicate.await.unwrap().unwrap(), first_task_id);
+
+        // Exercise the pre-normalization duplicate path with the same stale
+        // snapshot interleaving. The no-Control branch must validate the fresh
+        // success and its complete terminal evidence before returning runId.
+        let second_chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let (second_task_id, _second_input, _second_user, second_user_row) =
+            seed_running_chat(&second_chat.chat_id, "probe-task-race");
+        let (second_persisted, _) = watch::channel(Some(Ok(())));
+        let second_control = Arc::new(chat_control(
+            owner.clone(),
+            revision,
+            "probe-task-race".into(),
+            second_task_id.clone(),
+            second_chat.chat_id.clone(),
+            second_user_row,
+            state.store.clone(),
+            state.chats.clone(),
+            second_persisted,
+        ));
+        host.active
+            .lock()
+            .await
+            .insert(second_task_id.clone(), second_control.clone());
+        let (second_snapshot_tx, second_snapshot_rx) = oneshot::channel();
+        let (second_release_tx, second_release_rx) = oneshot::channel();
+        *host.duplicate_task_snapshot_pause.lock().unwrap() =
+            Some((second_snapshot_tx, second_release_rx));
+        let host_for_probe = host.clone();
+        let state_for_probe = state.clone();
+        let owner_for_probe = owner.clone();
+        let probe_cancel = CancellationToken::new();
+        let second_chat_id = second_chat.chat_id.clone();
+        let raw_input = json!({
+            "threadId":second_chat_id.clone(),
+            "runId":"probe-task-race",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"probe-task-race-user","role":"user","content":"hello"}]
+        });
+        let duplicate_probe = tokio::spawn(async move {
+            host_for_probe
+                .duplicate_before_normalization(
+                    &state_for_probe,
+                    &owner_for_probe,
+                    &raw_input,
+                    Some(&second_chat_id),
+                    &probe_cancel,
+                    true,
+                )
+                .await
+        });
+        second_snapshot_rx.await.unwrap();
+        let second_assistant_id = MessageId::new().to_string();
+        finish_chat(&second_chat.chat_id, &second_task_id, &second_assistant_id);
+        second_control.finished.store(true, Ordering::Release);
+        host.active.lock().await.remove(&second_task_id);
+        second_release_tx.send(()).unwrap();
+        assert_eq!(
+            duplicate_probe.await.unwrap().unwrap().as_deref(),
+            Some("probe-task-race")
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_chat_structured_schema_is_rejected_before_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let app_id = format!("a{}", "7".repeat(32));
+        std::fs::create_dir_all(host.apps_root.join(&app_id)).unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        let owner = Owner {
+            app_id: app_id.clone(),
+            release_digest: "2".repeat(64),
+            invocation_id: "chat-structured-output-test".into(),
+        };
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let mut input: Input = serde_json::from_value(json!({
+            "requestId":"chat-structured-output-run",
+            "prompt":"return a structured answer"
+        }))
+        .unwrap();
+        input.protocol_thread_id = Some(chat.chat_id.clone());
+        input.protocol_history_digest =
+            Some(local_app::v2::agent::protocol::history_fingerprint(&[]));
+        input.output_schema = Some(json!({
+            "type":"object",
+            "properties":{"answer":{"type":"string"}},
+            "required":["answer"]
+        }));
+        assert!(validate_chat_output_mode(None, &input).is_ok());
+
+        assert_eq!(
+            host.start_task(
+                owner.clone(),
+                1,
+                &[],
+                &[],
+                input,
+                Some(json!({"id":"chat-structured-user","role":"user","content":"answer"})),
+                Some(chat.chat_id.clone()),
+                CancellationToken::new(),
+                true,
+                true,
+            )
+            .await
+            .unwrap_err(),
+            "chat_structured_output_unsupported"
+        );
+        assert!(matches!(
+            state
+                .store
+                .task_id_for_request(&owner, "chat-structured-output-run"),
+            Err(local_app::v2::AppError::NotFound(_))
+        ));
+        assert_eq!(
+            state.chats.get(&chat.chat_id).unwrap().state,
+            ChatState::Idle
+        );
+        assert!(host.active.lock().await.is_empty());
+        assert_eq!(
+            std::fs::read_dir(state.root.join("tasks/protocol-events"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_interruption_persist_quarantines_then_recovers_original_event_evidence() {
         let root = tempfile::tempdir().unwrap();
         let (host, _service) = test_wake_host(root.path()).await;
         let (owner, input, key, state) = configured_wake_fixture(&host);
@@ -3897,7 +5627,12 @@ mod progress_tests {
                 b"{partial",
             )
             .unwrap();
-            std::fs::set_permissions(tasks, std::fs::Permissions::from_mode(0o500)).unwrap();
+            // Replacing the ledger path with a directory makes the later
+            // quarantine write fail deterministically, including under a
+            // privileged test runner which can bypass mode bits.
+            let ledger = tasks.join("agent-tasks.json");
+            std::fs::rename(&ledger, tasks.join("agent-tasks.test-backup")).unwrap();
+            std::fs::create_dir(ledger).unwrap();
         }));
         let result = host
             .start_task(
@@ -3913,19 +5648,11 @@ mod progress_tests {
                 false,
             )
             .await;
-        std::fs::set_permissions(
-            state.root.join("tasks"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
         assert_eq!(result.unwrap_err(), "agent_storage_unavailable");
-        let task = state.store.get_by_request(&owner, &key.request_id).unwrap();
-        assert_eq!(
-            task.state,
-            State::Queued,
-            "A failed durable commit must not be presented as interrupted."
+        assert!(
+            state.store.get_by_request(&owner, &key.request_id).is_err(),
+            "uncertain in-memory task state must be quarantined"
         );
-        assert!(task.error.is_none());
         assert!(!host
             .wake_reservations
             .lock()
@@ -3933,12 +5660,82 @@ mod progress_tests {
             .reservations
             .contains_key(&key));
         assert!(host.active.lock().await.is_empty());
+
+        let tasks = state.root.join("tasks");
+        let ledger = tasks.join("agent-tasks.json");
+        std::fs::remove_dir(&ledger).unwrap();
+        std::fs::rename(tasks.join("agent-tasks.test-backup"), &ledger).unwrap();
+        let event_path = std::fs::read_dir(tasks.join("protocol-events"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let event_bytes = std::fs::read(&event_path).unwrap();
+        assert_eq!(event_bytes, b"{partial");
+
+        let recovered = AgentStore::open(&tasks).unwrap();
+        let task = recovered.get_by_request(&owner, &key.request_id).unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(
+            task.error.as_ref().map(|error| error.code.as_str()),
+            Some("protocol_event_storage_failed")
+        );
+        assert_eq!(std::fs::read(&event_path).unwrap(), event_bytes);
+
         let mut later = input;
         later.request_id = "independent-run".into();
+        let independent = recovered.admit(&owner, &later, &[]).unwrap();
+        assert!(independent.start);
+    }
+
+    #[tokio::test]
+    async fn ios_wake_claim_does_not_override_duplicate_only_gate_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_wake_host(root.path()).await;
+        let (owner, input, key, state) = configured_wake_fixture(&host);
+        let factory = host.factory.clone();
+        assert!(host.has_wake_reservation(&owner.app_id, 1, &input.request_id));
+
+        let error = host
+            .start_task(
+                owner.clone(),
+                1,
+                &[],
+                &[],
+                input.clone(),
+                None,
+                None,
+                CancellationToken::new(),
+                false,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, "host_wake_required");
         assert!(matches!(
-            state.store.admit(&owner, &later, &[]),
-            Err(local_app::v2::AppError::Busy(_))
+            state.store.get_by_request(&owner, &key.request_id),
+            Err(local_app::v2::AppError::NotFound(_))
         ));
+        assert!(host.has_wake_reservation(&owner.app_id, 1, &input.request_id));
+        assert!(host.active.lock().await.is_empty());
+        assert_eq!(
+            std::fs::read_dir(state.root.join("tasks/protocol-events"))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        drop(host);
+        let reopened = AppAgentHost::new(&service, factory, root.path()).unwrap();
+        let recovered_state = reopened.app_state(&owner.app_id).unwrap();
+        assert!(matches!(
+            recovered_state
+                .store
+                .get_by_request(&owner, &key.request_id),
+            Err(local_app::v2::AppError::NotFound(_))
+        ));
+        assert!(reopened.active.lock().await.is_empty());
     }
 
     #[cfg(unix)]
@@ -3972,48 +5769,115 @@ mod progress_tests {
                 assert!(control.protocol_events_failed.load(Ordering::Acquire));
             }
             let before = std::fs::read(&event_path).unwrap();
-            let (task, event_failed) = control
-                .commit_terminal(
-                    State::Failed,
-                    None,
-                    None,
-                    Some("agent_storage_unavailable".into()),
-                )
-                .unwrap();
-            assert!(event_failed);
-            assert_eq!(task.state, State::Interrupted);
             assert_eq!(
-                task.error.as_ref().unwrap().code,
-                "protocol_event_storage_failed"
+                control
+                    .commit_terminal(
+                        State::Failed,
+                        None,
+                        None,
+                        Some("agent_storage_unavailable".into()),
+                    )
+                    .unwrap_err(),
+                "agent_storage_unavailable"
             );
             assert_eq!(
                 std::fs::read(&event_path).unwrap(),
                 before,
-                "A failed event write must never be followed by RUN_ERROR"
+                "A failed event write must not be followed by another event"
             );
             assert!(control
                 .store
                 .protocol_events(&control.owner, &control.request_id, 0)
                 .is_err());
+            let recovered =
+                AgentStore::open(event_path.parent().unwrap().parent().unwrap()).unwrap();
+            let task = recovered
+                .get_by_request(&control.owner, &control.request_id)
+                .unwrap();
+            assert_eq!(task.state, State::Interrupted);
+            assert_eq!(task.error.as_ref().unwrap().code, "host_restarted");
+            assert!(std::fs::read(&event_path).unwrap().starts_with(&before));
         }
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn failed_terminal_interruption_keeps_active_owner_and_wake() {
+    async fn terminal_event_storage_failure_releases_cleaned_control_for_recovery() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
+        let app_id = format!("a{}", "6".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app_id)).unwrap();
+        let prior_state = AppAgentState::open(root.path(), &app_id).unwrap();
+        let prior_owner = Owner {
+            app_id: app_id.clone(),
+            release_digest: "2".repeat(64),
+            invocation_id: "progress-test".into(),
+        };
+        let prior_settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},
+            "tools":{},"skills":[],"background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        prior_state
+            .store
+            .configure(prior_owner.clone(), Some(prior_settings))
+            .unwrap();
+        let mut prior_input: Input =
+            serde_json::from_value(json!({"requestId":"prior-success", "prompt":"fixture"}))
+                .unwrap();
+        prior_input.protocol_thread_id = Some("prior-success-thread".into());
+        let prior = prior_state
+            .store
+            .admit(&prior_owner, &prior_input, &[])
+            .unwrap()
+            .task;
+        prior_state
+            .store
+            .update(
+                &prior_owner,
+                &prior.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        prior_state
+            .store
+            .append_event(
+                &prior_owner,
+                &prior.run_id,
+                json!({
+                    "type":"RUN_STARTED", "protocolVersion":"1.0",
+                    "threadId":"prior-success-thread", "runId":"prior-success"
+                }),
+            )
+            .unwrap();
+        commit_agent_terminal_for_test(
+            &prior_state.store,
+            &prior_owner,
+            &prior.run_id,
+            State::Succeeded,
+            Some(TaskResult {
+                text: "saved success".into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: None,
+                message_id: Some("prior-assistant".into()),
+            }),
+            None,
+        )
+        .unwrap();
+        drop(prior_state);
+
         let (host, _service) = test_wake_host(root.path()).await;
         let control = Arc::new(running_control_with_protocol(root.path(), true));
         let app_root = root.path().join(&control.owner.app_id);
-        let tasks = app_root.join("agent/agui-v1/tasks");
-        let event_path = tasks
+        let event_path = app_root
+            .join("agent/agui-v1/tasks")
             .join("protocol-events")
             .join(format!("{}.jsonl", control.id));
         let before = std::fs::read(&event_path).unwrap();
-        control
-            .protocol_events_failed
-            .store(true, Ordering::Release);
         let key = WakeKey {
             app_id: control.owner.app_id.clone(),
             revision: control.revision,
@@ -4040,31 +5904,63 @@ mod progress_tests {
         let input: Input =
             serde_json::from_value(json!({"requestId":control.request_id, "prompt":"fixture"}))
                 .unwrap();
-        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::set_permissions(&event_path, std::fs::Permissions::from_mode(0o400)).unwrap();
         host.clone()
             .execute(control.clone(), admission, input, app_root)
             .await;
-        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&event_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(control.finished.load(Ordering::Acquire));
-        assert!(host.active.lock().await.contains_key(&control.id));
-        assert!(host
+        assert!(!host.active.lock().await.contains_key(&control.id));
+        assert!(!host
             .wake_reservations
             .lock()
             .unwrap()
             .reservations
             .contains_key(&key));
+        assert!(control.store.get(&control.owner, &control.id).is_err());
+        assert_eq!(std::fs::read(&event_path).unwrap(), before);
+        host.stop_all().await.unwrap();
+
+        let recovered = AppAgentState::open(root.path(), &control.owner.app_id).unwrap();
+        let old_success = recovered
+            .store
+            .get_by_request(&prior_owner, "prior-success")
+            .unwrap();
+        assert_eq!(old_success.state, State::Succeeded);
+        assert_eq!(old_success.result.as_ref().unwrap().text, "saved success");
         assert_eq!(
-            control
+            recovered
                 .store
-                .get(&control.owner, &control.id)
+                .protocol_events(&prior_owner, "prior-success", 0)
                 .unwrap()
-                .state,
-            State::Running
+                .events
+                .last()
+                .unwrap()["type"],
+            "RUN_FINISHED"
+        );
+        let interrupted = recovered
+            .store
+            .get_by_request(&prior_owner, "progress-run")
+            .unwrap();
+        assert_eq!(interrupted.state, State::Interrupted);
+        assert!(interrupted.result.is_none());
+        assert_eq!(
+            interrupted.error.as_ref().unwrap().code,
+            "protocol_commit_incomplete"
         );
         assert_eq!(std::fs::read(&event_path).unwrap(), before);
-        assert_eq!(
-            host.stop_all().await.unwrap_err(),
-            "agent_cleanup_incomplete"
+
+        let mut independent: Input = serde_json::from_value(
+            json!({"requestId":"independent-after-reopen", "prompt":"fixture"}),
+        )
+        .unwrap();
+        independent.protocol_thread_id = Some("independent-thread".into());
+        assert!(
+            recovered
+                .store
+                .admit(&prior_owner, &independent, &[])
+                .unwrap()
+                .start
         );
     }
 
@@ -4570,6 +6466,9 @@ mod progress_tests {
             serde_json::from_value(json!({"requestId":"deferred-run", "prompt":"new request"}))
                 .unwrap();
         input.protocol_thread_id = Some(chat_id.clone());
+        input.protocol_history_digest = Some(local_app::v2::agent::protocol::history_fingerprint(
+            &state.chats.protocol_history_digests(&chat_id).unwrap(),
+        ));
         let new_user = json!({"id":"new-user", "role":"user", "content":"new request"});
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -5147,6 +7046,7 @@ mod accepted_projection_tests {
             chats: state.chats.clone(),
             chat_id: Some(chat.chat_id.clone()),
             user_message_id: None,
+            chat_orchestrator: Mutex::new(None),
             chat_persisted,
             chat_commit: AsyncMutex::new(None),
             attachment_metadata: Vec::new(),
@@ -5159,8 +7059,224 @@ mod accepted_projection_tests {
             model_failure: Mutex::new(None),
             timed_out: AtomicBool::new(false),
             usage: AsyncMutex::new(None),
+            fail_after_final_ledger_before_chat_authority: AtomicBool::new(false),
+            after_final_ledger_error_barrier: Mutex::new(None),
         };
         (root, state, control, user, chat.chat_id)
+    }
+
+    #[test]
+    fn admission_rechecks_the_committed_chat_history_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let app_id = format!("a{}", "7".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app_id)).unwrap();
+        let state = AppAgentState::open(root.path(), &app_id).unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "history-race".into(),
+        };
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},
+            "tools":{},"skills":[],"background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let raw = json!({
+            "threadId":chat.chat_id.clone(),
+            "runId":"history-race-run",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"user-new","role":"user","content":"question"}]
+        });
+        let (normalized, _) = normalize_page_run_input(&state, raw, Some(&chat.chat_id)).unwrap();
+        let expected = normalized.input.protocol_history_digest.clone().unwrap();
+        state
+            .chats
+            .record_protocol_message(
+                &chat.chat_id,
+                "concurrent-run",
+                &json!({"id":"concurrent-user","role":"user","content":"changed history"}),
+            )
+            .unwrap();
+        let chats = state.chats.clone();
+        let checked_chat_id = chat.chat_id.clone();
+        let admission = state.store.admit_scoped_with_check(
+            &owner,
+            &normalized.input,
+            &[],
+            &[],
+            Some(&chat.chat_id),
+            true,
+            move || {
+                let current = chats.protocol_history_digests(&checked_chat_id)?;
+                if local_app::v2::agent::protocol::history_fingerprint(&current) != expected {
+                    return Err(local_app::v2::AppError::Invalid(
+                        "AG-UI Chat history changed during Agent admission".into(),
+                    ));
+                }
+                Ok(())
+            },
+        );
+        assert!(admission.is_err());
+        assert!(matches!(
+            state.store.get_by_request(&owner, "history-race-run"),
+            Err(local_app::v2::AppError::NotFound(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uncertain_chat_index_prevents_protocol_start_from_falling_back_to_stateless() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let app_id = format!("a{}", "8".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app_id)).unwrap();
+        let state = AppAgentState::open(root.path(), &app_id).unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "uncertain-chat-start".into(),
+        };
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},
+            "tools":{},"skills":[],"background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+
+        std::fs::set_permissions(&state.root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let write_error = state.chats.archive(&chat.chat_id).unwrap_err();
+        std::fs::set_permissions(&state.root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(
+            write_error,
+            local_app::v2::AppError::ChatStorageUncertain
+        ));
+
+        let raw = json!({
+            "threadId":chat.chat_id,
+            "runId":"uncertain-chat-run",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"user-uncertain","role":"user","content":"question"}]
+        });
+        assert_eq!(
+            normalize_page_run_input(&state, raw, None).unwrap_err(),
+            "chat_storage_unavailable"
+        );
+        assert!(matches!(
+            state.store.get_by_request(&owner, "uncertain-chat-run"),
+            Err(local_app::v2::AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn post_finalize_chat_authority_failure_quarantines_before_waiting_readers_resume() {
+        let (root, state, control, user, chat_id) = setup();
+        let app_id = control.owner.app_id.clone();
+        let owner = control.owner.clone();
+        let control = Arc::new(control);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        control
+            .fail_after_final_ledger_before_chat_authority
+            .store(true, Ordering::Release);
+        *control.after_final_ledger_error_barrier.lock().unwrap() = Some(barrier.clone());
+
+        let writer_control = control.clone();
+        let writer_chat_id = chat_id.clone();
+        let writer = std::thread::spawn(move || {
+            writer_control.commit_terminal(
+                State::Succeeded,
+                Some(result(
+                    &writer_chat_id,
+                    "assistant-commit-race".into(),
+                    "committed answer".into(),
+                    None,
+                )),
+                None,
+                None,
+            )
+        });
+        barrier.wait();
+
+        assert_eq!(
+            control
+                .chats
+                .protocol_history_page(&chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![user.clone()],
+            "the assistant stays hidden before Chat authority is installed"
+        );
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let reader_store = control.store.clone();
+        let reader_owner = owner.clone();
+        let reader = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            reader_store.get_by_request(&reader_owner, "public-run-1")
+        });
+        ready_rx.recv().unwrap();
+        barrier.wait();
+
+        assert_eq!(
+            writer.join().unwrap().unwrap_err(),
+            "chat_storage_unavailable"
+        );
+        assert!(matches!(
+            reader.join().unwrap(),
+            Err(local_app::v2::AppError::Io(_))
+        ));
+        assert!(control
+            .chats
+            .protocol_history_page(&chat_id, None, 10)
+            .is_err());
+        assert!(control
+            .store
+            .get_by_request(&owner, "public-run-1")
+            .is_err());
+
+        drop(control);
+        drop(state);
+        let recovered = AppAgentState::open(root.path(), &app_id).unwrap();
+        let task = recovered
+            .store
+            .get_by_request(&owner, "public-run-1")
+            .unwrap();
+        assert_eq!(task.state, State::Succeeded);
+        assert_eq!(
+            recovered
+                .chats
+                .protocol_history_page(&chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![
+                user,
+                json!({
+                    "id":"assistant-commit-race","role":"assistant","content":"committed answer"
+                })
+            ]
+        );
     }
 
     fn result(
@@ -5294,6 +7410,107 @@ mod accepted_projection_tests {
         let next = json!({"threadId":chat_id,"runId":"public-run-2","protocolVersion":"1.0",
             "messages":sdk_history.into_iter().chain(std::iter::once(json!({"id":"user-2","role":"user","content":"next"}))).collect::<Vec<_>>()});
         assert!(normalize_page_run_input(&state, next, Some(&chat_id)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn pending_chat_assistant_stays_hidden_after_restart_and_blocks_followup_admission() {
+        let (root, state, control, user, chat_id) = setup();
+        let expected = result(
+            &chat_id,
+            "assistant-pending".into(),
+            "private answer".into(),
+            None,
+        );
+        let candidate = state
+            .store
+            .with_protocol_commit_permit(|permit| {
+                state.store.prepare_protocol_terminal(
+                    permit,
+                    &control.owner,
+                    &control.id,
+                    State::Succeeded,
+                    Some(expected.clone()),
+                    None,
+                    None,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.state, State::Succeeded);
+        state
+            .chats
+            .record_protocol_message(
+                &chat_id,
+                &control.id,
+                &json!({
+                    "id":"assistant-pending","role":"assistant","content":"private answer"
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .chats
+                .protocol_history_page(&chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![user.clone()]
+        );
+        let event_path = state
+            .root
+            .join("tasks/protocol-events")
+            .join(format!("{}.jsonl", control.id));
+        let event_bytes = std::fs::read(&event_path).unwrap();
+        let app_id = control.owner.app_id.clone();
+        drop(control);
+        drop(state);
+
+        let recovered = AppAgentState::open(root.path(), &app_id).unwrap();
+        let recovered_owner = Owner {
+            app_id: app_id.clone(),
+            release_digest: "2".repeat(64),
+            invocation_id: "recovered".into(),
+        };
+        let task = recovered
+            .store
+            .get_by_request(&recovered_owner, "public-run-1")
+            .unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert!(task.result.is_none());
+        assert_eq!(
+            task.error.as_ref().unwrap().code,
+            "protocol_commit_incomplete"
+        );
+        assert_eq!(
+            recovered
+                .chats
+                .protocol_history_page(&chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![user.clone()]
+        );
+        assert_eq!(std::fs::read(&event_path).unwrap(), event_bytes);
+        assert!(recovered
+            .store
+            .protocol_events(&recovered_owner, "public-run-1", 0)
+            .is_err());
+
+        let next_user = json!({"id":"next-user","role":"user","content":"follow up"});
+        let next_input = json!({
+            "threadId":chat_id,
+            "runId":"public-run-2",
+            "protocolVersion":"1.0",
+            "messages":[user, next_user]
+        });
+        assert_eq!(
+            normalize_page_run_input(&recovered, next_input, Some(&chat_id)).unwrap_err(),
+            "agui_history_unavailable"
+        );
+        assert!(matches!(
+            recovered
+                .store
+                .get_by_request(&recovered_owner, "public-run-2"),
+            Err(local_app::v2::AppError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
@@ -5785,6 +8002,30 @@ mod protocol_retry_tests {
     use super::*;
     use local_app::v2::agent::{Model, Settings, TaskResult};
 
+    async fn test_host(root: &Path) -> (Arc<AppAgentHost>, Arc<MobileLocalAppServiceHandle>) {
+        use crate::mobile::test_support::{
+            test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
+        };
+        let cfg = test_config(root);
+        let runtime = crate::mobile::host::build_mobile(
+            cfg.clone(),
+            Arc::new(HostFakePlatform::new(root.to_path_buf())),
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+        )
+        .await
+        .unwrap();
+        let service_home = root.join("user").join(branding::DOT_DIR);
+        let service = MobileLocalAppServiceHandle::new(service_home, None, "ios".into()).unwrap();
+        let host = AppAgentHost::new(
+            &service,
+            runtime.app_agent_factory.clone(),
+            &cfg.lingxi_home,
+        )
+        .unwrap();
+        (host, service)
+    }
+
     fn owner(app_id: &str) -> Owner {
         Owner {
             app_id: app_id.to_owned(),
@@ -5804,6 +8045,50 @@ mod protocol_retry_tests {
             background: false,
             max_turns: 4,
             timeout_ms: 30_000,
+        }
+    }
+
+    fn chat_control(
+        owner: Owner,
+        revision: u64,
+        request_id: String,
+        id: String,
+        chat_id: String,
+        user_message_id: String,
+        store: Arc<AgentStore>,
+        chats: Arc<ChatStore>,
+        chat_persisted: watch::Sender<Option<Result<(), String>>>,
+    ) -> Control {
+        Control {
+            owner,
+            revision,
+            request_id,
+            id,
+            protocol_thread_id: Some(chat_id.clone()),
+            cancel: CancellationToken::new(),
+            finished: AtomicBool::new(false),
+            done: Notify::new(),
+            lease: Mutex::new(None),
+            interaction: AsyncMutex::new(None),
+            store,
+            chats,
+            chat_id: Some(chat_id),
+            user_message_id: Some(user_message_id),
+            chat_orchestrator: Mutex::new(None),
+            chat_persisted,
+            chat_commit: AsyncMutex::new(None),
+            attachment_metadata: Vec::new(),
+            assistant_message_ids: AsyncMutex::new(HashSet::new()),
+            assistant_display_text: AsyncMutex::new(HashMap::new()),
+            protocol_events_failed: AtomicBool::new(false),
+            native_output: NativeOutputProgress::default(),
+            text: AsyncMutex::new(String::new()),
+            model_failed: AtomicBool::new(false),
+            model_failure: Mutex::new(None),
+            timed_out: AtomicBool::new(false),
+            usage: AsyncMutex::new(None),
+            fail_after_final_ledger_before_chat_authority: AtomicBool::new(false),
+            after_final_ledger_error_barrier: Mutex::new(None),
         }
     }
 
@@ -5834,7 +8119,7 @@ mod protocol_retry_tests {
         });
 
         assert_eq!(
-            protocol_duplicate_run(&state, &owner, &input).unwrap(),
+            protocol_duplicate_run(&state, &owner, &input, Some(&chat.chat_id)).unwrap(),
             None
         );
         let (normalized, chat_id) =
@@ -5851,16 +8136,58 @@ mod protocol_retry_tests {
             )
             .unwrap();
         state
-            .chats
-            .start_turn(&chat.chat_id, &admitted.task.run_id)
+            .store
+            .update(
+                &owner,
+                &admitted.task.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .append_event(
+                &owner,
+                &admitted.task.run_id,
+                json!({
+                    "type":"RUN_STARTED",
+                    "protocolVersion":"1.0",
+                    "threadId":chat.chat_id,
+                    "runId":"public-run-1"
+                }),
+            )
             .unwrap();
         state
             .chats
-            .record_protocol_message(&chat.chat_id, "public-run-1", &normalized.user_message)
+            .start_turn(&chat.chat_id, &admitted.task.run_id)
             .unwrap();
-
+        let task_user_message_id =
+            MessageId::from_uuid(uuid::Uuid::parse_str(&admitted.task.run_id).unwrap()).to_string();
+        state
+            .chats
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: task_user_message_id,
+                    run_id: admitted.task.run_id.clone(),
+                    role: ChatRole::User,
+                    created_at: now_millis(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        state
+            .chats
+            .record_protocol_message(
+                &chat.chat_id,
+                &admitted.task.run_id,
+                &normalized.user_message,
+            )
+            .unwrap();
         assert_eq!(
-            protocol_duplicate_run(&state, &owner, &input)
+            protocol_duplicate_run(&state, &owner, &input, Some(&chat.chat_id))
                 .unwrap()
                 .as_deref(),
             Some("public-run-1"),
@@ -5874,32 +8201,48 @@ mod protocol_retry_tests {
         });
         state
             .chats
-            .record_protocol_message(&chat.chat_id, "public-run-1", &assistant)
+            .record_protocol_message(&chat.chat_id, &admitted.task.run_id, &assistant)
             .unwrap();
-        state
-            .store
-            .update(
-                &owner,
-                &admitted.task.run_id,
-                State::Succeeded,
-                Some(TaskResult {
-                    text: "answer".into(),
-                    output: None,
-                    attachments: Vec::new(),
-                    chat_id: Some(chat.chat_id.clone()),
-                    message_id: Some("assistant-message-1".into()),
-                }),
-                None,
-                None,
-            )
-            .unwrap();
+        commit_agent_terminal_for_test(
+            &state.store,
+            &owner,
+            &admitted.task.run_id,
+            State::Succeeded,
+            Some(TaskResult {
+                text: "answer".into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: Some(chat.chat_id.clone()),
+                message_id: Some("assistant-message-1".into()),
+            }),
+            None,
+        )
+        .unwrap();
+        let accepted = state.store.committed_protocol_assistants().unwrap();
+        assert_eq!(
+            accepted.keys().next().map(String::as_str),
+            Some(admitted.task.run_id.as_str())
+        );
+        state.chats.set_committed_assistants(&accepted).unwrap();
         state
             .chats
             .finish_turn(&chat.chat_id, &admitted.task.run_id)
             .unwrap();
 
+        drop(state);
+        let recovered = AppAgentState::open(directory.path(), &app_id).unwrap();
         assert_eq!(
-            protocol_duplicate_run(&state, &owner, &input)
+            recovered
+                .chats
+                .protocol_history_page(&chat.chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![normalized.user_message.clone(), assistant.clone()],
+            "the ledger's internal task UUID must authorize assistant visibility after restart"
+        );
+
+        assert_eq!(
+            protocol_duplicate_run(&recovered, &owner, &input, Some(&chat.chat_id))
                 .unwrap()
                 .as_deref(),
             Some("public-run-1"),
@@ -5915,11 +8258,12 @@ mod protocol_retry_tests {
             ]
         });
         assert_eq!(
-            protocol_duplicate_run(&state, &owner, &changed_prefix).unwrap_err(),
+            protocol_duplicate_run(&recovered, &owner, &changed_prefix, Some(&chat.chat_id))
+                .unwrap_err(),
             "request_conflict"
         );
         assert_eq!(
-            state
+            recovered
                 .chats
                 .protocol_history_page(&chat.chat_id, None, 10)
                 .unwrap()
@@ -5927,6 +8271,956 @@ mod protocol_retry_tests {
                 .len(),
             2,
             "deduplicated retries must not append duplicate messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn production_duplicate_waits_for_chat_transcript_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_host(root.path()).await;
+        let source = root.path().join("duplicate-handshake-source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("index.html"), "fixture").unwrap();
+        std::fs::write(
+            source.join("lingxi-app.json"),
+            json!({
+                "schema":2,
+                "name":"Duplicate handshake test",
+                "entry":{"type":"static","path":"index.html"},
+                "targets":[{"platform":"ios","environment":"web"}],
+                "capabilities":["agent"],
+                "agent":{"tools":[]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let published = service
+            .request_value(json!({
+                "op":"publish",
+                "expectedRevision":0,
+                "sourcePath":source
+            }))
+            .await
+            .unwrap();
+        let app_id = published["record"]["appId"].as_str().unwrap().to_owned();
+        let revision = published["record"]["currentRevision"].as_u64().unwrap();
+        let (owner, _, _) = host
+            .current_release(&app_id, revision, "native-intent")
+            .await
+            .unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let input_value = json!({
+            "threadId":chat.chat_id,
+            "runId":"handshake-failure-run",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"handshake-user","role":"user","content":"hello"}]
+        });
+        let (normalized, chat_id) =
+            normalize_page_run_input(&state, input_value.clone(), Some(&chat.chat_id)).unwrap();
+        let admitted = state
+            .store
+            .admit_scoped(
+                &owner,
+                &normalized.input,
+                &[],
+                &[],
+                chat_id.as_deref(),
+                true,
+            )
+            .unwrap();
+        state
+            .store
+            .update(
+                &owner,
+                &admitted.task.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .append_event(
+                &owner,
+                &admitted.task.run_id,
+                json!({
+                    "type":"RUN_STARTED",
+                    "protocolVersion":"1.0",
+                    "threadId":chat.chat_id,
+                    "runId":"handshake-failure-run"
+                }),
+            )
+            .unwrap();
+        state
+            .chats
+            .start_turn(&chat.chat_id, &admitted.task.run_id)
+            .unwrap();
+        let user_row_id =
+            MessageId::from_uuid(uuid::Uuid::parse_str(&admitted.task.run_id).unwrap()).to_string();
+        state
+            .chats
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: user_row_id.clone(),
+                    run_id: admitted.task.run_id.clone(),
+                    role: ChatRole::User,
+                    created_at: now_millis(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        state
+            .chats
+            .record_protocol_message(
+                &chat.chat_id,
+                &admitted.task.run_id,
+                &normalized.user_message,
+            )
+            .unwrap();
+        let (chat_persisted, _) = watch::channel(None);
+        let control = Arc::new(chat_control(
+            owner.clone(),
+            revision,
+            admitted.task.request_id.clone(),
+            admitted.task.run_id.clone(),
+            chat.chat_id.clone(),
+            user_row_id,
+            state.store.clone(),
+            state.chats.clone(),
+            chat_persisted,
+        ));
+        host.active
+            .lock()
+            .await
+            .insert(admitted.task.run_id.clone(), control.clone());
+        let (wait_started_tx, wait_started_rx) = oneshot::channel();
+        *host.duplicate_chat_wait_started.lock().unwrap() = Some(wait_started_tx);
+        let host_for_retry = host.clone();
+        let app_for_retry = app_id.clone();
+        let retry_input = input_value.clone();
+        let mut retry = tokio::spawn(async move {
+            host_for_retry
+                .host(json!({
+                    "op":"startNative",
+                    "appId":app_for_retry,
+                    "revision":revision,
+                    "input":retry_input
+                }))
+                .await
+        });
+        wait_started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut retry)
+                .await
+                .is_err()
+        );
+        control.report_chat_persisted(Err("chat_transcript_unavailable".into()));
+        assert_eq!(
+            retry.await.unwrap().unwrap_err(),
+            "chat_transcript_unavailable"
+        );
+        assert_eq!(
+            state
+                .store
+                .protocol_events(&owner, "handshake-failure-run", 0)
+                .unwrap()
+                .events
+                .len(),
+            1,
+            "the duplicate waits for the original transcript outcome and does not start a second run"
+        );
+        host.active.lock().await.remove(&admitted.task.run_id);
+    }
+
+    #[tokio::test]
+    async fn concurrent_none_probes_release_admission_for_wake_clear_during_chat_init() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_host(root.path()).await;
+        let source = root.path().join("duplicate-init-race-source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("index.html"), "fixture").unwrap();
+        std::fs::write(
+            source.join("lingxi-app.json"),
+            json!({
+                "schema":2,
+                "name":"Duplicate init race test",
+                "entry":{"type":"static","path":"index.html"},
+                "targets":[{"platform":"ios","environment":"web"}],
+                "capabilities":["agent"],
+                "agent":{"tools":[]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let published = service
+            .request_value(json!({
+                "op":"publish",
+                "expectedRevision":0,
+                "sourcePath":source
+            }))
+            .await
+            .unwrap();
+        let app_id = published["record"]["appId"].as_str().unwrap().to_owned();
+        let revision = published["record"]["currentRevision"].as_u64().unwrap();
+        service
+            .request_value(json!({
+                "op":"grant",
+                "appId":app_id,
+                "digest":published["release"]["digest"]
+            }))
+            .await
+            .unwrap();
+        let launch = service
+            .request_value(json!({"op":"start","appId":app_id,"revision":revision}))
+            .await
+            .unwrap();
+        let invocation_id = launch["run"]["runId"].as_str().unwrap().to_owned();
+        let (owner, _, _) = host
+            .current_release(&app_id, revision, &invocation_id)
+            .await
+            .unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let run_id = "duplicate-init-race-run";
+        let reservation = host
+            .host(json!({
+                "op":"wake.reserve",
+                "appId":app_id,
+                "revision":revision,
+                "runId":run_id,
+                "receiveTimeoutMs":120000
+            }))
+            .await
+            .unwrap();
+        host.force_wake_policy.store(true, Ordering::Release);
+        *host.duplicate_probe_none_barrier.lock().unwrap() =
+            Some(Arc::new(tokio::sync::Barrier::new(2)));
+        let (executor_started_tx, executor_started_rx) = oneshot::channel();
+        let (executor_release_tx, executor_release_rx) = oneshot::channel();
+        *host.chat_executor_init_pause.lock().unwrap() =
+            Some((executor_started_tx, executor_release_rx));
+        let (duplicate_waiting_tx, duplicate_waiting_rx) = oneshot::channel();
+        *host.duplicate_chat_wait_started.lock().unwrap() = Some(duplicate_waiting_tx);
+
+        let raw_input = json!({
+            "threadId":chat.chat_id.clone(),
+            "runId":run_id,
+            "protocolVersion":"1.0",
+            "messages":[{"id":"duplicate-init-user","role":"user","content":"hello"}]
+        });
+        let start_page = |host: Arc<AppAgentHost>, raw_input: Value| {
+            let app_id = app_id.clone();
+            let chat_id = chat.chat_id.clone();
+            let invocation_id = invocation_id.clone();
+            tokio::spawn(async move {
+                host.page(
+                    &app_id,
+                    &invocation_id,
+                    "agent.chats.send",
+                    json!({"chatId":chat_id,"input":raw_input}),
+                )
+                .await
+            })
+        };
+        let mut first = start_page(host.clone(), raw_input.clone());
+        let mut second = start_page(host.clone(), raw_input);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), executor_started_rx)
+            .await
+            .expect("both duplicate probes must pass before the first admission")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), duplicate_waiting_rx)
+            .await
+            .expect("the second admission must subscribe to the original Control")
+            .unwrap();
+
+        // The original executor has not persisted its Harness user row. A
+        // system expiration still needs admission to revoke it and finish.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            host.host(json!({
+                "op":"wake.clear",
+                "appId":app_id.clone(),
+                "revision":revision,
+                "runId":run_id,
+                "reservationId":reservation["reservationId"],
+                "reason":"system_expiration"
+            })),
+        )
+        .await
+        .expect("wake.clear must not wait behind the duplicate admission lock")
+        .unwrap();
+        let _ = executor_release_tx.send(());
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut first)
+            .await
+            .expect("the initial Chat caller must finish")
+            .unwrap();
+        let second_result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut second)
+            .await
+            .expect("the duplicate waiter must observe cancellation")
+            .unwrap();
+        assert!(first_result.is_err());
+        assert!(second_result.is_err());
+        let task = state.store.get_by_request(&owner, run_id).unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(task.error.as_ref().unwrap().code, "ios_background_expired");
+        assert!(host.active.lock().await.is_empty());
+        assert_eq!(
+            state.chats.get(&chat.chat_id).unwrap().state,
+            ChatState::Interrupted
+        );
+        service
+            .request_value(json!({"op":"stop","appId":app_id}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn production_start_native_retry_is_idempotent_before_and_after_commit_and_restart() {
+        async fn start_native(
+            host: &Arc<AppAgentHost>,
+            app_id: &str,
+            revision: u64,
+            input: Value,
+        ) -> Result<Value, String> {
+            host.host(json!({
+                "op":"startNative",
+                "appId":app_id,
+                "revision":revision,
+                "input":input
+            }))
+            .await
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_wake_host(root.path()).await;
+        let source = root.path().join("native-retry-source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("index.html"), "fixture").unwrap();
+        std::fs::write(
+            source.join("lingxi-app.json"),
+            json!({
+                "schema":2,
+                "name":"Native retry test",
+                "entry":{"type":"static","path":"index.html"},
+                "targets":[{"platform":"ios","environment":"web"}],
+                "capabilities":["agent"],
+                "agent":{"tools":[]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let published = service
+            .request_value(json!({
+                "op":"publish",
+                "expectedRevision":0,
+                "sourcePath":source
+            }))
+            .await
+            .unwrap();
+        let app_id = published["record"]["appId"].as_str().unwrap().to_owned();
+        let revision = published["record"]["currentRevision"].as_u64().unwrap();
+        let (owner, _, _) = host
+            .current_release(&app_id, revision, "native-intent")
+            .await
+            .unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let raw = json!({
+            "threadId":chat.chat_id,
+            "runId":"native-idempotent-run",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"native-user-message","role":"user","content":"hello"}]
+        });
+        let (normalized, chat_id) =
+            normalize_page_run_input(&state, raw.clone(), Some(&chat.chat_id)).unwrap();
+        let admission = state
+            .store
+            .admit_scoped(
+                &owner,
+                &normalized.input,
+                &[],
+                &[],
+                chat_id.as_deref(),
+                true,
+            )
+            .unwrap();
+        state
+            .store
+            .update(
+                &owner,
+                &admission.task.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .store
+            .append_event(
+                &owner,
+                &admission.task.run_id,
+                json!({
+                    "type":"RUN_STARTED",
+                    "protocolVersion":"1.0",
+                    "threadId":chat.chat_id,
+                    "runId":"native-idempotent-run"
+                }),
+            )
+            .unwrap();
+        state
+            .chats
+            .start_turn(&chat.chat_id, &admission.task.run_id)
+            .unwrap();
+        let task_user_message_id =
+            MessageId::from_uuid(uuid::Uuid::parse_str(&admission.task.run_id).unwrap())
+                .to_string();
+        state
+            .chats
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: task_user_message_id,
+                    run_id: admission.task.run_id.clone(),
+                    role: ChatRole::User,
+                    created_at: now_millis(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        state
+            .chats
+            .record_protocol_message(
+                &chat.chat_id,
+                &admission.task.run_id,
+                &normalized.user_message,
+            )
+            .unwrap();
+
+        let (chat_persisted, _) = watch::channel(Some(Ok(())));
+        let active_control = Arc::new(chat_control(
+            owner.clone(),
+            revision,
+            admission.task.request_id.clone(),
+            admission.task.run_id.clone(),
+            chat.chat_id.clone(),
+            MessageId::from_uuid(uuid::Uuid::parse_str(&admission.task.run_id).unwrap())
+                .to_string(),
+            state.store.clone(),
+            state.chats.clone(),
+            chat_persisted,
+        ));
+        host.active
+            .lock()
+            .await
+            .insert(admission.task.run_id.clone(), active_control.clone());
+
+        assert_eq!(
+            start_native(&host, &app_id, revision, raw.clone())
+                .await
+                .unwrap()["runId"],
+            "native-idempotent-run",
+            "an active retry must resolve before current-history normalization"
+        );
+        assert_eq!(
+            state
+                .store
+                .protocol_events(&owner, "native-idempotent-run", 0)
+                .unwrap()
+                .events
+                .len(),
+            1,
+            "the active retry must not append a second run or execute it again"
+        );
+
+        let assistant = json!({
+            "id":"native-assistant-message",
+            "role":"assistant",
+            "content":"answer"
+        });
+        state
+            .chats
+            .record_protocol_message(&chat.chat_id, &admission.task.run_id, &assistant)
+            .unwrap();
+        commit_agent_terminal_for_test(
+            &state.store,
+            &owner,
+            &admission.task.run_id,
+            State::Succeeded,
+            Some(TaskResult {
+                text: "answer".into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: Some(chat.chat_id.clone()),
+                message_id: Some("native-assistant-message".into()),
+            }),
+            None,
+        )
+        .unwrap();
+        let accepted = state.store.committed_protocol_assistants().unwrap();
+        state.chats.set_committed_assistants(&accepted).unwrap();
+        state
+            .chats
+            .finish_turn(&chat.chat_id, &admission.task.run_id)
+            .unwrap();
+        host.active.lock().await.remove(&admission.task.run_id);
+        drop(active_control);
+        assert_eq!(
+            host.start_task(
+                owner.clone(),
+                revision,
+                &[],
+                &[],
+                normalized.input.clone(),
+                Some(normalized.user_message.clone()),
+                Some(chat.chat_id.clone()),
+                CancellationToken::new(),
+                true,
+                true,
+            )
+            .await
+            .unwrap(),
+            admission.task.run_id.clone(),
+            "an inactive Chat duplicate must validate its committed success before returning"
+        );
+        assert_eq!(
+            start_native(&host, &app_id, revision, raw.clone())
+                .await
+                .unwrap()["runId"],
+            "native-idempotent-run"
+        );
+
+        let mut changed_input = raw.clone();
+        changed_input["messages"][0]["content"] = json!("different input");
+        assert_eq!(
+            start_native(&host, &app_id, revision, changed_input)
+                .await
+                .unwrap_err(),
+            "request_conflict"
+        );
+        let other_chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            host.page(
+                &app_id,
+                "native-intent",
+                "agent.chats.send",
+                json!({"chatId":other_chat.chat_id,"input":raw.clone()}),
+            )
+            .await
+            .unwrap_err(),
+            "chat_thread_mismatch",
+            "the page Chat route must validate its outer binding before duplicate lookup"
+        );
+        assert_eq!(
+            protocol_duplicate_run(&state, &owner, &raw, Some(&other_chat.chat_id)).unwrap_err(),
+            "chat_thread_mismatch",
+            "agent.chats.send must validate its outer Chat binding before duplicate lookup"
+        );
+        let mut different_chat = raw.clone();
+        different_chat["threadId"] = json!(other_chat.chat_id);
+        assert_eq!(
+            start_native(&host, &app_id, revision, different_chat)
+                .await
+                .unwrap_err(),
+            "request_conflict"
+        );
+
+        let factory = host.factory.clone();
+        drop(host);
+        let reopened_host = AppAgentHost::new(&service, factory, root.path()).unwrap();
+        assert_eq!(
+            start_native(&reopened_host, &app_id, revision, raw)
+                .await
+                .unwrap()["runId"],
+            "native-idempotent-run",
+            "a restart retry must resolve the original committed request"
+        );
+        assert_eq!(
+            reopened_host
+                .page(
+                    &app_id,
+                    "native-intent",
+                    "agent.chats.send",
+                    json!({"chatId":chat.chat_id,"input":json!({
+                        "threadId":chat.chat_id,
+                        "runId":"native-idempotent-run",
+                        "protocolVersion":"1.0",
+                        "messages":[{"id":"native-user-message","role":"user","content":"hello"}]
+                    })}),
+                )
+                .await
+                .unwrap()["runId"],
+            "native-idempotent-run",
+            "agent.chats.send must resolve a committed retry after restart"
+        );
+        let reopened_state = reopened_host.app_state(&app_id).unwrap();
+        assert_eq!(
+            reopened_state
+                .chats
+                .protocol_history_page(&chat.chat_id, None, 10)
+                .unwrap()
+                .messages
+                .len(),
+            2,
+            "retries must not append duplicate Chat messages"
+        );
+        assert!(reopened_state.store.settings(&owner).unwrap().is_some());
+
+        // The page-side settings read has succeeded, but the duplicate probe
+        // has not acquired admission yet. Revoke first; its locked recheck must
+        // reject the otherwise-valid duplicate.
+        let (probe_ready_tx, probe_ready_rx) = oneshot::channel();
+        let (probe_release_tx, probe_release_rx) = oneshot::channel();
+        *reopened_host.duplicate_pre_admission_pause.lock().unwrap() =
+            Some((probe_ready_tx, probe_release_rx));
+        let probe_host = reopened_host.clone();
+        let probe_app = app_id.clone();
+        let probe_input = json!({
+            "threadId":chat.chat_id,
+            "runId":"native-idempotent-run",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"native-user-message","role":"user","content":"hello"}]
+        });
+        let duplicate = tokio::spawn(async move {
+            probe_host
+                .host(json!({
+                    "op":"startNative",
+                    "appId":probe_app,
+                    "revision":revision,
+                    "input":probe_input
+                }))
+                .await
+        });
+        probe_ready_rx.await.unwrap();
+        reopened_host
+            .host(json!({"op":"configure","appId":app_id,"settings":null}))
+            .await
+            .unwrap();
+        probe_release_tx.send(()).unwrap();
+        assert_eq!(
+            duplicate.await.unwrap().unwrap_err(),
+            "agent_not_authorized"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_inline_tool_transcript_repairs_owner_for_admission_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let app_id = format!("a{}", "4".repeat(32));
+        std::fs::create_dir_all(directory.path().join(&app_id)).unwrap();
+        let state = AppAgentState::open(directory.path(), &app_id).unwrap();
+        let owner = owner(&app_id);
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &session_id.to_string(),
+            )
+            .unwrap();
+        let first_raw = json!({
+            "threadId":chat.chat_id,
+            "runId":"tool-turn-one",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"tool-user-one","role":"user","content":"read a file"}]
+        });
+        let first_assistant_id = MessageId::new().to_string();
+        let (first_task_id, first_user, first_assistant) = complete_protocol_chat_turn(
+            &state,
+            &owner,
+            &chat.chat_id,
+            first_raw,
+            &first_assistant_id,
+            "The file says hello.",
+        );
+
+        let second_raw = json!({
+            "threadId":chat.chat_id,
+            "runId":"tool-turn-two",
+            "protocolVersion":"1.0",
+            "messages":[{"id":"tool-user-two","role":"user","content":"summarize that"}]
+        });
+        let second_assistant_id = MessageId::new().to_string();
+        let (second_task_id, second_user, second_assistant) = complete_protocol_chat_turn(
+            &state,
+            &owner,
+            &chat.chat_id,
+            second_raw,
+            &second_assistant_id,
+            "The file contains a greeting.",
+        );
+
+        let transcript_path = state.chats.transcript_path(&chat.chat_id).unwrap();
+        assert_eq!(
+            transcript_path,
+            state
+                .root
+                .join("chats")
+                .join(&chat.chat_id)
+                .join(format!("{session_id}.jsonl")),
+            "the fixture must use the dedicated AppAgent Chat UUID path"
+        );
+        let first_task_uuid = uuid::Uuid::parse_str(&first_task_id).unwrap();
+        let second_task_uuid = uuid::Uuid::parse_str(&second_task_id).unwrap();
+        let assistant_tool_uuid = uuid::Uuid::new_v4();
+        let assistant_tool_message_uuid = uuid::Uuid::new_v4();
+        let tool_result_uuid = uuid::Uuid::new_v4();
+        let first_assistant_uuid = uuid::Uuid::new_v4();
+        let second_assistant_uuid = uuid::Uuid::new_v4();
+        let first_assistant_message_uuid = MessageId::parse_prefixed(&first_assistant_id)
+            .unwrap()
+            .as_uuid()
+            .to_string();
+        let second_assistant_message_uuid = MessageId::parse_prefixed(&second_assistant_id)
+            .unwrap()
+            .as_uuid()
+            .to_string();
+        let tool_use_id = ToolUseId::new().to_string();
+        let cwd = directory.path().to_string_lossy().to_string();
+        let timestamp = "2026-10-28T12:00:00.000Z";
+        let rows = vec![
+            json!({
+                "type":"user","uuid":first_task_uuid,"parentUuid":null,
+                "sessionId":session_id,"timestamp":timestamp,"cwd":cwd,
+                "message":{"role":"user","content":"read a file"}
+            }),
+            json!({
+                "type":"assistant","uuid":assistant_tool_uuid,"parentUuid":first_task_uuid,
+                "sessionId":session_id,"timestamp":timestamp,"cwd":cwd,
+                "message":{"id":assistant_tool_message_uuid,"role":"assistant","content":[{
+                    "type":"tool_use","id":tool_use_id,"name":"Read","input":{"path":"hello.txt"}
+                }]}
+            }),
+            json!({
+                "type":"user","uuid":tool_result_uuid,"parentUuid":assistant_tool_uuid,
+                "sessionId":session_id,"timestamp":timestamp,"cwd":cwd,
+                "message":{"role":"user","content":[{
+                    "type":"tool_result","tool_use_id":tool_use_id,
+                    "content":"hello","is_error":false
+                }]}
+            }),
+            json!({
+                "type":"assistant","uuid":first_assistant_uuid,"parentUuid":tool_result_uuid,
+                "sessionId":session_id,"timestamp":timestamp,"cwd":cwd,
+                "message":{"id":first_assistant_message_uuid,"role":"assistant","content":[{"type":"text","text":"The file says hello."}]}
+            }),
+            json!({
+                "type":"user","uuid":second_task_uuid,"parentUuid":first_assistant_uuid,
+                "sessionId":session_id,"timestamp":timestamp,"cwd":cwd,
+                "message":{"role":"user","content":"summarize that"}
+            }),
+            json!({
+                "type":"assistant","uuid":second_assistant_uuid,"parentUuid":second_task_uuid,
+                "sessionId":session_id,"timestamp":timestamp,"cwd":cwd,
+                "message":{"id":second_assistant_message_uuid,"role":"assistant","content":[{"type":"text","text":"The file contains a greeting."}]}
+            }),
+        ];
+        let transcript = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&transcript_path, transcript.as_bytes()).unwrap();
+
+        // Preserve a stale row written by the old recovery path. Its random
+        // transcript MessageId must be corrected from the owning ToolUse.
+        state
+            .chats
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: MessageId::from_uuid(tool_result_uuid).to_string(),
+                    run_id: tool_result_uuid.to_string(),
+                    role: ChatRole::User,
+                    created_at: now_millis(),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        drop(state);
+        let recovered = AppAgentState::open(directory.path(), &app_id).unwrap();
+        assert_eq!(
+            recovered.chats.get(&chat.chat_id).unwrap().state,
+            ChatState::Idle
+        );
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(directory.path().to_path_buf()),
+        );
+        let replayed =
+            orchestrator::resume::replay_session_state_from_path(&transcript_path, session_id, fs)
+                .await
+                .unwrap();
+        super::super::validate_local_app_chat_resume(&replayed).unwrap();
+        validate_chat_result_in_transcript(
+            &replayed,
+            &TaskResult {
+                text: "The file contains a greeting.".into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: Some(chat.chat_id.clone()),
+                message_id: Some(second_assistant_id.clone()),
+            },
+        )
+        .unwrap();
+        assert!(validate_chat_result_in_transcript(
+            &replayed,
+            &TaskResult {
+                text: "different answer".into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: Some(chat.chat_id.clone()),
+                message_id: Some(second_assistant_id.clone()),
+            }
+        )
+        .is_err());
+        assert!(validate_chat_result_in_transcript(
+            &replayed,
+            &TaskResult {
+                text: "The file contains a greeting.".into(),
+                output: Some(json!({"answer":"The file contains a greeting."})),
+                attachments: Vec::new(),
+                chat_id: Some(chat.chat_id.clone()),
+                message_id: Some(second_assistant_id.clone()),
+            }
+        )
+        .is_err());
+        assert!(replayed.display_history.iter().any(|message| matches!(
+            message,
+            ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(block,
+                    lingxi_core::types::ContentBlock::ToolResult { tool_use_id: id, .. }
+                        if id.to_string() == tool_use_id
+                ))
+        )));
+        recover_chat_message_metadata(
+            &recovered.chats,
+            &chat.chat_id,
+            &replayed,
+            &recovered.store,
+            &owner,
+            None,
+            None,
+        )
+        .unwrap();
+        let tool_row = MessageId::from_uuid(tool_result_uuid).to_string();
+        assert!(recovered
+            .chats
+            .message_metadata(&chat.chat_id)
+            .unwrap()
+            .iter()
+            .any(|metadata| metadata.message_id == tool_row && metadata.run_id == first_task_id));
+        assert_eq!(
+            recovered.chats.get(&chat.chat_id).unwrap().state,
+            ChatState::Idle
+        );
+        let (_, third_turn_checkpoint) = recovered
+            .store
+            .latest_chat_transcript_checkpoint(&owner.app_id, &chat.chat_id, "tool-turn-three")
+            .unwrap()
+            .unwrap();
+        assert_eq!(third_turn_checkpoint.byte_len, 2);
+        assert_eq!(first_user["id"], "tool-user-one");
+        assert_eq!(first_assistant["id"], first_assistant_id);
+        assert_eq!(second_user["id"], "tool-user-two");
+        assert_eq!(second_assistant["id"], second_assistant_id);
+
+        let mut third_messages = recovered
+            .chats
+            .protocol_history_page(&chat.chat_id, None, 10)
+            .unwrap()
+            .messages;
+        third_messages.push(json!({
+            "id":"tool-user-three","role":"user","content":"one more question"
+        }));
+        let third_raw = json!({
+            "threadId":chat.chat_id,
+            "runId":"tool-turn-three",
+            "protocolVersion":"1.0",
+            "messages":third_messages
+        });
+        // This fixture exercises history normalization and ledger admission
+        // only. Runtime transcript continuation is covered by strict writer
+        // checkpoints and remains fail-closed for unsupported tool assets.
+        let (third, third_chat) =
+            normalize_page_run_input(&recovered, third_raw, Some(&chat.chat_id)).unwrap();
+        let expected_history = third.input.protocol_history_digest.clone().unwrap();
+        let chats = recovered.chats.clone();
+        let admission = recovered
+            .store
+            .admit_scoped_with_check(
+                &owner,
+                &third.input,
+                &[],
+                &[],
+                third_chat.as_deref(),
+                true,
+                move || {
+                    let history = chats.protocol_history_digests(&chat.chat_id)?;
+                    if local_app::v2::agent::protocol::history_fingerprint(&history)
+                        != expected_history
+                    {
+                        return Err(local_app::v2::AppError::Invalid(
+                            "AG-UI Chat history changed during Agent admission".into(),
+                        ));
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(
+            admission.start,
+            "the third turn should be admitted after restart"
         );
     }
 
@@ -5945,26 +9239,46 @@ mod protocol_retry_tests {
         });
         let normalized = local_app::v2::agent::protocol::normalize_run_input(&value, &[]).unwrap();
         let admitted = store.admit(&owner, &normalized.input, &[]).unwrap();
-        let task = store
-            .update(
+        store
+            .append_event(
                 &owner,
                 &admitted.task.run_id,
-                State::Succeeded,
-                Some(TaskResult {
-                    text: String::new(),
-                    output: Some(Value::Null),
-                    attachments: Vec::new(),
-                    chat_id: None,
-                    message_id: None,
+                json!({
+                    "type":"RUN_STARTED", "protocolVersion":"1.0",
+                    "threadId":"thread-null-result", "runId":"public-null-run"
                 }),
-                None,
-                None,
             )
             .unwrap();
+        let task = commit_agent_terminal_for_test(
+            &store,
+            &owner,
+            &admitted.task.run_id,
+            State::Succeeded,
+            Some(TaskResult {
+                text: String::new(),
+                output: Some(Value::Null),
+                attachments: Vec::new(),
+                chat_id: None,
+                message_id: None,
+            }),
+            None,
+        )
+        .unwrap();
 
+        assert_eq!(task.state, State::Failed);
         let event = protocol_terminal_event(&task, "thread-null-result").unwrap();
         assert_eq!(event["type"], "RUN_ERROR");
         assert_eq!(event["code"], "structured_output_not_representable");
         local_app::v2::agent::protocol::validate_event(&event).unwrap();
+        let persisted = store.get_by_request(&owner, "public-null-run").unwrap();
+        assert_eq!(persisted.state, State::Failed);
+        assert_eq!(
+            persisted.error.as_ref().map(|error| error.code.as_str()),
+            Some("structured_output_not_representable")
+        );
+        let page = store.protocol_events(&owner, "public-null-run", 0).unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[0]["type"], "RUN_STARTED");
+        assert_eq!(page.events[1], event);
     }
 }

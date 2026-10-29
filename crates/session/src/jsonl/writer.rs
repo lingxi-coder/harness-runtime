@@ -29,6 +29,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+#[path = "persistent_chat.rs"]
+mod persistent_chat;
+pub use persistent_chat::{CapturedChatTranscript, ChatTranscriptCheckpoint};
+
 /// Native `removeMessageByUuid` scans this much of the file tail before it
 /// falls back to a full rewrite.
 const TOMBSTONE_TAIL_BYTES: u64 = 64 * 1024;
@@ -133,6 +137,9 @@ struct DurableTranscriptTarget {
 /// (cross-process locking is delegated to the `FileSystem` flock impl when
 /// the orchestrator wants it; the spec only mandates in-process for M5-07).
 pub struct JsonlWriter {
+    /// Dedicated AppAgent transcript authority; physical I/O is pinned to
+    /// this writer and its private Chat directory for its entire lifetime.
+    persistent_chat: Option<Arc<std::sync::Mutex<persistent_chat::PersistentChatWriter>>>,
     queued_operations: std::sync::OnceLock<(SessionId, QueueOperationBuffer, PathBuf)>,
     path: PathBuf,
     active_path: Arc<std::sync::RwLock<PathBuf>>,
@@ -500,6 +507,7 @@ impl JsonlWriter {
     #[must_use]
     pub fn new(path: PathBuf, fs: Arc<dyn FileSystem>) -> Self {
         Self {
+            persistent_chat: None,
             queued_operations: std::sync::OnceLock::new(),
             active_path: Arc::new(std::sync::RwLock::new(path.clone())),
             path,
@@ -521,6 +529,12 @@ impl JsonlWriter {
     /// transaction append through their configured `FileSystem`.
     #[must_use]
     pub fn with_durable_lock(self, durable_lock: Arc<DurableTranscriptWriter>) -> Self {
+        if self
+            .reject_persistent_chat_mutation("shared durable authority")
+            .is_err()
+        {
+            return self;
+        }
         *self
             .durable_lock
             .write()
@@ -529,6 +543,12 @@ impl JsonlWriter {
     }
 
     pub fn bind_queue_operations(&self, session: SessionId, operations: QueueOperationBuffer) {
+        if self
+            .reject_persistent_chat_mutation("queue binding")
+            .is_err()
+        {
+            return;
+        }
         let owner = self
             .queued_operations
             .get_or_init(|| (session, operations.clone(), self.active_path()));
@@ -628,6 +648,12 @@ impl JsonlWriter {
     /// session switch. The writer remains the same shared in-process object;
     /// only the pinned session-state root changes.
     pub fn set_durable_lock(&self, durable_lock: Arc<DurableTranscriptWriter>) {
+        if self
+            .reject_persistent_chat_mutation("shared durable authority")
+            .is_err()
+        {
+            return;
+        }
         *self
             .durable_lock
             .write()
@@ -672,6 +698,12 @@ impl JsonlWriter {
         cwd: PathBuf,
         durable_lock: Arc<DurableTranscriptWriter>,
     ) {
+        if self
+            .reject_persistent_chat_mutation("session target change")
+            .is_err()
+        {
+            return;
+        }
         *self
             .durable_lock
             .write()
@@ -759,6 +791,9 @@ impl JsonlWriter {
         &self,
         transcript_path: &Path,
     ) -> Result<Box<dyn FlockGuard>, WriterError> {
+        if let Some(guard) = self.persistent_chat_identity_guard(transcript_path)? {
+            return Ok(guard);
+        }
         let root = transcript_path
             .parent()
             .ok_or_else(|| FsError::Io("transcript has no parent directory".into()))?;
@@ -811,8 +846,18 @@ impl JsonlWriter {
         let store = self.identity_store.clone();
         let transcript_path = transcript_path.to_path_buf();
         let uuid = uuid.map(str::to_owned);
+        let strict_owner = self.persistent_chat.clone();
+        #[cfg(test)]
+        let test_gate = self.take_persistent_chat_identity_test_gate();
         tokio::task::spawn_blocking(move || {
-            if let Some(uuid) = uuid {
+            // The guard must outlive actual sidecar I/O, even if the awaiting
+            // task is cancelled. A strict guard also retains its real owner.
+            let _strict_io = persistent_chat::identity_io_guard(&strict_owner, &transcript_path)?;
+            #[cfg(test)]
+            if let Some(gate) = test_gate {
+                gate.wait();
+            }
+            let result = if let Some(uuid) = uuid {
                 message_identity::append_row_identity_at(
                     &store,
                     &transcript_path,
@@ -830,11 +875,13 @@ impl JsonlWriter {
                     &root,
                     &identity,
                 )
-            }
+            };
+            result?;
+            Ok::<_, FsError>(guard)
         })
         .await
-        .map_err(|error| FsError::Io(error.to_string()))??;
-        Ok(guard)
+        .map_err(|error| FsError::Io(error.to_string()))?
+        .map_err(WriterError::from)
     }
 
     /// Read Host-managed outer-row identities for one transcript. A missing
@@ -873,7 +920,10 @@ impl JsonlWriter {
 
         let _identity_guard = self.identity_sidecar_guard(transcript_path).await?;
         let path = transcript_path.to_path_buf();
+        let strict_owner = self.persistent_chat.clone();
         tokio::task::spawn_blocking(move || {
+            let _identity_guard = _identity_guard;
+            let _strict_io = persistent_chat::identity_io_guard(&strict_owner, &path)?;
             let root = path
                 .parent()
                 .ok_or_else(|| FsError::Io("transcript has no parent directory".into()))?;
@@ -908,6 +958,7 @@ impl JsonlWriter {
         transcript_path: &Path,
         durable_writer: Arc<DurableTranscriptWriter>,
     ) -> Result<SessionMessageIdentitySnapshot, WriterError> {
+        self.reject_persistent_chat_mutation("shared durable identity authority")?;
         self.bootstrap_session_message_identity_snapshot_with_authority(
             transcript_path,
             Some(durable_writer),
@@ -962,7 +1013,10 @@ impl JsonlWriter {
         let _identity_guard = self.identity_sidecar_guard(transcript_path).await?;
         let path = transcript_path.to_path_buf();
         let store = self.identity_store.clone();
+        let strict_owner = self.persistent_chat.clone();
         tokio::task::spawn_blocking(move || {
+            let _identity_guard = _identity_guard;
+            let _strict_io = persistent_chat::identity_io_guard(&strict_owner, &path)?;
             let root = path
                 .parent()
                 .ok_or_else(|| FsError::Io("transcript has no parent directory".into()))?;
@@ -1220,6 +1274,12 @@ impl JsonlWriter {
     /// The append mutex makes the boundary explicit: an append already in
     /// progress finishes on the previous file before this method returns.
     pub async fn retarget(&self, path: PathBuf) {
+        if self.persistent_chat.is_some() {
+            if self.active_path() != path {
+                let _ = self.reject_persistent_chat_mutation("transcript retarget");
+            }
+            return;
+        }
         let _g = self.lock.lock().await;
         *self
             .active_path
@@ -1248,6 +1308,7 @@ impl JsonlWriter {
         session_id: &str,
         relocated_cwd: &str,
     ) -> Result<(), WriterError> {
+        self.reject_persistent_chat_mutation("transcript relocation")?;
         if let Some(durable_target) = self.active_durable_target() {
             return self
                 .retarget_with_relocation_durable(
@@ -2216,6 +2277,13 @@ impl JsonlWriter {
         payload: &str,
         account_backstops: bool,
     ) -> Result<(), WriterError> {
+        if self.append_persistent_chat_payload(path, payload).await? {
+            if account_backstops {
+                self.bytes_since_metadata_re_append
+                    .fetch_add(payload.len(), Ordering::Relaxed);
+            }
+            return Ok(());
+        }
         let path_str = path.to_str().expect("session paths are UTF-8");
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -2372,6 +2440,9 @@ impl JsonlWriter {
     /// Best-effort, like the metadata backstop: a rewrite failure must never
     /// fail the append that triggered it.
     pub async fn maybe_compact_transcript(&self, boundary_written: bool) -> Option<CompactStats> {
+        if self.persistent_chat.is_some() {
+            return None;
+        }
         if !local_gc_enabled() {
             return None;
         }
@@ -2902,6 +2973,7 @@ impl JsonlWriter {
         &self,
         message_ids: &[String],
     ) -> Result<Option<String>, WriterError> {
+        self.reject_persistent_chat_mutation("retry transcript rewrite")?;
         let _guard = self.lock.lock().await;
         let path = self.active_path();
         let source = tokio::fs::read_to_string(&path)
@@ -3019,6 +3091,7 @@ impl JsonlWriter {
     /// transcripts use an atomic rewrite after Native's bounded tail scan. A
     /// target outside the tail window can be found only in files up to 50 MiB.
     pub async fn remove_message_by_uuid(&self, message_uuid: &str) -> Result<bool, WriterError> {
+        self.reject_persistent_chat_mutation("transcript tombstone")?;
         use std::io::{Read, Seek};
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
 

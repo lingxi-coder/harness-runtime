@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "persistent_chat.rs"]
+mod persistent_chat;
+
 impl ConversationOrchestrator {
     /// Construct a new orchestrator with a fresh in-memory session and
     /// BOTH batched + streaming API clients wired.

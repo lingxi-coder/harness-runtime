@@ -1,4 +1,5 @@
 use super::*;
+use lingxi_core::types::MessageId;
 fn owner() -> Owner {
     Owner {
         app_id: format!("a{}", "1".repeat(32)),
@@ -38,6 +39,7 @@ fn input() -> Input {
         protocol_parent_run_id: None,
         protocol_input_digest: None,
         protocol_message_sha256: None,
+        protocol_history_digest: None,
         prompt: "private photo description".into(),
         attachments: vec![Attachment {
             name: "photo.txt".into(),
@@ -70,6 +72,399 @@ fn deduplication_does_not_admit_another_task() {
     let mut changed = input();
     changed.prompt = "changed".into();
     assert!(s.admit(&owner(), &changed, &[]).is_err());
+}
+
+#[test]
+fn successful_chat_history_lookup_survives_release_change_without_widening_task_reads() {
+    let (_directory, store) = store();
+    let current_owner = owner();
+    let chat_id = uuid::Uuid::new_v4().to_string();
+    let input_value = json!({
+        "threadId":chat_id,
+        "runId":"chat-history-cross-release",
+        "protocolVersion":"1.0",
+        "messages":[{"id":"cross-release-user","role":"user","content":"hello"}]
+    });
+    let normalized = protocol::normalize_run_input(&input_value, &[]).unwrap();
+    let admitted = store
+        .admit_scoped(
+            &current_owner,
+            &normalized.input,
+            &[],
+            &[],
+            Some(&chat_id),
+            true,
+        )
+        .unwrap();
+    store
+        .update(
+            &current_owner,
+            &admitted.task.run_id,
+            State::Running,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_event(
+            &current_owner,
+            &admitted.task.run_id,
+            json!({
+                "type":"RUN_STARTED",
+                "protocolVersion":"1.0",
+                "threadId":chat_id,
+                "runId":"chat-history-cross-release"
+            }),
+        )
+        .unwrap();
+    store
+        .record_chat_transcript_checkpoint(
+            &current_owner,
+            &admitted.task.run_id,
+            &chat_id,
+            ChatTranscriptCheckpoint {
+                byte_len: 14,
+                sha256: "a".repeat(64),
+            },
+        )
+        .unwrap();
+    let assistant_id = MessageId::new().to_string();
+    commit_protocol_terminal_for_test(
+        &store,
+        &current_owner,
+        &admitted.task.run_id,
+        State::Succeeded,
+        Some(TaskResult {
+            text: "hello back".into(),
+            output: None,
+            attachments: Vec::new(),
+            chat_id: Some(chat_id.clone()),
+            message_id: Some(assistant_id),
+        }),
+        None,
+    )
+    .unwrap();
+
+    let next_release_owner = Owner {
+        release_digest: "3".repeat(64),
+        invocation_id: "next-release".into(),
+        ..current_owner.clone()
+    };
+    assert!(store
+        .get(&next_release_owner, &admitted.task.run_id)
+        .is_err());
+    let (history_task, checkpoint) = store
+        .successful_chat_history_task(&current_owner.app_id, &chat_id, &admitted.task.run_id)
+        .unwrap();
+    assert_eq!(history_task.state, State::Succeeded);
+    assert_eq!(checkpoint.byte_len, 14);
+    assert_eq!(checkpoint.sha256, "a".repeat(64));
+    assert_eq!(
+        history_task.result.as_ref().unwrap().chat_id.as_deref(),
+        Some(chat_id.as_str())
+    );
+    assert!(store
+        .successful_chat_history_task(
+            &current_owner.app_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &admitted.task.run_id,
+        )
+        .is_err());
+    assert!(store
+        .successful_chat_history_task(
+            "a00000000000000000000000000000000",
+            &chat_id,
+            &admitted.task.run_id,
+        )
+        .is_err());
+}
+
+#[test]
+fn latest_chat_checkpoint_uses_longest_capture_across_release_not_task_sequence() {
+    let (_directory, store) = store();
+    let first_owner = owner();
+    let chat_id = uuid::Uuid::new_v4().to_string();
+
+    let finish_turn = |owner: &Owner,
+                       request_id: &str,
+                       checkpoint: ChatTranscriptCheckpoint,
+                       advance_phase: bool| {
+        let raw = json!({
+            "threadId":chat_id,
+            "runId":request_id,
+            "protocolVersion":"1.0",
+            "messages":[{"id":format!("user-{request_id}"),"role":"user","content":"question"}]
+        });
+        let normalized = protocol::normalize_run_input(&raw, &[]).unwrap();
+        let admitted = store
+            .admit_scoped(owner, &normalized.input, &[], &[], Some(&chat_id), true)
+            .unwrap();
+        let task_id = admitted.task.run_id;
+        store
+            .update(owner, &task_id, State::Running, None, None, None)
+            .unwrap();
+        store
+            .append_event(
+                owner,
+                &task_id,
+                json!({
+                    "type":"RUN_STARTED",
+                    "protocolVersion":"1.0",
+                    "threadId":chat_id,
+                    "runId":request_id
+                }),
+            )
+            .unwrap();
+        if advance_phase {
+            store
+                .set_phase(owner, &task_id, Some("waiting_for_answer"))
+                .unwrap();
+            store.set_phase(owner, &task_id, None).unwrap();
+        }
+        store
+            .record_chat_transcript_checkpoint(owner, &task_id, &chat_id, checkpoint)
+            .unwrap();
+        let task = commit_protocol_terminal_for_test(
+            &store,
+            owner,
+            &task_id,
+            State::Succeeded,
+            Some(TaskResult {
+                text: format!("answer-{request_id}"),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: Some(chat_id.clone()),
+                message_id: Some(MessageId::new().to_string()),
+            }),
+            None,
+        )
+        .unwrap();
+        (task_id, task)
+    };
+
+    let (first_id, first_task) = finish_turn(
+        &first_owner,
+        "older-complex-turn",
+        ChatTranscriptCheckpoint {
+            byte_len: 1_000,
+            sha256: "a".repeat(64),
+        },
+        true,
+    );
+    let next_owner = Owner {
+        release_digest: "3".repeat(64),
+        invocation_id: "next-release".into(),
+        ..first_owner.clone()
+    };
+    store
+        .configure(next_owner.clone(), Some(settings()))
+        .unwrap();
+    let (second_id, second_task) = finish_turn(
+        &next_owner,
+        "newer-simple-turn",
+        ChatTranscriptCheckpoint {
+            byte_len: 2_000,
+            sha256: "b".repeat(64),
+        },
+        false,
+    );
+
+    assert!(
+        first_task.sequence > second_task.sequence,
+        "the older run fixture must have more per-task phase transitions"
+    );
+    assert!(store.get(&next_owner, &first_id).is_err());
+    assert_eq!(
+        store
+            .successful_chat_history_task(&first_owner.app_id, &chat_id, &first_id)
+            .unwrap()
+            .0
+            .state,
+        State::Succeeded,
+        "same-App Chat recovery remains scoped across the release update"
+    );
+
+    // This is the checkpoint a third turn must open and verify against the
+    // exact Chat file. A smaller, older capture cannot win because its task
+    // happened to accumulate more state transitions.
+    let (_, third_turn_checkpoint) = store
+        .latest_chat_transcript_checkpoint(&next_owner.app_id, &chat_id, "third-turn-id")
+        .unwrap()
+        .unwrap();
+    assert_eq!(third_turn_checkpoint.byte_len, 2_000);
+    assert_eq!(third_turn_checkpoint.sha256, "b".repeat(64));
+
+    // Simulate conflicting durable evidence that could survive an older
+    // implementation: same length, different digest must not select either.
+    let first_conflicting_id = first_id.clone();
+    let second_conflicting_id = second_id.clone();
+    store
+        .change(|ledger| {
+            ledger
+                .runs
+                .get_mut(&first_conflicting_id)
+                .expect("first successful Chat task exists")
+                .chat_transcript_checkpoint = Some(ChatTranscriptCheckpoint {
+                byte_len: 2_000,
+                sha256: "a".repeat(64),
+            });
+            ledger
+                .runs
+                .get_mut(&second_conflicting_id)
+                .expect("second successful Chat task exists")
+                .chat_transcript_checkpoint = Some(ChatTranscriptCheckpoint {
+                byte_len: 2_000,
+                sha256: "c".repeat(64),
+            });
+            Ok(())
+        })
+        .unwrap();
+    assert!(store
+        .latest_chat_transcript_checkpoint(&next_owner.app_id, &chat_id, "third-turn-id")
+        .is_err());
+}
+
+#[test]
+fn duplicate_admission_skips_stale_history_check_after_first_commit() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
+    };
+
+    let (_directory, store) = store();
+    let store = Arc::new(store);
+    let chat_store = Arc::new(ChatStore::open(&_directory.path().join("chat-index")).unwrap());
+    let chat = chat_store
+        .create(
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+    let mut request = input();
+    request.request_id = "shared-history-race".into();
+    request.protocol_thread_id = Some(chat.chat_id.clone());
+    request.protocol_history_digest = Some(protocol::history_fingerprint(&[]));
+
+    let barrier = Arc::new(Barrier::new(3));
+    let checks = Arc::new(AtomicUsize::new(0));
+    let chat_id = chat.chat_id.clone();
+    let spawn = |store: Arc<AgentStore>,
+                 chat_store: Arc<ChatStore>,
+                 barrier: Arc<Barrier>,
+                 checks: Arc<AtomicUsize>,
+                 request: Input| {
+        let chat_id = chat_id.clone();
+        let persisted_chat_id = chat_id.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            store.admit_scoped_with_check(
+                &owner(),
+                &request,
+                &[],
+                &[],
+                Some(&chat_id),
+                true,
+                move || {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    chat_store.record_protocol_message(
+                        &persisted_chat_id,
+                        "accepted-run",
+                        &serde_json::json!({
+                            "id":"accepted-user","role":"user","content":"question"
+                        }),
+                    )
+                },
+            )
+        })
+    };
+    let first = spawn(
+        store.clone(),
+        chat_store.clone(),
+        barrier.clone(),
+        checks.clone(),
+        request.clone(),
+    );
+    let second = spawn(
+        store.clone(),
+        chat_store.clone(),
+        barrier.clone(),
+        checks.clone(),
+        request,
+    );
+    barrier.wait();
+    let first = first.join().unwrap().unwrap();
+    let second = second.join().unwrap().unwrap();
+
+    assert_ne!(first.start, second.start);
+    assert_eq!(first.task.run_id, second.task.run_id);
+    assert_eq!(checks.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        chat_store
+            .protocol_history_page(&chat.chat_id, None, 10)
+            .unwrap()
+            .messages
+            .len(),
+        1,
+        "the first admission must finish its Chat write before the duplicate resolves"
+    );
+}
+
+#[test]
+fn failed_cancelled_and_interrupted_protocol_turns_block_chat_followups() {
+    let cases = [
+        ("failed", State::Failed, "model_error"),
+        ("cancelled", State::Cancelled, "cancelled"),
+        ("interrupted", State::Interrupted, "ios_background_expired"),
+    ];
+
+    for (suffix, terminal_state, error_code) in cases {
+        let (_directory, store) = store();
+        let chat_id = format!("thread-{suffix}");
+        let mut request = input();
+        request.request_id = format!("run-{suffix}");
+        request.protocol_thread_id = Some(chat_id.clone());
+        let admission = store
+            .admit_scoped(&owner(), &request, &[], &[], Some(&chat_id), true)
+            .unwrap();
+        store
+            .append_event(
+                &owner(),
+                &admission.task.run_id,
+                serde_json::json!({
+                    "type":"RUN_STARTED", "protocolVersion":"1.0",
+                    "threadId":chat_id,"runId":request.request_id
+                }),
+            )
+            .unwrap();
+        let terminal = commit_protocol_terminal_for_test(
+            &store,
+            &owner(),
+            &admission.task.run_id,
+            terminal_state.clone(),
+            None,
+            Some(error_code.into()),
+        )
+        .unwrap();
+        assert_eq!(terminal.state, terminal_state);
+
+        let mut followup = input();
+        followup.request_id = format!("next-{suffix}");
+        followup.protocol_thread_id = Some(chat_id.clone());
+        let error = match store.admit_scoped(&owner(), &followup, &[], &[], Some(&chat_id), true) {
+            Err(error) => error,
+            Ok(_) => panic!("an unverified Chat turn must block follow-up admission"),
+        };
+        assert!(matches!(
+            error,
+            AppError::Invalid(message) if message == "Chat has an incomplete or unverified turn"
+        ));
+        assert!(matches!(
+            store.get_by_request(&owner(), &followup.request_id),
+            Err(AppError::NotFound(_))
+        ));
+    }
 }
 
 #[test]
@@ -792,19 +1187,15 @@ fn native_output_is_private_bounded_owner_scoped_and_durable() {
     assert!(store
         .record_native_output_bytes(&other_release, &task.run_id, 7, 3)
         .is_err());
-    store
-        .update(
-            &owner(),
-            &task.run_id,
-            State::Cancelled,
-            None,
-            None,
-            Some("cancelled".into()),
-        )
-        .unwrap();
-    store.append_event(&owner(), &task.run_id, serde_json::json!({
-        "type":"RUN_FINISHED","threadId":"thread-native","runId":"request-1","outcome":{"type":"cancelled"}
-    })).unwrap();
+    commit_protocol_terminal_for_test(
+        &store,
+        &owner(),
+        &task.run_id,
+        State::Cancelled,
+        None,
+        Some("cancelled".into()),
+    )
+    .unwrap();
     assert!(store
         .record_native_output_bytes(&owner(), &task.run_id, 7, 18)
         .is_err());
@@ -861,13 +1252,26 @@ fn protocol_finalization_blocks_readers_until_terminal_event_is_durable() {
     let writer_store = store.clone();
     let run_id = run.run_id.clone();
     let writer = thread::spawn(move || {
-        writer_store.with_protocol_commit(|| {
-            writer_store.update(&owner(), &run_id, State::Cancelled, None, None, Some("cancelled".into())).unwrap();
+        writer_store.with_protocol_commit_permit(|permit| {
+            writer_store
+                .prepare_protocol_terminal(
+                    permit,
+                    &owner(),
+                    &run_id,
+                    State::Cancelled,
+                    None,
+                    None,
+                    Some("cancelled".into()),
+                )
+                .unwrap();
             updated_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            writer_store.append_event(&owner(), &run_id, serde_json::json!({
+            writer_store.append_protocol_commit_event(permit, &owner(), &run_id, serde_json::json!({
                 "type":"RUN_FINISHED","threadId":"barrier-thread","runId":"request-1","outcome":{"type":"cancelled"}
             })).unwrap();
+            writer_store
+                .finalize_protocol_terminal(permit, &owner(), &run_id)
+                .unwrap();
         }).unwrap();
     });
     updated_rx.recv().unwrap();
