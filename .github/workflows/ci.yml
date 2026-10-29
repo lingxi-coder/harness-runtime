@@ -244,6 +244,21 @@ jobs:
           fi
           cargo check --locked -p harness-runtime --no-default-features "${feature_args[@]}"
 
+  mobile-app-agent-tests:
+    name: Mobile Local App Agent recovery
+    runs-on: ubuntu-24.04
+    env:
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Test persistent Chat and mobile Agent lifecycle
+        run: |
+          cargo test --locked -p session --lib persistent_chat
+          cargo test --locked -p orchestrator --lib persistent_chat
+          cargo test --locked -p harness-runtime --no-default-features --features mobile --lib mobile::app_agent::service::
+
   harness-desktop-native:
     name: Harness desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
