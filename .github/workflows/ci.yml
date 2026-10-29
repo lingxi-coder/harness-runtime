@@ -95,6 +95,42 @@ jobs:
         # earlier failure for exactly this reason.
         run: cargo test --locked --workspace --all-features --no-fail-fast
 
+  mobile-skill-cold-resume-regression:
+    name: Mobile skill cold resume in isolation
+    runs-on: ubuntu-latest
+    env:
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - name: Install runtime integration test dependencies
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap socat
+      - name: Run the exact cold resume test with one test thread
+        env:
+          COLD_RESUME_TEST_LOG: ${{ runner.temp }}/mobile-skill-cold-resume.log
+        # Keep workspace feature unification identical to unit-tests while
+        # isolating this case to investigate its existing five-second timeout.
+        run: |
+          set -euo pipefail
+          test_name='mobile::host::tests::mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch'
+          set +e
+          cargo test --locked --workspace --all-features --no-fail-fast \
+            "$test_name" -- --exact --test-threads=1 2>&1 | tee "$COLD_RESUME_TEST_LOG"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          if (( pipeline_status[0] != 0 )); then
+            exit "${pipeline_status[0]}"
+          fi
+          if (( pipeline_status[1] != 0 )); then
+            exit "${pipeline_status[1]}"
+          fi
+          grep -Fqx 'running 1 test' "$COLD_RESUME_TEST_LOG"
+          grep -Fqx "test $test_name ... ok" "$COLD_RESUME_TEST_LOG"
+
   lint:
     runs-on: ubuntu-latest
     steps:
