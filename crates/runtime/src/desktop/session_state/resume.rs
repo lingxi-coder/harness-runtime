@@ -28,9 +28,8 @@ pub async fn capture_resume_cost(
         return tokio::task::spawn_blocking(move || {
             let coordinator = SessionStateCoordinator::open(&home, source_id, lease)
                 .map_err(|error| error.to_string())?;
-            coordinator
-                .hydrate_blocking()
-                .map(|hydration| Some(hydration.state))
+            hydrate_from_journal_read_only(&coordinator.journal(), source_id)
+                .map(|hydration| Some(hydration.hydration.state))
                 .map_err(|error| error.to_string())
         })
         .await
@@ -243,6 +242,83 @@ mod tests {
     }
     fn open(home: &Path, id: SessionId) -> Arc<SessionStateCoordinator> {
         SessionStateCoordinator::open(home, id, Arc::new(Lease(id.to_string()))).unwrap()
+    }
+
+    #[tokio::test]
+    async fn branch_recovery_reads_claimed_ledger_without_settling_or_rewriting_it() {
+        let home = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let lease: SharedSessionWriterLease = Arc::new(Lease(id.to_string()));
+        assert!(
+            capture_branch_recovery(home.path(), id.as_uuid(), lease.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let coordinator = SessionStateCoordinator::open(home.path(), id, lease.clone()).unwrap();
+        let worker = coordinator.start().await.unwrap();
+        coordinator
+            .record_execution(lingxi_core::host::ToolExecutionRecord {
+                identity: lingxi_core::host::ToolExecutionIdentity {
+                    session_id: id,
+                    provider_response_id: "response".into(),
+                    provider_call_id: "call".into(),
+                    member_index: 0,
+                },
+                tool_name: "computer".into(),
+                input_digest: "input".into(),
+                recovery_binding: DurableToolOutput {
+                    digest: "binding".into(),
+                    payload: serde_json::json!({}),
+                    media_refs: vec![],
+                },
+                acknowledged_safety_checks: vec![],
+                stage: ToolExecutionStage::Started,
+                outcome: None,
+                output: None,
+            })
+            .await
+            .unwrap();
+        coordinator.close_and_drain().await.unwrap();
+        worker.await.unwrap();
+        let journal = coordinator.journal();
+        journal
+            .write_snapshot(1, &serde_json::json!({"sentinel":"unchanged"}))
+            .unwrap();
+        let path = journal.root().join(session::jsonl::JOURNAL_FILE_NAME);
+        let snapshot = journal.root().join(session::jsonl::SNAPSHOT_FILE_NAME);
+        let before = std::fs::read(&path).unwrap();
+        let snapshot_before = std::fs::read(&snapshot).unwrap();
+        drop(coordinator);
+        let recovery = capture_branch_recovery(home.path(), id.as_uuid(), lease.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery.executions.len(), 1);
+        assert_eq!(
+            recovery.executions[0].stage,
+            ToolExecutionStage::OutcomeUnknown
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
+        capture_resume_cost(home.path(), id.as_uuid(), lease.clone(), "")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
+        let mut partial = before;
+        partial.extend_from_slice(b"{partial");
+        std::fs::write(&path, &partial).unwrap();
+        assert!(
+            capture_branch_recovery(home.path(), id.as_uuid(), lease.clone())
+                .await
+                .is_err()
+        );
+        assert!(capture_resume_cost(home.path(), id.as_uuid(), lease, "")
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(path).unwrap(), partial);
+        assert_eq!(std::fs::read(snapshot).unwrap(), snapshot_before);
     }
 
     #[tokio::test]

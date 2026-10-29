@@ -899,6 +899,10 @@ pub async fn build_with_credential_stack(
     // Validate once at the boundary; every desktop-answered gate below (main,
     // side chat) and the native cron seed (a clone of `cfg`) use this value.
     let permission_timeout = cfg.resolved_permission_timeout()?;
+    // This choice belongs only to this construction; no settings, cron,
+    // workflow or other cloned child configuration may inherit it.
+    let initial_conversation_mode = cfg.initial_conversation_mode.take();
+    let target_resume_snapshot = cfg.session_resume_target_snapshot.take();
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
         let mut seed = cfg.clone();
         seed.session_writer_lease = None;
@@ -1843,8 +1847,13 @@ pub async fn build_with_credential_stack(
                 &snapshot.content,
                 &snapshot.source_session_id,
             )
+        } else if let Some(target_snapshot) = target_resume_snapshot.as_ref() {
+            session::JsonlWriter::capture_session_metadata_source(
+                target_snapshot,
+                &main_session_uuid,
+            )
         } else {
-            // A fork has its own workspace and metadata identity.
+            // A lazy fork has its own workspace and metadata identity.
             Vec::new()
         };
         main_jsonl_writer.install_session_metadata_source(&main_session_uuid, &rows);
@@ -6135,6 +6144,16 @@ pub async fn build_with_credential_stack(
         model_provenance,
     ))
     .await?;
+    // A cold resume must finish its original profile's hooks and deferred
+    // recovery before its host applies an explicit new selection. Deferred
+    // headless builds likewise own this step at their mount boundary.
+    if !cfg.defer_session_start && cfg.session_resume_snapshot.is_none() {
+        if let Some(mode) = initial_conversation_mode {
+            orch.set_conversation_mode(mode)
+                .await
+                .map_err(|error| BuildError::Orchestrator(error.to_string()))?;
+        }
+    }
     orch.enable_goal_retries();
     orch.attach_owned_session_switches();
     orch.set_main_report_waker(Arc::new(

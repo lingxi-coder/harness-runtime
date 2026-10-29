@@ -19,6 +19,9 @@ pub use provider_config::startup_catalog::{CatalogPlatform, StartupCatalog};
 pub mod api;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod media_handoff;
+/// Read-only recovery inspection for independent session branches.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod branch_recovery;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub(crate) mod media_skill;
 #[cfg(feature = "engine")]

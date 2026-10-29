@@ -2,6 +2,8 @@ include!("../fast_mode_preference_tests.rs");
 include!("../permission_preference_tests.rs");
 include!("../model_preference_tests.rs");
 include!("../provider_region_tests.rs");
+#[path = "initial_profile_tests.rs"]
+mod initial_profile_tests;
 include!("../reasoning_preference_tests.rs");
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
@@ -31,7 +33,8 @@ use tool_skill::skill::SkillCommandType;
 use super::{
     build_mobile, builtin_provider_catalog, classify_provider_connection_response,
     collect_session_agent_transcript_paths, enqueue_mobile_prompt_dispatch,
-    find_session_agent_transcript_path, lower_session_agent_snapshot, mobile_cron_schedule_error,
+    find_session_agent_transcript_path, lower_session_agent_snapshot, mobile_anchor_startup_scan_count,
+    mobile_cron_schedule_error,
     mobile_mcp_config_unchanged, mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
     mobile_mcp_record_reload_intent, mobile_mcp_reload_requires_replacement,
     mobile_mcp_run_reload_job, mobile_mcp_state_is_transitional,
@@ -12152,12 +12155,6 @@ fn mobile_initial_and_new_session_modes_use_versioned_records() {
     config.session_mode = session::jsonl::SessionMode::Chat;
     let (handle, _) = build_submit_handle_with_config(config, tmp.path());
     handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
         for create_new in [false, true] {
             if create_new {
                 handle
@@ -12175,9 +12172,140 @@ fn mobile_initial_and_new_session_modes_use_versioned_records() {
                 .find(|row| row["type"] == "session-mode")
                 .unwrap();
             assert_eq!(mode["sessionMode"], "chat");
-            assert_eq!(mode["contextRevision"], 0);
-            assert_eq!(mode["profileEpoch"], 0);
+            let expected_epoch = if create_new { 0 } else { 1 };
+            assert_eq!(mode["contextRevision"], expected_epoch);
+            assert_eq!(mode["profileEpoch"], expected_epoch);
         }
+    });
+}
+
+#[test]
+fn initial_chat_mode_only_session_is_anchored_once_and_can_reopen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, listener) = build_submit_handle_with_config(config.clone(), tmp.path());
+    let (source_id, context_id) = handle.runtime().block_on(async {
+        let source_id = handle.inner().orchestrator.current_session_id().await.as_uuid().to_string();
+        let path = handle.inner().session_writer.active_path();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(session::jsonl::route_lines(&before).mobile_empty_sessions.is_empty());
+        let hook = serde_json::json!({
+            "type":"attachment", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+            "sessionId":source_id, "timestamp":"2026-10-29T00:00:00Z", "cwd":config.cwd,
+            "version":"test", "isSidechain":false,
+            "attachment":{"type":"hook_success", "hookEvent":"SessionStart", "hookName":"SessionStart:startup",
+                "toolUseID":uuid::Uuid::new_v4(), "content":"x".repeat(70 * 1024), "stdout":"", "stderr":"", "exitCode":0,
+                "command":"true", "durationMs":0}
+        });
+        let context_id = uuid::Uuid::new_v4();
+        let context = serde_json::json!({
+            "type":"attachment", "uuid":context_id, "parentUuid":hook["uuid"],
+            "sessionId":source_id, "timestamp":"2026-10-29T00:00:01Z", "cwd":config.cwd,
+            "version":"test", "isSidechain":false,
+            "attachment":{"type":"hook_additional_context", "hookEvent":"SessionStart", "hookName":"SessionStart",
+                "toolUseID":"SessionStart", "content":["startup-context-marker"]}
+        });
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{hook}").unwrap();
+        writeln!(file, "{context}").unwrap();
+        drop(file);
+        let startup = std::fs::read_to_string(&path).unwrap();
+        let scans_before = mobile_anchor_startup_scan_count(&path);
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
+        let anchored = std::fs::read_to_string(&path).unwrap();
+        let scans_after = mobile_anchor_startup_scan_count(&path);
+        assert_eq!(scans_after, scans_before + 1);
+        assert!(session::jsonl::route_lines(&anchored).mobile_empty_sessions.contains(&source_id));
+        assert!(anchored.contains(&hook.to_string()));
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), anchored);
+        assert_eq!(mobile_anchor_startup_scan_count(&path), scans_after);
+
+        // The warm cache must be invalidated when the same file is truncated
+        // or a replacement arrives at the same path with a larger size.
+        std::fs::write(&path, &before).unwrap();
+        handle.ensure_mobile_session_anchor().await.unwrap();
+        assert_eq!(mobile_anchor_startup_scan_count(&path), scans_after + 1);
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, &startup).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        handle.ensure_mobile_session_anchor().await.unwrap();
+        assert_eq!(mobile_anchor_startup_scan_count(&path), scans_after + 2);
+        assert!(session::jsonl::route_lines(&std::fs::read_to_string(&path).unwrap())
+            .mobile_empty_sessions.contains(&source_id));
+        handle.submit(ClientCommand::ListSessions { limit: None }).await.unwrap();
+        assert!(drained(&listener).await.iter().any(|event| matches!(event,
+            Ev::SessionList { sessions } if sessions.iter().any(|row| row.uuid == source_id && row.mode == SessionModeDto::Chat)
+        )));
+        (source_id, context_id)
+    });
+    drop(handle);
+    let (reopened, listener) = build_submit_handle(tmp.path());
+    reopened.runtime().block_on(async {
+        reopened.submit(ClientCommand::ResumeSession { session_id: source_id.clone(), cwd: None }).await.unwrap();
+        let state = reopened.inner().orchestrator.conversation_mode().await;
+        assert_eq!((state.active, state.selected), (session::jsonl::SessionMode::Chat, session::jsonl::SessionMode::Chat));
+        assert_eq!(state.revision, 1);
+        let restored_source = std::fs::read_to_string(reopened.inner().session_writer.active_path()).unwrap();
+        let profile = session::JsonlWriter::session_mode_transition_from_source(&restored_source, &source_id).unwrap();
+        assert_eq!((profile.active_epoch, profile.selected_epoch), (1, 1));
+        let session = reopened.inner().orchestrator.session();
+        let history = session.lock().await;
+        assert!(history.history.iter().any(|message| {
+            message.id().as_uuid() == context_id && message.text_content().contains("startup-context-marker")
+        }), "startup hook context must be restored for the first model request");
+        drop(history);
+        assert!(drained(&listener).await.iter().any(|event| matches!(event,
+            Ev::SessionResumed { session_id, mode: SessionModeDto::Chat, .. } if session_id == &source_id
+        )));
+    });
+}
+
+#[test]
+fn anchored_session_with_deferred_tool_is_not_restored_as_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, _) = build_submit_handle_with_config(config, tmp.path());
+    let (source_id, path, source) = handle.runtime().block_on(async {
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
+        let source_id = handle.inner().orchestrator.current_session_id().await.as_uuid().to_string();
+        let path = handle.inner().session_writer.active_path();
+        let deferred = serde_json::json!({
+            "type":"attachment", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+            "sessionId":source_id, "timestamp":"2026-10-29T00:00:00Z", "cwd":handle.session_cwd(),
+            "version":"test", "isSidechain":false,
+            "attachment":{"type":"hook_deferred_tool", "hookEvent":"PreToolUse", "hookName":"PreToolUse:Bash",
+                "toolUseID":"toolu_pending", "toolName":"Bash", "toolInput":{"command":"echo pending"},
+                "permissionMode":"default"}
+        });
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{deferred}").unwrap();
+        drop(file);
+        let source = std::fs::read(&path).unwrap();
+        (source_id, path, source)
+    });
+    drop(handle);
+    let (reopened, _) = build_submit_handle(tmp.path());
+    reopened.runtime().block_on(async {
+        let prior = reopened.inner().orchestrator.current_session_id().await;
+        assert!(matches!(
+            reopened
+                .submit(ClientCommand::ResumeSession {
+                    session_id: source_id,
+                    cwd: None
+                })
+                .await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert_eq!(
+            reopened.inner().orchestrator.current_session_id().await,
+            prior
+        );
+        assert_eq!(std::fs::read(path).unwrap(), source);
     });
 }
 
@@ -13195,6 +13323,111 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
             .expect("fork row");
         assert_eq!(fork_row.mode, session::jsonl::SessionMode::Chat);
         assert_eq!(fork_row.message_count, visible_message_count);
+    });
+}
+
+#[test]
+fn submit_fork_session_rejects_deferred_tools_for_current_and_other_source() {
+    for current_source in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (source_id, _) = seed_replay_valid_session(tmp.path());
+        let cfg = test_config(tmp.path());
+        let cwd = cfg.cwd.to_string_lossy().into_owned();
+        let path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_id);
+        let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+        handle.runtime().block_on(async {
+            if current_source {
+                handle.submit(ClientCommand::ResumeSession {
+                    session_id: source_id.clone(), cwd: None,
+                }).await.unwrap();
+            }
+            let assistant = uuid::Uuid::new_v4();
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(file, "{}", serde_json::json!({
+                "type":"assistant", "uuid":assistant, "sessionId":source_id,
+                "parentUuid":"cccccccc-3333-4333-8333-cccccccccccc", "cwd":cwd,
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":"pending","name":"Bash","input":{"command":"true"}}]}
+            })).unwrap();
+            writeln!(file, "{}", serde_json::json!({
+                "type":"attachment", "uuid":uuid::Uuid::new_v4(), "sessionId":source_id,
+                "parentUuid":assistant, "cwd":cwd,
+                "attachment":{"type":"hook_deferred_tool","toolUseID":"pending","toolName":"Bash","toolInput":{"command":"true"}}
+            })).unwrap();
+            drop(file);
+            let before = std::fs::read(&path).unwrap();
+            let before_files = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+            let previous = handle.inner().orchestrator.conversation_mode().await;
+            let error = handle.submit(ClientCommand::ForkSession {
+                session_id: source_id.clone(), target_mode: SessionModeDto::Chat,
+            }).await.unwrap_err();
+            assert!(matches!(error, ClientError::Rejected { message } if message.contains("Resume the original session first")));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), before_files);
+            assert_eq!(handle.inner().orchestrator.conversation_mode().await, previous);
+            assert!(!drained(&listener).await.iter().any(|event| matches!(event, Ev::SessionForked { .. })));
+        });
+    }
+}
+
+#[test]
+fn submit_fork_session_rejects_unsettled_native_receipt_without_source_changes() {
+    use lingxi_core::host::{
+        DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,
+        ToolExecutionIdentity, ToolExecutionOutcome, ToolExecutionRecord,
+        ToolExecutionStage,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (source_id, _) = seed_replay_valid_session(tmp.path());
+    let cfg = test_config(tmp.path());
+    let cwd = cfg.cwd.to_string_lossy().into_owned();
+    let path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_id);
+    let (handle, listener) = build_submit_handle_with_config(cfg.clone(), tmp.path());
+    handle.runtime().block_on(async {
+        let id = lingxi_core::types::SessionId::parse_prefixed(&source_id).unwrap();
+        let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))
+            .claim_session_id(&source_id, std::process::id()).unwrap().into_shared();
+        let relative = std::path::PathBuf::from("session-state").join(id.as_uuid().to_string());
+        let journal = session::jsonl::DurableJournal::open_under(&cfg.lingxi_home, &relative).unwrap();
+        let output = DurableToolOutput { digest:"binding".into(), payload:serde_json::json!({}), media_refs:vec![] };
+        let mut execution = ToolExecutionRecord {
+            identity:ToolExecutionIdentity { session_id:id, provider_response_id:"response".into(), provider_call_id:"call".into(), member_index:0 },
+            tool_name:"computer".into(), input_digest:"input".into(), recovery_binding:output.clone(),
+            acknowledged_safety_checks:vec![], stage:ToolExecutionStage::Started, outcome:None, output:None,
+        };
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        execution.stage = ToolExecutionStage::Terminal;
+        execution.outcome = Some(ToolExecutionOutcome::Succeeded);
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        execution.stage = ToolExecutionStage::OutputPrepared;
+        execution.output = Some(output.clone());
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        execution.stage = ToolExecutionStage::OutputPublished;
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        let receipt = NativeReceiptRecord {
+            response:None, session_id:id, receipt_id:"response/call".into(), execution_ids:vec![execution.execution_id()],
+            binding:NativeContinuationBinding { account:"account".into(), profile:"profile".into(), model:"model".into(), endpoint:"endpoint".into(), protocol:"responses".into() },
+            stage:NativeReceiptStage::Prepared, submission_attempt:0, receipt:output, provider_response_id:None,
+        };
+        journal.append_once(&receipt.event_id(), &serde_json::json!({"NativeReceipt": receipt})).unwrap();
+        journal.write_snapshot(5, &serde_json::json!({"sentinel":"unchanged"})).unwrap();
+        let wal = cfg.lingxi_home.join(&relative).join(session::jsonl::JOURNAL_FILE_NAME);
+        let snapshot = cfg.lingxi_home.join(&relative).join(session::jsonl::SNAPSHOT_FILE_NAME);
+        let wal_before = std::fs::read(&wal).unwrap();
+        let snapshot_before = std::fs::read(&snapshot).unwrap();
+        drop(journal);
+        drop(lease);
+        let source_before = std::fs::read(&path).unwrap();
+        let before_files = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        let error = handle.submit(ClientCommand::ForkSession {
+            session_id:source_id.clone(), target_mode:SessionModeDto::Chat,
+        }).await.unwrap_err();
+        assert!(matches!(error, ClientError::Rejected { message } if message.contains("unsettled computer receipt")));
+        assert_eq!(std::fs::read(&path).unwrap(), source_before);
+        assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), before_files);
+        assert!(!drained(&listener).await.iter().any(|event| matches!(event, Ev::SessionForked { .. })));
     });
 }
 

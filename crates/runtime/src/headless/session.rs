@@ -2,7 +2,7 @@
 
 use crate::desktop::{BuildError, DesktopConfig, DesktopRuntime, DesktopSessionResumeSnapshot};
 use lingxi_core::host::live_sessions::{LiveSessionDir, SharedSessionWriterLease};
-use lingxi_core::host::{FileSystem, OutputStream};
+use lingxi_core::host::{FileSystem, OrchestratorHandle, OutputStream};
 use session::jsonl::JsonlMessage;
 use std::path::Path;
 use std::sync::Arc;
@@ -41,6 +41,7 @@ pub enum SessionStart {
 pub struct PreparedSession {
     source_id: Uuid,
     source_content: Arc<str>,
+    mounted_content: Arc<str>,
     session_id: Uuid,
     fork: bool,
     messages: Vec<JsonlMessage>,
@@ -98,6 +99,19 @@ pub async fn prepare(
             (id, None, None, *fork)
         }
     };
+    let session_id = if fork {
+        match config.session_id_override.as_deref() {
+            Some(raw) => lingxi_core::types::SessionId::parse_prefixed(raw)
+                .ok_or("Invalid branch session ID. Must be a valid UUID.")?
+                .as_uuid(),
+            None => Uuid::new_v4(),
+        }
+    } else {
+        source_id
+    };
+    if fork && session_id == source_id {
+        return Err("A branch must use a different session ID from its source".into());
+    }
     let missing = || format!("No conversation found with session ID: {source_id}");
     let source_path = session::jsonl::resolve_session_path(&config.lingxi_home, &cwd, source_id)
         .await
@@ -147,10 +161,28 @@ pub async fn prepare(
         &content,
     )
     .await?;
-    let session_id = if fork { Uuid::new_v4() } else { source_id };
+    if fork {
+        let recovery = crate::desktop::session_state::capture_branch_recovery(
+            &config.lingxi_home,
+            source_id,
+            source_lease.clone(),
+        )
+        .await?;
+        orchestrator::native_computer::validate_independent_branch(
+            source_id,
+            &content,
+            &messages,
+            recovery.as_ref(),
+        )?;
+    }
     let (target_path, target_lease) = if fork {
         let target_path =
             session::jsonl::session_path(&config.lingxi_home, &cwd, &session_id.to_string());
+        match tokio::fs::symlink_metadata(&target_path).await {
+            Ok(_) => return Err("The requested branch session ID already exists".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("could not inspect branch target: {error}")),
+        }
         let target_lease = if config.session_persistence {
             Some(claim_session(&config.lingxi_home, session_id)?)
         } else {
@@ -162,6 +194,42 @@ pub async fn prepare(
             source_path.clone(),
             config.session_persistence.then(|| source_lease.clone()),
         )
+    };
+    let (mounted_content, messages, entries) = if fork {
+        let source_cwd = session::jsonl::loader::transcript_workspace_path(&source_path, &loaded)
+            .unwrap_or_else(|| config.cwd.to_string_lossy().into_owned());
+        let options = session::branch::CapturedBranch {
+            lingxi_home: &config.lingxi_home,
+            source_cwd: &source_cwd,
+            target_cwd: &cwd,
+            source_session_id: source_id,
+            target_session_id: session_id,
+            source_content: &content,
+            messages: &messages,
+            custom_title: None,
+            mode: config.initial_conversation_mode,
+        };
+        let mounted_content: Arc<str> = if config.session_persistence {
+            session::branch::create_branch_from_captured(options, fs.clone())
+                .await
+                .map_err(|error| format!("could not create branch: {error}"))?;
+            tokio::fs::read_to_string(&target_path)
+                .await
+                .map_err(|error| error.to_string())?
+                .into()
+        } else {
+            session::branch::render_branch_from_captured(options, fs.clone())
+                .await
+                .map_err(|error| format!("could not create branch: {error}"))?
+                .content
+                .into()
+        };
+        let target = session::jsonl::route_lines(&mounted_content);
+        let (target_messages, _) =
+            session::jsonl::build_conversation_chain(&target, &session_id.to_string());
+        (mounted_content, target_messages, target.messages_in_order)
+    } else {
+        (content.clone(), messages, loaded.messages_in_order)
     };
     config.session_id_override = Some(session_id.to_string());
     if let Some(workspace) = resumed_cwd {
@@ -188,6 +256,7 @@ pub async fn prepare(
         source_session_id: source_id.to_string(),
         content: content.clone(),
     });
+    config.session_resume_target_snapshot = fork.then(|| mounted_content.clone());
     config.session_writer_lease = target_lease;
     config.session_resume_cost = resume_cost;
     if config.initial_effort.is_none() {
@@ -196,10 +265,11 @@ pub async fn prepare(
     Ok(Some(PreparedSession {
         source_id,
         source_content: content,
+        mounted_content,
         session_id,
         fork,
         messages,
-        entries: loaded.messages_in_order,
+        entries,
         preserve_boot_model: config.default_model_explicit
             || config.default_model_env_pinned
             || config.cli_agent.is_some(),
@@ -288,74 +358,70 @@ async fn mount_prepared(
     prepared: Option<PreparedSession>,
 ) -> Result<(), String> {
     let source = if let Some(prepared) = prepared {
-        if prepared.fork {
-            runtime.stage_fork_history(prepared.messages.clone()).await;
-        }
         let replayed = orchestrator::state_from_messages(prepared.session_id, &prepared.messages);
         let permission_mode = if !prepared.explicit_permission_mode && replayed.plan_mode {
             permission::PermissionMode::Plan
         } else {
             config.permission_mode
         };
-        runtime
-            .orchestrator
-            .set_permission_mode(permission_mode.wire_str())
-            .await?;
-        let last_uuid = prepared
-            .messages
-            .iter()
-            .rev()
-            .map(|row| row.uuid.clone())
-            .find(|id| !id.is_empty());
-        runtime.orchestrator.seed_last_jsonl_uuid(last_uuid).await;
+        let profile = session::JsonlWriter::session_mode_transition_from_source(
+            &prepared.mounted_content,
+            &prepared.session_id.to_string(),
+        );
+        // Preserve the headless resume's established model selection rule even
+        // when the transcript has no human-turn model setting. Install it
+        // before restoration so dependent reasoning state uses the same model.
+        if !prepared.preserve_boot_model
+            && runtime.model_provenance == lingxi_core::host::ModelProvenance::ProviderCatalogTier
         {
             let session = runtime.orchestrator.session();
             let mut state = session.lock().await;
-            state.session_id = replayed.session_id;
-            state.history = replayed.history;
-            state.compacted_user_turns = replayed.compacted_user_turns;
-            state.virtual_user_messages = replayed.virtual_user_messages;
-            state.transcript_only_messages = replayed.transcript_only_messages;
-            state.compact_summary_messages = replayed.compact_summary_messages;
-            state.model_context_excluded_messages = replayed.model_context_excluded_messages;
-            state.active_goal = replayed.active_goal;
-            if !prepared.preserve_boot_model
-                && runtime.model_provenance
-                    == lingxi_core::host::ModelProvenance::ProviderCatalogTier
-            {
-                state.model = replayed.model;
-                state.model_profile = replayed.model_profile;
-            }
-            state.plan_mode = permission_mode == permission::PermissionMode::Plan;
-            if state.plan_mode {
-                state.plan_reminder_shown = false;
-            }
+            state.model = replayed.model;
+            state.model_profile = replayed.model_profile;
         }
         runtime
             .orchestrator
-            .sync_active_goal_stop_hook_for_current_state()
-            .await;
-        runtime
-            .orchestrator
-            .restore_resume_runtime_metadata(&prepared.messages)
-            .await;
-        runtime
-            .orchestrator
-            .restore_resume_prompt_metadata(&prepared.entries)
-            .await;
-        orchestrator::replay_deferred_tools_after_resume(
-            &runtime.orchestrator,
-            orchestrator::deferred_tool_replays_from_messages(&prepared.entries),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+            .restore_captured_session_history(
+                prepared.session_id,
+                &prepared.messages,
+                &prepared.entries,
+                true,
+                permission_mode,
+                profile,
+                &prepared.mounted_content,
+            )
+            .await?;
+        if !prepared.fork {
+            orchestrator::replay_deferred_tools_after_resume(
+                &runtime.orchestrator,
+                orchestrator::deferred_tool_replays_from_messages(&prepared.entries),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
         "resume"
     } else {
+        if let Some(mode) = config.initial_conversation_mode {
+            runtime
+                .orchestrator
+                .set_conversation_mode(mode)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         "startup"
     };
     let effects = runtime.orchestrator.fire_session_start(source).await;
     let _ = runtime.apply_session_start_effects(&effects).await;
     runtime.orchestrator.fire_instructions_loaded().await;
+    if source == "resume" {
+        if let Some(mode) = config.initial_conversation_mode {
+            runtime
+                .orchestrator
+                .set_conversation_mode(mode)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -401,6 +467,290 @@ pub async fn rewind_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::host::session_context::{ConversationMode, SessionModeSnapshot};
+    use lingxi_core::types::{utf16_json::Utf16JsonProjection, ToolUseId};
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum StartupEvent {
+        Mode(ConversationMode),
+        Tool(String),
+        Hook(String),
+    }
+
+    #[derive(Default)]
+    struct StartupTrace(std::sync::Mutex<Vec<StartupEvent>>);
+
+    #[async_trait::async_trait]
+    impl OutputStream for StartupTrace {
+        async fn emit_conversation_mode(&self, state: &SessionModeSnapshot) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(StartupEvent::Mode(state.active));
+        }
+
+        async fn emit_hook_started(&self, _: &str, _: &str, event: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(StartupEvent::Hook(event.into()));
+        }
+
+        async fn emit_text(&self, _: &Utf16JsonProjection) {}
+
+        async fn emit_tool_call(&self, _: &ToolUseId, tool: &str, _: &Utf16JsonProjection) {
+            self.0.lock().unwrap().push(StartupEvent::Tool(tool.into()));
+        }
+
+        async fn emit_tool_result(
+            &self,
+            _: &ToolUseId,
+            _: &str,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
+            _: Option<&Utf16JsonProjection>,
+        ) {
+        }
+
+        async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
+    }
+
+    fn startup_config(root: &Path, id: Uuid) -> DesktopConfig {
+        let cwd = root.join("startup-project");
+        std::fs::create_dir_all(cwd.join(".lingxi")).unwrap();
+        std::fs::write(
+            cwd.join(".lingxi/settings.json"),
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"true"}]}]}}"#,
+        )
+        .unwrap();
+        let mut config = DesktopConfig::default();
+        config.cwd = cwd;
+        config.lingxi_home = root.join("startup-home");
+        config.session_id_override = Some(id.to_string());
+        config.isolated_credential_storage = true;
+        config.use_noop_permission_gate = true;
+        config.enable_automation_scheduler = false;
+        config
+    }
+
+    fn startup_sink() -> Arc<dyn client::adapter::PermissionRequestSink> {
+        Arc::new(crate::headless::HeadlessPermissionRequestSink)
+    }
+
+    #[tokio::test]
+    async fn fresh_explicit_chat_is_durable_before_desktop_and_headless_hooks() {
+        for (headless, restore_draft) in [(false, false), (false, true), (true, false)] {
+            let root = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4();
+            let mut config = startup_config(root.path(), id);
+            config.initial_conversation_mode = Some(ConversationMode::Chat);
+            config.restore_draft = restore_draft;
+            let trace = Arc::new(StartupTrace::default());
+            let runtime = if headless {
+                let prepared = prepare(&mut config, &SessionStart::New).await.unwrap();
+                build_prepared(config.clone(), prepared, trace.clone(), startup_sink())
+                    .await
+                    .unwrap()
+            } else {
+                crate::desktop::build(config.clone(), trace.clone(), startup_sink())
+                    .await
+                    .unwrap()
+            };
+            let events = trace.0.lock().unwrap().clone();
+            let mode = events
+                .iter()
+                .position(|event| *event == StartupEvent::Mode(ConversationMode::Chat))
+                .unwrap();
+            let hook = events
+                .iter()
+                .position(|event| *event == StartupEvent::Hook("SessionStart".into()))
+                .unwrap();
+            assert!(mode < hook, "{events:?}");
+            let path = session::jsonl::session_path(
+                &config.lingxi_home,
+                &config.cwd.to_string_lossy(),
+                &id.to_string(),
+            );
+            let source = std::fs::read_to_string(path).unwrap();
+            let persisted =
+                session::JsonlWriter::session_mode_transition_from_source(&source, &id.to_string())
+                    .unwrap();
+            assert_eq!(
+                (persisted.active, persisted.selected, persisted.pending),
+                (ConversationMode::Chat, ConversationMode::Chat, false)
+            );
+            assert!(
+                runtime
+                    .session_lifecycle
+                    .shutdown_and_drain()
+                    .await
+                    .complete
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_default_code_restarts_without_a_mode_record() {
+        let root = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let mut config = startup_config(root.path(), id);
+        config.initial_conversation_mode = Some(ConversationMode::Code);
+        let hook = serde_json::json!({"hookSpecificOutput":{
+            "hookEventName":"SessionStart", "additionalContext":"startup context"
+        }});
+        let command = format!("printf '%s\\n' '{hook}'");
+        std::fs::write(
+            config.cwd.join(".lingxi/settings.json"),
+            serde_json::json!({
+                "hooks":{"SessionStart":[{"hooks":[{"type":"command","command":command}]}]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let runtime = crate::desktop::build(
+            config.clone(),
+            Arc::new(StartupTrace::default()),
+            startup_sink(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            runtime
+                .session_lifecycle
+                .shutdown_and_drain()
+                .await
+                .complete
+        );
+        drop(runtime);
+        let path = session::jsonl::session_path(
+            &config.lingxi_home,
+            &config.cwd.to_string_lossy(),
+            &id.to_string(),
+        );
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(crate::desktop::session_state::is_mode_only_draft(
+            &source,
+            &id.to_string()
+        ));
+        assert!(session::JsonlWriter::session_mode_transition_from_source(
+            &source,
+            &id.to_string()
+        )
+        .is_none());
+        config.initial_conversation_mode = Some(ConversationMode::Chat);
+        config.restore_draft = true;
+        config.session_transcript_path = Some(path);
+        config.session_resume_snapshot = Some(DesktopSessionResumeSnapshot {
+            source_session_id: id.to_string(),
+            content: source.into(),
+        });
+        let trace = Arc::new(StartupTrace::default());
+        let resumed = crate::desktop::build(config, trace.clone(), startup_sink())
+            .await
+            .unwrap();
+        assert_eq!(
+            resumed.orchestrator.conversation_mode().await.active,
+            ConversationMode::Code
+        );
+        let events = trace.0.lock().unwrap().clone();
+        let code = events
+            .iter()
+            .position(|event| *event == StartupEvent::Mode(ConversationMode::Code))
+            .unwrap();
+        let hook = events
+            .iter()
+            .position(|event| *event == StartupEvent::Hook("SessionStart".into()))
+            .unwrap();
+        assert!(code < hook, "{events:?}");
+        assert!(
+            resumed
+                .session_lifecycle
+                .shutdown_and_drain()
+                .await
+                .complete
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_headless_recovers_saved_profile_before_replay_and_override() {
+        for explicit in [None, Some(ConversationMode::Code)] {
+            let root = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4();
+            let mut config = startup_config(root.path(), id);
+            config.initial_conversation_mode = explicit;
+            let user = Uuid::new_v4();
+            let assistant = Uuid::new_v4();
+            let rows = [
+                serde_json::json!({"type":"user", "uuid":user, "sessionId":id, "parentUuid":null, "cwd":config.cwd, "message":{"role":"user","content":"continue"}}),
+                serde_json::json!({"type":"assistant", "uuid":assistant, "sessionId":id, "parentUuid":user, "cwd":config.cwd, "message":{"role":"assistant","content":[{"type":"tool_use","id":"deferred", "name":"Bash", "input":{"command":"true"}}]}}),
+                serde_json::json!({"type":"attachment", "uuid":Uuid::new_v4(), "sessionId":id, "parentUuid":assistant, "cwd":config.cwd, "attachment":{"type":"hook_deferred_tool","toolUseID":"deferred","toolName":"Bash","toolInput":{"command":"true"}}}),
+                serde_json::json!({"type":"session-mode", "sessionId":id, "sessionMode":"chat", "contextRevision":3, "profileEpoch":3, "admittedMode":"chat", "admittedEpoch":3, "pending":false}),
+            ];
+            let path = session::jsonl::session_path(
+                &config.lingxi_home,
+                &config.cwd.to_string_lossy(),
+                &id.to_string(),
+            );
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                rows.iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let prepared = prepare(&mut config, &resume(id, false)).await.unwrap();
+            let trace = Arc::new(StartupTrace::default());
+            let runtime = build_prepared(config, prepared, trace.clone(), startup_sink())
+                .await
+                .unwrap();
+            let events = trace.0.lock().unwrap().clone();
+            let chat = events
+                .iter()
+                .position(|event| *event == StartupEvent::Mode(ConversationMode::Chat))
+                .unwrap();
+            let replay = events
+                .iter()
+                .position(|event| *event == StartupEvent::Tool("Bash".into()))
+                .unwrap();
+            let hook = events
+                .iter()
+                .position(|event| *event == StartupEvent::Hook("SessionStart".into()))
+                .unwrap();
+            assert!(chat < replay && replay < hook, "{events:?}");
+            if explicit.is_some() {
+                let code = events
+                    .iter()
+                    .position(|event| *event == StartupEvent::Mode(ConversationMode::Code))
+                    .unwrap();
+                assert!(hook < code, "{events:?}");
+            } else {
+                assert!(
+                    !events.contains(&StartupEvent::Mode(ConversationMode::Code)),
+                    "{events:?}"
+                );
+            }
+            let source = std::fs::read_to_string(path).unwrap();
+            let persisted =
+                session::JsonlWriter::session_mode_transition_from_source(&source, &id.to_string())
+                    .unwrap();
+            assert_eq!(
+                (persisted.active, persisted.revision, persisted.active_epoch),
+                if explicit.is_some() {
+                    (ConversationMode::Code, 4, 4)
+                } else {
+                    (ConversationMode::Chat, 3, 3)
+                }
+            );
+            assert!(
+                runtime
+                    .session_lifecycle
+                    .shutdown_and_drain()
+                    .await
+                    .complete
+            );
+        }
+    }
 
     fn source_transcript(source_id: Uuid, cwd: &Path) -> String {
         let mut first = serde_json::json!({
@@ -552,7 +902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_stages_history_without_writing_before_first_prompt_admission() {
+    async fn fork_atomically_publishes_history_with_a_fresh_profile() {
         let (_root, mut config, source_id, source_path, source_content) = fixture().await;
         let prepared = prepare(&mut config, &resume(source_id, true))
             .await
@@ -562,11 +912,24 @@ mod tests {
         assert!(prepared.fork);
         assert!(claim_session(&config.lingxi_home, source_id).is_ok());
         assert!(claim_session(&config.lingxi_home, prepared.session_id).is_err());
-        assert!(!config.session_transcript_path.as_ref().unwrap().exists());
+        assert!(config.session_transcript_path.as_ref().unwrap().exists());
         assert!(config.parent_session_id.is_none());
         assert_eq!(prepared.messages.len(), 2);
         assert_eq!(prepared.messages[0].parent_uuid, None);
         assert_eq!(prepared.messages[1].parent_uuid.as_deref(), Some("first"));
+        assert!(prepared
+            .messages
+            .iter()
+            .all(|message| message.session_id == prepared.session_id.to_string()));
+        let profile = session::JsonlWriter::session_mode_transition_from_source(
+            &prepared.mounted_content,
+            &prepared.session_id.to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            (profile.active, profile.active_epoch),
+            (ConversationMode::Code, 1)
+        );
         assert_eq!(
             config
                 .session_resume_snapshot
@@ -579,6 +942,166 @@ mod tests {
             tokio::fs::read_to_string(source_path).await.unwrap(),
             source_content
         );
+    }
+
+    #[tokio::test]
+    async fn fork_uses_explicit_target_and_refuses_source_or_existing_target() {
+        for persistence in [true, false] {
+            let (_root, mut config, source_id, source_path, source) = fixture().await;
+            config.session_persistence = persistence;
+            let target_id = Uuid::new_v4();
+            let target_id_text = target_id.to_string();
+            config.session_id_override = Some(target_id_text.clone());
+            let prepared = prepare(&mut config, &resume(source_id, true))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(prepared.session_id, target_id);
+            assert_eq!(
+                config.session_id_override.as_deref(),
+                Some(target_id_text.as_str())
+            );
+            assert_eq!(
+                config.session_transcript_path.as_ref().unwrap().exists(),
+                persistence
+            );
+            assert_eq!(std::fs::read_to_string(&source_path).unwrap(), source);
+
+            let (_root, mut collision, source_id, source_path, source) = fixture().await;
+            collision.session_persistence = persistence;
+            let target_id = Uuid::new_v4();
+            collision.session_id_override = Some(target_id.to_string());
+            let target = session::jsonl::session_path(
+                &collision.lingxi_home,
+                &collision.cwd.to_string_lossy(),
+                &target_id.to_string(),
+            );
+            std::fs::write(&target, "existing target\n").unwrap();
+            let error = prepare(&mut collision, &resume(source_id, true))
+                .await
+                .err()
+                .unwrap();
+            assert!(error.contains("already exists"), "{error}");
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "existing target\n"
+            );
+            assert_eq!(std::fs::read_to_string(&source_path).unwrap(), source);
+
+            collision.session_id_override = Some(source_id.to_string());
+            let error = prepare(&mut collision, &resume(source_id, true))
+                .await
+                .err()
+                .unwrap();
+            assert!(error.contains("different session ID"), "{error}");
+            assert_eq!(std::fs::read_to_string(source_path).unwrap(), source);
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_uses_fresh_code_epoch_and_never_reactivates_source_skill() {
+        for persistence in [true, false] {
+            let (_root, mut config, source_id, source_path, _) = fixture().await;
+            config.session_persistence = persistence;
+            config.initial_conversation_mode = Some(ConversationMode::Code);
+            config.isolated_credential_storage = true;
+            config.enable_automation_scheduler = false;
+            let first = Uuid::new_v4();
+            let skill = Uuid::new_v4();
+            let tail = Uuid::new_v4();
+            let rows = [
+                serde_json::json!({"type":"user", "uuid":first, "sessionId":source_id, "parentUuid":null, "cwd":config.cwd, "message":{"role":"user","content":"question"}}),
+                serde_json::json!({"type":"user", "uuid":skill, "sessionId":source_id, "parentUuid":first, "cwd":config.cwd, "isMeta":true, "origin":{"type":"skill_activation","context_epoch":7,"skill_name":"old","skill_path":"/skills/old"}, "message":{"role":"user","content":"old skill"}}),
+                serde_json::json!({"type":"user", "uuid":tail, "sessionId":source_id, "parentUuid":skill, "cwd":config.cwd, "message":{"role":"user","content":"continue"}}),
+                serde_json::json!({"type":"session-mode", "sessionId":source_id, "sessionMode":"chat", "contextRevision":3, "profileEpoch":3, "admittedMode":"chat", "admittedEpoch":3, "pending":false}),
+            ];
+            let source = rows
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>();
+            std::fs::write(&source_path, &source).unwrap();
+            let prepared = prepare(&mut config, &resume(source_id, true))
+                .await
+                .unwrap()
+                .unwrap();
+            let target_id = prepared.session_id;
+            let profile = session::JsonlWriter::session_mode_transition_from_source(
+                &prepared.mounted_content,
+                &target_id.to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                (profile.active, profile.selected, profile.active_epoch),
+                (ConversationMode::Code, ConversationMode::Code, 8)
+            );
+            let target_path = config.session_transcript_path.clone().unwrap();
+            assert_eq!(target_path.exists(), persistence);
+            assert_eq!(std::fs::read_to_string(&source_path).unwrap(), source);
+            let runtime = build_prepared(
+                config,
+                Some(prepared),
+                Arc::new(StartupTrace::default()),
+                startup_sink(),
+            )
+            .await
+            .unwrap();
+            let history = runtime
+                .orchestrator
+                .session()
+                .lock()
+                .await
+                .model_context_history();
+            assert!(history
+                .iter()
+                .any(|message| message.text_content() == "question"));
+            assert!(!history
+                .iter()
+                .any(|message| message.text_content() == "old skill"));
+            let current = runtime.orchestrator.conversation_mode().await;
+            assert_eq!(
+                (current.active, current.selected, current.revision),
+                (ConversationMode::Code, ConversationMode::Code, 8)
+            );
+            assert!(
+                runtime
+                    .session_lifecycle
+                    .shutdown_and_drain()
+                    .await
+                    .complete
+            );
+            assert_eq!(std::fs::read_to_string(source_path).unwrap(), source);
+            assert_eq!(target_path.exists(), persistence);
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_rejects_deferred_source_work_without_writing_a_target() {
+        let (_root, mut config, source_id, source_path, mut source) = fixture().await;
+        let assistant = Uuid::new_v4();
+        source.push_str(&format!("{}\n{}\n",
+            serde_json::json!({"type":"assistant", "uuid":assistant, "sessionId":source_id, "parentUuid":"second", "message":{"role":"assistant","content":[{"type":"tool_use","id":"pending","name":"Bash","input":{"command":"true"}}]}}),
+            serde_json::json!({"type":"attachment", "uuid":Uuid::new_v4(), "sessionId":source_id, "parentUuid":assistant, "attachment":{"type":"hook_deferred_tool","toolUseID":"pending","toolName":"Bash","toolInput":{"command":"true"}}})
+        ));
+        std::fs::write(&source_path, &source).unwrap();
+        let files_before = std::fs::read_dir(source_path.parent().unwrap())
+            .unwrap()
+            .count();
+        let error = prepare(&mut config, &resume(source_id, true))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("Resume the original session first"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&source_path).unwrap(), source);
+        assert_eq!(
+            std::fs::read_dir(source_path.parent().unwrap())
+                .unwrap()
+                .count(),
+            files_before
+        );
+        assert!(config.session_id_override.is_none());
     }
 
     #[tokio::test]

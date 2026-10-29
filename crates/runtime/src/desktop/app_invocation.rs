@@ -421,11 +421,13 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     config.plan_mode_instructions = None;
     config.plans_directory = None;
     config.session_resume_snapshot = None;
+    config.session_resume_target_snapshot = None;
     config.session_resume_cost = None;
     config.session_transcript_path = None;
     config.session_writer_lease = None;
     config.session_id_override = None;
     config.parent_session_id = None;
+    config.initial_conversation_mode = None;
     config.session_persistence = false;
     config.idle_compaction_enabled = false;
     config.defer_session_start = false;
@@ -552,6 +554,8 @@ mod tests {
     #[test]
     fn strips_history_and_personal_customizations_but_retains_host_route() {
         let mut config = config();
+        config.initial_conversation_mode =
+            Some(lingxi_core::host::session_context::ConversationMode::Chat);
         config.session_id_override = Some("creating-chat".into());
         config.session_resume_cost = Some(cost::CostState::default());
         config.session_resume_snapshot = Some(DesktopSessionResumeSnapshot {
@@ -576,6 +580,7 @@ mod tests {
         assert!(config.customization_gates.safe_mode && !config.customization_gates.bare);
         assert!(config.session_resume_snapshot.is_none() && config.session_resume_cost.is_none());
         assert!(config.session_id_override.is_none() && config.append_system_prompt.is_none());
+        assert!(config.initial_conversation_mode.is_none());
         assert!(config.mcp_paths.is_empty() && config.add_dir.is_empty());
         assert!(config.cli_agents_json.is_none() && config.cli_plugin_dirs.is_empty());
         assert!(!config.session_started_as_coordinator && !config.session_persistence);

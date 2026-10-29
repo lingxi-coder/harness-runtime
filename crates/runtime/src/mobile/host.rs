@@ -1093,6 +1093,193 @@ pub enum MobileEngineError {
     Internal(String),
 }
 
+struct MobileSessionAnchor {
+    path: std::path::PathBuf,
+    session_id: uuid::Uuid,
+    file_id: u128,
+    observed_len: u64,
+}
+
+#[cfg(unix)]
+fn mobile_anchor_file_id(metadata: &std::fs::Metadata) -> u128 {
+    use std::os::unix::fs::MetadataExt;
+    (u128::from(metadata.dev()) << 64) | u128::from(metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn mobile_anchor_file_id(metadata: &std::fs::Metadata) -> u128 {
+    metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |time| time.as_nanos())
+}
+
+#[cfg(test)]
+static MOBILE_ANCHOR_STARTUP_SCANS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn mobile_anchor_startup_scan_count(path: &std::path::Path) -> usize {
+    MOBILE_ANCHOR_STARTUP_SCANS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(path)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// A startup attachment may precede the first user turn. Keep this predicate
+/// shared between empty-session anchoring and cold replay, so no other kind of
+/// attachment (in particular a deferred tool) can be treated as empty history.
+fn mobile_startup_hook_attachment(attachment: &Utf16JsonProjection) -> bool {
+    let event = attachment.string_at("/hookEvent");
+    let name = attachment.string_at("/hookName");
+    let kind = attachment.string_at("/type");
+    if kind == Some("hook_additional_context") {
+        let content = attachment.at_pointer("/content");
+        return event == Some("SessionStart")
+            && name == Some("SessionStart")
+            && attachment.string_at("/toolUseID") == Some("SessionStart")
+            && content
+                .and_then(|value| value.array_len())
+                .is_some_and(|length| {
+                    length > 0
+                        && (0..length).all(|index| {
+                            content
+                                .and_then(|value| value.get_index(index))
+                                .and_then(|value| value.as_str())
+                                .is_some()
+                        })
+                });
+    }
+    let startup_hook = matches!(
+        (event, name),
+        (Some("SessionStart"), Some("SessionStart:startup"))
+            | (Some("InstructionsLoaded"), Some("InstructionsLoaded"))
+    );
+    if !startup_hook
+        || attachment
+            .string_at("/toolUseID")
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .is_none()
+    {
+        return false;
+    }
+    let string = |field: &str| attachment.string_at(field).is_some();
+    let number = |field: &str| {
+        attachment
+            .at_pointer(field)
+            .and_then(|value| value.as_number())
+            .is_some()
+    };
+    match kind {
+        Some("hook_success") => {
+            string("/content")
+                && string("/stdout")
+                && string("/stderr")
+                && number("/exitCode")
+                && string("/command")
+                && number("/durationMs")
+        }
+        Some("hook_non_blocking_error") => {
+            string("/stdout") && string("/stderr") && number("/exitCode")
+        }
+        Some("hook_cancelled") => true,
+        Some("hook_system_message") => string("/content"),
+        _ => false,
+    }
+}
+
+fn mobile_anchored_startup_only(loaded: &session::jsonl::LoadedTranscript, id: uuid::Uuid) -> bool {
+    if !loaded.mobile_empty_sessions.contains(&id.to_string())
+        || loaded.malformed_line_count != 0
+        || loaded.messages_in_order.is_empty()
+    {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    loaded.messages_in_order.iter().all(|row| {
+        let Ok(row_id) = uuid::Uuid::parse_str(&row.uuid) else {
+            return false;
+        };
+        let parent_valid = row.parent_uuid.as_ref().is_none_or(|parent| {
+            uuid::Uuid::parse_str(parent)
+                .ok()
+                .is_some_and(|parent| seen.contains(&parent))
+        });
+        let valid = row.message_type == "attachment"
+            && uuid::Uuid::parse_str(&row.session_id).ok() == Some(id)
+            && !row.is_sidechain
+            && !seen.contains(&row_id)
+            && parent_valid
+            && row.message.to_json_string().ok().as_deref() == Some("null")
+            && row.tool_use_result_projection.is_none()
+            && ["rendered", "renderedRole", "toolUseResult"]
+                .iter()
+                .all(|field| !row.extra.contains_property(field))
+            && row
+                .attachment_projection
+                .as_ref()
+                .is_some_and(mobile_startup_hook_attachment);
+        seen.insert(row_id);
+        valid
+    })
+}
+
+/// Replay the existing startup attachments using the same projections as a
+/// normal conversation, even though there is not yet a user/assistant tip.
+fn replay_mobile_anchored_startup(
+    path: std::path::PathBuf,
+    source: String,
+    loaded: session::jsonl::LoadedTranscript,
+    id: uuid::Uuid,
+) -> orchestrator::ReplayedSession {
+    let sid = id.to_string();
+    let transcript_metadata =
+        session::jsonl::JsonlWriter::capture_session_metadata_source(&source, &sid);
+    let profile_epoch =
+        session::jsonl::JsonlWriter::session_mode_transition_from_source(&source, &sid)
+            .map_or(0, |profile| profile.active_epoch);
+    let (snapshot, rendering) =
+        orchestrator::resume::prompt_state_for_epoch_from_source(&source, &sid, profile_epoch);
+    let mut runtime_metadata =
+        orchestrator::resume::runtime_metadata_from_messages(&loaded.messages_in_order);
+    let (agent_type, agent_definition) =
+        session::jsonl::loader::agent_resume_state_from_loaded(&loaded, &sid);
+    runtime_metadata.main_thread_agent_type = agent_type;
+    runtime_metadata.main_thread_agent_definition = agent_definition;
+    runtime_metadata.prompt_snapshot = snapshot;
+    runtime_metadata.prompt_snapshot_epoch = Some(profile_epoch);
+    runtime_metadata.context_rendering_hint = rendering;
+    let worktree_session = loaded.worktree_states.get(&sid).cloned();
+    let messages = loaded.messages_in_order;
+    let last_message_uuid = messages
+        .last()
+        .and_then(|row| uuid::Uuid::parse_str(&row.uuid).ok());
+    let state = orchestrator::resume::state_from_messages(id, &messages);
+    let display_history = state.history.clone();
+    let client_state_tool_results =
+        orchestrator::resume::client_state_tool_results_from_messages(&messages);
+    orchestrator::ReplayedSession {
+        transcript_path: path,
+        working_directory: None,
+        worktree_session,
+        transcript_metadata,
+        state,
+        display_history,
+        // These lifecycle attachments project only to model-only meta rows,
+        // so there are no visible message timestamps to restore.
+        display_timestamps: Default::default(),
+        last_message_uuid,
+        messages,
+        runtime_metadata,
+        client_state_tool_results,
+    }
+}
+
 /// The real mobile session host (plan F3-04): the opaque handle the foreign
 /// (Swift / Kotlin) side holds for the lifetime of one engine connection.
 ///
@@ -1206,7 +1393,7 @@ pub struct MobileEngineHandle {
     fs: Arc<dyn lingxi_core::host::FileSystem>,
     /// The active target whose initial transcript anchor has been established.
     /// Retargeting and failed initialization are retried under this guard.
-    initialized_session_anchor: Mutex<Option<std::path::PathBuf>>,
+    initialized_session_anchor: Mutex<Option<MobileSessionAnchor>>,
     /// The deterministic build recipe, captured so the cron firing path
     /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
@@ -4307,26 +4494,119 @@ impl MobileEngineHandle {
         // still bound to the reserved session. It imports only a missing
         // identity sidecar, rather than replaying both files on every command.
         self.ensure_reserved_session_identity(&session_uuid).await?;
-        let nonempty = tokio::fs::symlink_metadata(&path)
-            .await
-            .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() > 0);
-        if initialized.as_ref() == Some(&path) {
-            if nonempty {
-                return Ok(());
+        let metadata = tokio::fs::symlink_metadata(&path).await.ok();
+        let nonempty = metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.file_type().is_file() && metadata.len() > 0);
+        if let Some(anchor) = initialized.as_mut() {
+            if anchor.path == path && anchor.session_id == session_id.as_uuid() {
+                if let Some(metadata) = metadata.as_ref().filter(|_| nonempty) {
+                    if anchor.file_id == mobile_anchor_file_id(metadata)
+                        && metadata.len() >= anchor.observed_len
+                    {
+                        anchor.observed_len = metadata.len();
+                        return Ok(());
+                    }
+                } else {
+                    *initialized = None;
+                    return Err(ClientError::Internal {
+                        message: "initialized session transcript is missing or empty".into(),
+                    });
+                }
             }
+            // Retargeting, replacement, or truncation requires a fresh proof.
             *initialized = None;
-            return Err(ClientError::Internal {
-                message: "initialized session transcript is missing or empty".into(),
-            });
         }
-        if !nonempty {
+        // Initial Chat can persist its profile (and startup hook attachments)
+        // before any command creates the normal empty-session anchor. Existing
+        // titles and conversation rows must never be replaced by this path.
+        let unanchored_startup =
+            if nonempty {
+                use tokio::io::AsyncBufReadExt;
+
+                #[cfg(test)]
+                {
+                    let mut scans = MOBILE_ANCHOR_STARTUP_SCANS
+                        .get_or_init(Default::default)
+                        .lock()
+                        .unwrap();
+                    *scans.entry(path.clone()).or_default() += 1;
+                }
+                let file =
+                    tokio::fs::File::open(&path)
+                        .await
+                        .map_err(|error| ClientError::Internal {
+                            message: format!("read session anchor metadata failed: {error}"),
+                        })?;
+                let mut reader = tokio::io::BufReader::new(file);
+                let mut line = String::new();
+                let mut saw_mode = false;
+                let mut valid = true;
+                loop {
+                    line.clear();
+                    let count = reader.read_line(&mut line).await.map_err(|error| {
+                        ClientError::Internal {
+                            message: format!("read session anchor metadata failed: {error}"),
+                        }
+                    })?;
+                    if count == 0 {
+                        break;
+                    }
+                    if !line.ends_with('\n') {
+                        valid = false;
+                        break;
+                    }
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let Ok(row) = Utf16JsonProjection::parse(&line) else {
+                        valid = false;
+                        break;
+                    };
+                    let same_session = row
+                        .string_at("/sessionId")
+                        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                        == Some(session_id.as_uuid());
+                    let no_conversation = ["message", "rendered", "renderedRole", "toolUseResult"]
+                        .iter()
+                        .all(|field| !row.contains_property(field));
+                    let startup_row = match row.string_at("/type") {
+                        Some("session-mode") => {
+                            saw_mode = true;
+                            !row.contains_property("attachment")
+                                && session::JsonlWriter::session_mode_transition_from_source(
+                                    &line,
+                                    &session_uuid,
+                                )
+                                .is_some()
+                        }
+                        Some("attachment") => {
+                            row.subprojection("/attachment")
+                                .ok()
+                                .as_ref()
+                                .is_some_and(mobile_startup_hook_attachment)
+                                && row
+                                    .string_at("/uuid")
+                                    .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                                    .is_some()
+                                && row.at_pointer("/isSidechain").and_then(|v| v.as_bool())
+                                    == Some(false)
+                        }
+                        _ => false,
+                    };
+                    if !same_session || !no_conversation || !startup_row {
+                        valid = false;
+                        break;
+                    }
+                }
+                valid && saw_mode
+            } else {
+                false
+            };
+        if !nonempty || unanchored_startup {
             self.inner
                 .session_writer
-                .append_mobile_empty_session(
-                    &session_uuid,
-                    "新对话",
-                    &self.session_cwd(),
-                )
+                .append_mobile_empty_session(&session_uuid, "新对话", &self.session_cwd())
                 .await
                 .map_err(|error| ClientError::Internal {
                     message: format!("persist session anchor failed: {error}"),
@@ -4359,7 +4639,23 @@ impl MobileEngineHandle {
                     message: format!("persist initial conversation mode failed: {error}"),
                 })?;
         }
-        *initialized = Some(path);
+        let metadata =
+            tokio::fs::symlink_metadata(&path)
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: format!("inspect initialized session transcript failed: {error}"),
+                })?;
+        if !metadata.file_type().is_file() || metadata.len() == 0 {
+            return Err(ClientError::Internal {
+                message: "initialized session transcript is missing or empty".into(),
+            });
+        }
+        *initialized = Some(MobileSessionAnchor {
+            path,
+            session_id: session_id.as_uuid(),
+            file_id: mobile_anchor_file_id(&metadata),
+            observed_len: metadata.len(),
+        });
         Ok(())
     }
 
@@ -4559,8 +4855,11 @@ impl MobileEngineHandle {
                             .map(|message| std::path::PathBuf::from(&message.cwd))
                     })
                     .or_else(|| restored_directory.clone());
-                let mut replayed =
-                    orchestrator::resume::replay_captured_session(path, source, loaded, uuid)?;
+                let mut replayed = if mobile_anchored_startup_only(&loaded, uuid) {
+                    replay_mobile_anchored_startup(path, source, loaded, uuid)
+                } else {
+                    orchestrator::resume::replay_captured_session(path, source, loaded, uuid)?
+                };
                 replayed.working_directory = restored_directory.clone();
                 Ok(replayed)
             });
@@ -6716,8 +7015,11 @@ impl MobileEngineHandle {
     /// Poll engine commands on the owned runtime. Foreign executors, including
     /// Swift's cooperative pool, can have much smaller stacks than our workers.
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
-        if matches!(&command, ClientCommand::SetSessionMode { .. }) {
-            return self.submit_owned_mode(command).await;
+        if matches!(
+            &command,
+            ClientCommand::SetSessionMode { .. } | ClientCommand::ForkSession { .. }
+        ) {
+            return self.submit_owned_transition(command).await;
         }
         let handle = self
             .self_weak
@@ -6764,10 +7066,13 @@ impl MobileEngineHandle {
     }
 
     async fn submit_impl(&self, command: ClientCommand) -> Result<(), ClientError> {
-        // This entry is also exposed by UniFFI. Mode selections use the same
-        // claim-before-detach path even when called through that entry.
-        if matches!(&command, ClientCommand::SetSessionMode { .. }) {
-            return self.submit_owned_mode(command).await;
+        // This entry is also exposed by UniFFI. Mode selections and branch
+        // publication use the same claim-before-detach path here.
+        if matches!(
+            &command,
+            ClientCommand::SetSessionMode { .. } | ClientCommand::ForkSession { .. }
+        ) {
+            return self.submit_owned_transition(command).await;
         }
         let transition = self.loop_transition.clone().lock_owned().await;
         self.submit_impl_with_transition(command, transition).await
@@ -6775,7 +7080,7 @@ impl MobileEngineHandle {
 }
 
 impl MobileEngineHandle {
-    async fn submit_owned_mode(&self, command: ClientCommand) -> Result<(), ClientError> {
+    async fn submit_owned_transition(&self, command: ClientCommand) -> Result<(), ClientError> {
         let handle = self
             .self_weak
             .upgrade()
@@ -6788,7 +7093,9 @@ impl MobileEngineHandle {
         // Once claimed, the task owns both the handle and guard until durable
         // persistence and publication finish, even if its caller disappears.
         let task = self.runtime().spawn(async move {
-            handle.submit_impl_with_transition(command, transition).await
+            handle
+                .submit_impl_with_transition(command, transition)
+                .await
         });
         task.await.map_err(|error| ClientError::Internal {
             message: format!("mobile command task failed: {error}"),
@@ -7766,18 +8073,97 @@ impl MobileEngineHandle {
                     SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
                     SessionModeDto::Code => session::jsonl::SessionMode::Code,
                 };
-                let result = session::branch::create_branch_with_mode(
+                let cwd = self.session_cwd();
+                let source_id = lingxi_core::types::SessionId::from_uuid(source_uuid);
+                let source_uuid_text = source_uuid.to_string();
+                let source_path = if source_uuid == handle.current_session_id().await.as_uuid() {
+                    self.inner.session_writer.active_path()
+                } else {
+                    session::jsonl::session_path(&self.lingxi_home, &cwd, &source_uuid_text)
+                };
+                if source_path.file_stem().and_then(|name| name.to_str())
+                    != Some(source_uuid_text.as_str())
+                {
+                    return Err(ClientError::Rejected {
+                        message: "fork: source transcript identity changed".into(),
+                    });
+                }
+                let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+                    self.lingxi_home.join("sessions"),
+                );
+                let source_lease = live
+                    .claim_session_id(&source_uuid_text, std::process::id())
+                    .map_err(|error| ClientError::Rejected {
+                        message: format!("fork: source session is in use: {error}"),
+                    })?
+                    .into_shared();
+                let target_uuid = uuid::Uuid::new_v4();
+                let _target_lease = live
+                    .claim_session_id(&target_uuid.to_string(), std::process::id())
+                    .map_err(|error| ClientError::Rejected {
+                        message: format!("fork: could not claim branch session: {error}"),
+                    })?
+                    .into_shared();
+                let authority = crate::mobile::transcript::MobileTranscriptSessionSwitcher::new(
+                    self.lingxi_home.clone(),
+                )
+                .writer(source_id)
+                .await
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("fork: source transcript authority failed: {error}"),
+                })?;
+                let source = tokio::task::spawn_blocking(move || {
+                    authority.with_transaction(|_| {
+                        std::fs::read_to_string(&source_path).map_err(|error| {
+                            session::jsonl::TranscriptWriterError::Fs(
+                                lingxi_core::host::FsError::Io(error.to_string()),
+                            )
+                        })
+                    })
+                })
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: format!("fork: source capture task failed: {error}"),
+                })?
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("fork: source transcript unavailable: {error}"),
+                })?;
+                let loaded = session::jsonl::route_lines(&source);
+                let recovery = crate::branch_recovery::capture_branch_recovery(
                     &self.lingxi_home,
-                    &self.session_cwd(),
                     source_uuid,
-                    None,
-                    target_mode,
+                    source_lease.clone(),
+                )
+                .await
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("fork: resume the original session first: {error}"),
+                })?;
+                orchestrator::native_computer::validate_independent_branch(
+                    source_uuid,
+                    &source,
+                    &loaded.messages_in_order,
+                    recovery.as_ref(),
+                )
+                .map_err(|message| ClientError::Rejected { message })?;
+                let result = session::branch::create_branch_from_captured(
+                    session::branch::CapturedBranch {
+                        lingxi_home: &self.lingxi_home,
+                        source_cwd: &cwd,
+                        target_cwd: &cwd,
+                        source_session_id: source_uuid,
+                        target_session_id: target_uuid,
+                        source_content: &source,
+                        messages: &loaded.messages_in_order,
+                        custom_title: None,
+                        mode: Some(target_mode),
+                    },
                     self.fs.clone(),
                 )
                 .await
                 .map_err(|error| ClientError::Rejected {
                     message: format!("fork: could not duplicate session {session_id}: {error}"),
                 })?;
+                drop(source_lease);
                 self.event_sink
                     .emit(ClientEvent::SessionForked {
                         source_session_id: source_uuid.to_string(),

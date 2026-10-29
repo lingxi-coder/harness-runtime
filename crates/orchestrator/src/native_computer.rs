@@ -6,6 +6,7 @@ use hooks::attachment::HookPublicationGuard;
 use lingxi_core::host::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,
     ToolExecutionIdentity, ToolExecutionOutcome, ToolExecutionRecord, ToolExecutionStage,
+    ToolJournalRecovery,
 };
 use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId, ToolUseId,
@@ -2120,6 +2121,14 @@ pub(crate) async fn has_unsettled_profile_receipts(
         .recover_session(session_id)
         .await
         .map_err(internal)?;
+    let history = orch.session.lock().await.history.clone();
+    recovery_has_unsettled_profile_receipts(&recovered, &history)
+}
+
+fn recovery_has_unsettled_profile_receipts(
+    recovered: &ToolJournalRecovery,
+    history: &[ConversationMessage],
+) -> Result<bool, OrchestratorError> {
     if recovered
         .receipts
         .iter()
@@ -2133,7 +2142,6 @@ pub(crate) async fn has_unsettled_profile_receipts(
         .filter(|receipt| receipt.stage == NativeReceiptStage::ResponseReceived)
         .flat_map(|receipt| receipt.execution_ids.iter().cloned())
         .collect();
-    let history = orch.session.lock().await.history.clone();
     let mut abandoned = std::collections::HashSet::new();
     for value in history
         .iter()
@@ -2158,6 +2166,69 @@ pub(crate) async fn has_unsettled_profile_receipts(
         !completed.contains(&execution.execution_id())
             && !abandoned.contains(&execution.identity.call_identity())
     }))
+}
+
+/// Validate that an independently published branch will not inherit an
+/// unfinished tool or native-computer continuation. The caller must hold the
+/// source writer claim while capturing both the transcript and its journal.
+/// This check is read-only and does not execute or settle source operations.
+///
+/// # Errors
+/// Returns an actionable error when the source must be resumed first, journal
+/// ownership does not match the captured session, or recovery data is invalid.
+pub fn validate_independent_branch(
+    session_id: uuid::Uuid,
+    source: &str,
+    branch_messages: &[session::jsonl::JsonlMessage],
+    recovered: Option<&ToolJournalRecovery>,
+) -> Result<(), String> {
+    let id = lingxi_core::types::SessionId::from_uuid(session_id);
+    if let Some(recovered) = recovered {
+        if recovered
+            .executions
+            .iter()
+            .any(|execution| execution.identity.session_id != id)
+            || recovered
+                .receipts
+                .iter()
+                .any(|receipt| receipt.session_id != id)
+        {
+            return Err("branch recovery journal does not match the source session".into());
+        }
+    }
+    let loaded = session::jsonl::route_lines(source);
+    if !crate::resume::deferred_tool_replays_from_messages(&loaded.messages_in_order).is_empty()
+        || !crate::resume::deferred_tool_replays_from_messages(branch_messages).is_empty()
+    {
+        return Err("This session has deferred tools. Resume the original session first before creating a branch.".into());
+    }
+    let (source_messages, _) =
+        session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+    let state = crate::resume::state_from_messages(session_id, &source_messages);
+    if let Some(recovered) = recovered {
+        if recovery_has_unsettled_profile_receipts(recovered, &state.history)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("This session has an unsettled computer receipt. Resume the original session first before creating a branch.".into());
+        }
+    } else {
+        // A native marker without its durable journal cannot prove that its
+        // execution and receipt settled. Never guess from transcript text.
+        let branch = crate::resume::state_from_messages(session_id, branch_messages);
+        if state.history.iter().chain(&branch.history).any(|message| {
+            let content = match message {
+                ConversationMessage::User { content, .. }
+                | ConversationMessage::Assistant { content, .. } => content.as_slice(),
+                ConversationMessage::System { .. } => &[],
+            };
+            content.iter().any(|block| matches!(block,
+                ContentBlock::ProviderContent { value, .. }
+                    if value.string_at("/type").is_some_and(|kind| kind.starts_with("lingxi_computer_"))))
+        }) {
+            return Err("This session's computer recovery journal is unavailable. Resume the original session first before creating a branch.".into());
+        }
+    }
+    Ok(())
 }
 
 async fn receipt_acknowledgements(

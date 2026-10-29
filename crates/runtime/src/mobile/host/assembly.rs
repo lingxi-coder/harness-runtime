@@ -2703,7 +2703,15 @@ pub(super) async fn build_mobile_inner_with_ask(
     .with_instruction_user_email_provider(instruction_identity.clone())
     .with_workflow_size_guideline(workflow_size_guideline_state)
     .with_session_id(main_session_id)
-    .with_conversation_mode(cfg.session_mode)
+    // Ordinary sessions start from the implicit Code profile so their initial
+    // selection goes through the same durable transition as later selections.
+    // The isolated app-agent host has no transcript writer and keeps its
+    // existing in-memory initialization.
+    .with_conversation_mode(if cfg.app_agent_host {
+        cfg.session_mode
+    } else {
+        session::jsonl::SessionMode::Code
+    })
     // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
     // reports the loaded settings hooks (the executor fires against it; this
     // exposes it for inspection — mobile sibling of desktop's
@@ -2827,6 +2835,17 @@ pub(super) async fn build_mobile_inner_with_ask(
     let orch = orchestrator::ConversationOrchestrator::into_shared(
         orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed),
     );
+    if !cfg.app_agent_host && cfg.session_mode != session::jsonl::SessionMode::Code {
+        // Commit before SessionStart (including Mods) can create or consume
+        // profile-scoped instructions. Code is the implicit revision-0 default.
+        orch.set_conversation_mode(cfg.session_mode)
+            .await
+            .map_err(|error| {
+                MobileBuildError::Orchestrator(format!(
+                    "persist initial conversation profile: {error}"
+                ))
+            })?;
+    }
     instruction_identity.bind_root(&orch);
     root_instruction_provider
         .bind(&orch)

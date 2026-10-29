@@ -2333,6 +2333,66 @@ async fn old_session_receipt_does_not_block_new_session_profile() {
 }
 
 #[tokio::test]
+async fn independent_branch_rejects_unsettled_receipt_and_accepts_settled_source() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    fixture.prepared_receipt().await;
+    let session_id = fixture.orch.session.lock().await.session_id;
+    let source = std::fs::read_to_string(&fixture.transcript_path).unwrap();
+    let loaded = session::jsonl::route_lines(&source);
+    let recovery = fixture.journal.recover_session(session_id).await.unwrap();
+    assert!(validate_independent_branch(
+        session_id.as_uuid(),
+        &source,
+        &loaded.messages_in_order,
+        Some(&recovery),
+    )
+    .unwrap_err()
+    .contains("Resume the original session first"));
+    assert!(validate_independent_branch(
+        session_id.as_uuid(),
+        &source,
+        &loaded.messages_in_order,
+        None,
+    )
+    .unwrap_err()
+    .contains("recovery journal is unavailable"));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.transcript_path).unwrap(),
+        source
+    );
+    assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
+
+    let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
+    prepare_projection(&fixture.orch, MODEL, None, &catalog)
+        .await
+        .unwrap()
+        .unwrap()
+        .submission
+        .unwrap()
+        .before_submit()
+        .await
+        .unwrap();
+    let mut response = mock_message_response(vec![], Some("end_turn"));
+    response.model = MODEL.into();
+    fixture.accept_response(&response).await.unwrap();
+    let source = std::fs::read_to_string(&fixture.transcript_path).unwrap();
+    let loaded = session::jsonl::route_lines(&source);
+    let recovery = fixture.journal.recover_session(session_id).await.unwrap();
+    validate_independent_branch(
+        session_id.as_uuid(),
+        &source,
+        &loaded.messages_in_order,
+        Some(&recovery),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&fixture.transcript_path).unwrap(),
+        source
+    );
+    assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn profile_epoch_fences_openai_and_gemini_continuations_after_cold_recovery() {
     use lingxi_core::host::session_context::ConversationMode;
 

@@ -3992,6 +3992,28 @@ impl ConversationOrchestrator {
         )
     }
 
+    /// Admit a TUI turn with its visible-row correlation token and notify the
+    /// host when recovery and profile admission have completed. Before the
+    /// callback the caller still owns its text and attachments.
+    pub fn run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
+        &self,
+        prompt: impl Into<Utf16JsonProjection>,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        row_token: String,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> futures::future::BoxFuture<'_, Result<TurnOutcome, OrchestratorError>> {
+        self.run_turn_streaming_with_origin_and_row_token_and_admission(
+            prompt,
+            images,
+            cancel,
+            None,
+            true,
+            Some(row_token),
+            on_admitted,
+        )
+    }
+
     /// As [`Self::run_turn_streaming_with_cancel_image_sources`], but allows the
     /// caller to pin the persisted user-message UUID.
     pub async fn run_turn_streaming_with_cancel_image_sources_and_message_id(
@@ -5234,10 +5256,11 @@ mod current_prompt_upe_scope_tests {
         let waiting_admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let waiting_admissions_callback = waiting_admissions.clone();
         let mut waiting = Box::pin(
-            orch.run_turn_streaming_with_cancel_image_sources_and_admission(
+            orch.run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
                 source_string_projection("cancel before admission"),
                 Vec::new(),
                 cancel.clone(),
+                "waiting-row".into(),
                 Box::new(move || {
                     waiting_admissions_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }),
@@ -5267,10 +5290,11 @@ mod current_prompt_upe_scope_tests {
         let cancel_at_admission = CancellationToken::new();
         let cancel_at_admission_callback = cancel_at_admission.clone();
         let outcome = orch
-            .run_turn_streaming_with_cancel_image_sources_and_admission(
+            .run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
                 source_string_projection("callback after admission"),
                 Vec::new(),
                 cancel_at_admission,
+                "admitted-row".into(),
                 Box::new(move || {
                     admitted_count_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     cancel_at_admission_callback.cancel();

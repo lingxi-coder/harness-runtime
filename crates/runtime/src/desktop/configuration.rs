@@ -303,6 +303,12 @@ pub struct DesktopConfig {
         Option<llm_runtime::auth::anthropic::environment::EnvironmentLookup>,
     /// Restore the mounted session before the host fires startup lifecycle hooks.
     pub defer_session_start: bool,
+    /// Explicit profile for a new session, applied before startup hooks.
+    /// A resumed session first restores its captured profile for hooks and
+    /// recovery; its host applies an explicit selection after that lifecycle.
+    /// `None` keeps the default Code profile for new sessions and the saved
+    /// profile for resumed sessions.
+    pub initial_conversation_mode: Option<lingxi_core::host::session_context::ConversationMode>,
     /// Maximum repair attempts for a rejected structured output.
     pub max_structured_output_retries: i64,
     /// Open the session while its startup MCP servers connect (Claude Code's
@@ -615,6 +621,9 @@ pub struct DesktopConfig {
     /// A non-deferred build adopts its matching session history before hooks;
     /// deferred headless builds mount their prepared truncated/fork history.
     pub session_resume_snapshot: Option<DesktopSessionResumeSnapshot>,
+    /// Captured metadata of an independent fork target, whose source snapshot
+    /// remains separate for inherited agent and workspace settings.
+    pub session_resume_target_snapshot: Option<Arc<str>>,
     /// Captured cumulative usage to seed only a target with no durable ledger.
     pub session_resume_cost: Option<cost::CostState>,
     /// Construction-only writer claim acquired by the host. When present the
@@ -1027,6 +1036,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("oauth_environment_lookup", &self.oauth_environment_lookup)
             .field("defer_session_start", &self.defer_session_start)
+            .field("initial_conversation_mode", &self.initial_conversation_mode)
             .field("connect_mcp_in_background", &self.connect_mcp_in_background)
             .field("build_info", &self.build_info)
             .field(
@@ -1154,6 +1164,13 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.session_resume_snapshot.as_ref().map(|_| "<captured>"),
             )
             .field(
+                "session_resume_target_snapshot",
+                &self
+                    .session_resume_target_snapshot
+                    .as_ref()
+                    .map(|_| "<captured>"),
+            )
+            .field(
                 "session_writer_lease",
                 &self.session_writer_lease.as_ref().map(|_| "claimed"),
             )
@@ -1249,6 +1266,7 @@ impl Default for DesktopConfig {
             native_thinking_display: None,
             oauth_environment_lookup: None,
             defer_session_start: false,
+            initial_conversation_mode: None,
             connect_mcp_in_background: false,
             host_workspace_trusted: None,
             insights_policy_gate: None,
@@ -1315,6 +1333,7 @@ impl Default for DesktopConfig {
             restore_draft: false,
             initial_prompt_directories: Vec::new(),
             session_resume_snapshot: None,
+            session_resume_target_snapshot: None,
             session_resume_cost: None,
             parent_session_id: None,
             disable_slash_commands: false,
