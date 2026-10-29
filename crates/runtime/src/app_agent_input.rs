@@ -186,6 +186,7 @@ mod tests {
             protocol_parent_run_id: None,
             protocol_input_digest: None,
             protocol_message_sha256: None,
+            protocol_history_digest: None,
             prompt: "inspect".into(),
             attachments: vec![local_app::v2::agent::Attachment {
                 name: name.into(),
