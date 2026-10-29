@@ -179,6 +179,7 @@ impl ConversationOrchestrator {
             transcript: TranscriptStore::new(),
             prompt_runtime: PromptRuntime::new_with_response_language(response_language),
             compaction_runtime: CompactionRuntime::new(),
+            persistent_chat_context: None,
             idle_compaction_enabled: false,
             idle_compaction: super::idle_compaction_impl::IdleCompactionState::default(),
             lifecycle_runtime: LifecycleRuntime::new(),

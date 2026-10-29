@@ -31,6 +31,42 @@ fn main_source_requires_model_carrier(
 }
 
 impl ConversationOrchestrator {
+    /// Keep request-wide App authority independent from per-source hook
+    /// authority. Both survive credential awaits and every physical retry.
+    pub(crate) fn main_request_dispatch_admission(
+        &self,
+        messages: &[ConversationMessage],
+        guards: &[(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)],
+        cancel: Option<&CancellationToken>,
+    ) -> Option<llm_runtime::RequestDispatchAdmission> {
+        Self::with_chat_dispatch_check(
+            crate::prompt::async_hook_response::request_dispatch_admission(messages, guards),
+            self.chat_dispatch_check(cancel),
+        )
+    }
+
+    pub(crate) fn chat_dispatch_check(
+        &self,
+        cancel: Option<&CancellationToken>,
+    ) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+        self.persistent_chat_context
+            .as_ref()
+            .map(|context| context.dispatch_check(cancel))
+    }
+
+    pub(crate) fn with_chat_dispatch_check(
+        admission: Option<llm_runtime::RequestDispatchAdmission>,
+        check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Option<llm_runtime::RequestDispatchAdmission> {
+        let Some(check) = check else {
+            return admission;
+        };
+        Some(match admission {
+            Some(admission) => admission.with_additional_global_check(move || check()),
+            None => llm_runtime::RequestDispatchAdmission::new(move || check()),
+        })
+    }
+
     /// Pair a configured or explicitly selected source with a known route.
     /// Native aliases are resolved against the supplied route context. An
     /// unresolved source stays exact and retains the existing known anchor.

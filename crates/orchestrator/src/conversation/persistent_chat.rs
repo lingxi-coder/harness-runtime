@@ -406,6 +406,7 @@ impl ConversationOrchestrator {
             return Err(UNAVAILABLE.into());
         }
         validate_inline_history(&replayed.state.history)?;
+        super::super::persistent_chat_context::replay_context_receipts(captured)?;
         Ok(replayed)
     }
 
@@ -490,6 +491,7 @@ impl ConversationOrchestrator {
                 return Err(UNAVAILABLE.to_owned());
             }
             let replayed = Self::replay_persistent_chat_snapshot(&captured)?;
+            self.verify_persistent_chat_context(&captured)?;
             if live.history != replayed.state.history
                 || live.model_context_excluded_messages
                     != replayed.state.model_context_excluded_messages

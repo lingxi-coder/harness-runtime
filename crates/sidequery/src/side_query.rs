@@ -301,6 +301,19 @@ pub trait SideQueryClient: Send + Sync {
     /// Issue one side query and return the decoded response.
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError>;
 
+    /// Issue a host-authorized query whose admission is checked at every
+    /// physical dispatch, after credential preparation and across retries.
+    /// Clients that cannot carry this authority to their transport fail closed.
+    async fn query_with_dispatch_admission(
+        &self,
+        _request: SideQueryRequest,
+        _admission: llm_runtime::RequestDispatchAdmission,
+    ) -> Result<SideQueryResponse, SideQueryError> {
+        Err(SideQueryError::InvalidResponse(
+            "dispatch admission is unsupported by this side-query client".into(),
+        ))
+    }
+
     /// Retain a call's native assistant blocks for a cache-prefix fork.
     /// The default lets in-memory clients exercise the same denial loop.
     async fn query_fork(

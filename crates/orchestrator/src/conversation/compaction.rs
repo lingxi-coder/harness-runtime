@@ -1313,7 +1313,8 @@ impl ConversationOrchestrator {
             }
             None => Ok(draft),
         }?;
-        Ok(self.apply_context_collapse_projection(prepared))
+        self.apply_persistent_chat_projection(self.apply_context_collapse_projection(prepared))
+            .await
     }
 
     pub(super) fn apply_context_collapse_projection(

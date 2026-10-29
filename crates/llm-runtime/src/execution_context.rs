@@ -152,6 +152,24 @@ impl RequestDispatchAdmission {
         Self::with_global_and_message_sources(std::iter::empty::<AdmissionCheck>(), checks)
     }
 
+    /// Add a request-wide host fence without turning source-row guards into
+    /// global checks. Canonical normalization can still prune those rows.
+    #[must_use]
+    pub fn with_additional_global_check(
+        &self,
+        check: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        let mut global = self.checks.global.clone();
+        global.push(Arc::new(check));
+        Self {
+            checks: Arc::new(AdmissionChecks {
+                global,
+                by_message: self.checks.by_message.clone(),
+            }),
+            selected_messages: self.selected_messages.clone(),
+        }
+    }
+
     /// Retain row-scoped checks only while their source content contributes to
     /// the final semantic request. Global checks remain active independently.
     #[must_use]
@@ -538,6 +556,32 @@ mod tests {
         .retaining_message_sources(&HashSet::new())
         .expect("global admission remains after row pruning");
         assert!(!global_rejection.is_admitted());
+    }
+
+    #[test]
+    fn additional_global_fence_keeps_source_selection_semantics() {
+        let source_id = lingxi_core::types::MessageId::new();
+        let row = RequestDispatchAdmission::for_message_sources([(source_id, check(false))]);
+        let combined = row.with_additional_global_check(|| true);
+        assert!(
+            !combined.is_admitted(),
+            "the existing source guard still rejects"
+        );
+        assert!(
+            combined
+                .retaining_message_sources(&HashSet::new())
+                .unwrap()
+                .is_admitted(),
+            "a pruned source does not become a global guard"
+        );
+        let global = combined.with_additional_global_check(|| false);
+        assert!(
+            !global
+                .retaining_message_sources(&HashSet::new())
+                .unwrap()
+                .is_admitted(),
+            "request-wide Chat authority survives canonical source pruning"
+        );
     }
 }
 

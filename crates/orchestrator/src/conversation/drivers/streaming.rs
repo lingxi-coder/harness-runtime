@@ -296,6 +296,7 @@ fn mod_turn_step_stream(
         lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
     >,
     snapshot: Vec<ConversationMessage>,
+    chat_dispatch_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     guarded_async_hook_reminders: Vec<(
         MessageId,
         Arc<dyn hooks::attachment::HookPublicationGuard>,
@@ -365,6 +366,7 @@ fn mod_turn_step_stream(
             let source_typed_attachment_ids = typed_attachment_ids;
             let source_task_deliveries = task_deliveries;
             let source_dispatch_observer = request_dispatch_observer.clone();
+            let source_chat_dispatch_check = chat_dispatch_check.clone();
             let source_output = output.clone();
             let source_model_source = configured_model_source.clone();
             let source = move |forwarded: Utf16JsonProjection| {
@@ -397,6 +399,7 @@ fn mod_turn_step_stream(
                 let typed_attachment_ids = source_typed_attachment_ids.clone();
                 let task_deliveries = source_task_deliveries.clone();
                 let configured_model_source = source_model_source.clone();
+                let chat_dispatch_check = source_chat_dispatch_check.clone();
                 async move {
                     let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
                     let default_sentinel =
@@ -499,9 +502,12 @@ fn mod_turn_step_stream(
                         &mut guarded_reminders,
                     );
                     let request_dispatch_admission =
-                        crate::prompt::async_hook_response::request_dispatch_admission(
-                            &snapshot,
-                            &guarded_reminders,
+                        ConversationOrchestrator::with_chat_dispatch_check(
+                            crate::prompt::async_hook_response::request_dispatch_admission(
+                                &snapshot,
+                                &guarded_reminders,
+                            ),
+                            chat_dispatch_check.clone(),
                         );
                     let model_source =
                         crate::ConversationOrchestrator::configured_source_for_effective_route(
@@ -686,9 +692,12 @@ fn mod_turn_step_stream(
                             &mut fallback_guards,
                         );
                         let request_dispatch_admission =
-                            crate::prompt::async_hook_response::request_dispatch_admission(
-                                &fallback_snapshot,
-                                &fallback_guards,
+                            ConversationOrchestrator::with_chat_dispatch_check(
+                                crate::prompt::async_hook_response::request_dispatch_admission(
+                                    &fallback_snapshot,
+                                    &fallback_guards,
+                                ),
+                                chat_dispatch_check.clone(),
                             );
                         let stream = fallback_retry_scope
                             .run(fallback_request_capture.scope(
@@ -1236,6 +1245,7 @@ impl StreamingTurnDriver<'_> {
                     .await,
                 system_prompt.clone(),
                 snapshot,
+                orch.chat_dispatch_check(user_cancel.as_ref()),
                 guarded_async_hook_reminders.clone(),
                 tool_declarations.clone(),
                 tool_result_reminder_suffixes.clone(),
@@ -1280,11 +1290,11 @@ impl StreamingTurnDriver<'_> {
                 &mut turn_reminders,
                 &mut guarded_async_hook_reminders,
             );
-            let request_dispatch_admission =
-                crate::prompt::async_hook_response::request_dispatch_admission(
-                    &snapshot,
-                    &guarded_async_hook_reminders,
-                );
+            let request_dispatch_admission = orch.main_request_dispatch_admission(
+                &snapshot,
+                &guarded_async_hook_reminders,
+                user_cancel.as_ref(),
+            );
             let request_dispatch_observer =
                 observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output);
             orch.cancel_idle_compaction();
@@ -1835,11 +1845,11 @@ impl StreamingTurnDriver<'_> {
             turn_reminders,
             guarded_async_hook_reminders,
         );
-        let request_dispatch_admission =
-            crate::prompt::async_hook_response::request_dispatch_admission(
-                &non_stream_snapshot,
-                guarded_async_hook_reminders,
-            );
+        let request_dispatch_admission = orch.main_request_dispatch_admission(
+            &non_stream_snapshot,
+            guarded_async_hook_reminders,
+            user_cancel.as_ref(),
+        );
         crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
             model: non_stream_model.clone(),
             profile: non_stream_profile.clone(),
@@ -2458,11 +2468,11 @@ impl StreamingTurnDriver<'_> {
                                 &mut turn_reminders,
                                 &mut guarded_async_hook_reminders,
                             );
-                            let request_dispatch_admission =
-                                crate::prompt::async_hook_response::request_dispatch_admission(
-                                    &re_snapshot,
-                                    &guarded_async_hook_reminders,
-                                );
+                            let request_dispatch_admission = orch.main_request_dispatch_admission(
+                                &re_snapshot,
+                                &guarded_async_hook_reminders,
+                                user_cancel.as_ref(),
+                            );
                             let typed_attachment_ids =
                                 orch.typed_attachment_ids_for_snapshot(&re_snapshot);
                             let task_deliveries =

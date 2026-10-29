@@ -40,10 +40,14 @@ pub struct AppAgentSession {
 }
 /// Private Harness identity and replay state for one persistent App Chat turn.
 pub struct AppAgentChatResume {
+    pub chat_id: String,
     pub session_id: SessionId,
     pub transcript_path: PathBuf,
     pub replayed: Option<orchestrator::resume::ReplayedSession>,
     pub writer: Arc<session::jsonl::JsonlWriter>,
+    /// Captured under the previous successful task's exact writer proof.
+    pub context_source: Option<session::jsonl::CapturedChatTranscript>,
+    pub context_authorized: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 const BUILTINS: &[&str] = &[
     "Read",
@@ -495,9 +499,19 @@ impl AppAgentFactory {
         .with_read_state_map(context.read_file_state.clone())
         .with_model_resolution_context_provider(self.model_resolution.clone());
         if let Some(chat) = &chat {
-            // Persistent Chats use an exclusively owned, non-rewriting
-            // writer. Compaction cannot preserve the sealed transcript proof.
-            builder = builder.with_jsonl_writer(chat.writer.clone());
+            // Canonical history stays intact. Only an independently verified
+            // request projection may use a summary of the successful prefix.
+            let authorized = chat.context_authorized.clone();
+            let context_lease = lease.clone();
+            builder = builder
+                .with_jsonl_writer(chat.writer.clone())
+                .with_persistent_chat_context(orchestrator::PersistentChatContextConfig {
+                    app_id: owner.app_id.clone(),
+                    chat_id: chat.chat_id.clone(),
+                    source: chat.context_source.clone(),
+                    client: Arc::new(sidequery::ProviderSideQueryClient::from_service(api)),
+                    authorized: Arc::new(move || !context_lease.is_revoked() && authorized()),
+                })?;
         }
         let orch = ConversationOrchestrator::into_shared(builder);
         orch.switch_model(&model.model_id, Some(&model.provider_id))

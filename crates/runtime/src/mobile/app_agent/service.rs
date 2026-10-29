@@ -723,6 +723,33 @@ impl Control {
         }
     }
 
+    fn model_request_authorized(&self) -> bool {
+        !self.cancel.is_cancelled() && self.store.lease_valid(&self.owner, &self.id)
+    }
+
+    /// Streaming completion can represent a surfaced model error. It does not
+    /// authorize a successful Local App result or a resumable checkpoint.
+    fn check_model_completion_authority(&self, cleanup_failed: bool) -> Result<(), String> {
+        if cleanup_failed {
+            return Err("tool_cleanup_incomplete".into());
+        }
+        if self.model_failed.load(Ordering::Acquire) {
+            return Err(self
+                .model_failure
+                .lock()
+                .ok()
+                .and_then(|failure| failure.clone())
+                .unwrap_or_else(|| "model_execution_failed".into()));
+        }
+        if !self.model_request_authorized() {
+            return Err("cancelled".into());
+        }
+        // This is a prompt acceptance fence, not a terminal transaction. The
+        // AgentStore commit rechecks the grant epoch under its protocol permit
+        // before any successful answer, event or frontier can be published.
+        Ok(())
+    }
+
     fn revoke(&self) {
         self.revoke_lease();
         self.cancel.cancel();
@@ -2375,6 +2402,7 @@ impl AppAgentHost {
                 .await
                 .map_err(|_| "chat_transcript_unavailable")?,
             );
+            let mut context_source = None;
             let replayed = if has_previous_checkpoint {
                 let captured = writer
                     .capture_persistent_chat_snapshot(false)
@@ -2401,15 +2429,24 @@ impl AppAgentHost {
                     None,
                     None,
                 )?;
+                context_source = Some(captured);
                 Some(replayed)
             } else {
                 None
             };
+            let context_control = Arc::downgrade(control);
             Some(super::AppAgentChatResume {
+                chat_id: chat_id.clone(),
                 session_id: SessionId::from_uuid(session_uuid),
                 transcript_path,
                 replayed,
                 writer,
+                context_source,
+                context_authorized: Arc::new(move || {
+                    context_control
+                        .upgrade()
+                        .is_some_and(|control| control.model_request_authorized())
+                }),
             })
         } else {
             None
@@ -2557,20 +2594,7 @@ impl AppAgentHost {
             Some(usage_value(&session.orchestrator.snapshot_cost().await));
         questions.abort();
         control.interaction.lock().await.take();
-        if session.cleanup_failed.load(Ordering::Acquire) {
-            return Err("tool_cleanup_incomplete".into());
-        }
-        if control.model_failed.load(Ordering::Acquire) {
-            return Err(control
-                .model_failure
-                .lock()
-                .ok()
-                .and_then(|v| v.clone())
-                .unwrap_or_else(|| "model_execution_failed".into()));
-        }
-        if control.cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
+        control.check_model_completion_authority(session.cleanup_failed.load(Ordering::Acquire))?;
         match outcome {
             Ok(orchestrator::conversation::TurnOutcome::EndTurn) => {}
             Ok(orchestrator::conversation::TurnOutcome::MaxTurns) => {
@@ -2580,6 +2604,21 @@ impl AppAgentHost {
                 // Preserve the failure class without provider bodies, tool arguments,
                 // model text, paths or credentials in the app-visible result.
                 use orchestrator::error::OrchestratorError;
+                if let OrchestratorError::ApiCall(llm_runtime::LlmError::InvalidRequest {
+                    message,
+                }) = &error
+                {
+                    if matches!(
+                        message.as_str(),
+                        "chat_context_unavailable"
+                            | "chat_context_compaction_unsupported"
+                            | "chat_context_limit_exceeded"
+                            | "chat_context_budget_unknown"
+                            | "chat_context_authority_revoked"
+                    ) {
+                        return Err(message.clone());
+                    }
+                }
                 let code = match error {
                     OrchestratorError::PermissionAbort { .. } => "tool_permission_aborted",
                     OrchestratorError::StreamingProtocol(_) => "model_stream_protocol_failed",
@@ -7339,6 +7378,8 @@ mod progress_tests {
 mod accepted_projection_tests {
     use super::*;
     use lingxi_core::types::ContentBlock;
+
+    include!("chat_dispatch_tests.rs");
 
     fn assistant(id: MessageId, text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {

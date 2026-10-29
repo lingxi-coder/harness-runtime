@@ -1512,6 +1512,14 @@ impl ModelRuntime {
             )
             .await?;
         self.seal_prepared(&mut prepared).await?;
+        let admission = request.execution.request_dispatch_admission.as_ref();
+        if prepared.computer_submission.is_some()
+            && admission.is_some_and(|admission| !admission.is_admitted())
+        {
+            return Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false,
+            });
+        }
         prepared.before_computer_submit().await?;
         let call = prepared.wire_call.take().expect("sealed");
         let raw = transport.clone();
@@ -1519,6 +1527,13 @@ impl ModelRuntime {
         let mut callback_error = None;
         let received = call
             .dispatch_once_using(raw.as_ref(), || {
+                if admission.is_some_and(|admission| !admission.is_admitted()) {
+                    let error = LlmError::RequestDispatchRejected {
+                        prior_dispatch: false,
+                    };
+                    callback_error = Some(error.clone());
+                    return Err(crate::execution::wire_error(error));
+                }
                 let reservation = if let Some(budget) = api_attempts_left.as_ref() {
                     let Some(reservation) = budget.reserve() else {
                         callback_error = Some(LlmError::ApiAttemptsExhausted);

@@ -1853,6 +1853,8 @@ pub struct ConversationOrchestrator {
     pub(crate) ide_handle: Option<Arc<dyn lingxi_core::host::IdeHandle>>,
     /// Compaction engines, token ledgers, and extraction state.
     pub(crate) compaction_runtime: CompactionRuntime,
+    /// Physically checkpointed, request-only summaries for independent Chats.
+    pub(crate) persistent_chat_context: Option<Arc<persistent_chat_context::PersistentChatContext>>,
     /// `/fork` background-agent spawner. When wired (via
     /// [`Self::with_fork_spawner`], the composition root's
     /// `BackgroundAgentSpawner`), [`OrchestratorHandle::fork_conversation`]
@@ -2109,6 +2111,9 @@ mod headless_mcp;
 mod headless_ui;
 #[path = "conversation/idle_compaction.rs"]
 mod idle_compaction_impl;
+#[path = "conversation/persistent_chat_context.rs"]
+mod persistent_chat_context;
+pub use persistent_chat_context::PersistentChatContextConfig;
 
 use drivers_impl::parse_generated_session_name;
 pub(crate) use runtime_impl::TurnTimingCapture;

@@ -322,11 +322,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
     );
     request.opts.typed_attachment_ids = orch.typed_attachment_ids_for_snapshot(&request.messages);
     request.opts.task_deliveries = orch.task_deliveries_for_snapshot(&request.messages).await;
-    request.opts.request_dispatch_admission =
-        crate::prompt::async_hook_response::request_dispatch_admission(
-            &request.messages,
-            guarded_async_hook_reminders,
-        );
+    request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
+        &request.messages,
+        guarded_async_hook_reminders,
+        side_cancel,
+    );
     let request_history = request.messages.clone();
     let first = side_request!(orch
         .model_runtime
@@ -459,11 +459,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         orch.typed_attachment_ids_for_snapshot(&request.messages);
                     request.opts.task_deliveries =
                         orch.task_deliveries_for_snapshot(&request.messages).await;
-                    request.opts.request_dispatch_admission =
-                        crate::prompt::async_hook_response::request_dispatch_admission(
-                            &request.messages,
-                            guarded_async_hook_reminders,
-                        );
+                    request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
+                        &request.messages,
+                        guarded_async_hook_reminders,
+                        side_cancel,
+                    );
                     let request_history = request.messages.clone();
                     let retry_result = side_request!(orch
                         .model_runtime
@@ -562,11 +562,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     orch.typed_attachment_ids_for_snapshot(&request.messages);
                 request.opts.task_deliveries =
                     orch.task_deliveries_for_snapshot(&request.messages).await;
-                request.opts.request_dispatch_admission =
-                    crate::prompt::async_hook_response::request_dispatch_admission(
-                        &request.messages,
-                        guarded_async_hook_reminders,
-                    );
+                request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
+                    &request.messages,
+                    guarded_async_hook_reminders,
+                    side_cancel,
+                );
                 let request_history = request.messages.clone();
                 let retry_result = side_request!(orch
                     .model_runtime
@@ -863,11 +863,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     orch.typed_attachment_ids_for_snapshot(&request.messages);
                 request.opts.task_deliveries =
                     orch.task_deliveries_for_snapshot(&request.messages).await;
-                request.opts.request_dispatch_admission =
-                    crate::prompt::async_hook_response::request_dispatch_admission(
-                        &request.messages,
-                        guarded_async_hook_reminders,
-                    );
+                request.opts.request_dispatch_admission = orch.main_request_dispatch_admission(
+                    &request.messages,
+                    guarded_async_hook_reminders,
+                    side_cancel,
+                );
                 let request_history = request.messages.clone();
                 let retry_result = side_request!(orch
                     .model_runtime

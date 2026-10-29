@@ -139,6 +139,16 @@ impl ConversationOrchestrator {
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
+        let snapshot = self
+            .prepare_persistent_chat_request(
+                snapshot,
+                system,
+                &call.model,
+                call.model_profile.as_deref(),
+                &previous.wire_tools,
+                cancel,
+            )
+            .await?;
         let tool_result_reminder_suffixes =
             self.tool_result_reminder_suffixes_for_snapshot(&snapshot);
         Ok(PreparedTurnStep {
@@ -1031,6 +1041,17 @@ impl ConversationOrchestrator {
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
+
+        let snapshot = self
+            .prepare_persistent_chat_request(
+                snapshot,
+                system,
+                &prepared_call.model,
+                prepared_call.model_profile.as_deref(),
+                &wire_tools,
+                user_cancel,
+            )
+            .await?;
 
         Ok(PreparedTurnStep {
             snapshot,

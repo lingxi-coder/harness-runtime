@@ -74,6 +74,10 @@ pub(super) struct PersistentChatWriter {
     identity_test_gate: Option<IdentityIoTestGate>,
     #[cfg(test)]
     append_test_gate: Option<IdentityIoTestGate>,
+    #[cfg(test)]
+    context_after_append_test_gate: Option<IdentityIoTestGate>,
+    #[cfg(test)]
+    context_fail_before_sync: bool,
     // This is the SAME sidecar used by ordinary non-durable JsonlWriters.
     // Keep it until the writer is dropped, including after terminal sealing.
     lease: RootedFileLock,
@@ -252,6 +256,10 @@ impl PersistentChatWriter {
             identity_test_gate: None,
             #[cfg(test)]
             append_test_gate: None,
+            #[cfg(test)]
+            context_after_append_test_gate: None,
+            #[cfg(test)]
+            context_fail_before_sync: false,
             lease,
         };
         if let Some(expected) = expected {
@@ -624,6 +632,64 @@ impl JsonlWriter {
         self.persistent_chat.is_some()
     }
 
+    /// Append one private model-context receipt and synchronize its exact
+    /// revision in one worker. This does not commit a host success frontier.
+    /// A failed or cancelled caller must not install the candidate projection;
+    /// the physical writer lease remains held until the worker has finished.
+    pub async fn append_persistent_chat_context(
+        &self,
+        expected: ChatTranscriptCheckpoint,
+        row: &JsonlMessage,
+    ) -> Result<CapturedChatTranscript, WriterError> {
+        if row.message_type != "attachment"
+            || row
+                .attachment_projection
+                .as_ref()
+                .and_then(|value| value.string_at("/type"))
+                != Some("chat_model_context_v1")
+        {
+            return Err(unavailable("not a private Chat context receipt"));
+        }
+        let mut payload =
+            String::from_utf8(native_message_bytes(row)?).expect("native JSON encoder emits UTF-8");
+        payload.push('\n');
+        let _guard = self.lock.lock().await;
+        let state = self
+            .persistent_chat
+            .clone()
+            .ok_or_else(|| unavailable("uncontrolled writer"))?;
+        let path = self.active_path();
+        let session_id = row.session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut state = state
+                .lock()
+                .map_err(|_| unavailable("poisoned writer lock"))?;
+            let result = (|| {
+                if state.session_id.to_string() != session_id
+                    || checkpoint(state.read_source()?.as_bytes()) != expected
+                {
+                    return Err(unavailable("Chat context source revision changed"));
+                }
+                state.append(&path, &payload)?;
+                #[cfg(test)]
+                if let Some(gate) = state.context_after_append_test_gate.take() {
+                    gate.wait();
+                }
+                #[cfg(test)]
+                if state.context_fail_before_sync {
+                    return Err(unavailable("injected context sync failure"));
+                }
+                state.capture(false)
+            })();
+            if result.is_err() {
+                state.poisoned = true;
+            }
+            result
+        })
+        .await
+        .map_err(|error| unavailable(&error.to_string()))?
+    }
+
     /// Synchronize and capture one revision while holding the writer's append
     /// mutex. With `seal`, every subsequent append fails, including metadata.
     /// This proves bytes only; use the orchestrator checkpoint API to prove
@@ -758,6 +824,158 @@ mod tests {
         }))
         .unwrap();
         writer.append(&row).await.unwrap();
+    }
+
+    fn context_row(captured: &CapturedChatTranscript) -> JsonlMessage {
+        serde_json::from_value(json!({
+            "type":"attachment", "uuid":uuid::Uuid::new_v4(),
+            "parentUuid":null, "sessionId":captured.session_id(), "isSidechain":false,
+            "timestamp":"2026-10-29T00:00:00.000Z", "cwd":"/chat", "version":"test",
+            "message":null, "attachment":{"type":"chat_model_context_v1","testReceipt":true}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn context_append_requires_the_exact_revision_and_fences_a_stale_writer() {
+        let (_root, path, fs) = fixture();
+        let writer = JsonlWriter::open_persistent_chat(path.clone(), fs, None)
+            .await
+            .unwrap();
+        append_user(&writer, "successful source").await;
+        let old = writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .unwrap();
+        append_user(&writer, "concurrent accepted input").await;
+        let before = std::fs::read(&path).unwrap();
+        assert!(writer
+            .append_persistent_chat_context(old.checkpoint().clone(), &context_row(&old))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn context_sync_failure_keeps_the_previous_frontier_and_preserves_the_suffix() {
+        let (_root, path, fs) = fixture();
+        let writer = JsonlWriter::open_persistent_chat(path.clone(), fs, None)
+            .await
+            .unwrap();
+        append_user(&writer, "successful source").await;
+        let source = writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .unwrap();
+        writer
+            .persistent_chat
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .context_fail_before_sync = true;
+        assert!(writer
+            .append_persistent_chat_context(source.checkpoint().clone(), &context_row(&source))
+            .await
+            .is_err());
+        assert!(writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .is_err());
+        drop(writer);
+        let after = std::fs::read(&path).unwrap();
+        assert!(after.len() > source.checkpoint().byte_len as usize);
+        let target = path
+            .parent()
+            .unwrap()
+            .join(uuid::Uuid::new_v4().to_string())
+            .join(path.file_name().unwrap());
+        let restored = JsonlWriter::stage_persistent_chat_recovery(
+            path.clone(),
+            target,
+            Some(source.checkpoint().clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(restored.source(), source.source());
+        assert_eq!(std::fs::read(path).unwrap(), after);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_context_capture_keeps_the_real_writer_lease_until_worker_finishes() {
+        let (_root, path, fs) = fixture();
+        let writer = Arc::new(
+            JsonlWriter::open_persistent_chat(path.clone(), fs.clone(), None)
+                .await
+                .unwrap(),
+        );
+        append_user(&writer, "successful source").await;
+        let source = writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(std::sync::Barrier::new(2));
+        writer
+            .persistent_chat
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .context_after_append_test_gate = Some(IdentityIoTestGate {
+            entered: entered_tx,
+            resume: release.clone(),
+        });
+        let worker = writer.clone();
+        let owner = Arc::downgrade(writer.persistent_chat.as_ref().unwrap());
+        let row = context_row(&source);
+        let expected = source.checkpoint().clone();
+        let task =
+            tokio::spawn(
+                async move { worker.append_persistent_chat_context(expected, &row).await },
+            );
+        entered_rx.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        drop(writer);
+        assert!(rooted_fs::try_lock_exclusive(
+            path.parent().unwrap(),
+            &message_identity::lock_path(&path).unwrap(),
+            rooted_fs::PRIVATE_DIR_MODE,
+            rooted_fs::PRIVATE_FILE_MODE,
+        )
+        .is_err());
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .unwrap();
+        // The previous successful proof remains the only recovery selector,
+        // even if the orphaned worker finishes synchronizing its new receipt.
+        let target = path
+            .parent()
+            .unwrap()
+            .join(uuid::Uuid::new_v4().to_string())
+            .join(path.file_name().unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while owner.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let recovered = JsonlWriter::stage_persistent_chat_recovery(
+            path,
+            target,
+            Some(source.checkpoint().clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered.source(), source.source());
     }
 
     #[tokio::test]

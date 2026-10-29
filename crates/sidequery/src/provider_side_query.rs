@@ -51,6 +51,10 @@ use llm_runtime::{
 };
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "dispatch_admission_tests.rs"]
+mod dispatch_admission_tests;
+
 /// Default Anthropic API base URL used when the caller passes `None`.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
@@ -497,6 +501,199 @@ fn apply_exact_model_source(
     Ok(())
 }
 
+impl ProviderSideQueryClient {
+    async fn query_fork_with_admission(
+        &self,
+        request: SideQueryRequest,
+        options: ForkedSideQueryOptions,
+        admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<ForkedSideQueryResponse, SideQueryError> {
+        let prompt_suggestion =
+            request.query_source == crate::purposes::QuerySource::PromptSuggestion;
+        let first_text_only = prompt_suggestion
+            || request.query_source == crate::purposes::QuerySource::Compaction
+            || request.query_source.as_str() == "agent_classifier";
+        let separate_text_blocks = matches!(
+            &request.query_source,
+            crate::purposes::QuerySource::Custom(source) if source == "side_question"
+        );
+        if let ProviderSideQueryBackend::Session(service) = &self.backend {
+            let wants_structured = request.output_format.is_some();
+            let query_source = request.query_source.as_str();
+            let native_prompt_context = request.native_prompt_context.clone();
+            let system_prompt = request.system_prompt.clone();
+            let model_source = request.model_source.clone();
+            let mut canonical = service.build_side_query_request_with_thinking(
+                &request.model,
+                request.profile.as_deref(),
+                system_prompt.as_ref(),
+                request.system_prompt_input.as_ref(),
+                false,
+                request.messages,
+                request.tools,
+                // Fork compaction resolves the parent's ordinary output
+                // budget; other side queries carry their explicit cap.
+                request.max_tokens,
+                convert_tool_choice(request.tool_choice.as_ref()),
+                request.stop_sequences,
+                if prompt_suggestion {
+                    Some(service.thinking()?)
+                } else {
+                    request.thinking
+                },
+                request.effort,
+                request.temperature,
+                Some(query_source),
+                request.typed_attachment_ids,
+                request.task_deliveries,
+            )?;
+            apply_exact_model_source(&mut canonical, model_source.as_ref())?;
+            canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
+            canonical.execution.model_attempt = request.model_attempt;
+            canonical.execution.api_attempts_left = request.api_attempts_left;
+            canonical
+                .execution
+                .set_request_dispatch_admission(admission);
+            canonical.execution.fork_point_message_id = options.fork_point_message_id;
+            let explicit_system_blocks = options.system_blocks.is_some();
+            if let Some(system_blocks) = options.system_blocks {
+                // The utility caller supplied its complete system wire shape.
+                // Do not reclassify/cache-join it as a main conversation prompt.
+                let family =
+                    canonical
+                        .execution
+                        .input_protocol
+                        .ok_or_else(|| LlmError::InvalidRequest {
+                            message: "side-query protocol was not resolved".into(),
+                        })?;
+                let (system_input, _) = llm_runtime::convert::history_input(
+                    &request.model,
+                    &[],
+                    &system_blocks,
+                    &[],
+                    family,
+                )?;
+                canonical.input.system = system_input.system;
+                canonical.input.prompt_cache = system_input.prompt_cache;
+                if query_source == "agent_classifier" {
+                    canonical.execution.classifier_system_blocks = true;
+                } else {
+                    canonical.execution.prompt_cache = None;
+                }
+            }
+            if !explicit_system_blocks {
+                apply_native_side_query_prompt_context(
+                    &mut canonical,
+                    native_prompt_context.as_ref(),
+                    query_source,
+                )?;
+            }
+            let resp = if prompt_suggestion {
+                // Native I -> runForkedAgent -> query uses the main streaming
+                // request policy, with auxiliary ownership and no transcript writes.
+                canonical.execution.anthropic_request_kind = Default::default(); // Main
+                collect_completed_response(service.stream_request(canonical).await?).await?
+            } else {
+                service.execute_side_query_request(canonical).await?
+            };
+            return Ok(decode_fork_response(
+                resp,
+                wants_structured,
+                first_text_only,
+                separate_text_blocks,
+            ));
+        }
+
+        let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
+            unreachable!("session backend returned above")
+        };
+        if request.model_attempt.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "registered side query requires session accounting hooks".into(),
+            }
+            .into());
+        }
+
+        // Build the LlmRequest from the SideQueryRequest DTO.
+        let system = match options.system_blocks {
+            Some(blocks) => blocks,
+            None => system_blocks_from_source(
+                request.system_prompt.as_ref(),
+                request.system_prompt_input.as_ref(),
+            )?,
+        };
+
+        // Convert lingxi_core::types::ConversationMessage → llm_runtime::Message.
+        // We inline a minimal conversion here so sidequery does not need to
+        // depend on `agent` (which depends back on sidequery — a cycle).
+        let messages_source_ids = request
+            .messages
+            .iter()
+            .map(|message| message.id())
+            .collect();
+        let messages = convert_messages(request.messages)?;
+
+        let tools = request.tools;
+
+        // thinking (cc 2.1.198): a `Some` session config resolves through the
+        // SAME `reasoning_for_request` rules `ApiService::build_request`
+        // applies to every main-loop/subagent request (adaptive vs fixed
+        // budget, model predicates, env kill switches, max_tokens-1 clamp) —
+        // the compaction fork call therefore inherits the session's
+        // extended-thinking config. `None` (all utility callers) keeps the
+        // wire byte-identical to before (no `thinking` field).
+        let reasoning = request.thinking.and_then(|t| {
+            llm_runtime::model::thinking::reasoning_for_request(
+                t,
+                &request.model,
+                request.max_tokens,
+            )
+        });
+
+        let query_source = request.query_source.as_str().to_string();
+        let family = client.protocol_for_model(&request.model, request.profile.as_deref())?;
+        let (input, overrides) = llm_runtime::computer::without_computer_request(|| {
+            llm_runtime::convert::history_input(&request.model, &messages, &system, &tools, family)
+        })?;
+        let mut llm_req = LlmRequest {
+            input,
+            profile: request.profile,
+            stream: false,
+            execution: {
+                let mut context = llm_runtime::ExecutionContext::default();
+                context.input_protocol = Some(family);
+                context.capture_retry_count = true;
+                context.query_source = Some(query_source);
+                context.api_attempts_left = request.api_attempts_left;
+                context.message_json_string_overrides = overrides;
+                context
+            },
+        };
+        llm_req.execution.request_message_source_ids = messages_source_ids;
+        llm_req.execution.set_request_dispatch_admission(admission);
+        llm_req.set_tool_choice(convert_tool_choice(request.tool_choice.as_ref()));
+        llm_req.input.stop_sequences = request.stop_sequences;
+        llm_req.input.max_tokens = request.max_tokens;
+        llm_req.input.temperature = request.temperature;
+        llm_req.set_reasoning(reasoning);
+        llm_req.set_effort(request.effort)?;
+
+        // Dispatch directly through the shared SDK transport.
+
+        let resp = llm_runtime::HistoryResponse::from_model(
+            client.execute(&llm_req, transport.clone()).await?,
+            family,
+        )?;
+
+        Ok(decode_fork_response(
+            resp,
+            request.output_format.is_some(),
+            first_text_only,
+            separate_text_blocks,
+        ))
+    }
+}
+
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     fn estimate_request(
@@ -594,184 +791,23 @@ impl SideQueryClient for ProviderSideQueryClient {
             .response)
     }
 
+    async fn query_with_dispatch_admission(
+        &self,
+        request: SideQueryRequest,
+        admission: llm_runtime::RequestDispatchAdmission,
+    ) -> Result<SideQueryResponse, SideQueryError> {
+        Ok(self
+            .query_fork_with_admission(request, ForkedSideQueryOptions::default(), Some(admission))
+            .await?
+            .response)
+    }
+
     async fn query_fork(
         &self,
         request: SideQueryRequest,
         options: ForkedSideQueryOptions,
     ) -> Result<ForkedSideQueryResponse, SideQueryError> {
-        let prompt_suggestion =
-            request.query_source == crate::purposes::QuerySource::PromptSuggestion;
-        let first_text_only = prompt_suggestion
-            || request.query_source == crate::purposes::QuerySource::Compaction
-            || request.query_source.as_str() == "agent_classifier";
-        let separate_text_blocks = matches!(
-            &request.query_source,
-            crate::purposes::QuerySource::Custom(source) if source == "side_question"
-        );
-        if let ProviderSideQueryBackend::Session(service) = &self.backend {
-            let wants_structured = request.output_format.is_some();
-            let query_source = request.query_source.as_str();
-            let native_prompt_context = request.native_prompt_context.clone();
-            let system_prompt = request.system_prompt.clone();
-            let model_source = request.model_source.clone();
-            let mut canonical = service.build_side_query_request_with_thinking(
-                &request.model,
-                request.profile.as_deref(),
-                system_prompt.as_ref(),
-                request.system_prompt_input.as_ref(),
-                false,
-                request.messages,
-                request.tools,
-                // Fork compaction resolves the parent's ordinary output
-                // budget; other side queries carry their explicit cap.
-                request.max_tokens,
-                convert_tool_choice(request.tool_choice.as_ref()),
-                request.stop_sequences,
-                if prompt_suggestion {
-                    Some(service.thinking()?)
-                } else {
-                    request.thinking
-                },
-                request.effort,
-                request.temperature,
-                Some(query_source),
-                request.typed_attachment_ids,
-                request.task_deliveries,
-            )?;
-            apply_exact_model_source(&mut canonical, model_source.as_ref())?;
-            canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
-            canonical.execution.model_attempt = request.model_attempt;
-            canonical.execution.api_attempts_left = request.api_attempts_left;
-            canonical.execution.fork_point_message_id = options.fork_point_message_id;
-            let explicit_system_blocks = options.system_blocks.is_some();
-            if let Some(system_blocks) = options.system_blocks {
-                // The utility caller supplied its complete system wire shape.
-                // Do not reclassify/cache-join it as a main conversation prompt.
-                let family =
-                    canonical
-                        .execution
-                        .input_protocol
-                        .ok_or_else(|| LlmError::InvalidRequest {
-                            message: "side-query protocol was not resolved".into(),
-                        })?;
-                let (system_input, _) = llm_runtime::convert::history_input(
-                    &request.model,
-                    &[],
-                    &system_blocks,
-                    &[],
-                    family,
-                )?;
-                canonical.input.system = system_input.system;
-                canonical.input.prompt_cache = system_input.prompt_cache;
-                if query_source == "agent_classifier" {
-                    canonical.execution.classifier_system_blocks = true;
-                } else {
-                    canonical.execution.prompt_cache = None;
-                }
-            }
-            if !explicit_system_blocks {
-                apply_native_side_query_prompt_context(
-                    &mut canonical,
-                    native_prompt_context.as_ref(),
-                    query_source,
-                )?;
-            }
-            let resp = if prompt_suggestion {
-                // Native I -> runForkedAgent -> query uses the main streaming
-                // request policy, with auxiliary ownership and no transcript writes.
-                canonical.execution.anthropic_request_kind = Default::default(); // Main
-                collect_completed_response(service.stream_request(canonical).await?).await?
-            } else {
-                service.execute_side_query_request(canonical).await?
-            };
-            return Ok(decode_fork_response(
-                resp,
-                wants_structured,
-                first_text_only,
-                separate_text_blocks,
-            ));
-        }
-
-        let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
-            unreachable!("session backend returned above")
-        };
-        if request.model_attempt.is_some() {
-            return Err(LlmError::InvalidRequest {
-                message: "registered side query requires session accounting hooks".into(),
-            }
-            .into());
-        }
-
-        // Build the LlmRequest from the SideQueryRequest DTO.
-        let system = match options.system_blocks {
-            Some(blocks) => blocks,
-            None => system_blocks_from_source(
-                request.system_prompt.as_ref(),
-                request.system_prompt_input.as_ref(),
-            )?,
-        };
-
-        // Convert lingxi_core::types::ConversationMessage → llm_runtime::Message.
-        // We inline a minimal conversion here so sidequery does not need to
-        // depend on `agent` (which depends back on sidequery — a cycle).
-        let messages = convert_messages(request.messages)?;
-
-        let tools = request.tools;
-
-        // thinking (cc 2.1.198): a `Some` session config resolves through the
-        // SAME `reasoning_for_request` rules `ApiService::build_request`
-        // applies to every main-loop/subagent request (adaptive vs fixed
-        // budget, model predicates, env kill switches, max_tokens-1 clamp) —
-        // the compaction fork call therefore inherits the session's
-        // extended-thinking config. `None` (all utility callers) keeps the
-        // wire byte-identical to before (no `thinking` field).
-        let reasoning = request.thinking.and_then(|t| {
-            llm_runtime::model::thinking::reasoning_for_request(
-                t,
-                &request.model,
-                request.max_tokens,
-            )
-        });
-
-        let query_source = request.query_source.as_str().to_string();
-        let family = client.protocol_for_model(&request.model, request.profile.as_deref())?;
-        let (input, overrides) = llm_runtime::computer::without_computer_request(|| {
-            llm_runtime::convert::history_input(&request.model, &messages, &system, &tools, family)
-        })?;
-        let mut llm_req = LlmRequest {
-            input,
-            profile: request.profile,
-            stream: false,
-            execution: {
-                let mut context = llm_runtime::ExecutionContext::default();
-                context.input_protocol = Some(family);
-                context.capture_retry_count = true;
-                context.query_source = Some(query_source);
-                context.api_attempts_left = request.api_attempts_left;
-                context.message_json_string_overrides = overrides;
-                context
-            },
-        };
-        llm_req.set_tool_choice(convert_tool_choice(request.tool_choice.as_ref()));
-        llm_req.input.stop_sequences = request.stop_sequences;
-        llm_req.input.max_tokens = request.max_tokens;
-        llm_req.input.temperature = request.temperature;
-        llm_req.set_reasoning(reasoning);
-        llm_req.set_effort(request.effort)?;
-
-        // Dispatch directly through the shared SDK transport.
-
-        let resp = llm_runtime::HistoryResponse::from_model(
-            client.execute(&llm_req, transport.clone()).await?,
-            family,
-        )?;
-
-        Ok(decode_fork_response(
-            resp,
-            request.output_format.is_some(),
-            first_text_only,
-            separate_text_blocks,
-        ))
+        self.query_fork_with_admission(request, options, None).await
     }
 
     async fn query_json_schema(
@@ -1566,7 +1602,11 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
 
         let received = transport.received.lock().unwrap();
-        assert_eq!(received.len(), 1, "exactly one request reaches the recorder");
+        assert_eq!(
+            received.len(),
+            1,
+            "exactly one request reaches the recorder"
+        );
         let request_body = received[0].body.as_deref().expect("request body exists");
         let body: serde_json::Value =
             serde_json::from_str(request_body).expect("provider request body is JSON");
