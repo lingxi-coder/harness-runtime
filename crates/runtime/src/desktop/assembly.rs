@@ -903,6 +903,9 @@ pub async fn build_with_credential_stack(
     // workflow or other cloned child configuration may inherit it.
     let initial_conversation_mode = cfg.initial_conversation_mode.take();
     let target_resume_snapshot = cfg.session_resume_target_snapshot.take();
+    // The foreground launch owner is construction-only. A short-lived cron
+    // or other child must never rebind its registry or close its admission.
+    let bg_session_forker = cfg.bg_session_forker.take();
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
         let mut seed = cfg.clone();
         seed.session_writer_lease = None;
@@ -6029,7 +6032,7 @@ pub async fn build_with_credential_stack(
     // the live conversation into a new background session. `None` (default /
     // non-CLI hosts) leaves that `/fork` variant failing with a clear
     // `ActionFailed`, byte-identical to before this seam existed.
-    let orch_builder = match cfg.bg_session_forker.clone() {
+    let orch_builder = match bg_session_forker {
         Some(forker) => {
             forker.set_task_registry(task_registry.clone());
             orch_builder.with_bg_session_forker(forker)

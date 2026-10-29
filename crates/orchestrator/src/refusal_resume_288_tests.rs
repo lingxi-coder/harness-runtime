@@ -247,9 +247,17 @@ async fn local_notice_write_fork_projection_and_clear_preserve_the_original_mode
                 String,
             )>,
         >,
+        Arc<lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle>,
     );
     #[async_trait::async_trait]
     impl lingxi_core::host::bg_session_forker::BgSessionForker for ForkProbe {
+        fn lifecycle(
+            &self,
+        ) -> Arc<lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle>
+        {
+            self.1.clone()
+        }
+
         async fn fork_to_background(
             &self,
             snapshot: &lingxi_core::host::bg_session_forker::BgSessionSnapshot,

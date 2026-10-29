@@ -901,9 +901,21 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use tool_api::registry::ToolRegistry;
 
-        struct CaptureForker(Mutex<Vec<Vec<JsonlMessage>>>);
+        #[derive(Default)]
+        struct CaptureForker {
+            captured: Mutex<Vec<Vec<JsonlMessage>>>,
+            lifecycle:
+                Arc<lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle>,
+        }
         #[async_trait::async_trait]
         impl BgSessionForker for CaptureForker {
+            fn lifecycle(
+                &self,
+            ) -> Arc<lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle>
+            {
+                self.lifecycle.clone()
+            }
+
             async fn fork_to_background(
                 &self,
                 conversation: &BgSessionSnapshot,
@@ -911,7 +923,7 @@ mod tests {
                 _prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
                 model: &str,
             ) -> Result<Source, BgForkError> {
-                self.0.lock().unwrap().push(history_to_jsonl_lines(
+                self.captured.lock().unwrap().push(history_to_jsonl_lines(
                     conversation,
                     &uuid::Uuid::nil().to_string(),
                     "/tmp",
@@ -926,7 +938,7 @@ mod tests {
             }
         }
 
-        let forker = Arc::new(CaptureForker(Mutex::new(Vec::new())));
+        let forker = Arc::new(CaptureForker::default());
         let orch = crate::ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(Vec::new())),
@@ -967,11 +979,13 @@ mod tests {
                 &token_attachment,
             )
             .unwrap();
+        let token_content = format!("<system-reminder>\n{token_text}\n</system-reminder>");
         let token_message = orch
             .persist_model_reminder(
-                ConversationMessage::user_meta(
+                ConversationMessage::user_meta_js_utf16(
                     lingxi_core::types::MessageId::new(),
-                    format!("<system-reminder>\n{token_text}\n</system-reminder>"),
+                    token_content.clone(),
+                    token_content.encode_utf16().collect(),
                 ),
                 token_attachment_source.clone(),
             )
@@ -982,7 +996,7 @@ mod tests {
         OrchestratorHandle::background_conversation(&orch, Default::default())
             .await
             .unwrap();
-        let captures = forker.0.lock().unwrap().clone();
+        let captures = forker.captured.lock().unwrap().clone();
         assert_eq!(captures.len(), 2);
         let original = orch.session().lock().await.history.clone();
         for lines in captures {

@@ -795,6 +795,8 @@ pub struct DesktopConfig {
     /// variant fails with a clear `ActionFailed` — INERT boot. The concrete impl
     /// lives in `apps/cli` (which owns the daemon dispatch machinery); injecting
     /// it here keeps the leaf `orchestrator` crate off an `apps/cli` dependency.
+    /// Consumed by this construction before cloning child/settings configs:
+    /// a short-lived child cannot close the foreground owner's admission.
     pub bg_session_forker: Option<Arc<dyn lingxi_core::host::bg_session_forker::BgSessionForker>>,
     /// Optional per-runtime TUI AskUserQuestion bridge sender. Interactive TUI
     /// hosts fill this so questionnaire tools open the mounted bottom-pane

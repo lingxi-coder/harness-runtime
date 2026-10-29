@@ -4,6 +4,9 @@ use super::*;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
 use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 
+#[path = "startup_prewarm.rs"]
+pub(crate) mod startup_prewarm;
+
 fn same_request_route(left: &llm_runtime::MediaRoute, right: &llm_runtime::MediaRoute) -> bool {
     left.main.provider_id == right.main.provider_id
         && left.main.profile_name == right.main.profile_name
@@ -2974,9 +2977,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// can then reuse the returned `response.id` when its request is a strict
     /// extension of this prefix. Failures are intentionally ignored.
     pub fn spawn_startup_responses_websocket_prewarm(self: &Arc<Self>) {
-        self.abort_startup_responses_websocket_prewarm();
         let orchestrator = Arc::clone(self);
-        let handle = tokio::spawn(async move {
+        self.lifecycle_runtime.startup_responses_websocket_prewarm.spawn(async move {
             let (model, profile) = {
                 let session = orchestrator.session.lock().await;
                 (session.model.clone(), session.model_profile.clone())
@@ -3010,24 +3012,54 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 )
                 .await;
         });
-        *self
-            .lifecycle_runtime
-            .startup_responses_websocket_prewarm
-            .lock()
-            .expect("startup responses websocket prewarm") = Some(handle);
     }
 
     /// Abort any pending startup Responses WebSocket prewarm task.
     pub fn abort_startup_responses_websocket_prewarm(&self) {
-        if let Some(handle) = self
-            .lifecycle_runtime
+        self.lifecycle_runtime
             .startup_responses_websocket_prewarm
-            .lock()
-            .expect("startup responses websocket prewarm")
-            .take()
-        {
-            handle.abort();
+            .abort_current();
+    }
+
+    /// Revoke both foreground launch and startup-prewarm admission before the
+    /// host awaits teardown. Existing Arc holders cannot reopen either owner.
+    pub fn close_background_producer_admission(&self) {
+        if let Some(forker) = &self.bg_session_forker {
+            forker.lifecycle().close();
         }
+        self.lifecycle_runtime
+            .startup_responses_websocket_prewarm
+            .close();
+    }
+
+    /// Wait for all launches accepted before foreground admission closed.
+    pub async fn drain_background_session_launches(
+        &self,
+    ) -> lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchDrainReport {
+        if let Some(forker) = &self.bg_session_forker {
+            return forker.lifecycle().close_and_drain().await;
+        }
+        Default::default()
+    }
+
+    /// Joining is owned independently of this waiter, including on timeout.
+    pub async fn shutdown_startup_responses_websocket_prewarm(&self) -> Vec<String> {
+        self.lifecycle_runtime
+            .startup_responses_websocket_prewarm
+            .close_and_drain()
+            .await
+            .diagnostics
+    }
+
+    /// Install a controlled startup producer for host lifecycle integration tests.
+    #[cfg(feature = "test-support")]
+    pub fn spawn_startup_prewarm_for_test<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.lifecycle_runtime
+            .startup_responses_websocket_prewarm
+            .spawn(future);
     }
 
     /// Task 6 (llm-runtime future-work batch 5): re-map a terminal
@@ -4326,11 +4358,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         reasoning: lingxi_core::host::ReasoningSelection,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, String> {
-        let turn_guard = Arc::new(self
-            .turn_gate
-            .clone()
-            .try_lock_owned()
-            .map_err(|_| "busy:Target session is running".to_string())?);
+        let turn_guard = Arc::new(
+            self.turn_gate
+                .clone()
+                .try_lock_owned()
+                .map_err(|_| "busy:Target session is running".to_string())?,
+        );
         let settings = self.scheduled_turn_settings(model, reasoning)?;
         self.run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
             .await
@@ -4350,11 +4383,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     where
         F: std::future::Future<Output = Result<(), String>> + Send,
     {
-        let turn_guard = Arc::new(self
-            .turn_gate
-            .clone()
-            .try_lock_owned()
-            .map_err(|_| "busy:Target session is running".to_string())?);
+        let turn_guard = Arc::new(
+            self.turn_gate
+                .clone()
+                .try_lock_owned()
+                .map_err(|_| "busy:Target session is running".to_string())?,
+        );
         if self.session.lock().await.session_id != expected_session {
             return Err("busy:Target session changed before execution".into());
         }

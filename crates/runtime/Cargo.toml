@@ -306,7 +306,7 @@ async-trait = { workspace = true }
 base64 = { version = "0.22" }
 client = { path = "../client", features = ["test-support"] }
 insta = { version = "1.40", features = ["yaml"] }
-orchestrator = { path = "../orchestrator" }
+orchestrator = { path = "../orchestrator", features = ["test-support"] }
 tempfile = { version = "3", features = [] }
 test-harness = { path = "../test-harness" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }

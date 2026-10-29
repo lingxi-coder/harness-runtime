@@ -24,6 +24,9 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
 
+#[path = "bg_session_lifecycle.rs"]
+pub mod lifecycle;
+
 /// Conversation state copied into a background session. Model reminders keep
 /// their structured attachment payloads as well as rendered messages, so the
 /// new session can replay MCP deltas without announcing them a second time.
@@ -69,6 +72,11 @@ pub enum BgForkError {
 /// `ActionFailed` rather than panicking.
 #[async_trait]
 pub trait BgSessionForker: Send + Sync {
+    /// Shared permanent admission fence for every background launch path.
+    /// Each accepted publication keeps a claim through its owned completion,
+    /// including any uncertain shell handoff and recovery registration.
+    fn lifecycle(&self) -> Arc<lifecycle::BackgroundLaunchLifecycle>;
+
     /// Late binding after the host has constructed its session registry.
     fn set_task_registry(
         &self,

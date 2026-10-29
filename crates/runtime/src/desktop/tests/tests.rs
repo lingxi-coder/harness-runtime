@@ -4425,6 +4425,434 @@ async fn desktop_factory_rejects_non_string_native_tool_alias_targets() {
     ));
 }
 
+struct ShutdownTestForker {
+    lifecycle: Arc<lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle>,
+}
+
+#[async_trait::async_trait]
+impl lingxi_core::host::bg_session_forker::BgSessionForker for ShutdownTestForker {
+    fn lifecycle(
+        &self,
+    ) -> Arc<lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle> {
+        self.lifecycle.clone()
+    }
+
+    async fn fork_to_background(
+        &self,
+        _: &lingxi_core::host::bg_session_forker::BgSessionSnapshot,
+        _: Option<Arc<Utf16JsonProjection>>,
+        _: &Utf16JsonProjection,
+        _: &str,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::bg_session_forker::BgForkError> {
+        unreachable!("shutdown tests operate directly on launch claims")
+    }
+
+    async fn resume_to_background(
+        &self,
+        _: &str,
+    ) -> Result<String, lingxi_core::host::bg_session_forker::BgForkError> {
+        unreachable!("shutdown tests operate directly on launch claims")
+    }
+}
+
+async fn desktop_with_shutdown_test_forker() -> (
+    tempfile::TempDir,
+    super::DesktopRuntime,
+    Arc<lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle>,
+) {
+    let (tmp, mut cfg) = test_config(true);
+    let launches = Arc::new(
+        lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchLifecycle::default(),
+    );
+    cfg.bg_session_forker = Some(Arc::new(ShutdownTestForker {
+        lifecycle: launches.clone(),
+    }));
+    let runtime = build(
+        cfg,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await
+    .expect("desktop runtime");
+    (tmp, runtime, launches)
+}
+
+#[tokio::test]
+async fn child_shutdown_does_not_close_foreground_background_launch_owner() {
+    let (_tmp, runtime, launches) = desktop_with_shutdown_test_forker().await;
+    assert!(runtime.working_directory_config.bg_session_forker.is_none());
+    let child = build(
+        runtime.working_directory_config.clone(),
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await
+    .expect("child runtime from retained configuration");
+    let report = child.session_lifecycle.shutdown_and_drain().await;
+    assert!(
+        report.complete,
+        "child shutdown errors: {:?}",
+        report.errors
+    );
+    launches
+        .ensure_open()
+        .expect("the parent launch owner is still open");
+    drop(
+        launches
+            .claim()
+            .expect("the parent can still admit a launch"),
+    );
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(
+        report.complete,
+        "parent shutdown errors: {:?}",
+        report.errors
+    );
+    assert!(launches.claim().is_err());
+}
+
+#[tokio::test]
+async fn background_launch_timeout_preserves_authorities_until_retry() {
+    let (_tmp, runtime, launches) = desktop_with_shutdown_test_forker().await;
+    let claim = launches.claim().expect("launch admitted before shutdown");
+    let hooks = Arc::new(crate::desktop::fusion_attempt_composition_test::RetirementProbe);
+    let retained_hooks = Arc::downgrade(&hooks);
+    runtime
+        .session_lifecycle
+        .fusion_api_service
+        .set_model_attempt_hooks(hooks);
+
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(!report.complete);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("background session launches did not drain")),
+        "shutdown errors: {:?}",
+        report.errors
+    );
+    assert!(launches.claim().is_err(), "admission must remain closed");
+    assert!(retained_hooks.upgrade().is_some());
+    assert!(runtime
+        .session_lifecycle
+        .subagent_spawner
+        .tool_registry_handle()
+        .get()
+        .is_some());
+    runtime
+        .session_state
+        .flush()
+        .await
+        .expect("the writer must remain open for an admitted launch");
+
+    drop(claim);
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "shutdown errors: {:?}", report.errors);
+    assert!(report.errors.is_empty());
+    assert!(retained_hooks.upgrade().is_none());
+    assert!(runtime
+        .session_lifecycle
+        .subagent_spawner
+        .tool_registry_handle()
+        .get()
+        .is_none());
+    assert!(
+        runtime.session_state.flush().await.is_err(),
+        "the writer must close after the launch settles"
+    );
+}
+
+#[tokio::test]
+async fn blocked_launch_and_active_cost_attempt_respect_shutdown_deadline() {
+    let (_tmp, runtime, launches) = desktop_with_shutdown_test_forker().await;
+    let claim = launches.claim().expect("launch admitted before shutdown");
+    let tracker = runtime.session_lifecycle.cost_tracker.clone();
+    let budget = cost::BudgetEnforcer::new(
+        cost::BudgetConfig {
+            max_session_nano_usd: None,
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: Vec::new(),
+            on_exceed: cost::BudgetExceedPolicy::Halt,
+        },
+        tracker.clone(),
+    );
+    let session_id = tracker.session_id().await;
+    let output = budget
+        .workflow_output_scopes()
+        .begin_turn(session_id, lingxi_core::types::MessageId::new(), Some(100))
+        .await
+        .expect("create durable output scope");
+    let model = cost::ModelRef {
+        provider: cost::ProviderId::Anthropic,
+        model: "claude-sonnet-5".into(),
+    };
+    let (mut pricing, _) = cost::PricingCatalog::builtin_reference()
+        .resolve(&model)
+        .expect("pinned model pricing");
+    // The attempt contract prices reasoning output at the normal output rate.
+    pricing.token_rates.insert(
+        cost::TokenClass::ReasoningOutput,
+        pricing.token_rates[&cost::TokenClass::Output],
+    );
+    let intent = cost::AttemptIntent {
+        schema_version: 1,
+        session_id,
+        output_scope: None,
+        attempt_id: "shutdown-blocked-attempt".into(),
+        run_id: "shutdown-test-run".into(),
+        logical_call_id: "shutdown-test-call".into(),
+        wire_ordinal: 1,
+        stage: cost::AttemptStage::Panel,
+        panel_slot: Some(0),
+        profile_id: "shutdown-test-profile".into(),
+        model,
+        route_revision: 1,
+        pricing,
+        token_pricing_requires_quote: false,
+        authorized_nano_usd: 100_000,
+        authorized_input_tokens: 10,
+        authorized_output_tokens: 10,
+        billing_mode: cost::AttemptBillingMode::MeteredAttempts,
+        usage_contract: cost::AttemptUsageContract::AnthropicCacheTtlV1,
+    };
+    let permits = Arc::new(tokio::sync::Semaphore::new(1));
+    let attempt = budget
+        .begin_model_attempt(
+            intent,
+            &output,
+            u64::MAX,
+            permits.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .expect("register a real durable attempt lease");
+    assert_eq!(permits.available_permits(), 0);
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        tracker.drain_owned_settlements()
+    )
+    .await
+    .is_err());
+
+    // Pausing only after the real intent is durable avoids accelerating setup
+    // I/O. The outer guard makes the old unbounded cost wait fail this test.
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        super::shutdown::DESKTOP_SHUTDOWN_BUDGET + std::time::Duration::from_secs(1),
+        runtime.session_lifecycle.shutdown_and_drain(),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    tokio::time::resume();
+    let report = result.expect("shutdown must return within its overall budget");
+    // Tokio rounds deadlines to timer-wheel ticks, including with paused time.
+    assert!(
+        elapsed <= super::shutdown::DESKTOP_SHUTDOWN_BUDGET + std::time::Duration::from_millis(10),
+        "shutdown exceeded its deadline: {elapsed:?}"
+    );
+    assert!(!report.complete);
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("background session launches did not drain")));
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("cost settlement did not drain")));
+    assert_eq!(permits.available_permits(), 0);
+    assert!(runtime
+        .session_lifecycle
+        .subagent_spawner
+        .tool_registry_handle()
+        .get()
+        .is_some());
+    runtime
+        .session_state
+        .flush()
+        .await
+        .expect("the session writer remains open after the timed-out drain");
+    let task_cancel = tokio_util::sync::CancellationToken::new();
+    runtime
+        .task_registry
+        .register_mcp_task(
+            "shutdown-test".into(),
+            "registry-probe".into(),
+            None,
+            task_cancel.clone(),
+        )
+        .await
+        .expect("the registry remains open for an admitted launch");
+    assert!(!task_cancel.is_cancelled());
+
+    drop(claim);
+    attempt
+        .finish()
+        .expect("transfer the real attempt to its settlement owner")
+        .settle()
+        .await
+        .expect("the attempt settles durably after the drain waiter timed out");
+    assert_eq!(permits.available_permits(), 1);
+    drop(output);
+    drop(budget);
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "shutdown errors: {:?}", report.errors);
+    assert!(task_cancel.is_cancelled());
+    assert!(runtime.session_state.flush().await.is_err());
+}
+
+#[tokio::test]
+async fn completed_launch_panic_is_diagnostic_and_does_not_block_cleanup() {
+    use lingxi_core::host::bg_session_forker::BgForkError;
+
+    async fn panic_launch() -> Result<(), BgForkError> {
+        panic!("injected launch panic");
+    }
+
+    let (_tmp, runtime, launches) = desktop_with_shutdown_test_forker().await;
+    let outcome = launches.claim().unwrap().run_owned(panic_launch()).await;
+    assert!(outcome.is_err());
+
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "shutdown errors: {:?}", report.errors);
+    assert!(report.errors.is_empty());
+    assert!(runtime
+        .session_lifecycle
+        .subagent_spawner
+        .tool_registry_handle()
+        .get()
+        .is_none());
+    assert!(runtime.session_state.flush().await.is_err());
+    let drain = launches.close_and_drain().await;
+    assert!(drain.unconfirmed_recoveries.is_empty());
+    assert!(drain
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.contains("background launch owner panicked")));
+}
+
+#[tokio::test]
+async fn completed_prewarm_panic_is_diagnostic_and_does_not_block_cleanup() {
+    let (_tmp, runtime, _launches) = desktop_with_shutdown_test_forker().await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    runtime.orchestrator.spawn_startup_prewarm_for_test({
+        let started = started.clone();
+        async move {
+            started.notify_one();
+            panic!("injected startup prewarm panic");
+        }
+    });
+    started.notified().await;
+
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "shutdown errors: {:?}", report.errors);
+    assert!(report.errors.is_empty());
+    assert!(runtime
+        .session_lifecycle
+        .subagent_spawner
+        .tool_registry_handle()
+        .get()
+        .is_none());
+    assert!(runtime.session_state.flush().await.is_err());
+    assert!(runtime
+        .orchestrator
+        .shutdown_startup_responses_websocket_prewarm()
+        .await
+        .iter()
+        .any(|diagnostic| diagnostic.contains("startup prewarm failed")));
+}
+
+#[tokio::test]
+async fn cancelled_launch_with_unconfirmed_recovery_retains_authorities_until_retry() {
+    use lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchRecovery;
+    use lingxi_core::host::bg_session_forker::BgForkError;
+
+    struct RetryRollback(AtomicUsize);
+    #[async_trait::async_trait]
+    impl BackgroundLaunchRecovery for RetryRollback {
+        fn description(&self) -> String {
+            "injected handoff rollback".into()
+        }
+
+        async fn recover(&self) -> Result<(), String> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err("rollback unavailable".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    let (_tmp, runtime, launches) = desktop_with_shutdown_test_forker().await;
+    let hooks = Arc::new(crate::desktop::fusion_attempt_composition_test::RetirementProbe);
+    let retained_hooks = Arc::downgrade(&hooks);
+    runtime
+        .session_lifecycle
+        .fusion_api_service
+        .set_model_attempt_hooks(hooks);
+    let rollback = Arc::new(RetryRollback(AtomicUsize::new(0)));
+    let claim = launches.claim().unwrap();
+    let ticket = claim.register_recovery(rollback.clone());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let waiter = tokio::spawn({
+        let started = started.clone();
+        let release = release.clone();
+        async move {
+            claim
+                .run_owned(async move {
+                    let _unresolved = ticket;
+                    started.notify_one();
+                    release.notified().await;
+                    Err::<(), _>(BgForkError::Dispatch("handoff failed".into()))
+                })
+                .await
+        }
+    });
+    started.notified().await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(!report.complete);
+    assert!(
+        report.errors.iter().any(|error| {
+            error.contains("injected handoff rollback") && error.contains("rollback unavailable")
+        }),
+        "shutdown errors: {:?}",
+        report.errors
+    );
+    assert_eq!(rollback.0.load(Ordering::SeqCst), 1);
+    assert!(launches.claim().is_err());
+    assert!(retained_hooks.upgrade().is_some());
+    assert!(runtime
+        .session_lifecycle
+        .subagent_spawner
+        .tool_registry_handle()
+        .get()
+        .is_some());
+    runtime
+        .session_state
+        .flush()
+        .await
+        .expect("an unconfirmed rollback still needs the session writer");
+
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "shutdown errors: {:?}", report.errors);
+    assert!(report.errors.is_empty());
+    assert_eq!(rollback.0.load(Ordering::SeqCst), 2);
+    assert!(retained_hooks.upgrade().is_none());
+    assert!(runtime
+        .session_lifecycle
+        .subagent_spawner
+        .tool_registry_handle()
+        .get()
+        .is_none());
+    assert!(runtime.session_state.flush().await.is_err());
+}
+
 #[tokio::test]
 async fn failed_task_drain_preserves_desktop_runtime_authorities_for_retry() {
     use platform_posix::{PosixFileSystem, PosixRuntime};
