@@ -2779,7 +2779,7 @@ impl AppAgentHost {
                 let (normalized, chat_id) = normalize_page_run_input(&state, raw_input, None)?;
                 let duplicate_only = normalized.message_already_persisted;
                 let public_run_id = normalized.run_id;
-                validate_request_id(&normalized.run_id)?;
+                validate_request_id(&public_run_id)?;
                 let started = self
                     .start_task(
                         owner,
@@ -3355,6 +3355,7 @@ fn recover_chat_message_metadata(
             .copied()
             .unwrap_or_else(|| now_millis() as i64)
             .max(0) as u64;
+        let is_assistant = role == ChatRole::Assistant;
         planned.push((
             message_id.clone(),
             run_id.clone(),
@@ -3363,7 +3364,7 @@ fn recover_chat_message_metadata(
             existing,
             is_tool_result,
         ));
-        if role == ChatRole::Assistant {
+        if is_assistant {
             for block in content {
                 if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
                     let tool_use_id = id.to_string();

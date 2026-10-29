@@ -1211,7 +1211,7 @@ where
             "hostPlatform": host.platform
         });
         let script = include_str!("recovery_sw.js")
-            .replace("__LINGXI_RECOVERY_CONFIGURATION__", &config.to_string());
+            .replace("__LOCAL_APP_RECOVERY_CONFIGURATION__", &config.to_string());
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nService-Worker-Allowed: /\r\nX-Content-Type-Options: nosniff\r\n\r\n", script.len()).as_bytes()).await?;
         if method == "GET" {
             socket.write_all(script.as_bytes()).await?;

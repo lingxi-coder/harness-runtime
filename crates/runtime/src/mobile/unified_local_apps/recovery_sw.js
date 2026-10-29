@@ -1,6 +1,6 @@
 /* SDK-owned per-App-origin offline page. Never caches application or Agent data. */
 (() => {
-  const config = __LINGXI_RECOVERY_CONFIGURATION__;
+  const config = __LOCAL_APP_RECOVERY_CONFIGURATION__;
   const cacheName = `lingxi-local-app-recovery:${config.appId}`;
   const recoveryUrl = new URL('/__lingxi-offline-recovery', self.location.origin).href;
   const diagnosticPlaceholder = '<div id="recovery-diagnostic" data-reason="" data-ready-marker="unavailable" hidden></div>';
@@ -21,7 +21,7 @@ body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding
 <h2>Runs saved in this browser</h2><p id="status">Checking this app's saved run IDs…</p><ul id="runs"></ul>
 <div id="recovery-diagnostic" data-reason="" data-ready-marker="unavailable" hidden></div>
 <script>
-const config=__LINGXI_RECOVERY_CONFIGURATION__;
+const config=__LOCAL_APP_RECOVERY_CONFIGURATION__;
 const returnUrl='lingxi://apps/'+encodeURIComponent(config.appId);
 document.querySelector('#return').href=returnUrl;
 document.querySelector('#recovery-app-id').textContent=String(config.appId);

@@ -1789,7 +1789,7 @@ test('iOS offline recovery offers native review only for waking records',
     skipWaiting: async () => {}, clients: {claim: async () => {}}
   };
   const caches = {open: async () => ({put: async (_url, response) => { recoveryHtml = await response.text(); }})};
-  vm.runInNewContext(recoverySource.replaceAll('__LINGXI_RECOVERY_CONFIGURATION__', JSON.stringify(config)),
+  vm.runInNewContext(recoverySource.replaceAll('__LOCAL_APP_RECOVERY_CONFIGURATION__', JSON.stringify(config)),
     {self, caches, URL, Response});
   let installation;
   workerListeners.get('install')({waitUntil(promise) { installation = promise; }});

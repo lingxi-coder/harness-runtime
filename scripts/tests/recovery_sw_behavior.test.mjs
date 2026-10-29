@@ -73,7 +73,7 @@ function createWorker(fetchImpl = async () => new Response('upstream ok', {statu
     addEventListener(type, listener) { listeners.set(type, listener); },
     skipWaiting: async () => {}
   };
-  vm.runInNewContext(recoverySource.replaceAll('__LINGXI_RECOVERY_CONFIGURATION__', JSON.stringify(recoveryConfig)), {
+  vm.runInNewContext(recoverySource.replaceAll('__LOCAL_APP_RECOVERY_CONFIGURATION__', JSON.stringify(recoveryConfig)), {
     self,
     caches: {open: async () => cache},
     fetch: (request, options) => fetchImpl(request, options),
