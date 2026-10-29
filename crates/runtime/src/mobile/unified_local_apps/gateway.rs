@@ -222,6 +222,31 @@ async fn error(socket: &mut TcpStream, code: u16, message: &str) -> std::io::Res
     socket.write_all(body).await
 }
 
+fn create_agent_spool(directory: &Path) -> std::io::Result<std::fs::File> {
+    validate_private_spool_dir(directory)?;
+    // The host chooses a per-App directory inside its private library. This
+    // avoids Android's `/data/local/tmp` default and never accepts a page path.
+    let file = tempfile::tempfile_in(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // tempfile's Linux O_TMPFILE path uses OpenOptions' default mode, which
+        // can leave group/other read bits set. Restrict the opened inode before
+        // any body bytes or asynchronous writes can reach it.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        // The named-file fallback ignores unlink failures. Never write a body
+        // unless anonymity is confirmed on the same opened file handle.
+        if file.metadata()?.nlink() != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Agent request spool could not be unlinked",
+            ));
+        }
+    }
+    Ok(file)
+}
+
 async fn spool_fixed_body<R>(
     reader: &mut R,
     prefix: &[u8],
@@ -237,12 +262,9 @@ where
             "body exceeds content length",
         ));
     }
-    validate_private_spool_dir(directory)?;
-    // The host chooses a per-App directory inside its private library. This
-    // avoids Android's `/data/local/tmp` default and never accepts a page path.
-    // tempfile_in creates an owner-private anonymous file (0600 on Unix); the
-    // entry is unlinked on close, including timeout/cancellation/error paths.
-    let file = tempfile::tempfile_in(directory)?;
+    // The file is private and already unlinked before receiving request bytes.
+    // Closing the last handle releases it on timeout/cancellation/error paths.
+    let file = create_agent_spool(directory)?;
     let mut writer = tokio::fs::File::from_std(file);
     writer.write_all(prefix).await?;
     let mut written = prefix.len();
@@ -1302,6 +1324,9 @@ where
             Ok(Ok(spool)) => spool,
             Ok(Err(io_error)) if io_error.kind() == std::io::ErrorKind::InvalidData => {
                 return error(&mut socket, 400, "invalid request body").await;
+            }
+            Ok(Err(io_error)) if io_error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return error(&mut socket, 500, "Agent request storage unavailable").await;
             }
             Ok(Err(_)) => return error(&mut socket, 408, "incomplete Agent request").await,
             Err(_) => return error(&mut socket, 408, "Agent request timed out").await,
@@ -2490,6 +2515,123 @@ mod agent_json_tests {
         assert!(!is_page_method_allowed("agent.chats.creationStatusOther"));
     }
 
+    #[test]
+    fn request_spool_is_private_and_unlinked_before_any_body_is_written() {
+        let scratch = tempfile::tempdir().unwrap();
+        let spool_path = scratch.path().canonicalize().unwrap().join("spool");
+        ensure_host_directory(&spool_path, true).unwrap();
+        let file = create_agent_spool(&spool_path).unwrap();
+        let metadata = file.metadata().unwrap();
+        assert_eq!(metadata.len(), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            assert_eq!(metadata.nlink(), 0);
+            let alias = scratch.path().canonicalize().unwrap().join("spool-alias");
+            symlink(&spool_path, &alias).unwrap();
+            assert_eq!(
+                create_agent_spool(&alias).unwrap_err().kind(),
+                ErrorKind::PermissionDenied
+            );
+        }
+        assert_eq!(std::fs::read_dir(&spool_path).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pending_request_spools_are_private_and_close_after_timeout_eof_or_cancellation() {
+        use std::{
+            os::unix::fs::{MetadataExt, PermissionsExt},
+            task::{Context, Poll},
+        };
+
+        struct PendingBody {
+            started: Option<tokio::sync::oneshot::Sender<()>>,
+            finish: tokio::sync::oneshot::Receiver<()>,
+        }
+
+        impl tokio::io::AsyncRead for PendingBody {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                _buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if let Some(started) = self.started.take() {
+                    let _ = started.send(());
+                }
+                Pin::new(&mut self.finish).poll(cx).map(|_| Ok(()))
+            }
+        }
+
+        fn open_spools(directory: &Path) -> Vec<fs::Metadata> {
+            fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|entry| {
+                    let path = entry.unwrap().path();
+                    let target = fs::read_link(&path).ok()?;
+                    if !target.starts_with(directory) {
+                        return None;
+                    }
+                    match fs::metadata(path) {
+                        Ok(metadata) => Some(metadata),
+                        Err(error) if error.kind() == ErrorKind::NotFound => None,
+                        Err(error) => panic!("could not inspect open request spool: {error}"),
+                    }
+                })
+                .collect()
+        }
+
+        let scratch = tempfile::tempdir().unwrap();
+        let spool_path = scratch.path().canonicalize().unwrap().join("spool");
+        ensure_host_directory(&spool_path, true).unwrap();
+        for completion in ["timeout", "eof", "cancellation"] {
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let (finish, finished) = tokio::sync::oneshot::channel();
+            let mut reader = PendingBody {
+                started: Some(started),
+                finish: finished,
+            };
+            let mut body = Box::pin(spool_fixed_body(
+                &mut reader,
+                b"private-prefix",
+                1024,
+                &spool_path,
+            ));
+            tokio::select! {
+                result = &mut body => panic!("body finished before inspection: {result:?}"),
+                result = waiting => result.unwrap(),
+            }
+            let files = open_spools(&spool_path);
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].permissions().mode() & 0o777, 0o600);
+            assert_eq!(files[0].nlink(), 0);
+            assert_eq!(fs::read_dir(&spool_path).unwrap().count(), 0);
+            match completion {
+                "timeout" => assert!(tokio::time::timeout(Duration::from_millis(5), body)
+                    .await
+                    .is_err()),
+                "eof" => {
+                    finish.send(()).unwrap();
+                    assert_eq!(body.await.unwrap_err().kind(), ErrorKind::UnexpectedEof);
+                }
+                "cancellation" => drop(body),
+                _ => unreachable!(),
+            }
+            // Tokio's blocking write may briefly retain the last handle after
+            // its future is dropped. Check actual descriptor release, since an
+            // empty directory alone cannot detect leaked anonymous files.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !open_spools(&spool_path).is_empty() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("request spool handle leaked after body completion");
+            assert_eq!(fs::read_dir(&spool_path).unwrap().count(), 0);
+        }
+    }
+
     #[tokio::test]
     async fn request_body_spools_in_chunks_and_drops_tempfiles_on_timeout_or_eof() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2899,6 +3041,71 @@ mod agent_control_lane_tests {
 
     fn json_body(response: &str) -> serde_json::Value {
         serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_spool_rejection_is_a_server_error_without_dispatch_or_sensitive_details() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let spool_dir = temp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("private-spool-path-must-not-appear");
+        ensure_host_directory(&spool_dir, true).unwrap();
+        fs::set_permissions(&spool_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let route = Route {
+            host: Some(BrowserHost {
+                owner: Weak::new(),
+                app_id: "authorized-app".into(),
+                name: "Test App".into(),
+                revision: 1,
+                platform: "android".into(),
+            }),
+            run_id: "epoch".into(),
+            root: temp.path().into(),
+            spool_dir: spool_dir.clone(),
+            entry: "index.html".into(),
+            entry_service: None,
+            services: BTreeMap::new(),
+            port,
+            capabilities: Vec::new(),
+            cancel: cancel.clone(),
+        };
+        let admission = Arc::new(TestAdmission {
+            heavy: Semaphore::new(1),
+            control: Semaphore::new(8),
+        });
+        let agent = Arc::new(DelayedAgent::new());
+        let server = spawn_test_gateway(listener, route, admission, agent.clone());
+        let response = post_json(
+            port,
+            "agent.tasks.list",
+            serde_json::json!({"secret":"private-request-body-must-not-appear"}),
+        )
+        .await;
+        assert_eq!(status(&response), 500);
+        assert_eq!(
+            response.split_once("\r\n\r\n").unwrap().1,
+            "Agent request storage unavailable"
+        );
+        assert!(!response.contains(spool_dir.to_str().unwrap()));
+        assert!(!response.contains("must-not-appear"));
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        fs::set_permissions(&spool_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let recovered = post_json(port, "agent.tasks.list", serde_json::json!({})).await;
+        assert_eq!(status(&recovered), 200);
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read_dir(&spool_dir).unwrap().count(), 0);
+        cancel.cancel();
+        server.await.unwrap().unwrap();
     }
 
     #[tokio::test]
