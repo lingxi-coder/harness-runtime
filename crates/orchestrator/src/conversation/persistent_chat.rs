@@ -104,8 +104,8 @@ fn validate_inline_history(history: &[ConversationMessage]) -> Result<(), String
 mod tests {
     use super::*;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
     use lingxi_core::types::{utf16_json::Utf16JsonProjection as Source, ToolUseId};
     use std::io::Write as _;
@@ -137,8 +137,8 @@ mod tests {
         let api = Arc::new(MockApiClient::new(Vec::new()));
         let orch = ConversationOrchestrator::new_side_chat(
             OrchestratorConfig::default(),
-            api.clone(),
             api,
+            Arc::new(MockStreamingApiClient::empty()),
             Arc::new(ToolRegistry::new()),
             noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
@@ -155,7 +155,8 @@ mod tests {
         ConversationMessage::Assistant {
             id: MessageId::new(),
             content,
-            stop_reason: Some("end_turn".into()),
+            // External assistant messages use the synthetic transcript form.
+            stop_reason: Some("stop_sequence".into()),
             resumable: None,
             per_turn_effort: None,
         }

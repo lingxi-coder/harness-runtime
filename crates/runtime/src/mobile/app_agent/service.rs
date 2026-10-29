@@ -7090,7 +7090,8 @@ mod accepted_projection_tests {
     #[tokio::test]
     async fn chat_completion_releases_transcript_authority_unless_tool_cleanup_is_incomplete() {
         use orchestrator::test_support::{
-            noop_hook_executor, MockApiClient, NoOpPermissionGate, StaticMemoryProvider,
+            noop_hook_executor, MockApiClient, MockStreamingApiClient, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use session::jsonl::JsonlWriter;
 
@@ -7118,8 +7119,8 @@ mod accepted_projection_tests {
             let orchestrator = Arc::new(
                 ConversationOrchestrator::new_side_chat(
                     OrchestratorConfig::default(),
-                    api.clone(),
                     api,
+                    Arc::new(MockStreamingApiClient::empty()),
                     Arc::new(ToolRegistry::new()),
                     noop_hook_executor(),
                     Arc::new(NoOpPermissionGate),
@@ -7137,9 +7138,12 @@ mod accepted_projection_tests {
                 ))
                 .await;
             let assistant_id = MessageId::new();
-            orchestrator
-                .append_external_history_message(assistant(assistant_id, "answer"))
-                .await;
+            let mut answer = assistant(assistant_id, "answer");
+            if let ConversationMessage::Assistant { stop_reason, .. } = &mut answer {
+                // External assistant messages use the synthetic transcript form.
+                *stop_reason = Some("stop_sequence".into());
+            }
+            orchestrator.append_external_history_message(answer).await;
             let captured = orchestrator
                 .verify_persistent_chat_checkpoint(true)
                 .await
