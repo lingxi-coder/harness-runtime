@@ -51,6 +51,8 @@ mod dispatch_header;
 pub mod error;
 mod execution;
 mod execution_context;
+mod scope_output_quota;
+pub use scope_output_quota::ScopeOutputQuota;
 mod structured_output;
 pub use execution_context::{
     ApiAttemptsLeft, ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext,

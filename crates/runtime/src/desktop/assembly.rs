@@ -1463,7 +1463,8 @@ pub async fn build_with_credential_stack(
     // Keep the concrete session service shared with compaction/recap. Their
     // forked summary call must use the same resolved provider route and live
     // credential as the parent turn (Claude Code's single API pipeline).
-    let api_service = Arc::new(service_built);
+    let api_service =
+        Arc::new(service_built.with_scope_output_quota(cfg.scope_output_quota.clone()));
     auth.register_account_change_observer(Arc::downgrade(&api_service.account_change_observer()));
     let provider_adapter = Arc::new(
         ProviderApiAdapter::new(api_service.clone())

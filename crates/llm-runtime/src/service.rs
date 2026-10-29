@@ -1488,6 +1488,7 @@ fn sdk_prompt_cache_ttl_settings(
 
 /// Production service: drives `ModelRuntime` with full retry/rate-limit/betas.
 pub struct ApiService {
+    scope_output_quota: Option<Arc<crate::ScopeOutputQuota>>,
     fast_policy: crate::model::fast_admission::PolicySource,
     fast_availability: Arc<crate::model::fast_admission::Availability>,
     account_change_observer: Arc<ApiServiceAccountObserver>,
@@ -2379,6 +2380,12 @@ impl ApiService {
         ),
         LlmError,
     > {
+        if self.scope_output_quota.is_some() {
+            return Err(LlmError::UnsupportedCapability {
+                capability: "independent web requests are disabled for output-limited scopes"
+                    .into(),
+            });
+        }
         let started = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_secs(60);
         let profile = self
@@ -3523,6 +3530,7 @@ impl ApiService {
         });
         Self {
             fast_policy: Arc::new(|| Ok(crate::model::fast_admission::Policy::default())),
+            scope_output_quota: None,
             fast_availability,
             account_change_observer: account_change_observer.clone(),
             account_change_observer_keepalive: vec![account_change_observer],
@@ -3604,6 +3612,7 @@ impl ApiService {
             self.settings_backoff_ms,
         );
         child.fallback_models = self.fallback_models.clone();
+        child.scope_output_quota = self.scope_output_quota.clone();
         child.subscription = self.subscription.clone();
         child.aws_auth = self.aws_auth.clone();
         child.custom_cli_betas = self.custom_cli_betas.clone();
@@ -3631,6 +3640,35 @@ impl ApiService {
         child.fallback_models.clear();
         child.fallback_overrides.clear();
         child
+    }
+
+    /// Attach one trusted invocation quota. Forked services retain the same
+    /// capability; request JSON, explicit max_tokens and retries cannot reset it.
+    #[must_use]
+    pub fn with_scope_output_quota(mut self, quota: Option<Arc<crate::ScopeOutputQuota>>) -> Self {
+        self.scope_output_quota = quota;
+        self
+    }
+
+    fn clamp_scope_output(
+        &self,
+        request: &mut LlmRequest,
+        prior_dispatch: bool,
+    ) -> Result<(), LlmError> {
+        if let Some(quota) = &self.scope_output_quota {
+            if quota.is_revoked() {
+                return Err(LlmError::RequestDispatchRejected { prior_dispatch });
+            }
+            request.input.max_tokens = Some(quota.clamp(request.input.max_tokens));
+        }
+        Ok(())
+    }
+
+    fn validate_scope_output(&self, prepared: &crate::PreparedLlmCall) -> Result<(), LlmError> {
+        if let Some(quota) = &self.scope_output_quota {
+            quota.validate_prepared(prepared)?;
+        }
+        Ok(())
     }
 
     /// Attach the AWS auth-refresh driver (2.1.198 `awsAuthRefresh` flow).
@@ -7865,6 +7903,7 @@ impl ApiService {
         };
         let mut timeout_retries = crate::model::request_timeout::TimeoutRetryCount::default();
         loop {
+            self.clamp_scope_output(&mut req, any_dispatched)?;
             if policy == NonStreamDrivePolicy::Standard {
                 self.apply_native_main_thinking_policy(&mut req)?;
             }
@@ -7897,6 +7936,7 @@ impl ApiService {
                 let (dispatch_attempt, server_fallback_parameter_added) =
                     self.inject_headers(&mut prepared, dispatch)?;
                 self.client.seal_prepared(&mut prepared).await?;
+                self.validate_scope_output(&prepared)?;
                 Ok((prepared, dispatch_attempt, server_fallback_parameter_added))
             };
             let prepared = match timeout {
@@ -7973,6 +8013,10 @@ impl ApiService {
                         if admission
                             .as_ref()
                             .is_some_and(|admission| !admission.is_admitted())
+                            || self
+                                .scope_output_quota
+                                .as_ref()
+                                .is_some_and(|quota| quota.is_revoked())
                         {
                             admission_rejected = true;
                             dispatch_callback_rejected = true;
@@ -7990,11 +8034,27 @@ impl ApiService {
                             };
                             api_attempt_reservation = Some(reservation);
                         }
+                        let scope_reservation = match self.scope_output_quota.as_ref() {
+                            Some(quota) => {
+                                let Some(reservation) = quota.reserve() else {
+                                    dispatch_callback_rejected = true;
+                                    callback_error = Some(LlmError::ApiAttemptsExhausted);
+                                    return Err(crate::execution::wire_error(
+                                        LlmError::ApiAttemptsExhausted,
+                                    ));
+                                };
+                                Some(reservation)
+                            }
+                            None => None,
+                        };
                         if let Err(error) = attempt.mark_dispatched() {
                             dispatch_callback_rejected = true;
                             return Err(crate::execution::wire_error(error));
                         }
                         if let Some(reservation) = api_attempt_reservation.take() {
+                            reservation.commit();
+                        }
+                        if let Some(reservation) = scope_reservation {
                             reservation.commit();
                         }
                         if mctc_header_sent {
@@ -9448,6 +9508,11 @@ impl ApiService {
         tools: Vec<crate::ToolDeclaration>,
         skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
+        // An optional latency optimization must not send an unmetered side
+        // request for an invocation with a hard generation ceiling.
+        if self.scope_output_quota.is_some() {
+            return Ok(());
+        }
         let mut req = self.build_request(
             model,
             profile,
@@ -9600,6 +9665,7 @@ impl ApiService {
         let main_conversation = query_source_category(source) == Some(QuerySourceCategory::Main);
 
         loop {
+            self.clamp_scope_output(&mut req, any_dispatched)?;
             self.apply_native_main_thinking_policy(&mut req)?;
             req.execution.context_1m_beta_suppressed |= mark_context_1m_latch_on_message_start
                 || context_1m_scope
@@ -9679,6 +9745,7 @@ impl ApiService {
                 .await?;
                 let remaining =
                     first_byte_timeout.map(|timeout| timeout.saturating_sub(preparing.elapsed()));
+                self.validate_scope_output(&prepared)?;
                 // Budget/queue admission is host work, outside the network
                 // watchdog. Its wait must not masquerade as a provider timeout.
                 attempt = self.begin_model_attempt(&req, &prepared).await?;
@@ -9704,6 +9771,7 @@ impl ApiService {
                             if admission
                                 .as_ref()
                                 .is_some_and(|admission| !admission.is_admitted())
+                                || self.scope_output_quota.as_ref().is_some_and(|quota| quota.is_revoked())
                             {
                                 admission_rejected = true;
                                 return Err(LlmError::InvalidRequest {
@@ -9718,8 +9786,14 @@ impl ApiService {
                                 ),
                                 None => None,
                             };
+                            let scope_reservation = self.scope_output_quota.as_ref()
+                                .map(|quota| quota.reserve().ok_or(LlmError::ApiAttemptsExhausted))
+                                .transpose()?;
                             attempt.mark_dispatched()?;
                             if let Some(reservation) = api_attempt_reservation {
+                                reservation.commit();
+                            }
+                            if let Some(reservation) = scope_reservation {
                                 reservation.commit();
                             }
                             if mctc_header_sent {

@@ -1689,6 +1689,7 @@ pub fn api_service_from_stack(
         settings_max_retries,
         settings_backoff_ms,
     )
+    .with_scope_output_quota(cfg.scope_output_quota.clone())
     .with_subscription(stack.subscription)
     .with_custom_cli_betas(cfg.custom_betas.clone())
     .with_thinking(cfg.session_thinking)

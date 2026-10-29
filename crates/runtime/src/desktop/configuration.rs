@@ -263,6 +263,9 @@ pub struct DesktopConfig {
     pub app_invocation: Option<super::app_invocation::AppInvocationProfile>,
     /// Frozen tool grants for this invocation. Clones share permanent revocation.
     pub session_tool_grant_lease: Option<tool_api::SessionToolGrantLease>,
+    /// Host-owned output quota, shared with all retries and auxiliary services.
+    /// Absent for ordinary Desktop sessions; never loaded from settings.
+    pub scope_output_quota: Option<Arc<llm_runtime::ScopeOutputQuota>>,
     /// Host-scoped official catalog delivery; absent in deterministic embedders.
     pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
@@ -1002,6 +1005,7 @@ impl std::fmt::Debug for DesktopConfig {
                     .map(|_| "<configured>"),
             )
             .field("host_git_root_cache", &"<host-owned cache>")
+            .field("scope_output_quota", &self.scope_output_quota)
             .field(
                 "managed_policy_snapshot_cache_initialized",
                 &self.managed_policy_snapshot_cache.is_initialized(),
@@ -1227,6 +1231,7 @@ impl Default for DesktopConfig {
         Self {
             app_invocation: None,
             session_tool_grant_lease: None,
+            scope_output_quota: None,
             startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             managed_policy_snapshot_cache:
