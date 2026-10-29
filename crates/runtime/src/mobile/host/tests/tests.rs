@@ -6842,6 +6842,51 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         message_stop, text_delta, MockStreamingApiClient,
     };
 
+    fn assert_recoverable_pause(
+        phase: &str,
+        checkpoint: &crate::mobile::turn_durability::DurableTurnCheckpoint,
+    ) {
+        let event_kinds = checkpoint
+            .events
+            .iter()
+            .map(|event| {
+                serde_json::from_str::<serde_json::Value>(&event.event_json)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let diagnostic = format!(
+            "{phase}: state={:?}, queue_delivery={:?}, safe_to_resume={}, reason={:?}, event_kinds={event_kinds:?}",
+            checkpoint.state,
+            checkpoint.queue_delivery,
+            checkpoint.safe_to_resume,
+            checkpoint.reason,
+        );
+        eprintln!("{diagnostic}");
+        assert_eq!(
+            checkpoint.state,
+            Some(TurnRecoveryStateDto::PausedRecoverable),
+            "{diagnostic}"
+        );
+        assert_eq!(
+            checkpoint.queue_delivery,
+            QueueDeliveryState::Claimed,
+            "{diagnostic}"
+        );
+        assert!(checkpoint.safe_to_resume, "{diagnostic}");
+        assert!(
+            event_kinds
+                .iter()
+                .all(|kind| kind.as_deref() == Some("turn_started")),
+            "{diagnostic}"
+        );
+    }
+
     struct SourceUserRow {
         id: lingxi_core::types::MessageId,
         text_utf16: Option<Vec<u16>>,
@@ -7987,16 +8032,20 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 "checkpoint retains the hook's exact source projection"
             );
 
+            // Exercise cold restoration after a graceful PauseTurn. A hard-kill
+            // crash needs separate coverage without this quiescence handshake.
             first
+                .submit(ClientCommand::PauseTurn {
+                    turn_id: 247,
+                    reason: "graceful_test_restart".into(),
+                })
+                .await
+                .expect("quiesce the pending skill batch before disposing the engine");
+            let paused = first
                 .durable_turns
-                .transition(
-                    &session_id,
-                    247,
-                    TurnRecoveryStateDto::PausedRecoverable,
-                    true,
-                    Some("simulated_process_restart".into()),
-                )
-                .expect("mark the still-pending skill batch recoverable");
+                .load(&session_id, 247)
+                .expect("load the quiesced skill checkpoint");
+            assert_recoverable_pause("before engine disposal", &paused);
             (
                 session_id,
                 skill_listing_uuid,
@@ -8057,6 +8106,11 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             })
             .await
             .expect("restore the session containing the skill turn");
+        let cold = resumed
+            .durable_turns
+            .load(&session_id, 247)
+            .expect("cold-load the paused skill checkpoint");
+        assert_recoverable_pause("cold load before ResumeTurn", &cold);
         resumed
             .submit(ClientCommand::ResumeTurn { turn_id: 247 })
             .await
