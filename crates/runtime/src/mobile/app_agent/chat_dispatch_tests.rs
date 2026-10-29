@@ -292,13 +292,12 @@ async fn real_mobile_epoch_revocation_after_completion_fence_cannot_commit_a_che
         assert_eq!(transport.0.load(Ordering::Acquire), 1);
         control.check_model_completion_authority(false).unwrap();
         let history = orch.snapshot_history().await;
-        let (message_id, text) = accepted_assistant_projection(
-            &history,
-            &HashSet::new(),
-            &control.assistant_message_ids.lock().await,
-            &control.assistant_display_text.lock().await,
-        )
-        .unwrap();
+        let (message_id, text) = {
+            let observed_ids = control.assistant_message_ids.lock().await;
+            let display_text = control.assistant_display_text.lock().await;
+            accepted_assistant_projection(&history, &HashSet::new(), &*observed_ids, &*display_text)
+                .unwrap()
+        };
         let checkpoint = orch.verify_persistent_chat_checkpoint(true).await.unwrap();
         if revoke_before_checkpoint {
             advance_dispatch_test_epoch(&control);
