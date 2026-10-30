@@ -497,7 +497,10 @@ mod tests {
         let mut reg = CommandRegistry::new();
         command_api::builtins::register_bundled_skills(&mut reg, false);
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
-        for (name, args) in [("lingxi-api", "bots"), ("docs", "Write a report")] {
+        for (name, args) in [
+            ("lingxi-api", "bots"),
+            ("document-authoring", "Write a report"),
+        ] {
             let guide = loader.load(&name.into()).await.unwrap().unwrap();
             assert_eq!(guide.command_type, SkillCommandType::Prompt);
             assert!(!guide.disable_model_invocation);
@@ -512,6 +515,7 @@ mod tests {
         }
         assert!(loader.load(&"claude-api".into()).await.unwrap().is_none());
         assert!(loader.load(&"lingxi".into()).await.unwrap().is_none());
+        assert!(loader.load(&"docs".into()).await.unwrap().is_none());
     }
 
     #[tokio::test]

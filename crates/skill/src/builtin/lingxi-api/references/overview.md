@@ -7,7 +7,7 @@ and permissions. The same runtime does not make their tools interchangeable.
 | Capability | Execution owner and useful entry |
 | --- | --- |
 | Coding and files | Current session tools and permitted workspace |
-| Document authoring | `docs` skill and actual file or connected-document tools |
+| Document authoring | `document-authoring` skill and actual file or connected-document tools |
 | Camera, audio, live media | Host Media service; `media` skill when present |
 | Desktop/browser/device actions | Configured native backend and its actual tools |
 | Local Apps and inline visuals | Apps host / Visualization tool, with their skills |

@@ -55,7 +55,7 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_run_skill(reg);
     register_run_skill_generator_skill(reg);
     register_plugin_authoring_skill(reg);
-    register_docs_skill(reg);
+    register_document_authoring_skill(reg);
 
     // LingXi's explicit scheduler extension is outside Native's factory list.
     register_cron_skill(reg, cron_enabled);
@@ -113,8 +113,9 @@ fn register_lingxi_api_skill(reg: &mut CommandRegistry) {
 }
 
 /// Document authoring through the actual file/service capabilities of the host.
-fn register_docs_skill(reg: &mut CommandRegistry) {
-    let skill = skill::desktop_builtin_skill("docs").expect("builtin document skill");
+fn register_document_authoring_skill(reg: &mut CommandRegistry) {
+    let skill = skill::desktop_builtin_skill("document-authoring")
+        .expect("builtin document authoring skill");
     reg.register_command(SlashCommand {
         name: skill.name.into(),
         description: skill.description,
@@ -127,7 +128,7 @@ fn register_docs_skill(reg: &mut CommandRegistry) {
                 ..CommandFrontmatter::default()
             },
             prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
-                "docs",
+                "document-authoring",
             ))),
         },
         loaded_from: Some("bundled".into()),
@@ -672,8 +673,8 @@ mod tests {
             "dataviz".to_string(),
             // Ported 2026-09-10, once the session debug log it reads existed.
             "debug".to_string(),
-            "docs".to_string(),
             "doctor".to_string(),
+            "document-authoring".to_string(),
             // Ported 2026-09-10.
             "explain-usage".to_string(),
             "fewer-permission-prompts".to_string(),

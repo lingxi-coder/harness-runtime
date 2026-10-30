@@ -228,7 +228,7 @@ fn product_command_names(native: &[&str]) -> Vec<String> {
         .position(|name| name == "plugin-authoring")
         .unwrap()
         + 1;
-    names.insert(index, "docs".into());
+    names.insert(index, "document-authoring".into());
     names
 }
 
@@ -1278,7 +1278,11 @@ async fn native_295_commands_fixture_replay_body() {
                 outbound_reminder,
                 native_reminder
                     .replacen("claude-api", "lingxi-api", 1)
-                    .replacen("/plugin-authoring", "/plugin-authoring, /docs", 1),
+                    .replacen(
+                        "/plugin-authoring",
+                        "/plugin-authoring, /document-authoring",
+                        1
+                    ),
                 "unknown-command reminder adds only the product API name and document skill"
             );
             let harness_prompt_index = transcript_prompt_index(&harness_jsonl, case.prompt)

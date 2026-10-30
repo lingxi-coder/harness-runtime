@@ -251,12 +251,12 @@
       "id": "lingxi-documents-and-code-guide",
       "kind": "divergence",
       "finding": "The copied docs skill depends on a Claude document connector; the Claude-branded guide agent is deliberately absent.",
-      "reason": "The user requested keeping document authoring while adapting it to LingXi files and available document services, and adding LingXi's own guide. The bundled docs prompt has Chat/Code visibility and literal argument expansion. lingxi-code-guide uses the same offline sources as lingxi-api and only Read/Grep/Glob; it cannot acquire executable Skill, shell, memory-write or MCP tools. Keep the Claude guide exclusion and historical Native fixtures; catalog tests account explicitly for these product additions.",
+      "reason": "The user requested keeping document authoring while adapting it to LingXi files and available document services, and adding LingXi's own guide. The bundled document-authoring prompt has Chat/Code visibility and literal argument expansion. The user chose this name to distinguish document creation, editing and export from lingxi-api product guidance. lingxi-code-guide uses the same offline sources as lingxi-api and only Read/Grep/Glob; it cannot acquire executable Skill, shell, memory-write or MCP tools. Keep the Claude guide exclusion and historical Native fixtures; catalog tests account explicitly for these product additions.",
       "decided_on": "2026-10-29",
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/skill/src/builtin/docs/SKILL.md", "text": "name: docs" },
+        { "kind": "present", "path": "crates/skill/src/builtin/document-authoring/SKILL.md", "text": "name: document-authoring" },
         { "kind": "present", "path": "crates/agent/src/builtins.rs", "text": "fn lingxi_code_guide_definition()" }
       ]
     },

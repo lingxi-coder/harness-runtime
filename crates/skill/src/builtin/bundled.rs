@@ -21,10 +21,10 @@ pub(crate) struct BundledResource {
 /// Desktop builtin skill templates.
 pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
     BundledSkill {
-        name: "docs",
-        raw: include_str!("docs/SKILL.md"),
+        name: "document-authoring",
+        raw: include_str!("document-authoring/SKILL.md"),
         triggers: &[
-            "/docs",
+            "/document-authoring",
             "create a document",
             "edit a document",
             "创建文档",
