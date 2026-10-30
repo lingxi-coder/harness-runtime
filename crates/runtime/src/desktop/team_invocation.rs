@@ -30,18 +30,26 @@ impl TeamInvocationIdentity {
             &self.bot_key,
             &self.team_id,
             &self.conversation_id,
-            &self.origin_human_uid,
         ];
         if self.membership_generation == 0
             || parts
                 .iter()
                 .any(|s| s.is_empty() || s.len() > 512 || s.chars().any(char::is_control))
+            || self.origin_human_uid.is_empty()
+            || self.origin_human_uid.encode_utf16().count() > 128
+            || self
+                .origin_human_uid
+                .chars()
+                .any(|c| c == '/' || c <= '\u{1f}' || c == '\u{7f}')
         {
             return Err(TeamInvocationError::Identity);
         }
         let mut digest = Sha256::new();
         digest.update(b"lingxi-team-scope-v1\0");
-        for part in parts {
+        for part in parts
+            .into_iter()
+            .chain(std::iter::once(&self.origin_human_uid))
+        {
             digest.update((part.len() as u64).to_be_bytes());
             digest.update(part.as_bytes());
         }

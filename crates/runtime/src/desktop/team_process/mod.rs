@@ -26,6 +26,10 @@ pub struct TeamProcessDeadline {
 }
 
 impl TeamProcessDeadline {
+    pub(crate) fn instant(self) -> Instant {
+        self.instant
+    }
+
     /// Call when receiving the authenticated `startBot execute:true` response.
     /// Clock skew that places its deadline outside (now, now + 5 min] refuses.
     pub fn from_backend_unix_millis(unix_ms: u64) -> Result<Self, TeamProcessError> {

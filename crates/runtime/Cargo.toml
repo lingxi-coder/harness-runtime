@@ -382,6 +382,11 @@ path = "tests/desktop/team_invocation_process.rs"
 required-features = ["desktop"]
 
 [[test]]
+name = "team_connector"
+path = "tests/desktop/team_connector.rs"
+required-features = ["desktop"]
+
+[[test]]
 name = "settings_watch_spawn"
 path = "tests/desktop/settings_watch_spawn.rs"
 required-features = ["desktop"]

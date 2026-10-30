@@ -28,6 +28,8 @@ mod agent_skill_loader;
 pub mod app_invocation;
 pub mod auto_mode_propose;
 mod sdk;
+#[cfg(target_os = "macos")]
+pub mod team_connector;
 pub mod team_invocation;
 pub mod team_process;
 mod team_sandbox;
