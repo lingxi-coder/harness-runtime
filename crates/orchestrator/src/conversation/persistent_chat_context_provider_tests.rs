@@ -2,6 +2,8 @@
 // transcript fixture. All credentials and transports here are in-memory fakes;
 // request preparation, encoding, streaming and dispatch admission are real.
 
+use std::collections::HashMap;
+
 struct CanonicalBudgetProbe {
     provider: sidequery::ProviderSideQueryClient,
     estimates: std::sync::Mutex<Vec<(sidequery::SideQueryRequest, u64)>>,
@@ -227,6 +229,21 @@ impl llm_runtime::CredentialProvider for ChatTestCredentials {
             }
             Ok(llm_runtime::Credential::ApiKey("in-memory-fixture".into()))
         })
+    }
+}
+
+async fn wait_for_chat_model_stage(
+    entered: &tokio::sync::Notify,
+    run: &mut tokio::task::JoinHandle<
+        Result<crate::conversation::TurnOutcome, crate::error::OrchestratorError>,
+    >,
+    stage: &str,
+) {
+    tokio::select! {
+        result = run => panic!("the turn completed before {stage}: {result:?}"),
+        ready = tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()) => {
+            ready.unwrap_or_else(|error| panic!("the turn never reached {stage}: {error}"));
+        }
     }
 }
 
@@ -460,6 +477,7 @@ async fn real_chat_orchestrator_with_client(
     )
     .with_session_id(session_id)
     .with_jsonl_writer(writer)
+    .with_persistent_app_chat()
     .with_persistent_chat_context(PersistentChatContextConfig {
         app_id,
         chat_id,
@@ -479,7 +497,7 @@ async fn real_chat_orchestrator_with_client(
     )
     .await
     .unwrap();
-    Arc::new(orch)
+    ConversationOrchestrator::into_shared(orch)
 }
 
 fn has_historical_thinking(history: &[ConversationMessage]) -> bool {
@@ -796,14 +814,9 @@ async fn actual_summary_and_stream_recheck_live_owner_after_credentials_await() 
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         let worker = orch.clone();
-        let run =
+        let mut run =
             tokio::spawn(async move { worker.run_turn_streaming_with_cancel(prompt, token).await });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            credentials.entered.notified(),
-        )
-        .await
-        .unwrap();
+        wait_for_chat_model_stage(&credentials.entered, &mut run, "credentials").await;
         if summary {
             probe.assert_compaction_estimates(budget, false);
         } else {
@@ -845,10 +858,124 @@ async fn actual_summary_and_stream_recheck_live_owner_after_credentials_await() 
     }
 }
 
-struct ChatTestHookGuard(Arc<AtomicBool>);
+// The fixture controls generation invalidation; publication and durable commit
+// leases use the same fence implementation as the autonomous tool executor.
+struct ChatTestHookGuard(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence);
+
+impl ChatTestHookGuard {
+    fn new(generation: CancellationToken, publication_lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self(
+            crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+                generation,
+                publication_lock,
+            ),
+        )
+    }
+}
+
 impl hooks::attachment::HookPublicationGuard for ChatTestHookGuard {
     fn is_current(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.is_current()
+    }
+
+    fn generation_cancellation_token(&self) -> Option<CancellationToken> {
+        hooks::attachment::HookPublicationGuard::generation_cancellation_token(&self.0)
+    }
+
+    fn publish_if_current<'a>(
+        &'a self,
+        publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        hooks::attachment::HookPublicationGuard::publish_if_current(&self.0, publication)
+    }
+
+    fn commit_if_current<'a>(
+        &'a self,
+        mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        hooks::attachment::HookPublicationGuard::commit_if_current(&self.0, mutation)
+    }
+}
+
+#[tokio::test]
+async fn hook_generation_fence_cancels_publications_but_drains_admitted_commits() {
+    use hooks::attachment::HookPublicationGuard;
+
+    for durable in [false, true] {
+        let generation = CancellationToken::new();
+        let publication_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = Arc::new(ChatTestHookGuard::new(
+            generation.clone(),
+            publication_lock.clone(),
+        ));
+        let generation_signal = guard.generation_cancellation_token().unwrap();
+        assert!(guard.is_current());
+        assert!(!generation_signal.is_cancelled());
+
+        let accepted = AtomicBool::new(false);
+        let ready = Box::pin(async { accepted.store(true, Ordering::Release) });
+        let admitted = if durable {
+            guard.commit_if_current(ready).await
+        } else {
+            guard.publish_if_current(ready).await
+        };
+        assert!(admitted);
+        assert!(accepted.load(Ordering::Acquire));
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_guard = guard.clone();
+        let worker_entered = entered.clone();
+        let worker_release = release.clone();
+        let worker_finished = finished.clone();
+        let worker = tokio::spawn(async move {
+            let side_effect = Box::pin(async move {
+                worker_entered.notify_one();
+                worker_release.acquire().await.unwrap().forget();
+                worker_finished.store(true, Ordering::Release);
+            });
+            if durable {
+                worker_guard.commit_if_current(side_effect).await
+            } else {
+                worker_guard.publish_if_current(side_effect).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+
+        generation.cancel();
+        assert!(generation_signal.is_cancelled());
+        assert!(!guard.is_current());
+        for commit in [false, true] {
+            let forbidden = Box::pin(async {
+                panic!("a stale generation must not poll side effects");
+            });
+            let admitted = if commit {
+                guard.commit_if_current(forbidden).await
+            } else {
+                guard.publish_if_current(forbidden).await
+            };
+            assert!(!admitted);
+        }
+        if durable {
+            assert!(!worker.is_finished(), "an admitted commit must drain");
+            assert!(
+                publication_lock.try_lock().is_err(),
+                "commit keeps its lease"
+            );
+            release.add_permits(1);
+        }
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+                .await
+                .unwrap()
+                .unwrap(),
+            durable
+        );
+        assert_eq!(finished.load(Ordering::Acquire), durable);
+        assert!(publication_lock.try_lock().is_ok());
     }
 }
 
@@ -861,13 +988,16 @@ async fn combined_chat_hook_and_cancel_fences_guard_real_provider_dispatch() {
             let credentials = ChatTestCredentials::new(true);
             let service = chat_test_service(transport.clone(), credentials.clone(), 0);
             let adapter = Arc::new(crate::provider_adapter::ProviderApiAdapter::new(service));
-            let hook_current = Arc::new(AtomicBool::new(true));
+            let hook_generation = CancellationToken::new();
             let message =
                 ConversationMessage::user_meta(MessageId::new(), "accepted hook content".into());
             let guards: Vec<(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)> =
                 vec![(
                     message.id(),
-                    Arc::new(ChatTestHookGuard(hook_current.clone())),
+                    Arc::new(ChatTestHookGuard::new(
+                        hook_generation.clone(),
+                        Arc::new(tokio::sync::Mutex::new(())),
+                    )),
                 )];
             let cancel = CancellationToken::new();
             let messages = vec![
@@ -916,7 +1046,7 @@ async fn combined_chat_hook_and_cancel_fences_guard_real_provider_dispatch() {
             .unwrap();
             match rejected {
                 "chat" => fixture.allowed.store(false, Ordering::Release),
-                "hook" => hook_current.store(false, Ordering::Release),
+                "hook" => hook_generation.cancel(),
                 _ => cancel.cancel(),
             }
             credentials.release.add_permits(1);
@@ -959,16 +1089,11 @@ async fn actual_stream_retry_rechecks_authority_after_a_blocked_transport() {
         output.clone(),
     )
     .await;
-    let run = tokio::spawn(async move {
+    let mut run = tokio::spawn(async move {
         orch.run_turn_streaming_with_cancel("current", CancellationToken::new())
             .await
     });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        transport.entered.notified(),
-    )
-    .await
-    .unwrap();
+    wait_for_chat_model_stage(&transport.entered, &mut run, "initial transport dispatch").await;
     allowed.store(false, Ordering::Release);
     transport.release.add_permits(1);
     assert!(matches!(

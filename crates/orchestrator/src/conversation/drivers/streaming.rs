@@ -4196,6 +4196,7 @@ impl StreamingTurnDriver<'_> {
                         &input.text,
                         input.is_meta,
                         input.images.clone(),
+                        orch.is_persistent_app_chat(),
                     );
                     if input.prompt_ingress_kind
                         == Some(crate::request_context::PromptIngressKind::DirectBash)
@@ -4273,6 +4274,7 @@ impl StreamingTurnDriver<'_> {
                         &prompt_projection,
                         !in_human_turn,
                         images.clone(),
+                        orch.is_persistent_app_chat(),
                     ),
                 };
                 if !reused_unanswered_user_row {
@@ -4417,8 +4419,13 @@ impl StreamingTurnDriver<'_> {
                     for (index, row) in input.trailing_history_rows.iter().enumerate() {
                         if let Some(identity) = identity {
                             let row_id = identity.trailing_history_row_ids[index];
-                            let message =
-                                super::user_message_from_projection(row_id, row, false, Vec::new());
+                            let message = super::user_message_from_projection(
+                                row_id,
+                                row,
+                                false,
+                                Vec::new(),
+                                orch.is_persistent_app_chat(),
+                            );
                             let row_input = QueuedPromptInput {
                                 text: row.clone(),
                                 message_id: Some(row_id),
@@ -4439,8 +4446,13 @@ impl StreamingTurnDriver<'_> {
                                 .await?;
                         } else {
                             let row_id = lingxi_core::types::MessageId::new();
-                            let message =
-                                super::user_message_from_projection(row_id, row, false, Vec::new());
+                            let message = super::user_message_from_projection(
+                                row_id,
+                                row,
+                                false,
+                                Vec::new(),
+                                orch.is_persistent_app_chat(),
+                            );
                             let row_input = QueuedPromptInput {
                                 text: row.clone(),
                                 message_id: Some(row_id),

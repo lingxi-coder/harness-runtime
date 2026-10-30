@@ -1,7 +1,7 @@
 //! Root-confined, no-follow filesystem primitives for security-sensitive state.
 //!
-//! These helpers are synchronous because callers hold an advisory lock across
-//! an entire read-modify-write transaction. Unix uses directory file
+//! These helpers are synchronous so callers can retain ownership handles or
+//! advisory locks across a complete filesystem transaction. Unix uses directory file
 //! descriptors and `*at` syscalls. Windows uses handle-relative NT file APIs.
 //!
 //! The crate depends on nothing else in the workspace; `lingxi-core`
@@ -665,6 +665,108 @@ mod imp {
         )?;
         ensure_directory(&directory, relative)?;
         root_identity_from_file(&directory, relative)
+    }
+
+    pub(super) fn create_directory_new_pinned(
+        root: &Path,
+        relative: &Path,
+        _dir_mode: u32,
+        expected_root: &RootIdentity,
+    ) -> Result<std::fs::File, FsError> {
+        let (parent, name) = open_parent_checked(root, relative, false, Some(expected_root))?;
+        let descriptor = private_security_descriptor()?;
+        let directory = nt_create_relative(
+            &parent,
+            &name,
+            relative,
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_CREATE,
+            FILE_DIRECTORY_FILE,
+            FILE_ATTRIBUTE_DIRECTORY,
+            descriptor.0,
+        )?;
+        ensure_directory(&directory, relative)?;
+        Ok(directory)
+    }
+
+    pub(super) fn remove_tree_pinned(
+        root: &Path,
+        relative: &Path,
+        expected_root: &RootIdentity,
+        directory: &std::fs::File,
+    ) -> Result<(), FsError> {
+        validate_relative_path(relative)?;
+        let path = root.join(relative);
+        // Windows can deny directory rename/delete for the entire operation.
+        // Retain every ancestor while read_dir obtains names; all actual I/O
+        // and deletion still address handles opened relative to those parents.
+        let _parents = pin_task_path_parents(&path)?;
+        let (parent, name) = open_parent_checked(root, relative, false, Some(expected_root))?;
+        let tree = nt_create_relative(
+            &parent,
+            &name,
+            relative,
+            DELETE | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
+            FILE_ATTRIBUTE_DIRECTORY,
+            std::ptr::null_mut(),
+        )?;
+        ensure_directory(&tree, relative)?;
+        let expected = opened_file_identity(directory)?;
+        if root_identity_from_file(&tree, relative)? != expected {
+            return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+        }
+        remove_owned_children(&tree, &path, expected.volume, 0, &mut 16_384)?;
+        mark_delete(&tree, relative)
+    }
+
+    fn remove_owned_children(
+        directory: &std::fs::File,
+        path: &Path,
+        volume: u64,
+        depth: usize,
+        remaining: &mut usize,
+    ) -> Result<(), FsError> {
+        if depth > 64 {
+            return Err(FsError::TooLarge {
+                actual: depth as u64,
+                limit: 64,
+            });
+        }
+        for entry in std::fs::read_dir(path).map_err(|error| map_io(path, error))? {
+            let entry = entry.map_err(|error| map_io(path, error))?;
+            *remaining = remaining.checked_sub(1).ok_or(FsError::TooLarge {
+                actual: 16_385,
+                limit: 16_384,
+            })?;
+            let child_path = path.join(entry.file_name());
+            let child = nt_create_relative(
+                directory,
+                &entry.file_name(),
+                &child_path,
+                DELETE | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_OPEN,
+                0,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )?;
+            let metadata = child.metadata().map_err(|error| map_io(path, error))?;
+            // Reparse points fail closed, including junctions/mount points.
+            if is_reparse(&metadata) || root_identity_from_file(&child, path)?.volume != volume {
+                return Err(FsError::OutsideWorkspace(path.display().to_string()));
+            }
+            if metadata.is_dir() {
+                remove_owned_children(&child, &child_path, volume, depth + 1, remaining)?;
+            } else if !metadata.is_file() {
+                return Err(FsError::OutsideWorkspace(path.display().to_string()));
+            }
+            mark_delete(&child, &child_path)?;
+        }
+        Ok(())
     }
 
     fn open_parent(
@@ -1900,6 +2002,43 @@ pub fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
     imp::root_identity(root)
 }
 
+/// Exclusively create one directory below a pinned root and retain its opened
+/// handle. Existing entries, including empty directories and links, are never
+/// adopted or chmodded. The parent must already exist.
+pub fn create_directory_new_pinned(
+    root: &Path,
+    relative: &Path,
+    dir_mode: u32,
+    expected_root: &RootIdentity,
+) -> Result<std::fs::File, FsError> {
+    imp::create_directory_new_pinned(root, relative, dir_mode, expected_root)
+}
+
+/// Remove a retired, exclusively owned tree through no-follow directory
+/// handles. `directory` must be the handle retained from its creation; a
+/// replacement at the same name is refused. Child links are never traversed
+/// (Windows reparse points fail closed). Mounts and trees exceeding 16,384 entries or 64 directory levels
+/// are refused; an error can leave a partially removed owned tree.
+///
+/// The caller must first stop and drain every tool/process that can use the
+/// tree. This primitive does not establish that lifecycle proof or recover it
+/// after a crash. It must never be called merely because a task was cancelled.
+pub fn remove_tree_pinned(
+    root: &Path,
+    relative: &Path,
+    expected_root: &RootIdentity,
+    directory: &std::fs::File,
+) -> Result<(), FsError> {
+    if !directory
+        .metadata()
+        .map_err(|error| map_io(relative, error))?
+        .is_dir()
+    {
+        return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+    }
+    imp::remove_tree_pinned(root, relative, expected_root, directory)
+}
+
 /// Create or open one directory below `root` without following symlinks and
 /// return the identity of the opened directory handle. Newly-created Unix
 /// directories use `dir_mode`; existing Unix directories are tightened to the
@@ -2498,6 +2637,135 @@ mod imp {
         fs::fchmod(&directory, mode(dir_mode, relative)?)
             .map_err(|error| map_unix_io(relative, error))?;
         identity_from_fd(&directory, relative)
+    }
+
+    pub(super) fn create_directory_new_pinned(
+        root: &Path,
+        relative: &Path,
+        dir_mode: u32,
+        expected_root: &RootIdentity,
+    ) -> Result<std::fs::File, FsError> {
+        let (parent, name) =
+            open_parent_checked(root, relative, false, dir_mode, Some(expected_root))?;
+        fs::mkdirat(&parent, &name, mode(dir_mode, relative)?)
+            .map_err(|error| map_unix_io(relative, error))?;
+        let directory = fs::openat(
+            &parent,
+            &name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))?;
+        Ok(std::fs::File::from(directory))
+    }
+
+    pub(super) fn remove_tree_pinned(
+        root: &Path,
+        relative: &Path,
+        expected_root: &RootIdentity,
+        directory: &std::fs::File,
+    ) -> Result<(), FsError> {
+        let expected = opened_file_identity(directory)?;
+        let (parent, name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, Some(expected_root))?;
+        let tree = fs::openat(
+            &parent,
+            &name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        if identity_from_fd(&tree, relative)? != expected {
+            return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+        }
+        let check_scope = || {
+            open_root_checked(root, Some(expected_root))?;
+            let current = fs::openat(
+                &parent,
+                &name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| map_unix_io(relative, error))?;
+            if identity_from_fd(&current, relative)? != expected {
+                return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+            }
+            Ok(())
+        };
+        remove_owned_children(
+            &tree,
+            relative,
+            expected.volume,
+            0,
+            &mut 16_384,
+            &check_scope,
+        )?;
+        check_scope()?;
+        fs::unlinkat(&parent, &name, AtFlags::REMOVEDIR)
+            .map_err(|error| map_unix_io(relative, error))?;
+        fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))
+    }
+
+    fn remove_owned_children(
+        directory: &OwnedFd,
+        path: &Path,
+        volume: u64,
+        depth: usize,
+        remaining: &mut usize,
+        check_scope: &impl Fn() -> Result<(), FsError>,
+    ) -> Result<(), FsError> {
+        if depth > 64 {
+            return Err(FsError::TooLarge {
+                actual: depth as u64,
+                limit: 64,
+            });
+        }
+        let mut entries =
+            fs::Dir::read_from(directory).map_err(|error| map_unix_io(path, error))?;
+        for entry in &mut entries {
+            let entry = entry.map_err(|error| map_unix_io(path, error))?;
+            let name = entry.file_name();
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            *remaining = remaining.checked_sub(1).ok_or(FsError::TooLarge {
+                actual: 16_385,
+                limit: 16_384,
+            })?;
+            check_scope()?;
+            let metadata = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|error| map_unix_io(path, error))?;
+            if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
+                let child = fs::openat(
+                    directory,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| map_unix_io(path, error))?;
+                let identity = identity_from_fd(&child, path)?;
+                if identity.volume != volume || identity.file != metadata.st_ino as u64 {
+                    return Err(FsError::OutsideWorkspace(path.display().to_string()));
+                }
+                remove_owned_children(&child, path, volume, depth + 1, remaining, check_scope)?;
+                let current = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(|error| map_unix_io(path, error))?;
+                if current.st_dev != metadata.st_dev || current.st_ino != metadata.st_ino {
+                    return Err(FsError::OutsideWorkspace(path.display().to_string()));
+                }
+                check_scope()?;
+                fs::unlinkat(directory, name, AtFlags::REMOVEDIR)
+                    .map_err(|error| map_unix_io(path, error))?;
+            } else {
+                // Unlink directory entries, including links/FIFOs, without
+                // opening their contents or blocking on a writer.
+                check_scope()?;
+                fs::unlinkat(directory, name, AtFlags::empty())
+                    .map_err(|error| map_unix_io(path, error))?;
+            }
+        }
+        Ok(())
     }
 
     fn split(relative: &Path) -> Result<(Vec<OsString>, OsString), FsError> {
@@ -3472,6 +3740,24 @@ mod imp {
         Err(unsupported())
     }
 
+    pub(super) fn create_directory_new_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _dir_mode: u32,
+        _expected_root: &RootIdentity,
+    ) -> Result<std::fs::File, FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn remove_tree_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected_root: &RootIdentity,
+        _directory: &std::fs::File,
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
     pub(super) fn lock_exclusive(
         _root: &Path,
         _relative: &Path,
@@ -3707,6 +3993,103 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_directory_handle_refuses_existing_entries_and_wrong_root() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let pin = root_identity(root.path()).unwrap();
+        assert!(create_directory_new_pinned(
+            root.path(),
+            Path::new("scope"),
+            0o700,
+            &root_identity(other.path()).unwrap()
+        )
+        .is_err());
+        assert!(!root.path().join("scope").exists());
+        let directory =
+            create_directory_new_pinned(root.path(), Path::new("scope"), 0o700, &pin).unwrap();
+        assert!(directory.metadata().unwrap().is_dir());
+        assert!(matches!(
+            create_directory_new_pinned(root.path(), Path::new("scope"), 0o700, &pin),
+            Err(FsError::AlreadyExists(_))
+        ));
+        std::fs::write(root.path().join("scope/data"), "owned").unwrap();
+        remove_tree_pinned(root.path(), Path::new("scope"), &pin, &directory).unwrap();
+        drop(directory); // Windows closes the retained handle to finish deletion.
+        assert!(!root.path().join("scope").exists());
+    }
+
+    #[test]
+    fn tree_replacement_is_not_mistaken_for_the_retained_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let pin = root_identity(root.path()).unwrap();
+        let directory =
+            create_directory_new_pinned(root.path(), Path::new("scope"), 0o700, &pin).unwrap();
+        std::fs::write(root.path().join("scope/owned"), "original").unwrap();
+        std::fs::rename(root.path().join("scope"), root.path().join("moved")).unwrap();
+        std::fs::create_dir(root.path().join("scope")).unwrap();
+        std::fs::write(root.path().join("scope/user-data"), "preserve").unwrap();
+        assert!(remove_tree_pinned(root.path(), Path::new("scope"), &pin, &directory).is_err());
+        assert_eq!(
+            std::fs::read(root.path().join("moved/owned")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("scope/user-data")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[test]
+    fn tree_removal_refuses_a_replaced_workspace_before_deleting_children() {
+        let container = tempfile::tempdir().unwrap();
+        let root = container.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let pin = root_identity(&root).unwrap();
+        let directory =
+            create_directory_new_pinned(&root, Path::new("scope"), 0o700, &pin).unwrap();
+        std::fs::write(root.join("scope/source"), "original").unwrap();
+        std::fs::rename(&root, container.path().join("previous")).unwrap();
+        std::fs::create_dir_all(root.join("scope")).unwrap();
+        std::fs::write(root.join("scope/business"), "preserve").unwrap();
+        assert!(remove_tree_pinned(&root, Path::new("scope"), &pin, &directory).is_err());
+        assert_eq!(
+            std::fs::read(root.join("scope/business")).unwrap(),
+            b"preserve"
+        );
+        assert_eq!(
+            std::fs::read(container.path().join("previous/scope/source")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_removal_unlinks_child_links_but_refuses_root_and_parent_links() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("business"), "preserve").unwrap();
+        let pin = root_identity(root.path()).unwrap();
+        symlink(outside.path(), root.path().join("scope")).unwrap();
+        assert!(create_directory_new_pinned(root.path(), Path::new("scope"), 0o700, &pin).is_err());
+        assert!(
+            create_directory_new_pinned(root.path(), Path::new("scope/child"), 0o700, &pin)
+                .is_err()
+        );
+        std::fs::remove_file(root.path().join("scope")).unwrap();
+        let directory =
+            create_directory_new_pinned(root.path(), Path::new("scope"), 0o700, &pin).unwrap();
+        std::fs::create_dir(root.path().join("scope/cache")).unwrap();
+        std::fs::write(root.path().join("scope/cache/module.pyc"), b"derived").unwrap();
+        symlink(outside.path(), root.path().join("scope/outside")).unwrap();
+        remove_tree_pinned(root.path(), Path::new("scope"), &pin, &directory).unwrap();
+        assert_eq!(
+            std::fs::read(outside.path().join("business")).unwrap(),
+            b"preserve"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn handback_exclusive_handle_keeps_original_inode_after_leaf_replacement() {

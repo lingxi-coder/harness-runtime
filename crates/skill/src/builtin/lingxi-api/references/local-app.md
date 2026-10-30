@@ -18,10 +18,30 @@ background authorization and public uploads can be native-only operations.
 Explain the corresponding Apps UI when no model tool exists. `agent_catalog`
 lists public model identifiers; it neither returns credentials nor grants access.
 
-App-to-Agent communication uses the pinned official AG-UI contract. Agent-to-App
+App-to-Agent communication uses the pinned official AG-UI 1.0 contract. Agent-to-App
 page tools use WebMCP. They are opposite directions, not interchangeable wire
 formats. Host approvals and provider credentials remain native-owned. An App
 cannot approve its own request or obtain general host administration access.
+
+Generate only schema 2 packages and the current host API and Agent persistence
+format. Do not add compatibility aliases, old API decoders, old Agent-data
+migrations or old-pending cleanup hooks. Current business data remains separate;
+an authorized business-schema change still requires the host's verified backup
+and migration transaction.
+
+Persistent Chats use a stable host-owned `threadId` and a fresh `runId` for each
+new user turn. The host retains original successful history and file assets and
+prepares controlled summaries for bounded model context. Apps send only the new
+user Message, using `agent.file(file)` for images/documents. Tool calls and
+results continue the same Agent run instead of becoming new user turns. Do not
+compress, splice or rebuild tool history in the App. Select approved Skills
+independently for each run; prior messages do not activate a previous Skill or
+grant. Context, storage, run and OS limits still apply.
+
+After a connection loss, read the saved task, events or Chat history and use
+`connectAgent({runId})` to observe the same run without starting another request.
+Preserve unavailable data and original IDs/input. Never recreate a Chat or
+replay a tool effect to recover a lost page Promise.
 
 Current App Agent input has a restricted content profile (image, PDF, supported
 UTF-8 content). Do not infer audio/video, arbitrary remote URL, provider-handle,

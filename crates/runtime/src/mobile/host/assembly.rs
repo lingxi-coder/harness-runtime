@@ -2063,6 +2063,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     local_agent_status_sink.bind(task_registry.clone());
     let tool_ctx = BuiltinToolContext {
         host_git_root_cache: cfg.host_git_root_cache.clone(),
+        tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         side_chat: false,
         side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.

@@ -23,7 +23,9 @@ Inspect the actual platform and available runtime with the `{{SHELL_TOOL}}` tool
 
 ## Project manifest
 
-Use the current schema only. A minimal project looks like:
+Use schema 2 and only the current host contract. Do not generate old API aliases,
+fallback decoders, old Agent-data migrations or old-pending cleanup hooks. A
+minimal project looks like:
 
 ```json
 {
@@ -145,9 +147,17 @@ normalized `onRunFinishedEvent({outcome})` rather than treating Promise settleme
 alone as success. `abortRun` requests cancellation; a terminal cancelled outcome
 confirms it. A new independent request needs a fresh client/thread and exactly
 one user message. For multiple turns create/open an App Chat, use its handle ID
-as `threadId`, and send a fresh `runId` for each turn. Chat history is paged as
-`{messages: Message[], nextCursor?}`. The host owns the real Harness transcript;
-client-provided history must match canonical messages.
+as `threadId`, and send a fresh `runId` for each new user turn. Chat history is
+paged as `{messages: Message[], nextCursor?}` for display. Each new run supplies
+only its new user Message, with image/document parts from `agent.file(file)`;
+do not resend historical text, tool messages or file bytes.
+
+The host saves original successful Chat history and its assets. Tool calls and
+results continue the same Agent run; they never become new user turns. When the
+conversation grows, the host prepares controlled summaries for bounded model
+context while retaining the original transcript. App code does not compress,
+splice or reconstruct tool history. Context, asset, turn, duration and OS limits
+still apply; do not promise unlimited long chats or background execution.
 
 Chat creation is a LingXi host operation, separate from the AG-UI
 run protocol. Generate a lowercase UUIDv4 `requestId` and persist it with the
@@ -199,9 +209,9 @@ the fresh `runId` before sending, and use `chats.open(threadId)` on return.
 Then reconnect read-only with
 `createClient({threadId}).connectAgent({runId})`; a reload never submits another
 model request. Identical input with the same `runId` is idempotent; changed input
-under that ID is rejected. Do not use the retired Agent-run
-prompt/attachments/requestId or custom state-event protocol. Old Agent records
-are discarded, not converted.
+under that ID is rejected. Use only the current AG-UI input and Agent persistence
+format. Do not decode, convert, migrate or automatically clean up old Agent,
+Chat or pending records.
 
 Treat an immediate `tasks.get` `task_not_found` as a lookup miss, not a model
 outcome. Keep the exact saved input and `runId`; retry only read-only lookup or
@@ -220,6 +230,10 @@ cannot grant host tools. The current host profile rejects unsupported frontend
 tools, state, context and resume features explicitly. Pages cannot approve tools
 or questions. MCP grants bind the exact connection, configuration revision, raw
 tool name and definition; Skills add instructions, not execution permission.
+Select Skills independently for every run, including each persistent Chat turn.
+Omitting a Skill does not retain its previous instructions or grants. Historical
+messages are conversation data, not active Skill authority; an exact retry keeps
+its original selected IDs.
 
 Use standard browser File/camera selection with user confirmation before model
 submission. Files are limited to eight per new message, 25 MiB each and 50 MiB
@@ -256,7 +270,7 @@ standalone browser rendering are not real-provider or physical-device evidence.
 
 - Use `list` to find an app, then `read` its source metadata and latest release. Edit the bound source Project and update the same ID with the observed `expectedRevision`; never overwrite concurrent work silently.
 - Version switches preserve app data and may require new execution/capability consent. Failed staged preparation keeps the prior release; rolling code back does not reverse database or IndexedDB writes. New code does not receive permissions from a saved model preference alone.
-- Keep data formats backward readable. A changed filesystem `dataSchema` requires the host's verified backup/migration transaction; `compatibleFrom` alone is not proof. Do not erase data or bypass a migration refusal.
+- Implement only the current host contract; do not add old API decoders or old Agent-data migrations. A changed business filesystem `dataSchema` requires the host's verified backup/migration transaction; `compatibleFrom` alone is not proof. Do not erase current user records or bypass a migration refusal.
 - Use localStorage/IndexedDB for browser records, validate loaded data, report failed saves, and provide export/import for important records. Installation, publication and execution are different lifecycle steps.
 - Publishing to the public market is a separate native review action. Export only declared package files, excluding credentials, transcripts, grants, browser stores, databases and private files. Market installation copies code, not author permissions; a permitted customization creates a separate app and preserves upstream attribution.
 

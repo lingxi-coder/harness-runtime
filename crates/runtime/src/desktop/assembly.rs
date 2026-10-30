@@ -1,5 +1,5 @@
 use super::permission_config::{
-    append_desktop_computer_permission_rules, DesktopComputerPermissionIntegration,
+    DesktopComputerPermissionIntegration, append_desktop_computer_permission_rules,
 };
 use super::platform::{
     DesktopFileSystem, DesktopLspTransport, DesktopProcess, DesktopWorktreeManager,
@@ -19,9 +19,9 @@ use orchestrator::{
 use permission::gate::PermissionGate;
 use platform_posix::{PosixRuntime, PosixSandbox};
 #[cfg(windows)]
-use platform_windows::process::supervisor as shell_supervisor;
-#[cfg(windows)]
 use platform_windows::WindowsMcpTransport;
+#[cfg(windows)]
+use platform_windows::process::supervisor as shell_supervisor;
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use skill::SkillRegistry;
 use std::sync::Arc;
@@ -33,6 +33,16 @@ use tool_api::{BuiltinToolContext, ToolRegistry};
 #[cfg(test)]
 use super::watcher_test_support;
 use super::{
+    AgentMcpMergeGates, AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
+    CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
+    DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
+    DesktopMcpTransport, DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
+    DesktopWorkflowEvent, DesktopWorkflowEventSink, DesktopWorktreeCommandHandler,
+    FusionCatalogRefreshingChatGptConnect, FusionCatalogRefreshingCopilotConnect,
+    FusionCatalogRefreshingCredentialWriter, FusionCatalogRefreshingOAuthConnect,
+    JsonlWorktreeStatePersister, LlmStack, OrchestratorTeammatePromptRenderer, OutputRetryReporter,
+    PluginRuntime, ProcessSessionActivationObserver, RegistryStopHookSnapshot,
+    SharedCredentialStack, TEAMMATE_POOL_CAP, TaskRegistryWorkflowLauncher, TeammateStatusFanout,
     agent_restore, agent_skill_loader, agent_source_is_trusted, append_mcp_permission_rules,
     append_restricted_builtin_denies, apple_events_override, apply_worktree_launch,
     auto_mode_propose, aws_auth_refresher, background_agent, build_agent_mcp_tool_set,
@@ -63,17 +73,7 @@ use super::{
     sec_default_order_from_raw_tiers, session_agents, session_kind_for_job_tmp,
     session_read_allowances_for_boot, session_state, session_task_output_dir, settings_watch,
     should_enforce_permissions, skill_loader, spawn_cli_plugin_dir_collection_watch,
-    strict_allowlist_override, teammate_backend_selector, AgentMcpMergeGates,
-    AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
-    CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
-    DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
-    DesktopMcpTransport, DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
-    DesktopWorkflowEvent, DesktopWorkflowEventSink, DesktopWorktreeCommandHandler,
-    FusionCatalogRefreshingChatGptConnect, FusionCatalogRefreshingCopilotConnect,
-    FusionCatalogRefreshingCredentialWriter, FusionCatalogRefreshingOAuthConnect,
-    JsonlWorktreeStatePersister, LlmStack, OrchestratorTeammatePromptRenderer, OutputRetryReporter,
-    PluginRuntime, ProcessSessionActivationObserver, RegistryStopHookSnapshot,
-    SharedCredentialStack, TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
+    strict_allowlist_override, teammate_backend_selector,
 };
 
 /// Rebuild the slash-command MCP partition from the same generation-checked
@@ -893,6 +893,12 @@ pub async fn build_with_credential_stack(
     shared: SharedCredentialStack,
 ) -> Result<DesktopRuntime, BuildError> {
     super::app_invocation::enforce_app_config(&mut cfg)?;
+    let app_chat_mount = super::app_invocation::chat::open(
+        &cfg,
+        Arc::new(DesktopFileSystem::new(cfg.cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
+    )
+    .await?;
+    let is_app_chat = app_chat_mount.is_some();
     let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
         .with_tool_aliases(cfg.tool_aliases.clone())
         .map_err(BuildError::InvalidToolAliases)?;
@@ -1158,10 +1164,14 @@ pub async fn build_with_credential_stack(
     // Create the one ordinary transcript writer before durable session setup.
     // Production later decorates this same writer with the coordinator's
     // durable transaction; legacy/no-persistence hosts keep compatibility.
-    let main_jsonl_writer = session::jsonl::writer::JsonlWriter::new(
-        main_transcript_path.clone(),
-        Arc::new(DesktopFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
-    );
+    let main_jsonl_writer = if let Some(chat) = &app_chat_mount {
+        chat.writer.clone()
+    } else {
+        Arc::new(session::jsonl::writer::JsonlWriter::new(
+            main_transcript_path.clone(),
+            Arc::new(DesktopFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
+        ))
+    };
     // Resume the live file-history index before the first restored turn. The
     // `/rewind` command can parse snapshots directly from disk, but the edit
     // tools and turn-start snapshotter share this in-memory instance. Leaving
@@ -1730,7 +1740,7 @@ pub async fn build_with_credential_stack(
     // owns the session ledger.  A TempDir/custom `lingxi_home` must not read
     // the developer's ambient global config; such hosts pass `None` until an
     // explicit legacy path is provided by their composition fixture.
-    let legacy_config_path = if cfg.session_persistence {
+    let legacy_config_path = if cfg.session_persistence && !is_app_chat {
         migrations::global_config::global_config_path().filter(|_| {
             migrations::global_config::lingxi_config_home()
                 .is_some_and(|ambient_home| ambient_home == cfg.lingxi_home)
@@ -1750,8 +1760,10 @@ pub async fn build_with_credential_stack(
     } else {
         Some(ephemeral_session_home()?)
     };
-    let ledger_home = ephemeral_home
-        .clone()
+    let ledger_home = app_chat_mount
+        .as_ref()
+        .map(|chat| chat.ledger_home.clone())
+        .or_else(|| ephemeral_home.clone())
         .unwrap_or_else(|| cfg.lingxi_home.clone());
     let session_state_manager = {
         let legacy_shadow = legacy_opening_balance.map(|(legacy_session_id, amount)| {
@@ -1819,13 +1831,21 @@ pub async fn build_with_credential_stack(
     // resolves its active path under this writer's lock and the coordinator's
     // durable transaction, so ordinary append, outbox delivery, and `/cd`
     // retargeting share one authority.
-    let main_jsonl_writer = if cfg.session_persistence {
+    let main_jsonl_writer = if cfg.session_persistence && !is_app_chat {
         let coordinator = &session_state;
         let durable_writer = Arc::new(session::jsonl::DurableTranscriptWriter::from_pinned(
             coordinator.journal().root().to_path_buf(),
             coordinator.journal().root_identity(),
         ));
-        let writer = Arc::new(main_jsonl_writer.with_durable_lock(durable_writer));
+        let writer = Arc::new(
+            Arc::try_unwrap(main_jsonl_writer)
+                .map_err(|_| {
+                    BuildError::Orchestrator(
+                        "ordinary transcript writer was shared before binding".into(),
+                    )
+                })?
+                .with_durable_lock(durable_writer),
+        );
         writer
             .activate_session_target(
                 main_session_id,
@@ -1835,7 +1855,7 @@ pub async fn build_with_credential_stack(
             .map_err(|error| BuildError::DurableSession(error.to_string()))?;
         writer
     } else {
-        Arc::new(main_jsonl_writer)
+        main_jsonl_writer
     };
     if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
         let rows = if snapshot.source_session_id == main_session_uuid {
@@ -1849,7 +1869,7 @@ pub async fn build_with_credential_stack(
         };
         main_jsonl_writer.install_session_metadata_source(&main_session_uuid, &rows);
     }
-    if cfg.session_persistence {
+    if cfg.session_persistence && !is_app_chat {
         bootstrap_main_transcript_identity_if_nonempty(
             main_jsonl_writer.as_ref(),
             &main_transcript_path,
@@ -1859,7 +1879,11 @@ pub async fn build_with_credential_stack(
             BuildError::Orchestrator(format!("main transcript identity import failed: {error}"))
         })?;
     }
-    session_state_manager.set_transcript_writer(main_jsonl_writer.clone());
+    if !is_app_chat {
+        // Strict Chat owns its identity/append barrier; ordinary transcript
+        // queues and Fusion delivery must never bind a second writer authority.
+        session_state_manager.set_transcript_writer(main_jsonl_writer.clone());
+    }
     let fusion_transcript_target =
         fusion_recorder::FusionTranscriptTarget::new(main_jsonl_writer.clone())
             .for_session(main_session_id);
@@ -4568,7 +4592,15 @@ pub async fn build_with_credential_stack(
     let tool_ctx = BuiltinToolContext {
         host_git_root_cache: cfg.host_git_root_cache.clone(),
         side_chat: false,
-        side_chat_cleanup_failed: None,
+        side_chat_cleanup_failed: cfg
+            .app_invocation
+            .as_ref()
+            .and_then(|profile| profile.tool_cleanup_failed.clone()),
+        tool_execution_policy: if is_app_chat {
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat
+        } else {
+            Default::default()
+        },
         // The live session, so tools that persist oversized output can write to
         // claude-code's session-scoped `<projects>/<session-id>/tool-results/`
         // instead of dropping artifacts inside the user's repository. Same
@@ -5279,6 +5311,14 @@ pub async fn build_with_credential_stack(
     let registered_mcp_tools =
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await;
     for (conn_id, mcp_tools) in registered_mcp_tools {
+        let mcp_tools = if is_app_chat {
+            mcp_tools
+                .into_iter()
+                .filter(|tool| tool.supports_persistent_chat())
+                .collect()
+        } else {
+            mcp_tools
+        };
         tools_inner.register_mcp_tools(conn_id, mcp_tools);
     }
     // Structured output (`--json-schema`): compile the exact source schema
@@ -5342,6 +5382,18 @@ pub async fn build_with_credential_stack(
     }
     if cfg.restricted || cfg.restricted_tools.is_some() {
         tools_inner.set_restricted_builtin_filter(cfg.restricted_tools.as_deref());
+    }
+    if is_app_chat {
+        let supported = tools_inner
+            .available_tools(&tool_api::tool_trait::ToolStaticContext::default())
+            .into_iter()
+            .filter(|tool| tool.supports_persistent_chat())
+            .map(|tool| tool.name().to_owned())
+            .collect::<Vec<_>>();
+        tools_inner.set_restricted_builtin_filter(Some(&supported));
+        // Strict recovery cannot restore discovery state outside canonical
+        // inline messages. Every granted compatible tool is exposed eagerly.
+        tools_inner.set_deferral(Arc::new(tool_api::defer::DeferralState::disabled()));
     }
     if let Some(lease) = cfg.session_tool_grant_lease.clone() {
         tools_inner.set_session_tool_policy(lease);
@@ -5442,6 +5494,22 @@ pub async fn build_with_credential_stack(
                                 live_mcp_tool_ctx.clone(),
                             )
                             .await;
+                            let refreshed = if is_app_chat {
+                                refreshed
+                                    .into_iter()
+                                    .map(|(id, tools)| {
+                                        (
+                                            id,
+                                            tools
+                                                .into_iter()
+                                                .filter(|tool| tool.supports_persistent_chat())
+                                                .collect(),
+                                        )
+                                    })
+                                    .collect()
+                            } else {
+                                refreshed
+                            };
                             live_tools.replace_mcp_tools(refreshed);
                             reconcile_mcp_prompt_catalog(registry.as_ref(), &live_commands).await;
                             recovery.extend(registry.catalog_refresh_snapshot().await);
@@ -5460,6 +5528,22 @@ pub async fn build_with_credential_stack(
                         live_mcp_tool_ctx.clone(),
                     )
                     .await;
+                    let refreshed = if is_app_chat {
+                        refreshed
+                            .into_iter()
+                            .map(|(id, tools)| {
+                                (
+                                    id,
+                                    tools
+                                        .into_iter()
+                                        .filter(|tool| tool.supports_persistent_chat())
+                                        .collect(),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        refreshed
+                    };
                     live_tools.replace_mcp_tools(refreshed);
                 }
 
@@ -5476,6 +5560,22 @@ pub async fn build_with_credential_stack(
                             live_mcp_tool_ctx.clone(),
                         )
                         .await;
+                        let refreshed = if is_app_chat {
+                            refreshed
+                                .into_iter()
+                                .map(|(id, tools)| {
+                                    (
+                                        id,
+                                        tools
+                                            .into_iter()
+                                            .filter(|tool| tool.supports_persistent_chat())
+                                            .collect(),
+                                    )
+                                })
+                                .collect()
+                        } else {
+                            refreshed
+                        };
                         live_tools.replace_mcp_tools(refreshed);
                     }
                     Ok(_) => {}
@@ -5815,7 +5915,40 @@ pub async fn build_with_credential_stack(
     } else {
         orch_builder
     };
+    let orch_builder = if let Some(chat) = &app_chat_mount {
+        let profile = cfg
+            .app_invocation
+            .as_ref()
+            .expect("App Chat has a host profile");
+        let chat_profile = profile.app_chat.as_ref().expect("mounted App Chat");
+        let owner = chat.clone();
+        let lease = cfg
+            .session_tool_grant_lease
+            .clone()
+            .ok_or_else(|| BuildError::Orchestrator("App Chat has no grant owner".into()))?;
+        orch_builder
+            .with_session_id(main_session_id)
+            .with_persistent_app_chat()
+            .with_persistent_chat_context(orchestrator::PersistentChatContextConfig {
+                app_id: profile.identity.app_id.clone(),
+                chat_id: chat_profile.chat_id.clone(),
+                source: chat.source.clone(),
+                client: side_query_client.clone(),
+                authorized: Arc::new(move || {
+                    let _stable_chat_owner = &owner;
+                    !lease.is_revoked()
+                }),
+            })
+            .map_err(BuildError::Orchestrator)?
+    } else {
+        orch_builder
+    };
     let orch_builder = configure_boxed_orchestrator(Box::new(orch_builder), |orch_builder| {
+        let orch_builder = if is_app_chat {
+            orch_builder
+        } else {
+            orch_builder.with_file_history(file_history.clone())
+        };
         orch_builder
             // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
             // carry a deterministically-computed `transcript_path`
@@ -5829,7 +5962,6 @@ pub async fn build_with_credential_stack(
             .with_fast_mode(fast_flag.clone())
             // (/rewind) Share the file-history store so the turn loop snapshots each
             // turn + the write tools back up pre-edit content.
-            .with_file_history(file_history.clone())
             .with_vision_delegation(vision_delegation_enabled)
             .with_config_home(cfg.lingxi_home.clone())
             .with_mod_settings_reader(mod_settings_reader.clone())
@@ -5875,8 +6007,12 @@ pub async fn build_with_credential_stack(
             .with_agent_catalog(agent_catalog)
             .with_repo_root_reloader(repo_root_reloader.clone())
             .with_output_style_registry(plugin_output_style_registry.clone())
-            .with_compaction(compactor)
     });
+    let orch_builder = if is_app_chat {
+        orch_builder
+    } else {
+        configure_boxed_orchestrator(orch_builder, |builder| builder.with_compaction(compactor))
+    };
     let orch_builder = configure_boxed_orchestrator(orch_builder, |orch_builder| {
         orch_builder
             .with_cache_safe_slot(cache_safe_slot)
@@ -6128,6 +6264,9 @@ pub async fn build_with_credential_stack(
             default_model_profile.as_deref(),
             selection,
         );
+    }
+    if let Some(chat) = &app_chat_mount {
+        super::app_invocation::chat::restore(&orch, chat).await?;
     }
     let session_start_source = Box::pin(super::hydrate_captured_session_before_start(
         &orch,

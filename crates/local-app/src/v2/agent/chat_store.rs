@@ -37,13 +37,10 @@ struct ChatRecord {
     session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_run_id: Option<String>,
-    #[serde(default)]
     messages: BTreeMap<String, ChatMessageMetadata>,
     /// Canonical AG-UI messages. Data-source bytes are stored as private
     /// content-addressed assets and represented here only by hash and size.
-    #[serde(default)]
     protocol_messages: Vec<StoredProtocolMessage>,
-    #[serde(default)]
     protocol_asset_bytes: u64,
 }
 
@@ -75,7 +72,6 @@ struct ChatIndex {
     chats: BTreeMap<String, ChatRecord>,
     /// Retained even after a user deletes the Chat, so its request ID can
     /// never silently create a second resource.
-    #[serde(default)]
     creations: BTreeMap<String, ChatCreation>,
 }
 
@@ -286,17 +282,11 @@ impl ChatStore {
         if !index_meta.is_file() || index_meta.file_type().is_symlink() {
             return Err(AppError::ChatStorageUncertain);
         }
-        // Deserialize directly as well as inspecting the top-level value so
-        // duplicate fields and other invalid structures are still rejected.
+        // Decode only the current complete format. Missing authority or
+        // history fields are storage errors, never an empty-history upgrade.
         let bytes = fs::read(&index_path)?;
-        let value: Value =
-            serde_json::from_slice(&bytes).map_err(|_| AppError::ChatStorageUncertain)?;
-        let object = value.as_object().ok_or(AppError::ChatStorageUncertain)?;
         let index: ChatIndex =
             serde_json::from_slice(&bytes).map_err(|_| AppError::ChatStorageUncertain)?;
-        if !object.contains_key("creations") {
-            return Err(AppError::ChatLegacyIndexUnsupported);
-        }
         for (id, creation) in &index.creations {
             let fingerprint_valid = creation.fingerprint.as_deref().is_some_and(|value| {
                 value.len() == 64
@@ -1428,18 +1418,6 @@ impl ChatStore {
         self.rehydrate_protocol_message(chat_id, &stored)
     }
 
-    pub fn has_legacy_history_without_protocol(&self, chat_id: &str) -> Result<bool, AppError> {
-        if !safe_id(chat_id) {
-            return Err(invalid("invalid Chat ID"));
-        }
-        let index = self.lock_chat_index(chat_id)?;
-        let record = index
-            .chats
-            .get(chat_id)
-            .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
-        Ok(!record.messages.is_empty() && record.protocol_messages.is_empty())
-    }
-
     /// Rehydrate a bounded official Message page. The returned JSON contains
     /// standard DataSource base64, never asset paths or opaque host IDs.
     pub fn protocol_history_page(
@@ -2313,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_index_preflight_is_read_only_and_distinguishes_missing_creation_index() {
+    fn current_index_requires_creation_and_protocol_fields_without_rewriting_data() {
         let temp = tempfile::tempdir().unwrap();
         let new_root = temp.path().join("new");
         ChatStore::preflight_existing_index(&new_root).unwrap();
@@ -2327,8 +2305,8 @@ mod tests {
         ChatStore::preflight_existing_index(&empty_root).unwrap();
         assert_eq!(fs::read_dir(empty_root.join("chats")).unwrap().count(), 0);
 
-        let legacy_root = temp.path().join("legacy");
-        let store = ChatStore::open(&legacy_root).unwrap();
+        let root = temp.path().join("incomplete");
+        let store = ChatStore::open(&root).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         store
             .create(&id, Some("preserved"), &uuid::Uuid::new_v4().to_string())
@@ -2336,40 +2314,50 @@ mod tests {
         let transcript = store.transcript_path(&id).unwrap();
         fs::write(&transcript, b"original transcript").unwrap();
         drop(store);
-        let index_path = legacy_root.join("chats-index.json");
-        let mut legacy: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
-        legacy.as_object_mut().unwrap().remove("creations");
-        let bytes = serde_json::to_vec(&legacy).unwrap();
-        fs::write(&index_path, &bytes).unwrap();
-        assert!(matches!(
-            ChatStore::preflight_existing_index(&legacy_root),
-            Err(AppError::ChatLegacyIndexUnsupported)
-        ));
-        assert!(matches!(
-            ChatStore::open(&legacy_root),
-            Err(AppError::ChatLegacyIndexUnsupported)
-        ));
-        assert_eq!(fs::read(&index_path).unwrap(), bytes);
-        assert_eq!(fs::read(&transcript).unwrap(), b"original transcript");
+        let index_path = root.join("chats-index.json");
+        let original: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+        for field in [
+            "creations",
+            "messages",
+            "protocolMessages",
+            "protocolAssetBytes",
+        ] {
+            let mut incomplete = original.clone();
+            let object = if field == "creations" {
+                incomplete.as_object_mut().unwrap()
+            } else {
+                incomplete["chats"][&id].as_object_mut().unwrap()
+            };
+            assert!(object.remove(field).is_some());
+            let bytes = serde_json::to_vec(&incomplete).unwrap();
+            fs::write(&index_path, &bytes).unwrap();
+            assert!(
+                matches!(
+                    ChatStore::preflight_existing_index(&root),
+                    Err(AppError::ChatStorageUncertain)
+                ),
+                "{field}"
+            );
+            assert!(
+                matches!(ChatStore::open(&root), Err(AppError::ChatStorageUncertain)),
+                "{field}"
+            );
+            assert_eq!(fs::read(&index_path).unwrap(), bytes);
+            assert_eq!(fs::read(&transcript).unwrap(), b"original transcript");
+        }
 
-        // A missing marker must not be silently accepted even for an empty
-        // older index, and a failed open must not create a chats directory.
-        let empty_legacy_root = temp.path().join("empty-legacy");
-        fs::create_dir(&empty_legacy_root).unwrap();
+        let missing_creation_root = temp.path().join("missing-creations");
+        fs::create_dir(&missing_creation_root).unwrap();
         fs::write(
-            empty_legacy_root.join("chats-index.json"),
+            missing_creation_root.join("chats-index.json"),
             b"{\"chats\":{}}",
         )
         .unwrap();
         assert!(matches!(
-            ChatStore::preflight_existing_index(&empty_legacy_root),
-            Err(AppError::ChatLegacyIndexUnsupported)
+            ChatStore::open(&missing_creation_root),
+            Err(AppError::ChatStorageUncertain)
         ));
-        assert!(matches!(
-            ChatStore::open(&empty_legacy_root),
-            Err(AppError::ChatLegacyIndexUnsupported)
-        ));
-        assert!(!empty_legacy_root.join("chats").exists());
+        assert!(!missing_creation_root.join("chats").exists());
     }
 
     #[test]
@@ -2814,39 +2802,6 @@ mod tests {
                 "history without a confirmed successful task must remain untrusted"
             );
         }
-    }
-
-    #[test]
-    fn metadata_only_legacy_history_stays_unavailable_to_protocol_turns() {
-        let root = tempfile::tempdir().unwrap();
-        let store = ChatStore::open(root.path()).unwrap();
-        let chat = store
-            .create(
-                &uuid::Uuid::new_v4().to_string(),
-                None,
-                &uuid::Uuid::new_v4().to_string(),
-            )
-            .unwrap();
-        store
-            .record_message(
-                &chat.chat_id,
-                ChatMessageMetadata {
-                    message_id: "assistant-id".into(),
-                    run_id: "missing-task".into(),
-                    role: ChatRole::Assistant,
-                    created_at: 1,
-                    attachments: Vec::new(),
-                },
-            )
-            .unwrap();
-        drop(store);
-
-        let recovered = ChatStore::open(root.path()).unwrap();
-        recovered.reconcile_startup(&BTreeMap::new()).unwrap();
-        assert_eq!(recovered.get(&chat.chat_id).unwrap().state, ChatState::Idle);
-        assert!(recovered
-            .has_legacy_history_without_protocol(&chat.chat_id)
-            .unwrap());
     }
 
     #[test]

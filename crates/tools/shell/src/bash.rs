@@ -2619,6 +2619,10 @@ static SIDE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 
 #[async_trait]
 impl Tool for BashTool {
+    fn supports_persistent_chat(&self) -> bool {
+        self.ctx.process.supports_inline_foreground()
+    }
+
     fn name(&self) -> &str {
         TOOL_NAME
     }
@@ -2633,7 +2637,7 @@ impl Tool for BashTool {
     /// same switch — so a session that flips the env var sees a consistent
     /// prompt + schema pair.
     fn input_schema(&self) -> &Utf16JsonProjection {
-        if self.ctx.side_chat {
+        if self.ctx.requires_inline_foreground() {
             &SIDE_INPUT_SCHEMA
         } else if crate::prompt::background_tasks_disabled() {
             &INPUT_SCHEMA_NO_BACKGROUND
@@ -2738,7 +2742,7 @@ impl Tool for BashTool {
     /// threshold in claude-code — and `M0u`'s `AKr` ceiling would have clamped
     /// it to 50 000 even if it did.
     fn persistence_threshold(&self) -> Option<usize> {
-        Some(if self.ctx.side_chat {
+        Some(if self.ctx.requires_inline_foreground() {
             usize::MAX
         } else {
             MAX_TOOL_OUTPUT_LENGTH
@@ -2746,7 +2750,7 @@ impl Tool for BashTool {
     }
 
     fn persistence_threshold_ceiling(&self) -> Option<usize> {
-        self.ctx.side_chat.then_some(usize::MAX)
+        self.ctx.requires_inline_foreground().then_some(usize::MAX)
     }
 
     fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
@@ -2956,8 +2960,8 @@ impl Tool for BashTool {
         &self,
         opts: &PromptOptions,
     ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-        if self.ctx.side_chat {
-            return "Execute a shell command in the foreground. The default and maximum timeout are 120000 ms. Background execution and promotion are unavailable. Cancellation and timeout stop the command and wait for its process tree to be reaped. Prefer absolute paths; working-directory changes affect only this Side Chat.".into();
+        if self.ctx.requires_inline_foreground() {
+            return "Execute a shell command in the foreground. The default and maximum timeout are 120000 ms. Background execution and promotion are unavailable. Cancellation and timeout stop the command and wait for its process tree to be reaped. Prefer absolute paths; working-directory changes affect only this Chat.".into();
         }
         // BASH.6/BASH.7 — 1:1 with claude-code
         // `getSimplePrompt(model) = Dh(model) ? qUp(/*CONCISE*/) : TXa(/*VERBOSE*/)`.
@@ -3015,7 +3019,7 @@ impl Tool for BashTool {
         // (`run_in_background: true`) does not exist, so the oracle stops
         // blocking rather than dead-ending the model.
         if sleep_block_enabled()
-            && !self.ctx.side_chat
+            && !self.ctx.requires_inline_foreground()
             && !crate::prompt::background_tasks_disabled()
             && !run_bg
         {
@@ -3046,6 +3050,13 @@ impl Tool for BashTool {
         // non-streaming caller, in which case the run is awaited directly (no
         // behavior change).
         let cancel = ctx.cancel.clone();
+        if self.ctx.requires_inline_foreground()
+            && cancel
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(ToolError::Aborted);
+        }
 
         let cmd_str = input
             .string_at("/command")
@@ -3068,7 +3079,7 @@ impl Tool for BashTool {
         //
         // Every failure answers `None` and the command proceeds: a diff is a
         // convenience, and a shell command must never fail because git did.
-        let edit_diff_eligible = !self.ctx.side_chat
+        let edit_diff_eligible = !self.ctx.requires_inline_foreground()
             && !input
                 .at_pointer("/run_in_background")
                 .and_then(|value| value.as_bool())
@@ -3106,7 +3117,7 @@ impl Tool for BashTool {
         // claude-code `BashTool.tsx` sends the timeout as `timeout` (ms). Resolve
         // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
         // finite number > 0, else default), then clamp the execution budget.
-        if self.ctx.side_chat
+        if self.ctx.requires_inline_foreground()
             && input
                 .at_pointer("/run_in_background")
                 .and_then(|value| value.as_bool())
@@ -3116,12 +3127,15 @@ impl Tool for BashTool {
                 "Background shell execution is unavailable in Side Chat".into(),
             ));
         }
-        if self.ctx.side_chat && ctx.agent_id.is_none() && self.ctx.session_id.is_none() {
+        if self.ctx.requires_inline_foreground()
+            && ctx.agent_id.is_none()
+            && self.ctx.session_id.is_none()
+        {
             return Err(ToolError::InvalidInput(
                 "Side Chat shell owner is absent".into(),
             ));
         }
-        let timeout_ms = if self.ctx.side_chat {
+        let timeout_ms = if self.ctx.requires_inline_foreground() {
             input_timeout_ms(&input).unwrap_or(120_000).min(120_000)
         } else {
             resolve_timeout_ms(&input)
@@ -3134,13 +3148,13 @@ impl Tool for BashTool {
             .at_pointer("/run_in_background")
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
-            && !self.ctx.side_chat
+            && !self.ctx.requires_inline_foreground()
             && !crate::prompt::background_tasks_disabled();
         // Whether exceeding the timeout may move this command to the background
         // rather than kill it (claude-code `dn = !Dl() && $es(command)`). A
         // command whose first statement starts with `sleep` is excluded: the
         // point of a sleep is to finish, so backgrounding it just hides it.
-        let can_auto_background = !self.ctx.side_chat
+        let can_auto_background = !self.ctx.requires_inline_foreground()
             && !crate::prompt::background_tasks_disabled()
             && !first_statement_is_sleep(&cmd_str);
         // BASH.5: optional `dangerouslyDisableSandbox` override.
@@ -3405,7 +3419,7 @@ impl Tool for BashTool {
             let sandboxed =
                 sandboxed.with_process_owner(ctx.agent_id.map(|id| id.to_string()).or_else(|| {
                     self.ctx
-                        .side_chat
+                        .requires_inline_foreground()
                         .then(|| self.ctx.session_id.map(|id| id.to_string()))
                         .flatten()
                 }));
@@ -3530,13 +3544,15 @@ impl Tool for BashTool {
                     .map(ToString::to_string)
                     .or_else(|| {
                         self.ctx
-                            .side_chat
+                            .requires_inline_foreground()
                             .then(|| self.ctx.session_id.map(|id| id.to_string()))
                             .flatten()
                     })
                     .map(|owner| {
                         if self.ctx.side_chat {
                             format!("side:{owner}")
+                        } else if self.ctx.is_persistent_app_chat() {
+                            format!("local-app-chat:{owner}")
                         } else {
                             owner
                         }
@@ -3549,7 +3565,7 @@ impl Tool for BashTool {
         // does the same, minting one identity per shell command in `vV`
         // regardless of whether it is ever backgrounded — and settle it as
         // completed when the command actually finishes in the foreground.
-        let fg_bound = if self.ctx.side_chat {
+        let fg_bound = if self.ctx.requires_inline_foreground() {
             None
         } else {
             self.allocate_task_identity().await
@@ -3602,56 +3618,121 @@ impl Tool for BashTool {
         // background (returning `MovedToBackground`) rather than killing it; the
         // default trait impl still maps a normal finish to `Completed` and a
         // timeout to `Err(Timeout)`, preserving the interrupted-result fallback.
-        let run_fut = self.ctx.process.run_foreground_with_output_limit(
-            &sandboxed,
-            if self.ctx.side_chat {
-                None
+        let cleanup_owner = sandboxed.process_owner().map(str::to_owned);
+        let run_fut = async {
+            if self.ctx.is_persistent_app_chat() {
+                self.ctx
+                    .process
+                    .run_inline_foreground(
+                        &sandboxed,
+                        lingxi_core::host::tool_invoker::LOCAL_APP_CHAT_MAX_SHELL_OUTPUT_BYTES,
+                    )
+                    .await
             } else {
-                Some(bash_max_output_length())
-            },
-        );
-        tokio::pin!(run_fut);
-        let run_result = match &cancel {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => {
+                self.ctx
+                    .process
+                    .run_foreground_with_output_limit(
+                        &sandboxed,
                         if self.ctx.side_chat {
-                            if let Some(owner) = ctx.agent_id.as_ref().map(ToString::to_string).or_else(|| self.ctx.session_id.map(|id| id.to_string())) {
-                                loop {
-                                    self.ctx.process.kill_owner_processes(&format!("side:{owner}")).await;
-                                    tokio::select! {
-                                        result = &mut run_fut => {
-                                            if let Err(error) = result {
-                                                if self.ctx.note_side_chat_cleanup_failure(&error.to_string()) { return Err(ToolError::Internal(error.to_string())); }
+                            None
+                        } else {
+                            Some(bash_max_output_length())
+                        },
+                    )
+                    .await
+            }
+        };
+        tokio::pin!(run_fut);
+        // Register the owned child before racing cancellation. Otherwise a
+        // cancellation selected before the first poll could spawn new work
+        // only while trying to drain it after the kill request.
+        let first_result = if self.ctx.requires_inline_foreground() {
+            if cancel
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
+                self.ctx.sandbox_runner.cleanup_after_command().await;
+                return Err(ToolError::Aborted);
+            }
+            std::future::poll_fn(|cx| match std::future::Future::poll(run_fut.as_mut(), cx) {
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+                std::task::Poll::Pending => std::task::Poll::Ready(None),
+            })
+            .await
+        } else {
+            None
+        };
+        let run_result = if let Some(result) = first_result {
+            result
+        } else {
+            match &cancel {
+                Some(token) => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => {
+                            if self.ctx.requires_inline_foreground() {
+                                if let Some(owner) = cleanup_owner.as_ref() {
+                                    loop {
+                                        self.ctx.process.kill_owner_processes(owner).await;
+                                        tokio::select! {
+                                            result = &mut run_fut => {
+                                                if let Ok(lingxi_core::host::ForegroundRunResult {
+                                                    outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(handle), ..
+                                                }) = &result {
+                                                    let _ = self.ctx.process.kill(handle).await;
+                                                    let error = format!("{} shell detached during cancellation; reap is unconfirmed", lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE);
+                                                    self.ctx.note_side_chat_cleanup_failure(&error);
+                                                    return Err(ToolError::Internal(error));
+                                                }
+                                                if let Err(error) = result {
+                                                    if self.ctx.note_side_chat_cleanup_failure(&error.to_string()) { return Err(ToolError::Internal(error.to_string())); }
+                                                }
+                                                break;
                                             }
-                                            break;
+                                            () = tokio::time::sleep(Duration::from_millis(10)) => {}
                                         }
-                                        () = tokio::time::sleep(Duration::from_millis(10)) => {}
                                     }
                                 }
+                                self.ctx.sandbox_runner.cleanup_after_command().await;
+                                return Err(ToolError::Aborted);
                             }
-                            self.ctx.sandbox_runner.cleanup_after_command().await;
-                            return Err(ToolError::Aborted);
-                        }
-                        // `turnAbortBackgrounds: !Dl()` applies even before the
-                        // 2 s UI row is armed. Keep polling the same runner so
-                        // detachment does not drop (and kill) its OS child.
-                        if !self.ctx.side_chat && !crate::prompt::background_tasks_disabled() {
-                            if let Some(notify) = &on_demand {
-                                let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
-                                notify.notify_one();
-                                run_fut.await
+                            // `turnAbortBackgrounds: !Dl()` applies even before the
+                            // 2 s UI row is armed. Keep polling the same runner so
+                            // detachment does not drop (and kill) its OS child.
+                            if !self.ctx.requires_inline_foreground() && !crate::prompt::background_tasks_disabled() {
+                                if let Some(notify) = &on_demand {
+                                    let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+                                    notify.notify_one();
+                                    run_fut.await
+                                } else { return Err(ToolError::Aborted); }
                             } else { return Err(ToolError::Aborted); }
-                        } else { return Err(ToolError::Aborted); }
+                        }
+                        res = &mut run_fut => res,
                     }
-                    res = &mut run_fut => res,
                 }
+                None => run_fut.await,
             }
-            None => run_fut.await,
         };
         if let Err(error) = &run_result {
             self.ctx.note_side_chat_cleanup_failure(&error.to_string());
+        }
+        if self.ctx.requires_inline_foreground() {
+            if let Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(handle),
+                ..
+            }) = &run_result
+            {
+                let _ = self.ctx.process.kill(handle).await;
+                if let Some(owner) = cleanup_owner.as_ref() {
+                    self.ctx.process.kill_owner_processes(owner).await;
+                }
+                let error = format!(
+                    "{} shell detached unexpectedly; reap is unconfirmed",
+                    lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                );
+                self.ctx.note_side_chat_cleanup_failure(&error);
+                return Err(ToolError::Internal(error));
+            }
         }
         // The wrapped command has finished: tear down any per-command sandbox
         // state (e.g. bwrap mount points). No-op for the default

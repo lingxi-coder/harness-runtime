@@ -4,17 +4,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProjectRef {
     DesktopPath { path: String },
     MobileProject { project_id: String },
 }
 
-/// Stable host binding for a mutable authoring workspace. Optional binding
-/// fields let schema-2 records from before this contract load so the host can
-/// offer an explicit rebind; they are never accepted by `bindAuthoring`.
+/// Stable host binding for a mutable authoring workspace. A partial binding
+/// needs an explicit native bind before the host can resume authoring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthoringRef {
     pub source_directory: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,24 +179,6 @@ pub struct AuthoringResolution {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authoring_session_id: Option<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyArchive {
-    pub path: String,
-    pub kind: String,
-    pub status: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyEntry {
-    pub legacy_id: String,
-    pub name: String,
-    pub summary: String,
-    pub revision: u64,
-    pub source_path: String,
-    pub status: String,
-}
-
 /// Canonical library operations. Hosts additionally implement `start`, `stop`,
 /// `restart`, and `repair`; those cannot succeed without a real process adapter.
 #[derive(Debug, Clone, Deserialize)]
@@ -302,16 +287,6 @@ pub enum LibraryRequest {
         #[serde(rename = "appId")]
         app_id: String,
         authoring: AuthoringRef,
-    },
-    LegacyArchives {},
-    LegacyEntries {},
-    ImportLegacy {
-        #[serde(rename = "legacyId")]
-        legacy_id: String,
-        #[serde(rename = "sourcePath")]
-        source_path: String,
-        #[serde(default)]
-        authoring: Option<AuthoringRef>,
     },
     RestoreAuthoring {
         #[serde(rename = "appId")]

@@ -134,6 +134,7 @@ fn builder(
     )
     .with_session_id(session_id)
     .with_jsonl_writer(writer)
+    .with_persistent_app_chat()
 }
 
 fn answer(text: String) -> ConversationMessage {
@@ -166,6 +167,23 @@ async fn fixture_seed_variant(
     budget: Option<u64>,
     historical_thinking: bool,
     thinking_only_tail: bool,
+) -> ChatFixture {
+    fixture_seed_contents(
+        media_in_prefix,
+        budget,
+        historical_thinking,
+        thinking_only_tail,
+        false,
+    )
+    .await
+}
+
+async fn fixture_seed_contents(
+    media_in_prefix: bool,
+    budget: Option<u64>,
+    historical_thinking: bool,
+    thinking_only_tail: bool,
+    tool_rounds: bool,
 ) -> ChatFixture {
     let root = tempfile::tempdir().unwrap();
     let chat_id = uuid::Uuid::new_v4().to_string();
@@ -217,9 +235,50 @@ async fn fixture_seed_variant(
                         data: "AQID".into(),
                     },
                 });
+                content.push(ContentBlock::Document {
+                    source: lingxi_core::types::DocumentSource::Base64 {
+                        media_type: "application/pdf".into(),
+                        data: "JVBERi0xLjcK".into(),
+                    },
+                });
             }
         }
         seed.append_external_history_message(user).await;
+        if tool_rounds {
+            let id = lingxi_core::types::ToolUseId::new();
+            let mut tool_call = answer(String::new());
+            if let ConversationMessage::Assistant {
+                content,
+                stop_reason,
+                ..
+            } = &mut tool_call
+            {
+                *content = vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: "Read".into(),
+                    input: Utf16JsonProjection::parse(&format!(
+                        r#"{{"file_path":"round-{round}.txt"}}"#
+                    ))
+                    .unwrap(),
+                    provider_id: Some(format!("earlier-call-{round}")),
+                }];
+                // External assistant rows use the synthetic transcript form;
+                // actual provider tool-use turns have separate driver tests.
+                *stop_reason = Some("stop_sequence".into());
+            }
+            seed.append_external_history_message(tool_call).await;
+            let mut tool_result = ConversationMessage::user(MessageId::new(), String::new());
+            if let ConversationMessage::User { content, .. } = &mut tool_result {
+                *content = vec![ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content: format!("read evidence for round {round}").into(),
+                    is_error: Some(false),
+                    provider_tool_use_id: Some(format!("earlier-call-{round}")),
+                    content_blocks: (round == 0).then(|| Utf16JsonProjection::parse("[]").unwrap()),
+                }];
+            }
+            seed.append_external_history_message(tool_result).await;
+        }
         let mut assistant = answer(format!("old answer {round}: {}", "a".repeat(2000)));
         if historical_thinking {
             if let ConversationMessage::Assistant { content, .. } = &mut assistant {
@@ -250,6 +309,29 @@ async fn fixture_seed_variant(
             }
         }
         seed.append_external_history_message(assistant).await;
+    }
+    if tool_rounds {
+        let captured = seed_writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .unwrap();
+        let replayed = crate::resume::replay_captured_session(
+            path.clone(),
+            captured.source().to_owned(),
+            session::jsonl::route_lines(captured.source()),
+            session_id.as_uuid(),
+        )
+        .unwrap();
+        let live = seed.snapshot_history().await;
+        for (current, restored) in live.iter().zip(&replayed.state.history) {
+            if current != restored {
+                panic!(
+                    "tool fixture mismatch: live={:?}, restored={:?}",
+                    current, restored
+                );
+            }
+        }
+        assert_eq!(live.len(), replayed.state.history.len());
     }
     let source = seed.verify_persistent_chat_checkpoint(true).await.unwrap();
     drop(seed);
@@ -540,11 +622,27 @@ async fn an_oversized_current_input_fails_without_installing_a_useless_summary()
 }
 
 #[tokio::test]
-async fn protected_attachment_prefix_fails_without_losing_its_bytes() {
+async fn older_attachments_are_visible_to_the_summary_and_remain_canonical() {
     let fixture = fixture(true, Some(8000)).await;
-    let result = prepare_current(&fixture).await;
-    assert!(result.unwrap_err().to_string().contains(UNSUPPORTED));
-    assert!(fixture.summary.calls.lock().await.is_empty());
+    let original = fixture.orch.snapshot_history().await;
+    let projected = prepare_current(&fixture).await.unwrap();
+    let calls = fixture.summary.calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    let wire = serde_json::to_string(&calls[0].messages).unwrap();
+    assert!(wire.contains("image/png") && wire.contains("AQID"));
+    assert!(wire.contains("application/pdf") && wire.contains("JVBERi0xLjcK"));
+    assert!(calls[0].tools.is_empty());
+    assert!(!serde_json::to_string(&projected)
+        .unwrap()
+        .contains("JVBERi0xLjcK"));
+    let canonical = fixture.orch.snapshot_history().await;
+    assert_eq!(&canonical[..original.len()], original.as_slice());
+    assert_eq!(canonical.len(), original.len() + 1);
+    assert!(canonical
+        .last()
+        .unwrap()
+        .text_content()
+        .starts_with("current-only"));
     let captured = fixture
         .writer
         .capture_persistent_chat_snapshot(false)
@@ -556,6 +654,163 @@ async fn protected_attachment_prefix_fails_without_losing_its_bytes() {
             ContentBlock::Image { source: lingxi_core::types::ImageSource::Base64 { data, .. } } if data == "AQID")),
         _ => false,
     }));
+    assert_eq!(replayed.state.history, canonical);
+}
+
+#[tokio::test]
+async fn tool_results_do_not_split_user_rounds_or_prevent_later_chat_compaction() {
+    let fixture = fixture_seed_contents(false, Some(8000), false, false, true).await;
+    let original = fixture.orch.snapshot_history().await;
+    let projected = prepare_current(&fixture).await.unwrap();
+    let calls = fixture.summary.calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    let summary_wire = serde_json::to_string(&calls[0].messages).unwrap();
+    assert!(summary_wire.contains("read evidence for round 3"));
+    assert!(!summary_wire.contains("read evidence for round 4"));
+    assert!(calls[0].tools.is_empty());
+    assert!(!calls[0].messages.iter().any(|message| match message {
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => content.iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+        )),
+        _ => true,
+    }));
+    drop(calls);
+    let projected_wire = serde_json::to_string(&projected).unwrap();
+    assert!(!projected_wire.contains("earlier-call-3"));
+    assert!(projected_wire.contains("earlier-call-4") && projected_wire.contains("earlier-call-5"));
+    assert_eq!(
+        &fixture.orch.snapshot_history().await[..original.len()],
+        original.as_slice()
+    );
+    // The summary itself is intentionally virtual. Canonical closed tool
+    // rounds remain independently replayable and keep their exact call IDs.
+    fixture
+        .orch
+        .append_external_history_message(answer("current round completed".into()))
+        .await;
+    let capture = fixture
+        .orch
+        .verify_persistent_chat_checkpoint(true)
+        .await
+        .unwrap();
+    let replayed = ConversationOrchestrator::replay_persistent_chat_snapshot(&capture).unwrap();
+    assert_eq!(
+        &replayed.state.history[..original.len()],
+        original.as_slice()
+    );
+    let expected = fixture
+        .orch
+        .persistent_chat_context
+        .as_ref()
+        .unwrap()
+        .projection(replayed.state.history.clone())
+        .unwrap();
+    let ChatFixture {
+        _root,
+        path,
+        fs,
+        orch,
+        writer,
+        main,
+        summary,
+        allowed,
+        ..
+    } = fixture;
+    drop(orch);
+    drop(writer);
+    let reopened = Arc::new(
+        JsonlWriter::open_persistent_chat(path, fs, Some(capture.checkpoint().clone()))
+            .await
+            .unwrap(),
+    );
+    let (app_id, chat_id) = owner_from_path(capture.path()).unwrap();
+    let restored = builder(
+        _root.path(),
+        SessionId::from_uuid(capture.session_id()),
+        reopened,
+        main,
+        Some(8000),
+    )
+    .with_persistent_chat_context(PersistentChatContextConfig {
+        app_id,
+        chat_id,
+        source: Some(capture),
+        client: summary.clone(),
+        authorized: Arc::new(move || allowed.load(Ordering::Acquire)),
+    })
+    .unwrap();
+    assert_eq!(
+        restored
+            .persistent_chat_context
+            .as_ref()
+            .unwrap()
+            .projection(replayed.state.history)
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        summary.calls.lock().await.len(),
+        1,
+        "cold restore never replays the summary, model or tools"
+    );
+}
+
+#[test]
+fn summary_quotes_tools_without_replaying_calls_or_erasing_inline_media() {
+    use lingxi_core::types::{DocumentSource, ImageSource, ToolUseId};
+    let tool_id = ToolUseId::new();
+    let call = ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::ToolUse {
+            id: tool_id.clone(),
+            name: "mcp__nutrition__lookup".into(),
+            input: Utf16JsonProjection::parse(r#"{"query":"apple"}"#).unwrap(),
+            provider_id: Some("provider-call-1".into()),
+        }],
+        stop_reason: Some("tool_use".into()),
+        resumable: None,
+        per_turn_effort: None,
+    };
+    let mut result = ConversationMessage::user(MessageId::new(), String::new());
+    if let ConversationMessage::User { content, .. } = &mut result {
+        *content = vec![ContentBlock::ToolResult {
+            tool_use_id: tool_id,
+            content: "tool text has an unpaired unit: \u{fffd}".into(),
+            is_error: Some(false),
+            provider_tool_use_id: Some("provider-call-1".into()),
+            content_blocks: Some(Utf16JsonProjection::parse(r#"[{"type":"text","text":"nutrition evidence \ud800"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjcK"}}]"#).unwrap()),
+        }];
+    }
+    assert!(
+        !starts_user_round(&result),
+        "a tool reply is not a new user round"
+    );
+    let summary = summary_history(vec![call, result]).unwrap();
+    assert!(summary
+        .iter()
+        .all(|message| matches!(message, ConversationMessage::User { .. })));
+    let blocks = summary
+        .iter()
+        .flat_map(|message| match message {
+            ConversationMessage::User { content, .. } => content.iter(),
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>();
+    assert!(!blocks.iter().any(|block| matches!(
+        block,
+        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+    )));
+    assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { data, .. } } if data == "AQID")));
+    assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Document { source: DocumentSource::Base64 { data, .. } } if data == "JVBERi0xLjcK")));
+    let wire = serde_json::to_string(&summary).unwrap();
+    assert!(wire.contains("mcp__nutrition__lookup") && wire.contains("apple"));
+    assert!(blocks.iter().any(|block| matches!(block, ContentBlock::TextJsUtf16 { utf16_code_units, .. } if utf16_code_units.last() == Some(&0xd800))), "historical tool text retains exact UTF-16");
+    assert!(
+        !wire.contains("provider-call-1"),
+        "no provider tool continuation is replayed"
+    );
 }
 
 #[tokio::test]

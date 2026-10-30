@@ -169,8 +169,8 @@ pub struct Input {
     pub prompt: String,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
-    /// Ordered normalized parts used by the AG-UI adapter. The older private
-    /// prompt/attachments form remains an internal boundary input only.
+    /// Ordered content produced by the public AG-UI normalizer. Native model
+    /// adapters also accept the bounded private prompt/attachments DTO.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_parts: Vec<InputContentPart>,
     #[serde(default)]
@@ -221,7 +221,7 @@ where
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskResult {
     #[serde(default)]
     pub text: String,
@@ -343,25 +343,6 @@ pub struct ChatSummary {
 pub enum ChatRole {
     User,
     Assistant,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ChatMessage {
-    pub message_id: String,
-    pub run_id: String,
-    pub role: ChatRole,
-    pub text: String,
-    pub created_at: u64,
-    pub attachments: Vec<AttachmentMetadata>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ChatHistory {
-    pub messages: Vec<ChatMessage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -681,7 +662,6 @@ struct Ledger {
     epoch: u64,
     grants: BTreeMap<String, Grant>,
     runs: BTreeMap<String, Record>,
-    #[serde(default)]
     chat_recoveries: BTreeMap<String, recovery::ChatRecoveryRecord>,
 }
 
@@ -1027,6 +1007,9 @@ pub fn error_message(code: &str) -> &'static str {
         "skill_unavailable" | "skill_integrity_failed" => {
             "A selected release Skill file is unavailable or failed integrity verification. Publish a new release or choose another Skill."
         }
+        "skill_scope_limit_exceeded" => {
+            "Too much Skill data is retained by active or unfinished tasks. Wait for those tasks and cleanup to finish, or select fewer or smaller Skills, before starting another request."
+        }
         "invalid_output_schema" | "unsupported_schema_dialect" => {
             "The result schema must be a valid Draft-7 object with local references only."
         }
@@ -1048,6 +1031,30 @@ pub fn error_message(code: &str) -> &'static str {
         }
         "chat_deferred_tools_pending" => {
             "This Chat contains an unfinished tool operation. Review its effects before continuing; it will not be replayed automatically. Earlier Chat history remains available."
+        }
+        "chat_context_unavailable" => {
+            "The host could not prepare a verified model context for this Chat. Reopen the Chat and review its history before retrying."
+        }
+        "chat_context_compaction_unsupported" => {
+            "This Chat cannot safely shorten the history required for this request. Reduce the new input, choose a model with a larger context limit, or start a new Chat."
+        }
+        "chat_context_limit_exceeded" => {
+            "This Chat request exceeds its available model context limit. Use a smaller request or fewer attachments, choose a model with a larger context limit, or start a new Chat."
+        }
+        "chat_context_budget_unknown" => {
+            "The host could not determine the selected model's context limit. Check the model configuration in native Agent settings or choose another model."
+        }
+        "chat_context_authority_revoked" => {
+            "This Chat request was cancelled or its authorization changed. Review its status and any tool effects, then check native Agent permissions before starting another request."
+        }
+        "chat_tool_unsupported" => {
+            "The requested tool is not supported in persistent App Chats. Choose another tool or start an independent Agent request."
+        }
+        "chat_transcript_external_result_unmanaged" => {
+            "This Chat contains a tool result or media reference the host cannot safely restore. Review the task and saved history before choosing another tool or starting a new Chat."
+        }
+        "local_app_chat_inline_result_too_large" => {
+            "A tool returned more data than this Chat can retain. Request a smaller result or fewer files, and review the tool's effects before starting another run."
         }
         "chat_transcript_unavailable" => {
             "The Chat history could not be verified. Check the host status and saved data before continuing. The task will not be replayed automatically."

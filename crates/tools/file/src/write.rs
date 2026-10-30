@@ -244,6 +244,10 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 
 #[async_trait]
 impl Tool for FileWriteTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         TOOL_NAME
     }

@@ -72,9 +72,7 @@ impl ProjectLocalAppHost for MobileProjectAppHost {
                 let mut temporary = None;
                 let source = if let Some(staged) = input["staged_path"].as_str() { staged.to_owned() }
                 else if let Some(html) = input["html"].as_str() {
-                    let report = local_app::checks::check_document(html);
-                    // The host does not silently publish malformed documents.
-                    if !report.errors.is_empty() { return Err(report.errors.join("; ")); }
+                    local_app::v2::validate_inline_document(html)?;
                     let path = self.config_home.join("local-app-imports").join(uuid::Uuid::new_v4().simple().to_string());
                     let guard = ImportDirectory(path.clone());
                     std::fs::create_dir_all(&path).map_err(|error|error.to_string())?;
@@ -109,6 +107,69 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tool_ui::desktop_local_app::ProjectLocalAppHost;
+
+    #[tokio::test]
+    async fn inline_publication_uses_only_the_current_schema_two_library() {
+        let root = tempfile::tempdir().unwrap();
+        let service =
+            MobileLocalAppServiceHandle::new(root.path().join("config"), None, "android".into())
+                .unwrap();
+        let host = MobileProjectAppHost {
+            service: service.clone(),
+            config_home: service.config_home.clone(),
+            catalog: Arc::new(std::sync::OnceLock::new()),
+        };
+        let html = "<!doctype html><html><body>Current static source</body></html>";
+        let result = host
+            .request(json!({
+                "action":"publish", "name":"Current source", "html":html
+            }))
+            .await
+            .unwrap();
+        let app_id = result["id"].as_str().unwrap();
+        assert_eq!(result["release"]["manifest"]["schema"], 2);
+        assert_eq!(service.library.list().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(
+                service
+                    .library
+                    .source_path(app_id, 1)
+                    .unwrap()
+                    .join("index.html")
+            )
+            .unwrap(),
+            html
+        );
+        assert!(!service.config_home.join("local-apps/index.json").exists());
+        assert!(
+            std::fs::read_dir(service.config_home.join("local-app-imports"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_inline_document_fails_before_creating_any_staged_source() {
+        let root = tempfile::tempdir().unwrap();
+        let service =
+            MobileLocalAppServiceHandle::new(root.path().join("config"), None, "android".into())
+                .unwrap();
+        let host = MobileProjectAppHost {
+            service: service.clone(),
+            config_home: service.config_home.clone(),
+            catalog: Arc::new(std::sync::OnceLock::new()),
+        };
+        assert!(host
+            .request(json!({
+                "action":"publish", "name":"Fragment", "html":"<div>fragment</div>"
+            }))
+            .await
+            .is_err());
+        assert!(service.library.list().unwrap().is_empty());
+        assert!(!service.config_home.join("local-app-imports").exists());
+        assert!(!service.config_home.join("local-apps/index.json").exists());
+    }
 
     #[tokio::test]
     async fn staged_publish_uses_trusted_original_source_for_pending_authoring_lookup() {

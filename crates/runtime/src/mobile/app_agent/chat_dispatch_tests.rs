@@ -144,6 +144,7 @@ async fn dispatch_test_orchestrator(
     )
     .with_session_id(session_id)
     .with_jsonl_writer(writer)
+    .with_persistent_app_chat()
     .with_persistent_chat_context(orchestrator::PersistentChatContextConfig {
         app_id: control.owner.app_id.clone(),
         chat_id: chat_id.clone(),

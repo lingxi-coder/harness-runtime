@@ -2339,7 +2339,11 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             agent_name: None,
             team_name: None,
             origin_session_id: None,
-            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: if self.is_persistent_app_chat() {
+                lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat
+            } else {
+                lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary
+            },
             trusted_effective_permission_mode: None,
             classifier_only_review: None,
             instruction_context: Some(self.instruction_context_snapshot().await),
@@ -3894,7 +3898,11 @@ pub(crate) async fn streaming_tool_context_base(
         team_name: None,
         origin_session_id: None,
         instruction_context: Some(orch.instruction_context_snapshot().await),
-        tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+        tool_execution_policy: if orch.is_persistent_app_chat() {
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat
+        } else {
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary
+        },
         trusted_effective_permission_mode: None,
         classifier_only_review: None,
         content_replacement_state: None,
@@ -4988,6 +4996,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             Some(_) => None,
             None => orch.find_tool_for_dispatch(name),
         };
+        let tool_handle = tool_handle
+            .filter(|tool| !orch.is_persistent_app_chat() || tool.supports_persistent_chat());
         let Some(tool_handle) = tool_handle else {
             // Shared builder so this parity-critical string lives in one place
             // (also used by the streaming executor's add_tool).
@@ -6921,6 +6931,56 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // terminal tool result. The JoinSet aborts both tasks automatically if
         // this dispatch future is dropped by a parent turn/runtime shutdown.
         while event_tasks.join_next().await.is_some() {}
+        let tool_outcome = if orch.is_persistent_app_chat() {
+            tool_outcome.and_then(|result| {
+                let valid = (|| -> Result<(), String> {
+                    tool_api::persistent_chat::validate_inline_size(&result.data)
+                        .map_err(str::to_owned)?;
+                    if tool_handle.is_mcp() && result.data.array_len("").is_some() {
+                        tool_api::persistent_chat::validate_inline_blocks(&result.data)
+                            .map_err(str::to_owned)?;
+                    }
+                    if let Some(text) = &result.model_content {
+                        tool_api::persistent_chat::validate_inline_size(text)
+                            .map_err(str::to_owned)?;
+                    }
+                    if let Some(meta) = &result.mcp_meta {
+                        tool_api::persistent_chat::validate_inline_size(meta)
+                            .map_err(str::to_owned)?;
+                    }
+                    if serde_json::to_vec(&result.new_messages)
+                        .map_err(|error| error.to_string())?
+                        .len()
+                        > lingxi_core::host::tool_invoker::LOCAL_APP_CHAT_MAX_INLINE_BYTES
+                    {
+                        return Err(tool_api::persistent_chat::INLINE_RESULT_TOO_LARGE.into());
+                    }
+                    ConversationOrchestrator::validate_persistent_chat_history(
+                        &result.new_messages,
+                    )?;
+                    Ok(())
+                })();
+                valid
+                    .map(|()| result)
+                    .map_err(|error| tool_api::ToolError::InvalidInput(error.into()))
+            })
+        } else {
+            tool_outcome
+        };
+        let tool_outcome = match tool_outcome {
+            Err(error)
+                if orch.is_persistent_app_chat()
+                    && tool_api::persistent_chat::validate_inline_size(
+                        &error.model_facing_message(),
+                    )
+                    .is_err() =>
+            {
+                Err(tool_api::ToolError::InvalidInput(
+                    tool_api::persistent_chat::INLINE_RESULT_TOO_LARGE.into(),
+                ))
+            }
+            outcome => outcome,
+        };
         // Persist the execution fact before PostToolUse can replace its output.
         // A failed terminal write leaves Started unresolved and must stop the
         // turn so recovery cannot replay an input with an unknown outcome.
@@ -7765,7 +7825,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // The tool mapper owns field presence. Glob and most successful
         // builtins omit is_error; Bash explicitly carries interrupted:false.
         // Keep execution failure classification separate from the wire shape.
-        let model_is_error = if is_error {
+        let model_is_error = if is_error || (orch.is_persistent_app_chat() && persistence.replaced)
+        {
             Some(true)
         } else {
             tool_handle.map_result_is_error(&emit_payload)

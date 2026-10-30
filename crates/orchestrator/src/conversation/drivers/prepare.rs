@@ -249,7 +249,9 @@ impl ConversationOrchestrator {
             .await;
         let is_regular_user_prompt =
             prompt_ingress_kind == crate::request_context::PromptIngressKind::RegularUser;
-        let native_nar_ingress = crate::request_context::is_native_nar_ingress(prompt_ingress_kind);
+        let persistent_app_chat = self.is_persistent_app_chat();
+        let native_nar_ingress = !persistent_app_chat
+            && crate::request_context::is_native_nar_ingress(prompt_ingress_kind);
         if !is_regular_user_prompt {
             crate::request_context::clear_turn_projection();
         }
@@ -257,7 +259,8 @@ impl ConversationOrchestrator {
         // regular user-turn start, before deferred status snapshots are read.
         // Cache an empty producer result before entering the stateful registry
         // call so a cancelled preparation cannot run the scheduler twice.
-        if is_regular_user_prompt
+        if !persistent_app_chat
+            && is_regular_user_prompt
             && crate::request_context::prompt_ingress_producer_rows("mcp_turn_started").is_none()
             && crate::request_context::cache_prompt_ingress_producer_rows_pending(
                 self,
@@ -286,9 +289,11 @@ impl ConversationOrchestrator {
         // `relevant_memory_reminder_messages` and
         // `skill_discovery_reminder_message` consume them below — both of which
         // run before the blocking-limit estimate, so their tokens are counted.
-        self.start_memory_prefetch().await;
-        self.start_skill_discovery_prefetch().await;
-        self.maybe_extract_session_memory().await;
+        if !persistent_app_chat {
+            self.start_memory_prefetch().await;
+            self.start_skill_discovery_prefetch().await;
+            self.maybe_extract_session_memory().await;
+        }
 
         // Native Or freezes the host context before the query's automatic
         // compaction; Gr and the later Br projection reuse that same snapshot.
@@ -515,7 +520,11 @@ impl ConversationOrchestrator {
             })
             .flatten();
         let deferred_rows: Vec<crate::request_context::PromptIngressAttachment> =
-            if let Some(row) = cached_deferred_attachment {
+            if persistent_app_chat {
+                // App Chat uses an eager authorized catalog, supplied in full
+                // on each request; it has no Native deferred-tool replay state.
+                Vec::new()
+            } else if let Some(row) = cached_deferred_attachment {
                 vec![row]
             } else if native_nar_ingress && ingress_batch_finalized {
                 Vec::new()
@@ -903,7 +912,7 @@ impl ConversationOrchestrator {
         // order (`Ky("date_change")` before `Ky("deferred_tools_delta")`). The
         // dedupe is committed downstream, once the request is actually sent —
         // not here, where it has only been computed.
-        let date_change_reminder = if self.uses_announced_context().await {
+        let date_change_reminder = if persistent_app_chat || self.uses_announced_context().await {
             None
         } else {
             let session_id = self.session.lock().await.session_id;
@@ -1162,6 +1171,17 @@ impl ConversationOrchestrator {
         // Reminder fan-out has a large state machine; allocate it here so
         // preparing a turn does not embed or copy that state through its callers.
         Box::pin(async move {
+            if self.is_persistent_app_chat() {
+                // Keep the explicit App prompt, loaded Skill instructions and
+                // authorized wire tools in their normal request paths. Ambient
+                // Native reminders are outside the durable App Chat contract.
+                return Ok(TurnReminders {
+                    transient: Vec::new(),
+                    task_notifications: Vec::new(),
+                    model_reminders: Vec::new(),
+                    guarded_async_hook_reminders: Vec::new(),
+                });
+            }
             let is_regular_user_prompt =
                 prompt_ingress_kind == crate::request_context::PromptIngressKind::RegularUser;
             let native_nar_ingress =

@@ -6034,6 +6034,123 @@ mod restricted_policy_test {
 mod app_invocation_policy_tests {
     use super::*;
     use crate::PermissionRuleValue;
+
+    fn app_policy(rules: Vec<PermissionRule>) -> PermissionPolicy {
+        PermissionPolicy::from_rules(PermissionMode::BypassPermissions, rules).fork_app_invocation(
+            FsRoots {
+                cwd: PathBuf::from("/private/local-app/agent/workspace/task"),
+                home: None,
+                lingxi_home: PathBuf::from("/private/local-app/agent/workspace/task/.lingxi"),
+            },
+        )
+    }
+
+    #[test]
+    fn app_workspace_cat_is_allowed_by_the_real_default_policy() {
+        let child = app_policy(vec![]);
+        let input = Utf16JsonProjection::plain(serde_json::json!({"command":"cat notes.txt"}));
+        for tool in ["Bash", "Shell"] {
+            assert!(
+                matches!(
+                    child.authorize(tool, &input),
+                    PermissionResult::Allow { .. }
+                ),
+                "{tool} should retain ordinary in-workspace read-only access"
+            );
+        }
+    }
+
+    #[test]
+    fn app_private_task_reads_and_cleanup_receipt_writes_cannot_auto_allow() {
+        let child = app_policy(vec![]);
+        for command in [
+            "cat ../../tasks/private-task.json",
+            "printf '%s' forged > ../../chats/chat-id/generation-id/tool-cleanup.json",
+        ] {
+            let input = Utf16JsonProjection::plain(serde_json::json!({"command":command}));
+            for tool in ["Bash", "Shell"] {
+                let result = child.authorize(tool, &input);
+                assert!(
+                    matches!(
+                        result,
+                        PermissionResult::Ask { .. } | PermissionResult::Deny { .. }
+                    ),
+                    "{tool} unexpectedly auto-allowed {command}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn app_mcp_calls_keep_native_prompts_and_explicit_managed_policy() {
+        use lingxi_core::host::permission_gate::{PermissionDecision, PermissionGate};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        #[derive(Default)]
+        struct NativePrompt(AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl PermissionGate for NativePrompt {
+            async fn check(&self, _: &str, _: &Utf16JsonProjection) -> PermissionDecision {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                PermissionDecision::Deny {
+                    reason: "Native test user denied this call".into(),
+                }
+            }
+        }
+
+        let name = "mcp__filesystem__read_file";
+        let input =
+            Utf16JsonProjection::plain(serde_json::json!({"path":"../../tasks/private-task.json"}));
+        let rule = |source, behavior| PermissionRule {
+            value: PermissionRuleValue::from_rule_string(name),
+            source,
+            behavior,
+        };
+        let child = app_policy(vec![rule(
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+            PermissionBehavior::Allow,
+        )]);
+        assert!(matches!(
+            child.authorize(name, &input),
+            PermissionResult::Ask { .. }
+        ));
+        let prompt = Arc::new(NativePrompt::default());
+        let gate = crate::PolicyPermissionGate::new(Arc::new(child), prompt.clone());
+        for _ in 0..2 {
+            assert!(matches!(
+                gate.check(name, &input).await,
+                PermissionDecision::Deny { .. }
+            ));
+        }
+        assert_eq!(prompt.0.load(Ordering::SeqCst), 2);
+
+        for behavior in [PermissionBehavior::Allow, PermissionBehavior::Deny] {
+            let child = app_policy(vec![rule(
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
+                behavior,
+            )]);
+            let result = child.authorize(name, &input);
+            assert!(match behavior {
+                PermissionBehavior::Allow => matches!(result, PermissionResult::Allow { .. }),
+                PermissionBehavior::Deny => matches!(result, PermissionResult::Deny { .. }),
+                PermissionBehavior::Ask => unreachable!(),
+            });
+            let prompt = Arc::new(NativePrompt::default());
+            let gate = crate::PolicyPermissionGate::new(Arc::new(child), prompt.clone());
+            let result = gate.check(name, &input).await;
+            assert!(match behavior {
+                PermissionBehavior::Allow => matches!(result, PermissionDecision::Allow),
+                PermissionBehavior::Deny => matches!(result, PermissionDecision::Deny { .. }),
+                PermissionBehavior::Ask => unreachable!(),
+            });
+            assert_eq!(prompt.0.load(Ordering::SeqCst), 0);
+        }
+    }
+
     #[test]
     fn app_fork_preserves_managed_rules_but_drops_chat_authority() {
         let rule = |name: &str, source, behavior| PermissionRule {

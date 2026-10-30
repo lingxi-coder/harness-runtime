@@ -47,6 +47,21 @@ pub trait HookOutputObserver: Send + Sync {
 /// pipeline has already been consulted.
 #[async_trait]
 pub trait ProcessRunner: Send + Sync {
+    /// Whether this runner can collect bounded output entirely in memory and
+    /// confirm foreground process-tree cleanup without a task spool.
+    fn supports_inline_foreground(&self) -> bool {
+        false
+    }
+
+    /// Strict Local App Chat execution. Unsupported runners refuse before
+    /// spawning; falling back to a spool-producing runner is never implicit.
+    async fn run_inline_foreground(
+        &self,
+        _cmd: &SandboxedCommand,
+        _max_output_bytes: usize,
+    ) -> Result<ForegroundRunResult, ProcessError> {
+        Err(ProcessError::Unsupported)
+    }
     /// Export a supervised shell without changing its current owner.
     async fn export_shell(
         &self,

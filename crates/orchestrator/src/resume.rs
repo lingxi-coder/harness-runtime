@@ -661,6 +661,27 @@ pub fn replay_captured_session(
     loaded: LoadedTranscript,
     session_id: Uuid,
 ) -> Result<ReplayedSession, ResumeError> {
+    replay_captured_session_with_text_projection(transcript_path, source, loaded, session_id, true)
+}
+
+/// App Chat checkpoints replay exact source units in both canonical and display
+/// history. Native Chat/Code keeps its measured assistant replacement boundary.
+pub(crate) fn replay_persistent_app_chat_session(
+    transcript_path: PathBuf,
+    source: String,
+    loaded: LoadedTranscript,
+    session_id: Uuid,
+) -> Result<ReplayedSession, ResumeError> {
+    replay_captured_session_with_text_projection(transcript_path, source, loaded, session_id, false)
+}
+
+fn replay_captured_session_with_text_projection(
+    transcript_path: PathBuf,
+    source: String,
+    loaded: LoadedTranscript,
+    session_id: Uuid,
+    project_assistant_text: bool,
+) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid_str);
     if messages.is_empty() {
@@ -675,13 +696,18 @@ pub fn replay_captured_session(
     let worktree_session = loaded.worktree_states.get(&sid_str).cloned();
     let transcript_metadata = JsonlWriter::capture_session_metadata_source(&source, &sid_str);
     let transcript_entries = loaded.messages_in_order;
-    let (state, last_uuid, mut runtime_metadata) = build_state_from_jsonl(session_id, &messages);
+    let (state, last_uuid, mut runtime_metadata) =
+        build_state_from_jsonl_with_text_projection(session_id, &messages, project_assistant_text);
     let display_entries = transcript_entries
         .iter()
         .filter(|message| !message.is_sidechain)
         .cloned()
         .collect::<Vec<_>>();
-    let (display_state, _, _) = build_state_from_jsonl(session_id, &display_entries);
+    let (display_state, _, _) = build_state_from_jsonl_with_text_projection(
+        session_id,
+        &display_entries,
+        project_assistant_text,
+    );
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
     runtime_metadata.deferred_tools = deferred_tool_replays_from_messages(&transcript_entries);
@@ -943,6 +969,14 @@ fn build_state_from_jsonl(
     session_id: Uuid,
     messages: &[JsonlMessage],
 ) -> (SessionState, Option<Uuid>, ResumeRuntimeMetadata) {
+    build_state_from_jsonl_with_text_projection(session_id, messages, true)
+}
+
+fn build_state_from_jsonl_with_text_projection(
+    session_id: Uuid,
+    messages: &[JsonlMessage],
+    project_assistant_text: bool,
+) -> (SessionState, Option<Uuid>, ResumeRuntimeMetadata) {
     let mut state = SessionState::empty(
         SessionId::from_uuid(session_id),
         crate::config::DEFAULT_MODEL.to_string(),
@@ -1077,8 +1111,11 @@ fn build_state_from_jsonl(
                 last_uuid = Some(msg_uuid);
             }
             "assistant" => {
-                let mut content_blocks = extract_content_blocks(&m.message, false, true);
-                if let Err(error) = restore_exact_history_strings(m, &mut content_blocks, true) {
+                let mut content_blocks =
+                    extract_content_blocks(&m.message, false, project_assistant_text);
+                if let Err(error) =
+                    restore_exact_history_strings(m, &mut content_blocks, project_assistant_text)
+                {
                     tracing::warn!(uuid = %m.uuid, %error, "skipping invalid exact assistant history row");
                     continue;
                 }

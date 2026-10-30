@@ -133,6 +133,10 @@ fn parse_cell_id(cell_id: &str) -> Option<usize> {
 
 #[async_trait]
 impl Tool for NotebookEditTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         TOOL_NAME
     }

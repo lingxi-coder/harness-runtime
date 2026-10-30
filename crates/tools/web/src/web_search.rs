@@ -575,6 +575,10 @@ fn select_web_search_prompt(model: Option<&str>) -> String {
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         TOOL_NAME
     }

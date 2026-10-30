@@ -714,6 +714,12 @@ pub(crate) async fn persist_prompt_ingress_after_user(
         });
         return Ok(());
     }
+    // App Chat owns a self-contained transcript and an explicit system/tool
+    // catalog. Native's ambient attachment producers carry separate replay
+    // state that does not belong to this profile's conversation history.
+    if orchestrator.is_persistent_app_chat() {
+        return Ok(());
+    }
     let fallback_pending = unknown_command_fallback_pending();
     if !should_stage_prompt_ingress(kind, fallback_pending) {
         return Ok(());

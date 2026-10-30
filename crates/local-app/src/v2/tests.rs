@@ -349,23 +349,16 @@ fn continued_development_only_reuses_recorded_matching_session() {
 }
 
 #[test]
-fn older_authoring_metadata_requires_an_explicit_rebind() {
-    let (_dir, lib, mut req) = setup();
-    let old: AuthoringRef = serde_json::from_value(json!({
-        "sourceDirectory":"/root/.lingxi/.apps/test",
-        "sourceSessionId":"old-session",
-        "projectId":"old-project"
-    }))
-    .unwrap();
-    req.authoring = Some(old);
-    let record = lib.publish(req).unwrap().record;
-
-    let prepared = lib
-        .prepare_authoring(&record.app_id, &BTreeMap::new(), true)
-        .unwrap();
-    assert_eq!(prepared.action, "rebindRequired");
-    assert_eq!(prepared.source_directory, "/root/.lingxi/.apps/test");
-    assert!(prepared.authoring_session_id.is_none());
+fn authoring_rejects_obsolete_fields_instead_of_rebinding_them() {
+    let (_dir, lib, request) = setup();
+    for field in ["sourceSessionId", "projectId"] {
+        let mut value = serde_json::to_value(&request).unwrap();
+        value["op"] = json!("publish");
+        value["authoring"] = serde_json::to_value(authoring("/root/.lingxi/.apps/test")).unwrap();
+        value["authoring"][field] = json!("old-identity");
+        assert!(lib.request_json(&value.to_string()).is_err(), "{field}");
+        assert!(lib.list().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -606,26 +599,48 @@ fn json_contract_and_unknown_operations_fail_closed() {
         .request_json(r#"{"op":"list","ignored":"field"}"#)
         .is_err());
 }
+
 #[test]
-fn legacy_import_preserves_old_assets_and_has_new_identity() {
-    let (dir, lib, _req) = setup();
-    let legacy = dir.path().join("config/local-apps");
-    fs::create_dir_all(legacy.join("old1")).unwrap();
-    let html = "<!doctype html><html>legacy</html>";
-    fs::write(legacy.join("old1/1.html"), html).unwrap();
-    fs::write(legacy.join("index.json"),json!({"schema":1,"apps":{"old1":{"name":"Legacy","summary":"Old","revisions":[{"rev":1}]}}}).to_string()).unwrap();
-    assert_eq!(lib.legacy_entries().unwrap().len(), 1);
-    let imported = lib
-        .import_legacy("old1", &dir.path().join("imported-source"), None)
-        .unwrap();
-    assert_ne!(imported.record.app_id, "old1");
-    assert_eq!(
-        fs::read_to_string(legacy.join("old1/1.html")).unwrap(),
-        html
-    );
-    assert_eq!(lib.legacy_archives().unwrap().len(), 2);
+fn removed_archive_operations_cannot_convert_or_change_existing_files() {
+    let (dir, lib, _) = setup();
+    let archive = dir.path().join("config/local-apps/archive");
+    fs::create_dir_all(&archive).unwrap();
+    let old_index = dir.path().join("config/local-apps/index.json");
+    fs::write(&old_index, b"unsupported old index").unwrap();
+    fs::write(archive.join("private.db"), b"preserved data").unwrap();
+    let destination = dir.path().join("converted-source");
+    for request in [
+        json!({"op":"legacyEntries"}),
+        json!({"op":"legacyArchives"}),
+        json!({"op":"importLegacy","legacyId":"archive","sourcePath":destination}),
+    ] {
+        assert!(lib.request_json(&request.to_string()).is_err());
+        assert!(!destination.exists());
+        assert!(lib.list().unwrap().is_empty());
+        assert_eq!(fs::read(&old_index).unwrap(), b"unsupported old index");
+        assert_eq!(
+            fs::read(archive.join("private.db")).unwrap(),
+            b"preserved data"
+        );
+    }
 }
 
+#[test]
+fn current_source_import_dispatch_keeps_schema_two_and_independent_identity() {
+    let (_dir, lib, request) = setup();
+    let imported = lib
+        .request_json(&json!({"op":"import","sourcePath":request.source_path}).to_string())
+        .unwrap();
+    let app_id = imported["record"]["appId"].as_str().unwrap();
+    assert_eq!(imported["release"]["manifest"]["schema"], 2);
+    assert_eq!(imported["record"]["latestRevision"], 1);
+    assert!(imported["record"]["executionGrants"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(lib.list().unwrap().len(), 1);
+    assert_eq!(lib.get(app_id).unwrap().app_id, app_id);
+}
 #[test]
 fn restoring_source_creates_a_new_directory_and_rebinds_only_explicitly() {
     let (dir, lib, req) = setup();
@@ -920,97 +935,6 @@ fn preparation_data_is_separate_from_live_data_and_other_runs() {
     assert!(!Path::new(&two.preparation_data_path)
         .join("database")
         .exists());
-}
-#[test]
-fn desktop_legacy_sources_are_listed_and_imported_without_data_profiles_or_grants() {
-    let (dir, lib, _) = setup();
-    let old_id = "a12345678901234567890";
-    let old = dir.path().join("config/local-apps/desktop").join(old_id);
-    let revision = old.join("revisions/3");
-    fs::create_dir_all(&revision).unwrap();
-    fs::create_dir_all(old.join("data")).unwrap();
-    fs::write(old.join("data/private.db"), "old data").unwrap();
-    fs::write(old.join("browser-profile"), "old browser reference").unwrap();
-    fs::write(old.join("app.json"),json!({"id":old_id,"name":"Desktop old","summary":"Archive","revision":3,"grants":["process"],"sourceSession":{"sessionId":"old-session"}}).to_string()).unwrap();
-    let mut m = manifest();
-    m["schema"] = json!(1);
-    m.as_object_mut().unwrap().remove("targets");
-    m.as_object_mut().unwrap().remove("package");
-    fs::write(revision.join(MANIFEST_FILE), m.to_string()).unwrap();
-    fs::write(revision.join("index.html"), "<!doctype html>old desktop").unwrap();
-    let rows = lib.legacy_entries().unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].legacy_id, format!("desktop:{old_id}"));
-    assert_eq!(rows[0].status, "preservedNotMigrated");
-    let imported = lib
-        .import_legacy(
-            &rows[0].legacy_id,
-            &dir.path().join("restored-desktop"),
-            None,
-        )
-        .unwrap();
-    assert_ne!(imported.record.app_id, old_id);
-    assert_eq!(imported.release.manifest.schema, 2);
-    assert!(imported.record.execution_grants.is_empty());
-    assert!(imported.record.authoring.is_none());
-    assert!(
-        fs::read_dir(lib.data_path(&imported.record.app_id).unwrap())
-            .unwrap()
-            .next()
-            .is_none()
-    );
-    assert_eq!(
-        fs::read_to_string(old.join("data/private.db")).unwrap(),
-        "old data"
-    );
-    assert_eq!(
-        fs::read_to_string(old.join("browser-profile")).unwrap(),
-        "old browser reference"
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&fs::read(revision.join(MANIFEST_FILE)).unwrap()).unwrap()
-            ["schema"],
-        1
-    );
-}
-#[test]
-fn desktop_service_import_changes_relative_entry_to_url_and_requires_fresh_execution_consent() {
-    let (dir, lib, _) = setup();
-    let old_id = "a11223344556677889900";
-    let old = dir.path().join("config/local-apps/desktop").join(old_id);
-    let revision = old.join("revisions/1");
-    fs::create_dir_all(&revision).unwrap();
-    fs::write(
-        old.join("app.json"),
-        json!({"id":old_id,"name":"Old service","revision":1}).to_string(),
-    )
-    .unwrap();
-    fs::write(revision.join(MANIFEST_FILE),json!({"schema":1,"name":"Old service","entry":{"type":"server","process":"api","path":"ui"},"processes":[{"name":"api","command":"node server.js"}],"capabilities":["process"]}).to_string()).unwrap();
-    fs::write(revision.join("server.js"), "require('http')").unwrap();
-    let imported = lib
-        .import_legacy(
-            &format!("desktop:{old_id}"),
-            &dir.path().join("restored-service"),
-            None,
-        )
-        .unwrap();
-    assert_eq!(
-        imported.release.manifest.entry,
-        Entry::Server {
-            process: "api".into(),
-            path: Some("/ui".into())
-        }
-    );
-    assert!(imported
-        .release
-        .manifest
-        .targets
-        .iter()
-        .all(|t| t.environment == "native" && t.platform == std::env::consts::OS));
-    assert!(matches!(
-        lib.prepare_run(&imported.record.app_id, 1),
-        Err(AppError::ConsentRequired(_))
-    ));
 }
 #[test]
 fn service_names_cannot_alias_the_same_port_environment_variable() {

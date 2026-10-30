@@ -510,7 +510,7 @@ fn consumed_wake_retry_is_idempotent_and_chat_scoped() {
 }
 
 #[test]
-fn previous_settings_without_skills_migrate_to_an_empty_approved_set() {
+fn omitted_native_skill_selection_does_not_grant_skills() {
     let value = serde_json::json!({
         "model": {"providerId":"provider","modelId":"vision"},
         "tools": {},
@@ -523,16 +523,20 @@ fn previous_settings_without_skills_migrate_to_an_empty_approved_set() {
 }
 
 #[test]
-fn previous_task_results_load_without_losing_text_or_structured_output() {
+fn current_task_results_preserve_optional_output_and_reject_obsolete_fields() {
     let text: TaskResult = serde_json::from_value(serde_json::json!({"text":"done"})).unwrap();
     assert_eq!(text.text, "done");
     let structured: TaskResult = serde_json::from_value(serde_json::json!({
-        "output": {"ok": true},
-        "usage": {"inputTokens": 2}
+        "output": {"ok": true}
     }))
     .unwrap();
     assert_eq!(structured.text, "");
     assert_eq!(structured.output, Some(serde_json::json!({"ok": true})));
+    assert!(serde_json::from_value::<TaskResult>(serde_json::json!({
+        "output": {"ok": true},
+        "usage": {"inputTokens": 2}
+    }))
+    .is_err());
 }
 
 #[test]
@@ -545,6 +549,30 @@ fn normalized_attachment_input_is_bounded_and_path_free() {
     request.attachments[0].base64 = "not base64".into();
     assert!(validate_input(&request).is_err());
 }
+#[test]
+fn incomplete_current_ledger_is_rejected_without_inventing_a_recovery_frontier() {
+    let (dir, store) = store();
+    drop(store);
+    let ledger = dir.path().join("agent-tasks.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
+    assert!(value
+        .as_object_mut()
+        .unwrap()
+        .remove("chatRecoveries")
+        .is_some());
+    let bytes = serde_json::to_vec(&value).unwrap();
+    fs::write(&ledger, &bytes).unwrap();
+    assert!(matches!(
+        AgentStore::open(dir.path()),
+        Err(AppError::Json(_))
+    ));
+    assert_eq!(fs::read(&ledger).unwrap(), bytes);
+    assert!(fs::read_dir(dir.path().join("protocol-events"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
 #[test]
 fn ledger_never_persists_inputs() {
     let (dir, s) = store();
@@ -967,6 +995,99 @@ fn unsupported_image_model_result_explains_the_remedy() {
     let error = task.error.unwrap();
     assert_eq!(error.code, "model_vision_unsupported");
     assert!(error.message.contains("compatible model"));
+}
+
+#[test]
+fn current_chat_and_skill_failures_keep_actionable_messages_in_task_and_agui_replay() {
+    let cases = [
+        ("chat_context_unavailable", "Reopen the Chat"),
+        (
+            "chat_context_compaction_unsupported",
+            "Reduce the new input",
+        ),
+        ("chat_context_limit_exceeded", "smaller request"),
+        ("chat_context_budget_unknown", "model configuration"),
+        ("chat_context_authority_revoked", "tool effects"),
+        ("chat_tool_unsupported", "another tool"),
+        ("chat_transcript_external_result_unmanaged", "saved history"),
+        ("local_app_chat_inline_result_too_large", "smaller result"),
+        ("skill_scope_limit_exceeded", "fewer or smaller Skills"),
+    ];
+    for (index, (code, remedy)) in cases.into_iter().enumerate() {
+        let (dir, store) = store();
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let run_id = format!("failure-{index}");
+        let normalized = protocol::normalize_run_input(
+            &json!({
+                "threadId":chat_id, "runId":run_id,
+                "messages":[{"id":format!("user-{index}"),"role":"user",
+                    "content":"PRIVATE_ERROR_CANARY /private/host in-memory-test-secret"}]
+            }),
+            &[],
+        )
+        .unwrap();
+        let admitted = store
+            .admit_scoped(&owner(), &normalized.input, &[], &[], Some(&chat_id), true)
+            .unwrap();
+        store
+            .update(
+                &owner(),
+                &admitted.task.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .append_event(
+                &owner(),
+                &admitted.task.run_id,
+                json!({"type":"RUN_STARTED","threadId":chat_id,"runId":run_id}),
+            )
+            .unwrap();
+        let task = commit_protocol_terminal_for_test(
+            &store,
+            &owner(),
+            &admitted.task.run_id,
+            State::Failed,
+            None,
+            Some(code.into()),
+        )
+        .unwrap();
+        assert_eq!(task.state, State::Failed);
+        assert!(task.result.is_none());
+        let error = task.error.unwrap();
+        assert_eq!(error.code, code);
+        assert!(error.message.contains(remedy), "{code}: {}", error.message);
+        assert_ne!(error.message, error_message("unknown-task-failure"));
+        for detail in [
+            "PRIVATE_ERROR_CANARY",
+            "/private/",
+            "in-memory-test-secret",
+            "rolled back",
+        ] {
+            assert!(!error.message.contains(detail), "{code}: {detail}");
+        }
+        let events = store.protocol_events(&owner(), &run_id, 0).unwrap();
+        assert_eq!(events.events.len(), 2);
+        assert_eq!(events.events[1]["type"], "RUN_ERROR");
+        assert_eq!(events.events[1]["code"], code);
+        assert_eq!(events.events[1]["message"], error.message);
+        drop(store);
+        let reopened = AgentStore::open(dir.path()).unwrap();
+        let restored = reopened.get_by_request(&owner(), &run_id).unwrap();
+        assert_eq!(restored.state, State::Failed);
+        assert!(restored.result.is_none());
+        assert_eq!(restored.error.unwrap().message, error.message);
+        assert_eq!(
+            reopened
+                .protocol_events(&owner(), &run_id, 0)
+                .unwrap()
+                .events,
+            events.events
+        );
+    }
 }
 
 #[test]

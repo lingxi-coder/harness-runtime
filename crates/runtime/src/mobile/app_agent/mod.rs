@@ -68,6 +68,80 @@ fn clear_app_media_capabilities(context: &mut BuiltinToolContext) {
     context.media_agent_handoff = None;
 }
 
+fn media_requires_vision(media_type: &str) -> bool {
+    // Match app_agent_input::prepare: text documents become Text blocks;
+    // inline images and PDFs remain media in the actual model request.
+    let media_type = media_type.to_ascii_lowercase();
+    media_type.starts_with("image/") || media_type == "application/pdf"
+}
+
+fn validate_input_model_capabilities(
+    input: &Input,
+    history: &[lingxi_core::types::ConversationMessage],
+    capabilities: stateless::AppAgentModelCapabilities,
+) -> Result<(), String> {
+    use lingxi_core::types::{ContentBlock, ConversationMessage, DocumentSource};
+
+    let mut uses_vision = input
+        .attachments
+        .iter()
+        .any(|file| media_requires_vision(&file.media_type))
+        || input.content_parts.iter().any(|part| {
+            matches!(part, local_app::v2::agent::InputContentPart::Attachment { media_type, .. } if media_requires_vision(media_type))
+        });
+    let mut uses_tools = false;
+    for message in history {
+        let content = match message {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => content,
+            // The strict checkpoint validator separately rejects System rows.
+            ConversationMessage::System { .. } => continue,
+        };
+        for block in content {
+            match block {
+                ContentBlock::Image { .. } => uses_vision = true,
+                ContentBlock::Document {
+                    source: DocumentSource::Base64 { media_type, .. },
+                } => uses_vision |= media_requires_vision(media_type),
+                ContentBlock::ToolUse { .. } => uses_tools = true,
+                ContentBlock::ToolResult { content_blocks, .. } => {
+                    uses_tools = true;
+                    let Some(blocks) = content_blocks else {
+                        continue;
+                    };
+                    let count = blocks.array_len("").ok_or("chat_transcript_unavailable")?;
+                    for index in 0..count {
+                        // Inspect the canonical block array, never the display
+                        // string. The shared strict proof permits inline media
+                        // and text only; unknown shapes cannot become text.
+                        match blocks.string_at(&format!("/{index}/type")) {
+                            Some("image") => uses_vision = true,
+                            Some("document") => {
+                                let mime = blocks
+                                    .string_at(&format!("/{index}/source/media_type"))
+                                    .ok_or("chat_transcript_unavailable")?;
+                                uses_vision |= media_requires_vision(mime);
+                            }
+                            Some("text") => {}
+                            _ => return Err("chat_transcript_external_result_unmanaged".into()),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if uses_vision && !capabilities.supports_images {
+        return Err("model_vision_unsupported".into());
+    }
+    // ModelRuntime also rejects historical ToolUse/ToolResult before encoding.
+    // Give the App the same explicit error as newly selected tool grants.
+    if uses_tools && !capabilities.supports_tools {
+        return Err("model_tools_unsupported".into());
+    }
+    Ok(())
+}
+
 /// Generic Harness resume replays unresolved hook-deferred tools. Local App
 /// recovery must leave those operations for an explicit user decision instead.
 pub(super) fn validate_local_app_chat_resume(
@@ -219,12 +293,14 @@ impl AppAgentFactory {
         let route =
             stateless::resolve_selected_route(&self.api, &model.model_id, &model.provider_id)?;
         let capabilities = stateless::app_agent_capabilities(&self.api, &route);
-        if input.attachments.iter().any(|file| {
-            file.media_type.starts_with("image/") || file.media_type == "application/pdf"
-        }) && !capabilities.supports_images
-        {
-            return Err("model_vision_unsupported".into());
-        }
+        validate_input_model_capabilities(
+            input,
+            chat.as_ref()
+                .and_then(|chat| chat.replayed.as_ref())
+                .map(|replayed| replayed.state.history.as_slice())
+                .unwrap_or_default(),
+            capabilities,
+        )?;
         // Persistent Harness chats and tool-using tasks enforce schemas with
         // the internal StructuredOutput tool, so this execution path requires
         // function-tool capability even when the route supports native JSON.
@@ -329,6 +405,11 @@ impl AppAgentFactory {
         context.side_chat_cleanup_failed = Some(cleanup_failed.clone());
         context.session_id = Some(session_id);
         context.side_chat = true;
+        context.tool_execution_policy = if chat.is_some() {
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat
+        } else {
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary
+        };
         context.session_cwd = tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]);
         context.read_file_state = tool_api::read_file_state::new_read_file_state_map();
         context.worktree_session = tool_api::worktree_session::new_worktree_session_cell();
@@ -384,14 +465,15 @@ impl AppAgentFactory {
         tool_file::register_all(&mut tools, context.clone());
         tool_shell_mobile::register_all(&mut tools, context.clone());
         tool_web::register_all(&mut tools, context.clone(), None);
-        // Native deferred definitions and tool_reference results belong to the
-        // Anthropic protocol family. In other codecs expose only the lease's
-        // authorized tools inline; never advertise an unsupported discovery hop.
+        // Persistent Chat requests declare their fixed authorized tools inline.
+        // They must be self-contained after cold restore and cannot depend on
+        // ordinary Chat's native tool-reference discovery state. Other App
+        // tasks retain the protocol's existing deferred-search behavior.
         let protocol = self
             .api
             .protocol_for_model(&model.model_id, Some(&model.provider_id))
             .ok();
-        if app_supports_deferred_tool_search(protocol) {
+        if chat.is_none() && app_supports_deferred_tool_search(protocol) {
             tool_meta::register_all(&mut tools, context.clone());
         } else {
             let deferral = Arc::new(tool_api::DeferralState::disabled());
@@ -504,6 +586,7 @@ impl AppAgentFactory {
             let authorized = chat.context_authorized.clone();
             let context_lease = lease.clone();
             builder = builder
+                .with_persistent_app_chat()
                 .with_jsonl_writer(chat.writer.clone())
                 .with_persistent_chat_context(orchestrator::PersistentChatContextConfig {
                     app_id: owner.app_id.clone(),
@@ -560,6 +643,46 @@ fn app_supports_deferred_tool_search(protocol: Option<llm_runtime::ProtocolFamil
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+
+    #[test]
+    fn current_agui_image_and_pdf_parts_require_the_selected_vision_route() {
+        for (kind, media_type, data) in [
+            ("image", "image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII="),
+            ("document", "application/pdf", "JVBERi0xLjc="),
+        ] {
+            let normalized = local_app::v2::agent::protocol::normalize_run_input(
+                &json!({
+                    "threadId":"vision-thread", "runId":"vision-run",
+                    "messages":[{"id":"vision-user","role":"user","content":[{
+                        "type":kind,"source":{"type":"data","value":data,"mimeType":media_type}
+                    }]}]
+                }),
+                &[],
+            ).unwrap();
+            assert!(normalized.input.attachments.is_empty());
+            assert_eq!(
+                validate_input_model_capabilities(&normalized.input, &[], stateless::AppAgentModelCapabilities::default()).unwrap_err(),
+                "model_vision_unsupported"
+            );
+            validate_input_model_capabilities(&normalized.input, &[], stateless::AppAgentModelCapabilities {
+                supports_images: true,
+                ..Default::default()
+            }).unwrap();
+        }
+        let text = local_app::v2::agent::protocol::normalize_run_input(
+            &json!({"threadId":"text-thread", "runId":"text-run", "messages":[{
+                "id":"text-user","role":"user","content":"hello"
+            }]}),
+            &[],
+        )
+        .unwrap();
+        validate_input_model_capabilities(
+            &text.input,
+            &[],
+            stateless::AppAgentModelCapabilities::default(),
+        )
+        .unwrap();
+    }
 
     struct TestMediaService;
 
@@ -693,6 +816,347 @@ mod discovery_tests {
             assert!(!app_supports_deferred_tool_search(Some(protocol)));
         }
         assert!(!app_supports_deferred_tool_search(None));
+    }
+}
+
+#[cfg(test)]
+mod history_model_capability_tests {
+    use super::*;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+    use orchestrator::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
+        NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct NoDispatch(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl llm_runtime::Transport for NoDispatch {
+        async fn send(
+            &self,
+            _: llm_runtime::services::sdk::HttpRequest,
+        ) -> Result<
+            llm_runtime::services::sdk::StreamResponse,
+            llm_runtime::services::sdk::protocol::LlmError,
+        > {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("Factory capability preflight must not dispatch a provider request")
+        }
+    }
+
+    fn factory(
+        root: &std::path::Path,
+        vision: bool,
+        tools: bool,
+    ) -> (AppAgentFactory, Arc<NoDispatch>) {
+        let config = serde_json::from_value(json!({"providers":[{
+            "provider_id":"anthropic_first_party", "profile_name":"provider", "protocol":"anthropic_messages",
+            "base_url":"https://capability.invalid", "auth":"none", "credential":{"type":"none"},
+            "models":[{"display_model":"model", "request_model":"claude-sonnet-4-6", "billing_model":"claude-sonnet-4-6",
+                "capabilities":{"streaming":true,"tools":tools,"vision":vision,"documents":vision,"reasoning":false,"structured_output":false}}]
+        }]})).unwrap();
+        let transport = Arc::new(NoDispatch::default());
+        let api = Arc::new(llm_runtime::ApiService::new_with_routing(
+            Arc::new(llm_runtime::ModelRuntime::from_config(config).unwrap()),
+            transport.clone(),
+            Default::default(),
+            Default::default(),
+            "test",
+            None,
+            None,
+            None,
+            Default::default(),
+            Some(0),
+            Some(0),
+        ));
+        let context = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        (
+            AppAgentFactory {
+                config_home: root.to_path_buf(),
+                api,
+                context,
+                model_resolution: Arc::new(|_: &str, _: Option<&str>| {
+                    Ok(agent::model_resolution::ModelResolutionContext::default())
+                }),
+                host_hooks: Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new())),
+                pricing: Arc::new(cost::PricingCatalog::empty()),
+            },
+            transport,
+        )
+    }
+
+    fn assistant(content: Vec<ContentBlock>) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content,
+            // Seeded SDK history uses the synthetic assistant wire envelope.
+            stop_reason: Some("stop_sequence".into()),
+            resumable: None,
+            per_turn_effort: None,
+        }
+    }
+
+    fn history_with(block: ContentBlock, nested: bool) -> Vec<ConversationMessage> {
+        let mut question = ConversationMessage::user(MessageId::new(), "inspect the file".into());
+        let mut history = Vec::new();
+        if nested {
+            let id = ToolUseId::new();
+            let blocks =
+                Utf16JsonProjection::parse(&serde_json::to_string(&vec![block]).unwrap()).unwrap();
+            history.push(question);
+            history.push(assistant(vec![ContentBlock::ToolUse {
+                id: id.clone(),
+                name: "Read".into(),
+                input: Utf16JsonProjection::parse("{}").unwrap(),
+                provider_id: Some("provider-read".into()),
+            }]));
+            let mut result = ConversationMessage::user(MessageId::new(), String::new());
+            if let ConversationMessage::User { content, .. } = &mut result {
+                *content = vec![ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    provider_tool_use_id: Some("provider-read".into()),
+                    content: "file result".into(),
+                    is_error: Some(false),
+                    content_blocks: Some(blocks),
+                }];
+            }
+            history.push(result);
+        } else {
+            if let ConversationMessage::User { content, .. } = &mut question {
+                content.push(block);
+            }
+            history.push(question);
+        }
+        history.push(assistant(vec![ContentBlock::Text {
+            text: "file inspected".into(),
+            citations: None,
+        }]));
+        history
+    }
+
+    async fn cold_chat(
+        history: Vec<ConversationMessage>,
+    ) -> (tempfile::TempDir, AppAgentChatResume, Vec<u8>) {
+        let root = tempfile::tempdir().unwrap();
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let session_id = SessionId::new();
+        let path = root
+            .path()
+            .join("local-apps/v2/apps")
+            .join(format!("a{}", "1".repeat(32)))
+            .join("agent/agui-v1/chats")
+            .join(&chat_id)
+            .join(format!("{}.jsonl", session_id.as_uuid()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
+        );
+        let writer = Arc::new(
+            session::jsonl::JsonlWriter::open_persistent_chat(path.clone(), fs.clone(), None)
+                .await
+                .unwrap(),
+        );
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(MockStreamingApiClient::empty()),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        )
+        .with_session_id(session_id)
+        .with_persistent_app_chat()
+        .with_jsonl_writer(writer.clone());
+        for message in &history {
+            orch.append_external_history_message(message.clone()).await;
+        }
+        let captured = orch.verify_persistent_chat_checkpoint(true).await.unwrap();
+        drop(orch);
+        drop(writer);
+        let writer = Arc::new(
+            session::jsonl::JsonlWriter::open_persistent_chat(
+                path.clone(),
+                fs,
+                Some(captured.checkpoint().clone()),
+            )
+            .await
+            .unwrap(),
+        );
+        let source = writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .unwrap();
+        let replayed = ConversationOrchestrator::replay_persistent_chat_snapshot(&source).unwrap();
+        assert_eq!(replayed.state.history, history);
+        let bytes = std::fs::read(&path).unwrap();
+        (
+            root,
+            AppAgentChatResume {
+                chat_id,
+                session_id,
+                transcript_path: path,
+                replayed: Some(replayed),
+                writer,
+                context_source: Some(source),
+                context_authorized: Arc::new(|| true),
+            },
+            bytes,
+        )
+    }
+
+    async fn assert_factory_preflight(
+        history: Vec<ConversationMessage>,
+        vision: bool,
+        tools: bool,
+        expected: &str,
+    ) {
+        let (root, chat, original) = cold_chat(history).await;
+        let transcript = chat.transcript_path.clone();
+        let normalized = local_app::v2::agent::protocol::normalize_run_input(
+            &json!({"threadId":chat.chat_id,"runId":"new-run","messages":[{
+                "id":"new-user","role":"user","content":"continue the same Chat"
+            }]}),
+            &[],
+        )
+        .unwrap();
+        let owner = Owner {
+            app_id: format!("a{}", "1".repeat(32)),
+            release_digest: "2".repeat(64),
+            invocation_id: "capability-test".into(),
+        };
+        let store = local_app::v2::agent::AgentStore::open(&root.path().join("tasks")).unwrap();
+        store
+            .configure(
+                owner.clone(),
+                Some(local_app::v2::agent::Settings {
+                    model: local_app::v2::agent::Model {
+                        provider_id: "provider".into(),
+                        model_id: "claude-sonnet-4-6".into(),
+                    },
+                    tools: BTreeMap::new(),
+                    skills: vec![],
+                    background: false,
+                    max_turns: 1,
+                    timeout_ms: 1000,
+                }),
+            )
+            .unwrap();
+        let admission = store
+            .admit_scoped(
+                &owner,
+                &normalized.input,
+                &[],
+                &[],
+                Some(&chat.chat_id),
+                true,
+            )
+            .unwrap();
+        assert!(
+            admission.tools.is_empty(),
+            "only the restored history requires tool support"
+        );
+        let (factory, transport) = factory(root.path(), vision, tools);
+        let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
+        let error = match factory
+            .build(
+                &owner,
+                &admission,
+                &normalized.input,
+                root.path().to_path_buf(),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(NoOpPermissionGate),
+                tokio_util::sync::CancellationToken::new(),
+                question_tx,
+                Some(chat),
+                None,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("This fixture deliberately has no credentials"),
+        };
+        assert_eq!(error, expected);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(transcript).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn factory_checks_cold_user_and_tool_media_before_credentials_or_dispatch() {
+        use lingxi_core::types::{DocumentSource, ImageSource};
+        for block in [
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "aW1hZ2U=".into(),
+                },
+            },
+            ContentBlock::Document {
+                source: DocumentSource::Base64 {
+                    media_type: "application/pdf".into(),
+                    data: "JVBERg==".into(),
+                },
+            },
+        ] {
+            for nested in [false, true] {
+                let history = history_with(block.clone(), nested);
+                assert_factory_preflight(history.clone(), false, true, "model_vision_unsupported")
+                    .await;
+                // The same cold history passes the visual gate on a capable
+                // route and reaches the fixture's explicit missing credentials.
+                assert_factory_preflight(history, true, true, "model_credentials_unavailable")
+                    .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn real_text_document_decoding_and_text_tool_history_do_not_require_vision() {
+        let input = local_app::v2::agent::protocol::normalize_run_input(
+            &json!({"threadId":"text-document","runId":"text-document-run","messages":[{
+                "id":"document-user","role":"user","content":[{"type":"document","source":{
+                    "type":"data","mimeType":"text/plain","value":"eyJ0eXBlIjoiaW1hZ2UifQ=="
+                }}]
+            }]}),
+            &[],
+        )
+        .unwrap();
+        let prepared = crate::app_agent_input::prepare(&input.input).await.unwrap();
+        assert!(!prepared.uses_vision);
+        validate_input_model_capabilities(&input.input, &[], Default::default()).unwrap();
+        assert!(prepared
+            .blocks
+            .iter()
+            .all(|block| matches!(block, ContentBlock::Text { .. })));
+        let mut user = ConversationMessage::user(MessageId::new(), String::new());
+        if let ConversationMessage::User { content, .. } = &mut user {
+            *content = prepared.blocks;
+        }
+        assert_factory_preflight(vec![user], false, false, "model_credentials_unavailable").await;
+        let text_history = history_with(
+            ContentBlock::Text {
+                text: "{\"type\":\"image\"}".into(),
+                citations: None,
+            },
+            true,
+        );
+        assert_factory_preflight(
+            text_history.clone(),
+            false,
+            true,
+            "model_credentials_unavailable",
+        )
+        .await;
+        assert_factory_preflight(text_history, false, false, "model_tools_unsupported").await;
     }
 }
 

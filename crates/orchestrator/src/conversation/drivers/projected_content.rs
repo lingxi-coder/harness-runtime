@@ -61,13 +61,11 @@ pub(super) fn queued_human_rendered(
     let rendered_content = if content.string_units("").is_some() {
         text
     } else {
-        let mut blocks = vec![
-            Utf16JsonProjection::object(vec![
-                ("type".into(), "text".into()),
-                ("text".into(), text),
-            ])
-            .map_err(invalid_content)?,
-        ];
+        let mut blocks = vec![Utf16JsonProjection::object(vec![
+            ("type".into(), "text".into()),
+            ("text".into(), text),
+        ])
+        .map_err(invalid_content)?];
         let count = content
             .array_len("")
             .ok_or_else(|| invalid_content("projected content must be a string or array"))?;
@@ -258,14 +256,308 @@ fn invalid_content(error: impl std::fmt::Display) -> OrchestratorError {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-        StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
-        message_start, message_stop, noop_hook_executor, text_delta,
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
+        MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
     use lingxi_core::types::{ConversationMessage, MessageId, SessionId};
     use serde_json::Value;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn app_chat_plain_text_has_the_same_carrier_after_jsonl_replay() {
+        let image = ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "AQID".into(),
+        };
+        for source in [r#""plain text \ud83e\udd80""#, r#""unpaired \ud800""#] {
+            let source = Utf16JsonProjection::parse(source).unwrap();
+            for app_chat in [false, true] {
+                let id = MessageId::new();
+                let message = super::super::user_message_from_projection(
+                    id,
+                    &source,
+                    false,
+                    vec![image.clone()],
+                    app_chat,
+                );
+                let ConversationMessage::User { content, .. } = &message else {
+                    unreachable!()
+                };
+                let units = source.string_units("").unwrap();
+                assert_eq!(message.id(), id);
+                assert_eq!(
+                    content[1],
+                    ContentBlock::Image {
+                        source: image.clone()
+                    }
+                );
+                if app_chat && String::from_utf16(&units).is_ok() {
+                    assert!(matches!(&content[0], ContentBlock::Text { text, .. }
+                        if text.encode_utf16().eq(units.iter().copied())));
+                } else {
+                    assert!(
+                        matches!(&content[0], ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                        if utf16_code_units == &units)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn app_chat_plain_turns_checkpoint_exact_live_user_and_assistant_rows() {
+        use lingxi_core::host::json_schema_validator::{
+            CompiledJsonSchema, JsonSchemaValidation, SchemaWorkerError,
+        };
+        struct UnusedPlan;
+        #[async_trait::async_trait]
+        impl CompiledJsonSchema for UnusedPlan {
+            async fn validate(
+                &self,
+                _: &Utf16JsonProjection,
+            ) -> Result<JsonSchemaValidation, SchemaWorkerError> {
+                panic!("this turn advertises but does not call the tool")
+            }
+        }
+        for (streaming, unpaired, default_prompt) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+            (true, false, true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let session_id = SessionId::new();
+            let directory = root
+                .path()
+                .join("apps/test-app/agent/agui-v1/chats")
+                .join(uuid::Uuid::new_v4().to_string());
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join(format!("{}.jsonl", session_id.as_uuid()));
+            let writer = Arc::new(
+                session::JsonlWriter::open_persistent_chat(
+                    path,
+                    Arc::new(platform_posix::fs::PosixFileSystem::new(
+                        root.path().to_path_buf(),
+                    )),
+                    None,
+                )
+                .await
+                .unwrap(),
+            );
+            let mut answer_units = "checkpoint answer ".encode_utf16().collect::<Vec<_>>();
+            answer_units.push(0xd83e);
+            if !unpaired {
+                answer_units.push(0xdd80);
+            }
+            let api = Arc::new(MockApiClient::new(vec![
+                crate::test_support::mock_message_response(
+                    vec![llm_runtime::ContentBlock::TextJsUtf16 {
+                        text: String::from_utf16_lossy(&answer_units),
+                        utf16_code_units: answer_units.clone(),
+                        cache_control: None,
+                        citations: None,
+                    }],
+                    Some("end_turn"),
+                ),
+            ]));
+            let mut events = vec![
+                message_start("assistant", "claude-sonnet-5"),
+                content_block_start_text(0),
+                text_delta(0, "checkpoint answer "),
+            ];
+            // A surrogate pair can straddle provider deltas. Canonicalize
+            // only after the complete accepted row is available.
+            for unit in &answer_units["checkpoint answer ".len()..] {
+                events.push(llm_runtime::HistoryEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: llm_runtime::HistoryContentDelta::TextJsUtf16Delta {
+                        text: String::from_utf16_lossy(&[*unit]),
+                        utf16_code_units: vec![*unit],
+                    },
+                });
+            }
+            events.extend([
+                content_block_stop(0),
+                message_delta_stop("end_turn"),
+                message_stop(),
+            ]);
+            let stream = Arc::new(MockStreamingApiClient::with_turns(vec![events]));
+            let mut tools = tool_api::registry::ToolRegistry::new();
+            tools.register_builtin(Arc::new(
+                crate::structured_output::StructuredOutputTool::new(
+                    Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+                    Arc::new(UnusedPlan),
+                    Arc::new(std::sync::Mutex::new(None)),
+                ),
+            ));
+            let orch = crate::ConversationOrchestrator::new_side_chat(
+                crate::OrchestratorConfig {
+                    system_prompt_override: (!default_prompt).then(|| "Test Chat.".into()),
+                    append_system_prompt: Some("Explicit App Skill instructions.".into()),
+                    exclude_dynamic_system_prompt_sections: true,
+                    ..Default::default()
+                },
+                api.clone(),
+                stream.clone(),
+                Arc::new(tools),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            )
+            .with_session_id(session_id)
+            .with_jsonl_writer(writer.clone())
+            .with_persistent_app_chat();
+            let orch = crate::ConversationOrchestrator::into_shared(orch);
+            assert!(!orch.config.bare);
+            if streaming {
+                orch.run_turn_streaming_with_cancel(
+                    "checkpoint prompt 🦀",
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            } else {
+                orch.run_turn("checkpoint prompt 🦀").await.unwrap();
+            }
+            let (system, messages, tool_names) = if streaming {
+                let calls = stream.captured_calls().await;
+                assert_eq!(calls.len(), 1);
+                (
+                    calls[0].system.as_ref().unwrap().display_text(),
+                    calls[0].messages.clone(),
+                    calls[0]
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                let requests = api.captured_requests().await;
+                assert_eq!(requests.len(), 1);
+                let crate::OrchestratorApiRequest::Main(request) = &requests[0] else {
+                    panic!("expected the actual main request")
+                };
+                (
+                    request.system.as_ref().unwrap().display_text(),
+                    request.messages.clone(),
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            };
+            if default_prompt {
+                assert!(system.contains("Explicit App Skill instructions."));
+            } else {
+                assert_eq!(system, "Test Chat.\n\nExplicit App Skill instructions.");
+            }
+            assert_eq!(tool_names, ["StructuredOutput"]);
+            assert_eq!(messages.len(), 1, "ambient context reached the provider");
+            let live = orch.snapshot_history().await;
+            assert_eq!(live.len(), 2, "ambient context entered canonical history");
+            assert!(matches!(&live[0], ConversationMessage::User { content, .. }
+                if matches!(&content[0], ContentBlock::Text { text, .. } if text == "checkpoint prompt 🦀")));
+            let before_checkpoint = writer
+                .capture_persistent_chat_snapshot(false)
+                .await
+                .unwrap();
+            let captured = orch
+                .verify_persistent_chat_checkpoint(true)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{error}; streaming={streaming}; live={live:?}; durable={}",
+                        before_checkpoint.source()
+                    )
+                });
+            let replayed =
+                crate::ConversationOrchestrator::replay_persistent_chat_snapshot(&captured)
+                    .unwrap();
+            assert_eq!(live, replayed.state.history, "streaming={streaming}");
+            assert_eq!(live, replayed.display_history);
+            if streaming {
+                let written = session::jsonl::route_lines(captured.source());
+                let row = written
+                    .messages_in_order
+                    .iter()
+                    .find(|row| row.message_type == "assistant")
+                    .unwrap();
+                let logical_id = live[1].id().as_uuid().to_string();
+                assert_eq!(row.message.string_at("/id"), Some(logical_id.as_str()));
+                assert_eq!(row.extra.string_at("/providerMessageId"), Some("assistant"));
+            }
+            let ConversationMessage::Assistant {
+                content,
+                stop_reason,
+                ..
+            } = &live[1]
+            else {
+                panic!("expected the real assistant row")
+            };
+            assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+            if unpaired {
+                assert!(
+                    matches!(&content[0], ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                    if utf16_code_units == &answer_units)
+                );
+            } else {
+                assert!(matches!(&content[0], ContentBlock::Text { text, .. }
+                    if text.encode_utf16().eq(answer_units.iter().copied())));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_plain_chat_still_collects_ambient_context() {
+        let api = Arc::new(MockApiClient::new(vec![
+            crate::test_support::mock_message_response(
+                vec![llm_runtime::ContentBlock::TextJsUtf16 {
+                    text: "ordinary answer 🦀".into(),
+                    utf16_code_units: "ordinary answer 🦀".encode_utf16().collect(),
+                    cache_control: None,
+                    citations: None,
+                }],
+                Some("end_turn"),
+            ),
+        ]));
+        let root = tempfile::tempdir().unwrap();
+        let orch = crate::ConversationOrchestrator::new_side_chat(
+            crate::OrchestratorConfig {
+                system_prompt_override: Some("Test Chat.".into()),
+                ..Default::default()
+            },
+            api.clone(),
+            Arc::new(MockStreamingApiClient::empty()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        );
+        orch.run_turn("ordinary prompt").await.unwrap();
+        assert!(api.captured_msgs().await[0]
+            .iter()
+            .any(|message| matches!(message, ConversationMessage::User { is_meta: true, .. })));
+        let live = orch.snapshot_history().await;
+        assert!(matches!(&live[0], ConversationMessage::User { content, .. }
+            if matches!(&content[0], ContentBlock::TextJsUtf16 { .. })));
+        assert!(live
+            .iter()
+            .any(|message| matches!(message, ConversationMessage::User { is_meta: true, .. })));
+        assert!(
+            matches!(live.last(), Some(ConversationMessage::Assistant { content, .. })
+            if matches!(&content[0], ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                if utf16_code_units.iter().copied().eq("ordinary answer 🦀".encode_utf16())))
+        );
+    }
 
     #[test]
     fn projected_user_blocks_keep_utf16_and_media_order() {
@@ -298,11 +590,9 @@ mod tests {
         else {
             panic!("lost exact queued text")
         };
-        assert!(
-            utf16_code_units
-                .windows(3)
-                .any(|units| units == [0xd800, 10, b'l' as u16])
-        );
+        assert!(utf16_code_units
+            .windows(3)
+            .any(|units| units == [0xd800, 10, b'l' as u16]));
         assert!(utf16_code_units.contains(&0xdfff));
         let rendered = queued_human_rendered(&content).unwrap();
         let exact = rendered

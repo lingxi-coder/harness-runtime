@@ -202,6 +202,7 @@ struct Control {
     chat_id: Option<String>,
     user_message_id: Option<String>,
     chat_orchestrator: Mutex<Option<Arc<orchestrator::ConversationOrchestrator>>>,
+    skill_scope: AsyncMutex<Option<crate::app_agent_skills::SkillScope>>,
     chat_persisted: watch::Sender<Option<Result<(), String>>>,
     chat_commit: AsyncMutex<Option<oneshot::Receiver<()>>>,
     attachment_metadata: Vec<AttachmentMetadata>,
@@ -303,13 +304,13 @@ impl AppAgentState {
             invocation_id: "startup-recovery".into(),
         };
         owner.validate().map_err(|_| "invalid_app")?;
-        let legacy_root = app_root.join(app_id).join("agent");
+        let agent_root = app_root.join(app_id).join("agent");
         // Inspect an existing Chat index before AgentStore recovery can modify
         // task records or protocol events. Never initialize over an index we
         // cannot interpret.
-        ChatStore::preflight_existing_index(&legacy_root.join("agui-v1"))
+        ChatStore::preflight_existing_index(&agent_root.join("agui-v1"))
             .map_err(chat_store_open_error)?;
-        let root = initialize_agui_agent_store(&legacy_root)?;
+        let root = initialize_agui_agent_store(&agent_root)?;
         let store = Arc::new(
             AgentStore::open(&root.join("tasks")).map_err(|_| "agent_storage_unavailable")?,
         );
@@ -339,14 +340,12 @@ impl AppAgentState {
 
 fn chat_store_open_error(error: local_app::v2::AppError) -> &'static str {
     match error {
-        local_app::v2::AppError::ChatLegacyIndexUnsupported => "chat_legacy_index_unsupported",
         local_app::v2::AppError::ChatStorageUncertain => "chat_storage_uncertain",
         _ => "agent_storage_unavailable",
     }
 }
 
-/// Create a fresh AG-UI 1.0 store once per App, while retaining any older
-/// Agent data that cannot be identified as safe to discard.
+/// Open only the current AG-UI 1.0 store. Sibling paths are not Agent inputs.
 fn initialize_agui_agent_store(agent_root: &Path) -> Result<PathBuf, String> {
     ensure_agent_directory(agent_root)?;
     let store_root = agent_root.join("agui-v1");
@@ -372,10 +371,6 @@ fn initialize_agui_agent_store(agent_root: &Path) -> Result<PathBuf, String> {
                     {
                         return Err("agent_protocol_store_version_mismatch".into());
                     }
-                    // The marker only identifies the new subdirectory. An
-                    // older sibling store can still hold user data and must
-                    // be surfaced before any task recovery or cleanup runs.
-                    reject_existing_legacy_agent_data(agent_root)?;
                     return Ok(store_root);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -386,13 +381,11 @@ fn initialize_agui_agent_store(agent_root: &Path) -> Result<PathBuf, String> {
                     {
                         return Err("agent_protocol_store_marker_missing".into());
                     }
-                    reject_existing_legacy_agent_data(agent_root)?;
                 }
                 Err(_) => return Err("agent_storage_unavailable".into()),
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            reject_existing_legacy_agent_data(agent_root)?;
             create_agent_directory(&store_root)?;
         }
         Err(_) => return Err("agent_storage_unavailable".into()),
@@ -450,19 +443,6 @@ fn create_agent_directory(path: &Path) -> Result<(), String> {
     builder
         .create(path)
         .map_err(|_| "agent_storage_unavailable")?;
-    Ok(())
-}
-
-fn reject_existing_legacy_agent_data(agent_root: &Path) -> Result<(), String> {
-    // These paths may contain real user data. A filename or UUID alone cannot
-    // prove that deleting it is safe, so leave the whole old store untouched.
-    for name in ["tasks", "chats", "chats-index.json", "protocol-events"] {
-        match std::fs::symlink_metadata(agent_root.join(name)) {
-            Ok(_) => return Err("agent_legacy_store_unsupported".into()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("agent_storage_unavailable".into()),
-        }
-    }
     Ok(())
 }
 
@@ -1894,6 +1874,7 @@ impl AppAgentHost {
             chat_id,
             user_message_id,
             chat_orchestrator: Mutex::new(None),
+            skill_scope: AsyncMutex::new(None),
             chat_persisted: chat_persisted_tx,
             chat_commit: AsyncMutex::new(if is_chat { Some(chat_commit_rx) } else { None }),
             attachment_metadata,
@@ -2056,13 +2037,14 @@ impl AppAgentHost {
 
     async fn load_skill_prompt(
         &self,
-        owner: &Owner,
+        control: &Control,
         selected: &[String],
         workspace: &Path,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<crate::app_agent_skills::MaterializedSkills>, String> {
         if selected.is_empty() {
             return Ok(None);
         }
+        let owner = &control.owner;
         self.validate_current_release(owner).await?;
         let service = self.service().await?;
         let record = service
@@ -2095,8 +2077,30 @@ impl AppAgentHost {
             .as_ref()
             .map(|agent| agent.skills.as_slice())
             .ok_or("skill_not_declared")?;
-        crate::app_agent_skills::materialize(&source, workspace, skills, &release.files, selected)
-            .await
+        match crate::app_agent_skills::materialize(
+            &source,
+            workspace,
+            skills,
+            &release.files,
+            selected,
+            control.cancel.child_token(),
+        )
+        .await
+        {
+            Ok(materialized) => Ok(materialized),
+            Err(error) => {
+                let (code, scope) = error.into_parts();
+                if let Some(scope) = scope {
+                    // A failed preparation may already own files. Preserve its
+                    // exact handle as well as the fence; never rediscover it by
+                    // scanning a persistent Chat workspace or by path prefix.
+                    *control.skill_scope.lock().await = Some(scope);
+                    Err("tool_cleanup_incomplete".into())
+                } else {
+                    Err(code)
+                }
+            }
+        }
     }
 
     async fn execute(
@@ -2108,7 +2112,6 @@ impl AppAgentHost {
     ) {
         let id = control.id.clone();
         let owner = control.owner.clone();
-        let cwd = app_root.join("tasks").join(&id);
         let timer_control = control.clone();
         let timeout = admission.task.limits.timeout_ms;
         let timer = tokio::spawn(async move {
@@ -2116,9 +2119,31 @@ impl AppAgentHost {
             timer_control.timed_out.store(true, Ordering::Release);
             timer_control.revoke();
         });
-        let result = self
-            .execute_inner(&control, &admission, input, cwd.clone())
+        let mut result = self
+            .execute_inner(&control, &admission, input, app_root)
             .await;
+        // The scope is unique to this run, never reused by the next Chat turn.
+        // Retain it with the admission fence whenever native tool cleanup has
+        // not been confirmed. Cancelling or dropping a handle is not a drain.
+        if result
+            .as_ref()
+            .err()
+            .is_none_or(|error| error != "tool_cleanup_incomplete")
+        {
+            let mut scope = control.skill_scope.lock().await;
+            if let Some(scope) = scope.as_mut() {
+                if scope.cleanup_after_tools_drained().await.is_err() {
+                    result = Err("tool_cleanup_incomplete".into());
+                }
+            }
+            if result
+                .as_ref()
+                .err()
+                .is_none_or(|error| error != "tool_cleanup_incomplete")
+            {
+                scope.take();
+            }
+        }
         timer.abort();
         let result = if control.timed_out.load(Ordering::Acquire)
             && result
@@ -2130,7 +2155,12 @@ impl AppAgentHost {
         } else {
             result
         };
-        let mut result = if control.protocol_events_failed.load(Ordering::Acquire) {
+        let mut result = if control.protocol_events_failed.load(Ordering::Acquire)
+            && result
+                .as_ref()
+                .err()
+                .is_none_or(|error| error != "tool_cleanup_incomplete")
+        {
             Err("agent_storage_unavailable".into())
         } else {
             result
@@ -2336,12 +2366,24 @@ impl AppAgentHost {
         control: &Arc<Control>,
         admission: &Admission,
         input: Input,
-        cwd: PathBuf,
+        app_root: PathBuf,
     ) -> Result<(TaskResult, Value), String> {
         self.validate_current_release(&control.owner).await?;
-        tokio::fs::create_dir_all(&cwd)
-            .await
-            .map_err(|_| "task_storage_failed")?;
+        let relative = match &control.chat_id {
+            Some(chat_id) => PathBuf::from("workspaces").join(chat_id),
+            None => PathBuf::from("tasks").join(&control.id),
+        };
+        let cwd = app_root.join(&relative);
+        tokio::task::spawn_blocking(move || {
+            lingxi_core::host::rooted_fs::ensure_private_directory(
+                &app_root,
+                &relative,
+                lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+            )
+        })
+        .await
+        .map_err(|_| "task_storage_failed")?
+        .map_err(|_| "task_storage_failed")?;
         if admission.tools.is_empty() && admission.skills.is_empty() && control.chat_id.is_none() {
             if !control.store.lease_valid(&control.owner, &control.id)
                 || control.cancel.is_cancelled()
@@ -2372,8 +2414,15 @@ impl AppAgentHost {
         let (question_tx, mut question_rx) =
             tokio::sync::mpsc::channel::<tool_api::ask_user_question::AskUserQuestionExchange>(8);
         let skill_prompt = self
-            .load_skill_prompt(&control.owner, &admission.skills, &cwd)
+            .load_skill_prompt(control, &admission.skills, &cwd)
             .await?;
+        let skill_prompt = if let Some(materialized) = skill_prompt {
+            let (instructions, scope) = materialized.into_parts();
+            *control.skill_scope.lock().await = Some(scope);
+            Some(instructions)
+        } else {
+            None
+        };
         let chat_resume = if let Some(chat_id) = &control.chat_id {
             let session_id = control
                 .chats
@@ -3675,13 +3724,6 @@ fn normalize_page_run_input(
         }
     };
     let history = if let Some(chat_id) = chat_id.as_deref() {
-        if state
-            .chats
-            .has_legacy_history_without_protocol(chat_id)
-            .map_err(|_| "chat_storage_unavailable")?
-        {
-            return Err("agui_history_unavailable".into());
-        }
         state
             .chats
             .protocol_history_digests(chat_id)
@@ -4598,6 +4640,7 @@ mod progress_tests {
             chat_id: None,
             user_message_id: None,
             chat_orchestrator: Mutex::new(None),
+            skill_scope: AsyncMutex::new(None),
             chat_persisted,
             chat_commit: AsyncMutex::new(None),
             attachment_metadata: Vec::new(),
@@ -4651,6 +4694,181 @@ mod progress_tests {
     }
 
     #[tokio::test]
+    async fn scope_cleanup_failure_keeps_chat_fenced_when_protocol_storage_also_failed() {
+        use local_app::v2::{AgentSkill, ReleaseFile};
+        use sha2::{Digest, Sha256};
+
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let app_id = format!("a{}", "6".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app_id)).unwrap();
+        let state = AppAgentState::open(root.path(), &app_id).unwrap();
+        // This owner deliberately has no published release in the service:
+        // execute_inner fails before constructing a model or starting a tool.
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "scope-cleanup-regression".into(),
+        };
+        let mut granted = settings();
+        granted.skills = vec!["a".into()];
+        state.store.configure(owner.clone(), Some(granted)).unwrap();
+        let chat = state
+            .chats
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let mut input: Input = serde_json::from_value(json!({
+            "requestId":"scope-cleanup-storage-failure", "prompt":"fixture", "skills":["a"]
+        }))
+        .unwrap();
+        input.protocol_thread_id = Some(chat.chat_id.clone());
+        let admission = state
+            .store
+            .admit_scoped(
+                &owner,
+                &input,
+                &[],
+                &["a".into()],
+                Some(&chat.chat_id),
+                true,
+            )
+            .unwrap();
+        state
+            .store
+            .update(
+                &owner,
+                &admission.task.run_id,
+                State::Running,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .chats
+            .start_turn(&chat.chat_id, &admission.task.run_id)
+            .unwrap();
+        let (persisted, _) = watch::channel(None);
+        let control = Arc::new(chat_control(
+            owner,
+            1,
+            input.request_id.clone(),
+            admission.task.run_id.clone(),
+            chat.chat_id.clone(),
+            "scope-cleanup-user".into(),
+            state.store.clone(),
+            state.chats.clone(),
+            persisted,
+        ));
+        let workspace = state.root.join("workspaces").join(&chat.chat_id);
+        std::fs::create_dir_all(&workspace).unwrap();
+        let source = root.path().join("scope-source");
+        std::fs::create_dir_all(source.join("skills/a")).unwrap();
+        let bytes = b"Verified release instructions";
+        std::fs::write(source.join("skills/a/SKILL.md"), bytes).unwrap();
+        let materialized = crate::app_agent_skills::materialize(
+            &source,
+            &workspace,
+            &[AgentSkill {
+                id: "a".into(),
+                path: "skills/a/SKILL.md".into(),
+            }],
+            &[ReleaseFile {
+                path: "skills/a/SKILL.md".into(),
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                executable: false,
+            }],
+            &["a".into()],
+            control.cancel.child_token(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, scope) = materialized.into_parts();
+        let scope_path = scope.path().to_path_buf();
+        let retained = workspace.join("retained-original-scope");
+        std::fs::rename(&scope_path, &retained).unwrap();
+        std::fs::create_dir(&scope_path).unwrap();
+        std::fs::write(scope_path.join("business.txt"), b"preserve replacement").unwrap();
+        *control.skill_scope.lock().await = Some(scope);
+        control
+            .protocol_events_failed
+            .store(true, Ordering::Release);
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+
+        host.clone()
+            .execute(control.clone(), admission, input, state.root.clone())
+            .await;
+
+        assert!(control.finished.load(Ordering::Acquire));
+        assert!(
+            host.active.lock().await.contains_key(&control.id),
+            "protocol storage failure must not release an unconfirmed cleanup fence"
+        );
+        let task = control.store.get(&control.owner, &control.id).unwrap();
+        assert_eq!(task.state, State::Running);
+        assert_eq!(task.error.as_ref().unwrap().code, "tool_cleanup_incomplete");
+        assert_eq!(
+            control.skill_scope.lock().await.as_ref().unwrap().path(),
+            scope_path
+        );
+        assert_eq!(
+            control.chats.get(&chat.chat_id).unwrap().state,
+            ChatState::Running
+        );
+        assert_eq!(
+            control.chats.active_run(&chat.chat_id).unwrap().as_deref(),
+            Some(control.id.as_str())
+        );
+        assert!(matches!(
+            control.chats.start_turn(&chat.chat_id, "must-stay-busy"),
+            Err(local_app::v2::AppError::Busy(_))
+        ));
+        assert_eq!(
+            std::fs::read(scope_path.join("business.txt")).unwrap(),
+            b"preserve replacement"
+        );
+        assert_eq!(
+            std::fs::read(retained.join("skills/a/SKILL.md")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            host.stop_invocation(&control.owner.app_id, &control.owner.invocation_id)
+                .await
+                .unwrap_err(),
+            "agent_cleanup_incomplete",
+            "finished is a completion notification, not permission to drop the retained fence"
+        );
+
+        // No tool/model was started. Restore only this fixture's original
+        // owned tree, then discharge its real scope handle and budget.
+        std::fs::rename(&scope_path, workspace.join("preserved-replacement")).unwrap();
+        std::fs::rename(&retained, &scope_path).unwrap();
+        let mut held = control.skill_scope.lock().await;
+        held.as_mut()
+            .unwrap()
+            .cleanup_after_tools_drained()
+            .await
+            .unwrap();
+        held.take();
+        drop(held);
+        assert!(!scope_path.exists());
+        host.active.lock().await.remove(&control.id);
+        control
+            .chats
+            .finish_turn(&chat.chat_id, &control.id)
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn unavailable_app_storage_does_not_block_other_apps_or_modify_evidence() {
         let root = tempfile::tempdir().unwrap();
         let (initial_host, service) = test_wake_host(root.path()).await;
@@ -4688,6 +4906,9 @@ mod progress_tests {
         let apps_root = service.library.root().join("apps");
         let mut evidence = Vec::new();
         for (index, (app_id, _)) in published_apps.iter().take(4).enumerate() {
+            if index == 2 {
+                continue;
+            }
             let state = AppAgentState::open(&apps_root, app_id).unwrap();
             let owner = Owner {
                 app_id: app_id.clone(),
@@ -4775,15 +4996,13 @@ mod progress_tests {
         let factory = initial_host.factory.clone();
         drop(initial_host);
         let host = AppAgentHost::new(&service, factory, root.path()).unwrap();
-        assert_eq!(host.apps.lock().unwrap().len(), 1);
+        assert_eq!(host.apps.lock().unwrap().len(), 2);
         for (index, expected) in [
-            "chat_legacy_index_unsupported",
-            "chat_storage_uncertain",
-            "agent_legacy_store_unsupported",
-            "chat_storage_uncertain",
+            (0, "chat_storage_uncertain"),
+            (1, "chat_storage_uncertain"),
+            (3, "chat_storage_uncertain"),
         ]
         .into_iter()
-        .enumerate()
         {
             let (app_id, revision) = &published_apps[index];
             assert_eq!(host.app_state(app_id).err().as_deref(), Some(expected));
@@ -4802,6 +5021,7 @@ mod progress_tests {
             assert_eq!(std::fs::read(path).unwrap(), before);
         }
         assert!(old_agent.join("agui-v1/protocol-store.json").is_file());
+        assert!(host.app_state(&published_apps[2].0).is_ok());
 
         let (app_id, revision) = &published_apps[4];
         let (owner, _, _) = host
@@ -6735,7 +6955,8 @@ mod progress_tests {
                 root.path().to_path_buf(),
             )
             .with_session_id(SessionId::from_uuid(session_id))
-            .with_jsonl_writer(writer.clone()),
+            .with_jsonl_writer(writer.clone())
+            .with_persistent_app_chat(),
         );
         orchestrator
             .append_external_history_message(ConversationMessage::user(
@@ -7466,6 +7687,7 @@ mod accepted_projection_tests {
             chat_id: Some(chat.chat_id.clone()),
             user_message_id: None,
             chat_orchestrator: Mutex::new(None),
+            skill_scope: AsyncMutex::new(None),
             chat_persisted,
             chat_commit: AsyncMutex::new(None),
             attachment_metadata: Vec::new(),
@@ -7526,7 +7748,8 @@ mod accepted_projection_tests {
                     root.path().to_path_buf(),
                 )
                 .with_session_id(session_id)
-                .with_jsonl_writer(writer.clone()),
+                .with_jsonl_writer(writer.clone())
+                .with_persistent_app_chat(),
             );
             orchestrator
                 .append_external_history_message(ConversationMessage::user(
@@ -8478,7 +8701,7 @@ mod wake_tests {
     }
 
     #[test]
-    fn first_agui_store_preserves_legacy_agent_data() {
+    fn current_store_ignores_sibling_paths_and_preserves_application_data() {
         let root = tempfile::tempdir().unwrap();
         let agent = root.path().join("agent");
         let tasks = agent.join("tasks");
@@ -8501,8 +8724,8 @@ mod wake_tests {
         std::fs::write(agent.join("app-data.json"), b"preserved app data").unwrap();
 
         assert_eq!(
-            initialize_agui_agent_store(&agent).unwrap_err(),
-            "agent_legacy_store_unsupported"
+            initialize_agui_agent_store(&agent).unwrap(),
+            agent.join("agui-v1")
         );
         assert_eq!(
             std::fs::read(tasks.join("agent-tasks.json")).unwrap(),
@@ -8520,7 +8743,7 @@ mod wake_tests {
             std::fs::read(chats.join(old_chat).join("old-transcript.jsonl")).unwrap(),
             b"old chat"
         );
-        assert!(!agent.join("agui-v1").exists());
+        assert!(agent.join("agui-v1/protocol-store.json").is_file());
         assert_eq!(
             std::fs::read(spool.join("preserved")).unwrap(),
             b"unrelated upload spool"
@@ -8562,7 +8785,7 @@ mod wake_tests {
 
     #[cfg(unix)]
     #[test]
-    fn legacy_store_rejects_symlinked_task_roots_without_following_them() {
+    fn current_store_never_follows_unrelated_sibling_symlinks() {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
         let agent = root.path().join("agent");
@@ -8571,9 +8794,9 @@ mod wake_tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("important"), b"keep").unwrap();
         symlink(&outside, agent.join("tasks")).unwrap();
-        assert!(initialize_agui_agent_store(&agent).is_err());
+        assert!(initialize_agui_agent_store(&agent).is_ok());
         assert_eq!(std::fs::read(outside.join("important")).unwrap(), b"keep");
-        assert!(!agent.join("agui-v1").exists());
+        assert!(agent.join("agui-v1/protocol-store.json").is_file());
     }
 }
 
@@ -8690,6 +8913,7 @@ mod protocol_retry_tests {
             chat_id: Some(chat_id),
             user_message_id: Some(user_message_id),
             chat_orchestrator: Mutex::new(None),
+            skill_scope: AsyncMutex::new(None),
             chat_persisted,
             chat_commit: AsyncMutex::new(None),
             attachment_metadata: Vec::new(),

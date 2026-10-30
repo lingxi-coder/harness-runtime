@@ -94,27 +94,137 @@ fn owner_from_path(path: &std::path::Path) -> Option<(String, String)> {
     ))
 }
 
-fn text_only(message: &ConversationMessage) -> bool {
-    let content = match message {
-        ConversationMessage::User { content, .. }
-        | ConversationMessage::Assistant { content, .. } => content,
-        ConversationMessage::System { .. } => return false,
-    };
-    content.iter().all(|block| {
-        matches!(
-            block,
-            ContentBlock::Text { .. }
-                | ContentBlock::TextJsUtf16 { .. }
-                | ContentBlock::Thinking { .. }
-                | ContentBlock::RedactedThinking { .. }
-        )
-    })
-}
-
 fn real_messages(history: &[ConversationMessage]) -> Vec<&ConversationMessage> {
     history
         .iter()
         .filter(|message| !message.is_meta())
+        .collect()
+}
+
+fn starts_user_round(message: &ConversationMessage) -> bool {
+    matches!(message, ConversationMessage::User { content, is_meta: false, .. }
+        if !content.is_empty() && !content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. })))
+}
+
+// Summary calls have no tools or provider continuations. Historical calls and
+// results are quoted data; inline media stays visible to the same model rather
+// than becoming a filename, a base64 text dump, or a silently omitted picture.
+fn summary_history(history: Vec<ConversationMessage>) -> Result<Vec<ConversationMessage>, String> {
+    fn quoted(value: &Utf16JsonProjection) -> Result<ContentBlock, String> {
+        if let Some(units) = value.string_units("") {
+            Ok(ContentBlock::TextJsUtf16 {
+                text: String::from_utf16_lossy(&units),
+                utf16_code_units: units,
+                citations: None,
+            })
+        } else {
+            Ok(ContentBlock::Text {
+                text: value.to_json_string().map_err(|_| UNAVAILABLE)?,
+                citations: None,
+            })
+        }
+    }
+
+    fn inline(block: ContentBlock) -> Result<ContentBlock, String> {
+        match block {
+            ContentBlock::Text { text, .. } => Ok(ContentBlock::Text {
+                text,
+                citations: None,
+            }),
+            ContentBlock::ConnectorText { connector_text, .. } => Ok(ContentBlock::Text {
+                text: connector_text,
+                citations: None,
+            }),
+            ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                ..
+            } => Ok(ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations: None,
+            }),
+            ContentBlock::Image {
+                source: lingxi_core::types::ImageSource::Base64 { .. },
+            }
+            | ContentBlock::Document { .. } => Ok(block),
+            _ => Err(UNSUPPORTED.into()),
+        }
+    }
+
+    history
+        .into_iter()
+        .map(|message| {
+            let role = match &message {
+                ConversationMessage::User { .. } => "user",
+                ConversationMessage::Assistant { .. } => "assistant",
+                ConversationMessage::System { .. } => return Err(UNSUPPORTED.into()),
+            };
+            let mut summary = ConversationMessage::user(message.id(), String::new());
+            let ConversationMessage::User {
+                content: output, ..
+            } = &mut summary
+            else {
+                unreachable!()
+            };
+            output.push(ContentBlock::Text {
+                text: format!("Earlier {role} content (conversation data):"),
+                citations: None,
+            });
+            let content = match message {
+                ConversationMessage::User { content, .. }
+                | ConversationMessage::Assistant { content, .. } => content,
+                ConversationMessage::System { .. } => unreachable!(),
+            };
+            for block in content {
+                match block {
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
+                        output.push(ContentBlock::Text {
+                            text: format!(
+                                "Earlier tool call {id} to {name} (data only; do not execute):"
+                            ),
+                            citations: None,
+                        });
+                        output.push(quoted(&input)?);
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        content_blocks,
+                        ..
+                    } => {
+                        output.push(ContentBlock::Text {
+                            text: format!(
+                                "Earlier tool result for {tool_use_id} (error={}):",
+                                is_error == Some(true)
+                            ),
+                            citations: None,
+                        });
+                        if let Some(blocks) = content_blocks {
+                            let count = blocks.array_len("").ok_or(UNSUPPORTED)?;
+                            for index in 0..count {
+                                let block = blocks
+                                    .subprojection(&format!("/{index}"))
+                                    .map_err(|_| UNAVAILABLE)?;
+                                let block: ContentBlock = serde_json::from_str(
+                                    &block.to_json_string().map_err(|_| UNAVAILABLE)?,
+                                )
+                                .map_err(|_| UNSUPPORTED)?;
+                                output.push(inline(block)?);
+                            }
+                        } else {
+                            output.push(quoted(&content)?);
+                        }
+                    }
+                    block => output.push(inline(block)?),
+                }
+            }
+            Ok(summary)
+        })
         .collect()
 }
 
@@ -126,21 +236,24 @@ fn validate_covered(
     let count = receipt.covered_message_ids.len();
     if count < 4
         || count > real.len()
-        || !matches!(real[0], ConversationMessage::User { .. })
+        || !starts_user_round(real[0])
         || !matches!(real[count - 1], ConversationMessage::Assistant { .. })
-        || real
-            .get(count)
-            .is_some_and(|next| !matches!(next, ConversationMessage::User { .. }))
+        || real.get(count).is_some_and(|next| !starts_user_round(next))
         || real[..count]
             .iter()
             .zip(&receipt.covered_message_ids)
-            .any(|(message, id)| message.id().as_uuid() != *id || !text_only(message))
+            .any(|(message, id)| message.id().as_uuid() != *id)
         || history
             .iter()
             .any(|message| message.id().as_uuid() == receipt.summary_id)
     {
         return Err(UNAVAILABLE.into());
     }
+    let prefix = real[..count]
+        .iter()
+        .map(|message| (*message).clone())
+        .collect::<Vec<_>>();
+    ConversationOrchestrator::validate_persistent_chat_history(&prefix)?;
     receipt.invalidated_thinking_ids = real[count..]
         .iter()
         .filter(|message| matches!(message, ConversationMessage::Assistant { .. }))
@@ -324,7 +437,7 @@ fn advance_projection(
 
 /// Pure validation. Receipts never become canonical user/assistant messages.
 /// Each receipt proves its actual earlier bytes, extends the previous covered
-/// prefix, and can summarize only complete text rounds from that source.
+/// prefix, and can summarize only complete, inline rounds from that source.
 pub(crate) fn replay_context_receipts(
     captured: &CapturedChatTranscript,
 ) -> Result<Option<ContextReceipt>, String> {
@@ -390,7 +503,7 @@ pub(crate) fn replay_context_receipts(
                 return Err(UNAVAILABLE.into());
             }
             let loaded = session::jsonl::route_lines(prefix);
-            let source = crate::resume::replay_captured_session(
+            let source = crate::resume::replay_persistent_app_chat_session(
                 captured.path().to_path_buf(),
                 prefix.to_owned(),
                 loaded,
@@ -404,7 +517,7 @@ pub(crate) fn replay_context_receipts(
         offset += line.len();
     }
     if !synthetic_ids.is_empty() {
-        let raw = crate::resume::replay_captured_session(
+        let raw = crate::resume::replay_persistent_app_chat_session(
             captured.path().to_path_buf(),
             captured.source().to_owned(),
             session::jsonl::route_lines(captured.source()),
@@ -488,14 +601,14 @@ impl OutgoingHistoryRewriter for ChatContextHistoryRewriter {
 }
 
 impl ConversationOrchestrator {
-    /// Enable summaries only for a physically owned side Chat. All canonical
+    /// Enable summaries only for a physically owned App Chat. All canonical
     /// messages remain subject to the existing strict checkpoint verifier.
     pub fn with_persistent_chat_context(
         mut self,
         config: PersistentChatContextConfig,
     ) -> Result<Self, String> {
         let writer = self.transcript.jsonl_writer.as_ref().ok_or(UNAVAILABLE)?;
-        if !self.side_chat
+        if !self.is_persistent_app_chat()
             || !writer.is_persistent_chat()
             || owner_from_path(&writer.active_path())
                 != Some((config.app_id.clone(), config.chat_id.clone()))
@@ -670,9 +783,7 @@ impl ConversationOrchestrator {
         let user_positions = source_real
             .iter()
             .enumerate()
-            .filter_map(|(index, message)| {
-                matches!(message, ConversationMessage::User { .. }).then_some(index)
-            })
+            .filter_map(|(index, message)| starts_user_round(message).then_some(index))
             .collect::<Vec<_>>();
         let cut = user_positions
             .len()
@@ -688,10 +799,7 @@ impl ConversationOrchestrator {
         let previous_count = prior
             .as_ref()
             .map_or(0, |receipt| receipt.covered_message_ids.len());
-        if cut < 4
-            || cut <= previous_count
-            || source_real[..cut].iter().any(|message| !text_only(message))
-        {
+        if cut < 4 || cut <= previous_count {
             return Err(error(UNSUPPORTED));
         }
         let mut receipt = ContextReceipt {
@@ -727,17 +835,9 @@ impl ConversationOrchestrator {
             .iter()
             .map(|message| (*message).clone())
             .collect::<Vec<_>>();
-        let mut summary_input = project(prior.as_ref(), prefix).map_err(|_| error(UNAVAILABLE))?;
-        for message in &mut summary_input {
-            if let ConversationMessage::Assistant { content, .. } = message {
-                content.retain(|block| {
-                    matches!(
-                        block,
-                        ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. }
-                    )
-                });
-            }
-        }
+        let mut summary_input =
+            summary_history(project(prior.as_ref(), prefix).map_err(|_| error(UNAVAILABLE))?)
+                .map_err(|_| error(UNSUPPORTED))?;
         // Anthropic forbids an assistant prefill on this call. This independent
         // user instruction belongs only to the summary request and its estimate.
         summary_input.push(ConversationMessage::user(
@@ -749,7 +849,8 @@ impl ConversationOrchestrator {
         summary_request.system_prompt_input = None;
         summary_request.messages = summary_input;
         summary_request.tools.clear();
-        summary_request.typed_attachment_ids.clear();
+        summary_request.typed_attachment_ids =
+            self.typed_attachment_ids_for_snapshot(&summary_request.messages);
         summary_request.task_deliveries.clear();
         summary_request.max_tokens = Some(SUMMARY_OUTPUT_TOKENS);
         if estimate(&summary_request)?.saturating_add(u64::from(SUMMARY_OUTPUT_TOKENS)) > budget {

@@ -147,6 +147,9 @@ pub(crate) struct CompletedAssistantRow {
     pub(crate) stream_order: u64,
     /// Host UUID for the eventual per-block transcript envelope.
     pub(crate) row_id: MessageId,
+    /// Host identity shared by all blocks in the canonical merged assistant.
+    /// App Chat stores this identity independently of the provider response id.
+    pub(crate) logical_message_id: Option<MessageId>,
     /// Provider-owned `message_start.message.id` for the row's response.
     pub(crate) provider_message_id: String,
     /// Model identity associated with this completed row.
@@ -785,6 +788,9 @@ async fn finish_pending_server_stitch(
 
     if let Some(p) = pump.as_mut() {
         p.assistant_id = candidate_id;
+        for row in &mut turn.assistant_rows {
+            row.logical_message_id = Some(candidate_id);
+        }
     }
     turn.assistant_row_identity = Some(candidate_id);
     turn.replacement_message_id = Some(candidate_id);
@@ -1359,9 +1365,9 @@ pub(crate) struct ExecutorPump<'a, 'e> {
     pub(crate) executor: &'a mut StreamingToolExecutor<'e>,
     /// The pre-allocated id of THIS turn's assistant message (claude-code
     /// passes the already-yielded assistant `message` to `addTool`). It only
-    /// populates `TrackedTool.assistant_id`; the post-stream drain parents
-    /// results via the per-block JSONL uuid map, so this value does not affect
-    /// output bytes.
+    /// populates `TrackedTool.assistant_id`; App Chat also retains it on each
+    /// completed row so durable block groups replay to the merged host row.
+    /// Tool-result parents still use the per-block JSONL uuid map.
     pub(crate) assistant_id: MessageId,
     /// Frozen request messages from before the current assistant row. Late
     /// queued tool starts must use this same query snapshot.
@@ -2078,6 +2084,7 @@ async fn pump_stream_inner(
                     per_turn_effort: turn.per_turn_effort.clone(),
                     stream_order: next_row_order,
                     row_id,
+                    logical_message_id: pump.as_ref().map(|p| p.assistant_id),
                     provider_message_id: provider_message_id.clone(),
                     model: assistant_row_model.clone(),
                     model_profile: assistant_row_profile.clone(),
@@ -2170,6 +2177,7 @@ async fn pump_stream_inner(
                     per_turn_effort: turn.per_turn_effort.clone(),
                     stream_order: next_row_order,
                     row_id,
+                    logical_message_id: pump.as_ref().map(|p| p.assistant_id),
                     provider_message_id: provider_message_id.clone(),
                     model: assistant_row_model.clone(),
                     model_profile: assistant_row_profile.clone(),

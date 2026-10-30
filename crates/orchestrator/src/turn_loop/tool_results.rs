@@ -181,6 +181,9 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
     output_file: Option<&lingxi_core::host::process::ProcessOutputFile>,
 ) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
+    if orch.is_persistent_app_chat() {
+        return inline_chat_result(content, content_blocks);
+    }
     if orch.side_chat {
         return PersistenceOutcome {
             content,
@@ -276,7 +279,7 @@ pub(super) async fn persist_keep_recent_clears(
 ) -> std::collections::HashMap<ToolUseId, String> {
     use crate::tool_result_persistence as trp;
 
-    if orch.side_chat {
+    if orch.side_chat || orch.is_persistent_app_chat() {
         return std::collections::HashMap::new();
     }
     let mut out = std::collections::HashMap::new();
@@ -336,6 +339,10 @@ pub(super) async fn apply_tool_result_persistence(
     content_blocks: Option<&Utf16JsonProjection>,
 ) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
+
+    if orch.is_persistent_app_chat() {
+        return inline_chat_result(content, content_blocks);
+    }
 
     if tool_result_is_blank(&content, content_blocks) {
         if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
@@ -467,6 +474,22 @@ pub(super) async fn apply_tool_result_persistence(
     PersistenceOutcome {
         content: replacement,
         replaced: true,
+    }
+}
+
+fn inline_chat_result(
+    content: Utf16JsonProjection,
+    content_blocks: Option<&Utf16JsonProjection>,
+) -> PersistenceOutcome {
+    match tool_api::persistent_chat::validate_inline_result(&content, content_blocks) {
+        Ok(()) => PersistenceOutcome {
+            content,
+            replaced: false,
+        },
+        Err(error) => PersistenceOutcome {
+            content: format!("Local App Chat result rejected: {error}").into(),
+            replaced: true,
+        },
     }
 }
 

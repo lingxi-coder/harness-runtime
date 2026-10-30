@@ -180,6 +180,7 @@ fn user_message_from_projection(
     text: &Utf16JsonProjection,
     is_meta: bool,
     images: Vec<lingxi_core::types::ImageSource>,
+    persistent_app_chat: bool,
 ) -> ConversationMessage {
     let display = text.string_at("").unwrap_or_default().to_owned();
     let mut message = if images.is_empty() {
@@ -199,10 +200,26 @@ fn user_message_from_projection(
     {
         *meta = is_meta;
         if let Some(block) = content.first_mut() {
-            *block = ContentBlock::TextJsUtf16 {
-                text: text.string_at("").unwrap_or_default().to_owned(),
-                utf16_code_units: text.string_units("").unwrap_or_default(),
-                citations: None,
+            let units = text.string_units("").unwrap_or_default();
+            // App Chat checkpoints compare the exact live and replayed
+            // histories. JSONL decodes valid UTF-16 text as Text; keep this
+            // profile's admitted row in the same canonical representation.
+            // Ordinary Native Chat/Code retains its source carrier contract.
+            let canonical_text = if persistent_app_chat {
+                String::from_utf16(&units).ok()
+            } else {
+                None
+            };
+            *block = match canonical_text {
+                Some(text) => ContentBlock::Text {
+                    text,
+                    citations: None,
+                },
+                _ => ContentBlock::TextJsUtf16 {
+                    text: text.string_at("").unwrap_or_default().to_owned(),
+                    utf16_code_units: units,
+                    citations: None,
+                },
             };
         }
     }
@@ -708,7 +725,13 @@ impl ConversationOrchestrator {
         is_meta: bool,
         images: Vec<lingxi_core::types::ImageSource>,
     ) {
-        let msg = user_message_from_projection(MessageId::new(), text, is_meta, images);
+        let msg = user_message_from_projection(
+            MessageId::new(),
+            text,
+            is_meta,
+            images,
+            self.is_persistent_app_chat(),
+        );
         {
             let mut session = self.session.lock().await;
             session.history.push(msg.clone());
@@ -734,7 +757,13 @@ impl ConversationOrchestrator {
             }),
             ..QueuedPromptInput::default()
         };
-        let message = user_message_from_projection(identity.message_id, text, false, images);
+        let message = user_message_from_projection(
+            identity.message_id,
+            text,
+            false,
+            images,
+            self.is_persistent_app_chat(),
+        );
         let stored = self
             .persist_pending_prompt_queued_message_once(&message, &input, &identity.prompt_id)
             .await?;
@@ -1025,8 +1054,13 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear_idle_checkins();
-        let mut user_msg =
-            user_message_from_projection(MessageId::new(), &screened_text, false, Vec::new());
+        let mut user_msg = user_message_from_projection(
+            MessageId::new(),
+            &screened_text,
+            false,
+            Vec::new(),
+            self.is_persistent_app_chat(),
+        );
         let native_source = crate::native_user_message_source::current().unwrap_or_default();
         self.apply_native_user_message_source(&mut user_msg, &native_source)
             .await;
@@ -2732,7 +2766,10 @@ impl ConversationOrchestrator {
                 // `Err(..)` upstream of this match. Once nudged, a still-empty
                 // continuation falls through to the normal end.
                 if !loop_state.thinking_only_nudged
-                    && !pumped_has_visible_text(&pumped.assistant_blocks)
+                    && !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    )
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
@@ -2888,7 +2925,10 @@ impl ConversationOrchestrator {
                         )
                     });
                 if (!pumped.tool_input_issues.is_empty()
-                    || !pumped_has_visible_text(&pumped.assistant_blocks))
+                    || !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    ))
                     && can_repeat_original
                     && no_hosted_effects
                     && !loop_state.recovery.max_output_tokens_escalated
@@ -2969,7 +3009,10 @@ impl ConversationOrchestrator {
             // the generic terminal arm; once nudged it falls through.
             Some("stop_sequence")
                 if !loop_state.thinking_only_nudged
-                    && !pumped_has_visible_text(&pumped.assistant_blocks)
+                    && !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    )
                     && !prior_structured_output =>
             {
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
@@ -3030,7 +3073,10 @@ impl ConversationOrchestrator {
                 // thinking-only nudge applies here on the same terms and,
                 // like the `end_turn` arm, fires BEFORE the Stop hooks.
                 if !loop_state.thinking_only_nudged
-                    && !pumped_has_visible_text(&pumped.assistant_blocks)
+                    && !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    )
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
@@ -3444,6 +3490,7 @@ impl ConversationOrchestrator {
                     &input.text,
                     input.is_meta,
                     message_images,
+                    self.is_persistent_app_chat(),
                 );
                 if input.turn_companion {
                     if let ConversationMessage::User { turn_companion, .. } = &mut message {
@@ -3551,6 +3598,7 @@ impl ConversationOrchestrator {
                         &screened_text,
                         false,
                         images,
+                        self.is_persistent_app_chat(),
                     ),
                     true,
                 ),
@@ -4296,17 +4344,25 @@ impl ConversationOrchestrator {
 /// ~202946760):
 /// `ie.some(msg => msg.content.some(b => b.type === "text" && b.text.trim().length > 0))`.
 ///
-/// A `false` return = a thinking-only (or otherwise text-empty) response. Only
-/// [`lingxi_core::types::ContentBlock::Text`] blocks with a non-whitespace body count;
-/// `Thinking`, `ToolUse`, etc. are not "visible output" for this gate. (Tool
-/// uses are indexed separately in `PumpedTurn::tool_uses`; recovered responses
-/// also keep their original tool blocks in `assistant_blocks`. This gate only
-/// fires on `end_turn`/`stop_sequence`.)
 pub(super) fn pumped_has_visible_text(blocks: &[lingxi_core::types::ContentBlock]) -> bool {
     use lingxi_core::types::ContentBlock;
     blocks
         .iter()
-        .any(|b| matches!(b, ContentBlock::Text { text, .. } if !text.trim().is_empty()))
+        .any(|block| matches!(block, ContentBlock::Text { text, .. } if !text.trim().is_empty()))
+}
+
+/// App Chat's exact UTF-16 text remains visible even when an unpaired unit
+/// requires the JS carrier. Native Chat/Code keeps its original predicate.
+fn pumped_has_visible_text_for_profile(
+    blocks: &[lingxi_core::types::ContentBlock],
+    persistent_app_chat: bool,
+) -> bool {
+    use lingxi_core::types::ContentBlock;
+    pumped_has_visible_text(blocks)
+        || (persistent_app_chat
+            && blocks.iter().any(|block| {
+                matches!(block, ContentBlock::TextJsUtf16 { text, .. } if !text.trim().is_empty())
+            }))
 }
 
 pub(super) fn llm_response_to_pumped_turn(

@@ -204,6 +204,10 @@ impl StructuredOutputTool {
 
 #[async_trait]
 impl Tool for StructuredOutputTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         STRUCTURED_OUTPUT_TOOL_NAME
     }

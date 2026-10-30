@@ -1436,17 +1436,11 @@ fn agent_envelope(result: Result<Value, String>) -> String {
                 "agent_storage_unavailable" => {
                     "Agent task storage is unavailable. Existing task data has been preserved."
                 }
-                "agent_legacy_store_unsupported" => {
-                    "This App has older or unrecognized Agent storage that cannot be opened by this version. The existing data was preserved. Create a new App or seek help with the existing data."
-                }
                 "agent_protocol_store_marker_missing" => {
                     "This App has existing Agent data with a missing protocol marker. The existing data was preserved. Seek help before modifying it."
                 }
                 "agent_protocol_store_version_mismatch" => {
                     "This App's Agent data has an unsupported or invalid protocol marker. The existing data was preserved. Seek help before modifying it."
-                }
-                "chat_legacy_index_unsupported" => {
-                    "This App's Chat creation index is missing; its data may use an older format or be incomplete. The existing data was preserved. Create a new App or seek help with the existing data."
                 }
                 "chat_storage_uncertain" => {
                     "This App's Chat storage could not be verified. Keep the existing data and seek help before trying to modify it."
@@ -1508,15 +1502,7 @@ mod agent_envelope_tests {
     #[test]
     fn app_storage_errors_distinguish_missing_index_from_corruption() {
         for (code, phrase) in [
-            (
-                "chat_legacy_index_unsupported",
-                "older format or be incomplete",
-            ),
             ("chat_storage_uncertain", "could not be verified"),
-            (
-                "agent_legacy_store_unsupported",
-                "older or unrecognized Agent storage",
-            ),
             (
                 "agent_protocol_store_marker_missing",
                 "missing protocol marker",

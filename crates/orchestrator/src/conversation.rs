@@ -1659,6 +1659,7 @@ pub use native_policy_attachments::{
 pub struct ConversationOrchestrator {
     /// Lightweight child state never publishes process-wide session flags.
     pub(crate) side_chat: bool,
+    pub(crate) persistent_app_chat: bool,
     pub(crate) side_chat_model_refs: Option<Vec<String>>,
     pub(crate) config: OrchestratorConfig,
     pub(crate) native_sandbox_host_facts_provider:

@@ -2576,7 +2576,7 @@ impl ConversationOrchestrator {
             crate::prompt::MemoryFile,
         >,
     ) -> Result<Option<ConversationMessage>, lingxi_core::settings::SettingsError> {
-        if self.config.bare {
+        if self.config.bare || self.is_persistent_app_chat() {
             return Ok(None);
         }
         // `instructions` value = the assembled memory block (preamble + `Contents

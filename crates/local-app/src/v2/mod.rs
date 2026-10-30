@@ -2,9 +2,11 @@
 //! Filesystem calls are synchronous: async hosts must use their blocking executor.
 /// Host-owned Agent task records shared by native platforms.
 pub mod agent;
+mod document;
 mod library;
 mod manifest;
 mod model;
+pub use document::validate_inline_document;
 pub use library::*;
 pub use manifest::*;
 pub use model::*;
@@ -33,9 +35,6 @@ pub enum AppError {
     /// The Chat creation ID was previously deleted and cannot be reused.
     #[error("Chat creation request refers to a deleted Chat")]
     ChatCreateDeleted,
-    /// A stored index predates, or is missing, the creation identity map.
-    #[error("Chat creation index is missing; the data may use an older format or be incomplete")]
-    ChatLegacyIndexUnsupported,
     /// A Chat index write may have committed and requires reopening to verify.
     #[error("Chat storage outcome is uncertain; reopen the store before continuing")]
     ChatStorageUncertain,
@@ -56,7 +55,6 @@ impl AppError {
             Self::Busy(_) => "busy",
             Self::ChatCreateConflict => "chatCreateConflict",
             Self::ChatCreateDeleted => "chatCreateDeleted",
-            Self::ChatLegacyIndexUnsupported => "chatLegacyIndexUnsupported",
             Self::ChatStorageUncertain => "chatStorageUncertain",
             Self::Io(_) => "storageFailure",
         }

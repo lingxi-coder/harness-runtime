@@ -834,6 +834,152 @@ impl PosixProcess {
 
 #[async_trait]
 impl ProcessRunner for PosixProcess {
+    fn supports_inline_foreground(&self) -> bool {
+        true
+    }
+
+    async fn run_inline_foreground(
+        &self,
+        cmd: &SandboxedCommand,
+        max_output_bytes: usize,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        if cmd.process_owner().is_none()
+            || cmd.background_task().is_some()
+            || cmd.inner().stdin.is_some()
+        {
+            return Err(ProcessError::Unsupported);
+        }
+        let mut command = Self::build_command(cmd);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        attach_setsid(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|error| ProcessError::Io(error.to_string()))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| ProcessError::Io("inline child has no pid".into()))?;
+        let mut group_guard = StreamingProcessGroupGuard(Some(pid));
+        let _owner = super::agent_processes::register(cmd.process_owner(), Some(pid));
+        // Shell calls carry no stdin. Refuse unsupported callers before spawn
+        // above by the same strict API rather than leaving a blocked writer.
+        drop(child.stdin.take());
+        let mut stdout = child.stdout.take().expect("piped inline stdout");
+        let mut stderr = child.stderr.take().expect("piped inline stderr");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut out_chunk = [0u8; 8192];
+        let mut err_chunk = [0u8; 8192];
+        let mut out_done = false;
+        let mut err_done = false;
+        let mut status = None;
+        let mut truncated = false;
+        let deadline = tokio::time::sleep(cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT));
+        tokio::pin!(deadline);
+        let timed_out = loop {
+            if out_done && err_done && status.is_some() {
+                break false;
+            }
+            tokio::select! {
+                biased;
+                () = &mut deadline => break true,
+                read = stdout.read(&mut out_chunk), if !out_done => {
+                    match read {
+                        Ok(0) | Err(_) => out_done = true,
+                        Ok(count) => {
+                            let keep = count.min(max_output_bytes.saturating_sub(out.len() + err.len()));
+                            out.extend_from_slice(&out_chunk[..keep]);
+                            truncated |= keep != count;
+                        }
+                    }
+                }
+                read = stderr.read(&mut err_chunk), if !err_done => {
+                    match read {
+                        Ok(0) | Err(_) => err_done = true,
+                        Ok(count) => {
+                            let keep = count.min(max_output_bytes.saturating_sub(out.len() + err.len()));
+                            err.extend_from_slice(&err_chunk[..keep]);
+                            truncated |= keep != count;
+                        }
+                    }
+                }
+                waited = child.wait(), if status.is_none() => {
+                    status = Some(waited.map_err(|error| ProcessError::Io(error.to_string()))?);
+                }
+            }
+        };
+        if timed_out {
+            let _ = kill_tree_force(pid);
+            status = Some(
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                    .await
+                    .map_err(|_| {
+                        ProcessError::Io(format!(
+                            "{} process {pid} did not reap",
+                            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                        ))
+                    })?
+                    .map_err(|error| {
+                        ProcessError::Io(format!(
+                            "{} {error}",
+                            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                        ))
+                    })?,
+            );
+        }
+        // A shell may exit after a child closes its pipes and keeps running.
+        // Foreground completion must settle that owned group too.
+        kill_tree_force(pid).map_err(|error| {
+            ProcessError::Io(format!(
+                "{} {error}",
+                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+            ))
+        })?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let pgid = nix::unistd::Pid::from_raw(
+                i32::try_from(pid).map_err(|_| ProcessError::Unsupported)?,
+            );
+            loop {
+                match nix::sys::signal::killpg(pgid, None) {
+                    Err(nix::errno::Errno::ESRCH) => return Ok::<(), ProcessError>(()),
+                    Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    Err(error) => {
+                        return Err(ProcessError::Io(format!(
+                            "{} process group {pid} cleanup cannot be confirmed: {error}",
+                            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+                        )))
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            ProcessError::Io(format!(
+                "{} process group {pid} did not settle",
+                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+            ))
+        })??;
+        group_guard.0 = None;
+        let mut stdout = String::from_utf8_lossy(&out).into_owned();
+        if truncated {
+            stdout.push_str("\n[Local App Chat shell output truncated at the inline limit]");
+        }
+        Ok(lingxi_core::host::ForegroundRunResult {
+            outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
+                stdout,
+                stderr: String::from_utf8_lossy(&err).into_owned(),
+                exit_code: status
+                    .and_then(|status| status.code())
+                    .unwrap_or(TIMEOUT_KILL_EXIT_CODE),
+                timed_out,
+            }),
+            output_file: None,
+        })
+    }
+
     fn supports_foreground_backgrounding(&self) -> bool {
         true
     }
@@ -2295,6 +2441,75 @@ mod async_hook_tests {
             result.outcome,
             lingxi_core::host::ForegroundOutcome::Completed(_)
         ));
+        assert!(!parent.path().join("tasks").exists());
+    }
+
+    #[tokio::test]
+    async fn local_app_inline_foreground_caps_memory_without_spool() {
+        let parent = tempfile::tempdir().unwrap();
+        let runner = PosixProcess::with_task_output_dir(parent.path().join("tasks"));
+        let owner = format!("inline-chat-{}", std::process::id());
+        let command = sh("i=0; while [ $i -lt 10000 ]; do printf abcdefgh; i=$((i+1)); done")
+            .with_process_owner(Some(owner.clone()));
+        let result = runner.run_inline_foreground(&command, 128).await.unwrap();
+        let lingxi_core::host::ForegroundOutcome::Completed(output) = result.outcome else {
+            panic!("inline process detached")
+        };
+        assert!(output.stdout.len() < 256);
+        assert!(output.stdout.contains("truncated"));
+        assert!(result.output_file.is_none());
+        assert!(!parent.path().join("tasks").exists());
+        assert!(lingxi_core::host::agent_processes::snapshot(&owner).is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_app_inline_foreground_reaps_children_that_closed_their_pipes() {
+        let parent = tempfile::tempdir().unwrap();
+        let runner = PosixProcess::with_task_output_dir(parent.path().join("tasks"));
+        let command = sh("sleep 30 >/dev/null 2>&1 & printf '%s' \"$$\"")
+            .with_process_owner(Some("inline-closed-pipes".into()));
+        let result = runner.run_inline_foreground(&command, 128).await.unwrap();
+        let lingxi_core::host::ForegroundOutcome::Completed(output) = result.outcome else {
+            panic!("inline process detached")
+        };
+        let pgid = nix::unistd::Pid::from_raw(output.stdout.parse().unwrap());
+        assert_eq!(
+            nix::sys::signal::killpg(pgid, None),
+            Err(nix::errno::Errno::ESRCH)
+        );
+        assert!(!parent.path().join("tasks").exists());
+    }
+
+    #[tokio::test]
+    async fn local_app_inline_cancel_kills_and_reaps_before_returning() {
+        let parent = tempfile::tempdir().unwrap();
+        let runner = std::sync::Arc::new(PosixProcess::with_task_output_dir(
+            parent.path().join("tasks"),
+        ));
+        let owner = format!("inline-cancel-{}", std::process::id());
+        let command = sh("sleep 30 & wait").with_process_owner(Some(owner.clone()));
+        let worker = {
+            let runner = runner.clone();
+            tokio::spawn(async move { runner.run_inline_foreground(&command, 128).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while lingxi_core::host::agent_processes::snapshot(&owner).is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        runner.kill_owner_processes(&owner).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result.outcome,
+            lingxi_core::host::ForegroundOutcome::Completed(_)
+        ));
+        assert!(lingxi_core::host::agent_processes::snapshot(&owner).is_empty());
         assert!(!parent.path().join("tasks").exists());
     }
 

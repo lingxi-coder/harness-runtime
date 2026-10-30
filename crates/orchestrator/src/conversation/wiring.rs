@@ -129,6 +129,7 @@ impl ConversationOrchestrator {
         let ultracode = config.ultracode;
         Self {
             side_chat,
+            persistent_app_chat: false,
             side_chat_model_refs: None,
             config,
             native_sandbox_host_facts_provider: None,
@@ -1321,14 +1322,16 @@ impl ConversationOrchestrator {
     /// `force_compact` retains the M5-10 no-op shape. (M6-08)
     #[must_use]
     pub fn with_compaction(mut self, compactor: Arc<compaction::CompactionOrchestrator>) -> Self {
-        self.compaction_runtime.compaction = Some(compactor);
+        if !self.is_persistent_app_chat() {
+            self.compaction_runtime.compaction = Some(compactor);
+        }
         self
     }
 
     /// Enable the local, session-scoped idle compaction controller. Platform
     /// config defaults this to false and does not read remote experiment state.
     pub fn with_idle_compaction_enabled(mut self, enabled: bool) -> Self {
-        self.idle_compaction_enabled = enabled && !self.side_chat;
+        self.idle_compaction_enabled = enabled && !self.side_chat && !self.is_persistent_app_chat();
         self
     }
 
