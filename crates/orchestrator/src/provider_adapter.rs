@@ -852,6 +852,11 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.last_rate_limit_error_message()
     }
 
+    fn supports_responses_websocket_prewarm(&self, model: &str, profile: Option<&str>) -> bool {
+        self.service
+            .supports_responses_websocket_prewarm(model, profile)
+    }
+
     async fn prewarm_responses_websocket(
         &self,
         model: &str,

@@ -4223,6 +4223,45 @@ mod tests {
         )
     }
 
+    #[test]
+    fn prewarm_eligibility_follows_the_selected_route_and_transport() {
+        let transport = || FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let anthropic = make_adapter_for_protocol_with_websocket(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+            "anthropic",
+            "model",
+            transport(),
+            false,
+        );
+        let http_responses = make_adapter_for_protocol_with_websocket(
+            ProtocolFamily::OpenAiResponses,
+            ProviderId::OpenAI,
+            "https://api.openai.com",
+            "openai",
+            "model",
+            transport(),
+            false,
+        );
+        let websocket_responses = make_adapter_for_protocol_with_websocket(
+            ProtocolFamily::OpenAiResponses,
+            ProviderId::OpenAI,
+            "https://api.openai.com",
+            "openai",
+            "model",
+            transport(),
+            true,
+        );
+
+        assert!(!anthropic.supports_responses_websocket_prewarm("model", Some("anthropic")));
+        assert!(!http_responses.supports_responses_websocket_prewarm("model", Some("openai")));
+        assert!(websocket_responses.supports_responses_websocket_prewarm("model", Some("openai")));
+        assert!(websocket_responses.supports_responses_websocket_prewarm("model", None));
+        assert!(!websocket_responses.supports_responses_websocket_prewarm("unknown", None));
+        assert!(!websocket_responses.supports_responses_websocket_prewarm("model", Some("other")));
+    }
+
     async fn headers_after_inject_for_protocol(
         protocol: ProtocolFamily,
         provider_id: ProviderId,

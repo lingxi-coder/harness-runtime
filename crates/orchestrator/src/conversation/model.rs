@@ -2956,6 +2956,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 let session = orchestrator.session.lock().await;
                 (session.model.clone(), session.model_profile.clone())
             };
+            if !orchestrator
+                .api
+                .supports_responses_websocket_prewarm(&model, profile.as_deref())
+            {
+                return;
+            }
             let system = match orchestrator.provider_system_prompt().await {
                 Ok(system) => system,
                 Err(error) => {

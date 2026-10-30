@@ -6466,15 +6466,20 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
         );
 
         first
+            .submit(ClientCommand::PauseTurn {
+                turn_id: 246,
+                reason: "simulated_process_restart".into(),
+            })
+            .await
+            .expect("quiesce the in-flight request before restart");
+        let paused = first
             .durable_turns
-            .transition(
-                &session_id,
-                246,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
-            )
-            .expect("mark the in-flight request recoverable before restart");
+            .load(&session_id, 246)
+            .expect("load the paused prompt checkpoint");
+        assert_eq!(paused.state, Some(TurnRecoveryStateDto::PausedRecoverable));
+        assert_eq!(paused.queue_delivery, QueueDeliveryState::Claimed);
+        assert!(paused.safe_to_resume);
+        assert!(first.active_cancel.lock().await.is_none());
         session_id
     });
     drop(first);
@@ -6728,15 +6733,20 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Running));
         assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::Claimed);
         engine_for_work
-            .durable_turns
-            .transition(
-                &session_id,
+            .submit(ClientCommand::PauseTurn {
                 turn_id,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
-            )
-            .expect("mark the active request resumable before restart");
+                reason: "simulated_process_restart".into(),
+            })
+            .await
+            .expect("quiesce the active request before restart");
+        let paused = engine_for_work
+            .durable_turns
+            .load(&session_id, turn_id)
+            .expect("load the paused no-ID prompt checkpoint");
+        assert_eq!(paused.state, Some(TurnRecoveryStateDto::PausedRecoverable));
+        assert_eq!(paused.queue_delivery, QueueDeliveryState::Claimed);
+        assert!(paused.safe_to_resume);
+        assert!(engine_for_work.active_cancel.lock().await.is_none());
         (session_id, turn_id)
     });
     drop(engine);

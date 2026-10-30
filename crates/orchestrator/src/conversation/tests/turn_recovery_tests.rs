@@ -516,6 +516,10 @@ impl OrchestratorApiClient for BlockingPrewarmApiClient {
         })
     }
 
+    fn supports_responses_websocket_prewarm(&self, _model: &str, _profile: Option<&str>) -> bool {
+        true
+    }
+
     async fn prewarm_responses_websocket(
         &self,
         _model: &str,
@@ -1594,6 +1598,88 @@ async fn recov2_batched_blocking_limit_does_not_trigger_budget_continuation() {
         _ => None,
     });
     assert_eq!(end, Some("blocking_limit"));
+}
+
+#[tokio::test]
+async fn unsupported_startup_prewarm_skips_prompt_and_tool_preparation() {
+    struct IneligibleApi {
+        checked: Notify,
+        route: std::sync::Mutex<Option<(String, Option<String>)>>,
+    }
+
+    #[async_trait]
+    impl OrchestratorApiClient for IneligibleApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<HistoryResponse, LlmError> {
+            unreachable!("fixture does not submit model requests")
+        }
+
+        fn supports_responses_websocket_prewarm(&self, model: &str, profile: Option<&str>) -> bool {
+            *self.route.lock().unwrap() = Some((model.to_owned(), profile.map(str::to_owned)));
+            self.checked.notify_one();
+            false
+        }
+    }
+
+    struct CountingMemory(AtomicBool);
+
+    #[async_trait]
+    impl crate::prompt::MemoryHierarchyProvider for CountingMemory {
+        async fn load(&self, _cwd: &std::path::Path) -> Vec<crate::prompt::MemoryFile> {
+            self.0.store(true, Ordering::SeqCst);
+            Vec::new()
+        }
+
+        async fn load_conditional_rules(
+            &self,
+            _cwd: &std::path::Path,
+            _trigger: &std::path::Path,
+            _mode: crate::prompt::memory_block::InstructionFilesMode,
+        ) -> Vec<crate::prompt::MemoryFile> {
+            Vec::new()
+        }
+    }
+
+    let api = Arc::new(IneligibleApi {
+        checked: Notify::new(),
+        route: std::sync::Mutex::new(None),
+    });
+    let memory = Arc::new(CountingMemory(AtomicBool::new(false)));
+    let orch = Arc::new(ConversationOrchestrator::new(
+        OrchestratorConfig {
+            model: "selected-model".to_owned(),
+            ..OrchestratorConfig::default()
+        },
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        memory.clone(),
+        std::env::temp_dir(),
+    ));
+    orch.session.lock().await.model_profile = Some("selected-profile".to_owned());
+
+    orch.spawn_startup_responses_websocket_prewarm();
+    tokio::time::timeout(Duration::from_secs(5), api.checked.notified())
+        .await
+        .expect("prewarm must check the selected route");
+    orch.shutdown_startup_responses_websocket_prewarm()
+        .await
+        .unwrap();
+    assert_eq!(
+        *api.route.lock().unwrap(),
+        Some((
+            "selected-model".to_owned(),
+            Some("selected-profile".to_owned())
+        ))
+    );
+    assert!(
+        !memory.0.load(Ordering::SeqCst),
+        "an unsupported route must not assemble the system prompt"
+    );
 }
 
 #[tokio::test]

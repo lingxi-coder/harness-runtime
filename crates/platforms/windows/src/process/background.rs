@@ -240,7 +240,7 @@ fn start_child_kill(child: &mut tokio::process::Child) -> Result<(), ProcessErro
             std::sync::OnceLock::new();
         let failures = FAILURES.get_or_init(|| {
             std::sync::atomic::AtomicUsize::new(
-                std::env::var("LINGXI_TEST_CHILD_KILL_FAILURES")
+                std::env::var("HARNESS_TEST_CHILD_KILL_FAILURES")
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(0),
@@ -1514,10 +1514,10 @@ mod foreground_stop_tests {
                 command: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    "(while [ -d \"$LINGXI_TEST_FIXTURE_DIR\" ] && [ ! -e \"$LINGXI_TEST_FIXTURE_DIR/descendant.release\" ]; do sleep 0.05; done; : > \"$LINGXI_TEST_FIXTURE_DIR/descendant.done\" 2>/dev/null) & printf '%s' \"$!\" > descendant.pid; wait".into(),
+                    "(while [ -d \"$HARNESS_TEST_FIXTURE_DIR\" ] && [ ! -e \"$HARNESS_TEST_FIXTURE_DIR/descendant.release\" ]; do sleep 0.05; done; : > \"$HARNESS_TEST_FIXTURE_DIR/descendant.done\" 2>/dev/null) & printf '%s' \"$!\" > descendant.pid; wait".into(),
                 ],
                 cwd: Some(root.path().to_path_buf()),
-                env: [("LINGXI_TEST_FIXTURE_DIR".into(), root.path().display().to_string())].into(),
+                env: [("HARNESS_TEST_FIXTURE_DIR".into(), root.path().display().to_string())].into(),
                 timeout: Some(std::time::Duration::from_secs(30)),
                 stdin: None,
             },
@@ -1581,8 +1581,8 @@ mod foreground_stop_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn supervised_settlement_covers_foreground_and_background_stop() {
-        const CHILD: &str = "LINGXI_TEST_WINDOWS_SETTLEMENT_CHILD";
-        const ROOT: &str = "LINGXI_TEST_WINDOWS_SETTLEMENT_ROOT";
+        const CHILD: &str = "HARNESS_TEST_WINDOWS_SETTLEMENT_CHILD";
+        const ROOT: &str = "HARNESS_TEST_WINDOWS_SETTLEMENT_ROOT";
         if std::env::var_os(CHILD).is_none() {
             // taskkill is Windows-only. This isolated no-descendant fixture
             // admits a successful tree operation while Child::kill/wait is real.
@@ -1802,8 +1802,8 @@ mod foreground_stop_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_stop_retains_child_for_retry_without_blocking_error() {
-        const CHILD: &str = "LINGXI_TEST_WINDOWS_RETRY_CHILD";
-        const ROOT: &str = "LINGXI_TEST_WINDOWS_RETRY_ROOT";
+        const CHILD: &str = "HARNESS_TEST_WINDOWS_RETRY_CHILD";
+        const ROOT: &str = "HARNESS_TEST_WINDOWS_RETRY_ROOT";
         if std::env::var_os(CHILD).is_none() {
             use std::os::unix::fs::PermissionsExt;
             for mode in ["foreground", "background"] {
@@ -1825,7 +1825,7 @@ mod foreground_stop_tests {
                     ])
                     .env(CHILD, mode)
                     .env(ROOT, root.path())
-                    .env("LINGXI_TEST_CHILD_KILL_FAILURES", "2")
+                    .env("HARNESS_TEST_CHILD_KILL_FAILURES", "2")
                     .env("PATH", std::env::join_paths(paths).unwrap())
                     .output()
                     .unwrap();
@@ -1986,7 +1986,7 @@ mod foreground_stop_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn rejected_spawn_signal_failure_is_not_cancelled_settlement() {
-        const CHILD: &str = "LINGXI_TEST_REJECTED_WINDOWS_SPAWN_CHILD";
+        const CHILD: &str = "HARNESS_TEST_REJECTED_WINDOWS_SPAWN_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -1995,7 +1995,7 @@ mod foreground_stop_tests {
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
-                .env("LINGXI_TEST_CHILD_KILL_FAILURES", "2")
+                .env("HARNESS_TEST_CHILD_KILL_FAILURES", "2")
                 .output()
                 .unwrap();
             assert!(

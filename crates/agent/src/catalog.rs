@@ -71,7 +71,7 @@ pub enum AgentLoadError {
         path: PathBuf,
         /// Underlying yaml error.
         #[source]
-        source: serde_yaml::Error,
+        source: yaml_serde::Error,
     },
     /// Required `name` field was missing/non-string. Mirrors claude
     /// `parseAgentFromMarkdown` returning `null` (a SILENT skip — the file is
@@ -93,53 +93,53 @@ pub enum AgentLoadError {
 }
 
 /// An agent's YAML frontmatter. Each claude `BaseAgentDefinition` key is read
-/// as an untyped `serde_yaml::Value` (matching claude reading
+/// as an untyped `yaml_serde::Value` (matching claude reading
 /// `frontmatter['...']` directly off the parsed object) so the bespoke claude
 /// coercions can be applied per-field rather than relying on serde.
 #[derive(Debug, Default, Deserialize)]
 struct Frontmatter {
     #[serde(default)]
-    name: Option<serde_yaml::Value>,
+    name: Option<yaml_serde::Value>,
     #[serde(default)]
-    description: Option<serde_yaml::Value>,
+    description: Option<yaml_serde::Value>,
     #[serde(default)]
-    tools: Option<serde_yaml::Value>,
+    tools: Option<yaml_serde::Value>,
     #[serde(default)]
-    model: Option<serde_yaml::Value>,
+    model: Option<yaml_serde::Value>,
     #[serde(default, rename = "disallowedTools")]
-    disallowed_tools: Option<serde_yaml::Value>,
+    disallowed_tools: Option<yaml_serde::Value>,
     #[serde(default)]
-    skills: Option<serde_yaml::Value>,
+    skills: Option<yaml_serde::Value>,
     #[serde(default, rename = "mcpServers")]
-    mcp_servers: Option<serde_yaml::Value>,
+    mcp_servers: Option<yaml_serde::Value>,
     #[serde(default)]
-    hooks: Option<serde_yaml::Value>,
+    hooks: Option<yaml_serde::Value>,
     #[serde(default, rename = "maxTurns")]
-    max_turns: Option<serde_yaml::Value>,
+    max_turns: Option<yaml_serde::Value>,
     #[serde(default)]
-    background: Option<serde_yaml::Value>,
+    background: Option<yaml_serde::Value>,
     #[serde(default, rename = "omitInstructions")]
-    omit_instructions: Option<serde_yaml::Value>,
+    omit_instructions: Option<yaml_serde::Value>,
     #[serde(default)]
-    memory: Option<serde_yaml::Value>,
+    memory: Option<yaml_serde::Value>,
     #[serde(default)]
-    isolation: Option<serde_yaml::Value>,
+    isolation: Option<yaml_serde::Value>,
     #[serde(default, rename = "permissionMode")]
-    permission_mode: Option<serde_yaml::Value>,
+    permission_mode: Option<yaml_serde::Value>,
     #[serde(default)]
-    effort: Option<serde_yaml::Value>,
+    effort: Option<yaml_serde::Value>,
     #[serde(default)]
-    color: Option<serde_yaml::Value>,
+    color: Option<yaml_serde::Value>,
     #[serde(default, rename = "initialPrompt")]
-    initial_prompt: Option<serde_yaml::Value>,
+    initial_prompt: Option<yaml_serde::Value>,
     #[serde(default)]
-    experimental: Option<serde_yaml::Value>,
+    experimental: Option<yaml_serde::Value>,
     #[serde(default)]
-    observer: Option<serde_yaml::Value>,
+    observer: Option<yaml_serde::Value>,
     #[serde(default, rename = "observerMessage")]
-    observer_message: Option<serde_yaml::Value>,
+    observer_message: Option<yaml_serde::Value>,
     #[serde(default, rename = "observeSubagents")]
-    observe_subagents: Option<serde_yaml::Value>,
+    observe_subagents: Option<yaml_serde::Value>,
 }
 
 /// claude 2.1.220 `UVe`: sanitize a path/name for log display — replace
@@ -237,7 +237,7 @@ pub fn parse_agent_markdown(
         return Err(AgentLoadError::NoFrontmatter(path_for_error.to_path_buf()));
     };
 
-    let fm: Frontmatter = serde_yaml::from_str(yaml).map_err(|e| AgentLoadError::Yaml {
+    let fm: Frontmatter = yaml_serde::from_str(yaml).map_err(|e| AgentLoadError::Yaml {
         path: path_for_error.to_path_buf(),
         source: e,
     })?;
@@ -453,11 +453,11 @@ pub fn parse_agent_markdown(
         observer,
         omit_instructions: matches!(
             fm.omit_instructions.as_ref(),
-            Some(serde_yaml::Value::Bool(true))
+            Some(yaml_serde::Value::Bool(true))
         ) || fm
             .omit_instructions
             .as_ref()
-            .and_then(serde_yaml::Value::as_str)
+            .and_then(yaml_serde::Value::as_str)
             == Some("true"),
         cache_ttl: parse_cache_ttl_yaml(fm.experimental.as_ref()),
         offer_provider: None,
@@ -470,12 +470,12 @@ pub fn parse_agent_markdown(
 /// tolerated — so an unparseable `cacheTtl` yields `None` (env/setting decides)
 /// rather than dropping the whole agent. Both the documented `cacheTtl` spelling
 /// and upstream's normalized `cachettl` are accepted.
-fn parse_cache_ttl_yaml(experimental: Option<&serde_yaml::Value>) -> Option<AgentCacheTtl> {
+fn parse_cache_ttl_yaml(experimental: Option<&yaml_serde::Value>) -> Option<AgentCacheTtl> {
     let mapping = experimental?.as_mapping()?;
     for key in ["cacheTtl", "cachettl"] {
         if let Some(raw) = mapping
-            .get(serde_yaml::Value::String(key.to_string()))
-            .and_then(serde_yaml::Value::as_str)
+            .get(yaml_serde::Value::String(key.to_string()))
+            .and_then(yaml_serde::Value::as_str)
         {
             return AgentCacheTtl::parse(raw);
         }
@@ -495,9 +495,9 @@ fn parse_cache_ttl_json(experimental: Option<&serde_json::Value>) -> Option<Agen
 }
 
 fn parse_observer_frontmatter(
-    observer: Option<&serde_yaml::Value>,
-    message: Option<&serde_yaml::Value>,
-    observe_subagents: Option<&serde_yaml::Value>,
+    observer: Option<&yaml_serde::Value>,
+    message: Option<&yaml_serde::Value>,
+    observe_subagents: Option<&yaml_serde::Value>,
     owner: &str,
 ) -> Option<ObserverSpec> {
     let Some(agent) = observer
@@ -513,7 +513,7 @@ fn parse_observer_frontmatter(
         return None;
     };
     let message = match message {
-        None | Some(serde_yaml::Value::Null) => None,
+        None | Some(yaml_serde::Value::Null) => None,
         Some(value) => match yaml_as_string(value) {
             Some(raw) if !raw.trim().is_empty() => Some(raw),
             Some(_) => None,
@@ -526,8 +526,8 @@ fn parse_observer_frontmatter(
         },
     };
     let observe_subagents = match observe_subagents {
-        None | Some(serde_yaml::Value::Null) => true,
-        Some(serde_yaml::Value::Bool(value)) => *value,
+        None | Some(yaml_serde::Value::Null) => true,
+        Some(yaml_serde::Value::Bool(value)) => *value,
         Some(_) => {
             tracing::warn!(
                 "[agentObserver] Agent {owner} has invalid observeSubagents; defaulting to true"
@@ -550,7 +550,7 @@ fn parse_observer_frontmatter(
 
 /// Read a YAML value as a string if (and only if) it is a YAML string.
 /// Mirrors claude's `typeof x === 'string'` guards.
-fn yaml_as_string(v: &serde_yaml::Value) -> Option<String> {
+fn yaml_as_string(v: &yaml_serde::Value) -> Option<String> {
     v.as_str().map(str::to_string)
 }
 
@@ -611,24 +611,24 @@ fn parse_tool_list_from_cli(tools: &[String]) -> Vec<String> {
 /// claude `parseToolListString`: `None` (= caller default) for missing/null;
 /// `Some([])` for present-but-falsy; `Some(['*'])` when the parsed list
 /// contains `'*'`; otherwise `Some(parsed)`.
-fn parse_tool_list_string(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
+fn parse_tool_list_string(value: Option<&yaml_serde::Value>) -> Option<Vec<String>> {
     match value {
         // undefined / null -> null (caller decides default)
-        None | Some(serde_yaml::Value::Null) => None,
+        None | Some(yaml_serde::Value::Null) => None,
         Some(v) => {
             // Falsy values (empty string, false, 0) -> [] (no tools).
             let is_falsy = match v {
-                serde_yaml::Value::String(s) => s.is_empty(),
-                serde_yaml::Value::Bool(b) => !b,
-                serde_yaml::Value::Number(n) => n.as_f64() == Some(0.0),
+                yaml_serde::Value::String(s) => s.is_empty(),
+                yaml_serde::Value::Bool(b) => !b,
+                yaml_serde::Value::Number(n) => n.as_f64() == Some(0.0),
                 _ => false,
             };
             if is_falsy {
                 return Some(Vec::new());
             }
             let tools_array: Vec<String> = match v {
-                serde_yaml::Value::String(s) => vec![s.clone()],
-                serde_yaml::Value::Sequence(seq) => seq
+                yaml_serde::Value::String(s) => vec![s.clone()],
+                yaml_serde::Value::Sequence(seq) => seq
                     .iter()
                     .filter_map(|item| item.as_str().map(str::to_string))
                     .collect(),
@@ -648,7 +648,7 @@ fn parse_tool_list_string(value: Option<&serde_yaml::Value>) -> Option<Vec<Strin
 
 /// claude `parseAgentToolsFromFrontmatter`: `None` = all tools (the field was
 /// missing); `Some([])` = no tools; `'*'` -> all tools (`None`).
-fn parse_agent_tools_from_frontmatter(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
+fn parse_agent_tools_from_frontmatter(value: Option<&yaml_serde::Value>) -> Option<Vec<String>> {
     match parse_tool_list_string(value) {
         None => {
             // For agents: undefined = all tools (None); null = no tools ([]).
@@ -666,21 +666,21 @@ fn parse_agent_tools_from_frontmatter(value: Option<&serde_yaml::Value>) -> Opti
 }
 
 /// claude `parseSlashCommandToolsFromFrontmatter`: missing/empty -> `[]`.
-fn parse_slash_command_tools_from_frontmatter(value: Option<&serde_yaml::Value>) -> Vec<String> {
+fn parse_slash_command_tools_from_frontmatter(value: Option<&yaml_serde::Value>) -> Vec<String> {
     parse_tool_list_string(value).unwrap_or_default()
 }
 
 /// claude `parsePositiveIntFromFrontmatter`: number or numeric string; must be
 /// a positive integer.
-fn parse_positive_int_from_frontmatter(value: &serde_yaml::Value) -> Option<u32> {
+fn parse_positive_int_from_frontmatter(value: &yaml_serde::Value) -> Option<u32> {
     match value {
-        serde_yaml::Value::Null => None,
-        serde_yaml::Value::Number(n) => {
+        yaml_serde::Value::Null => None,
+        yaml_serde::Value::Number(n) => {
             // Number.isInteger(parsed) && parsed > 0
             n.as_i64()
                 .and_then(|i| if i > 0 { u32::try_from(i).ok() } else { None })
         }
-        serde_yaml::Value::String(s) => {
+        yaml_serde::Value::String(s) => {
             // parseInt(String(value), 10); Number.isInteger && > 0
             parse_int_radix10(s).and_then(|i| if i > 0 { u32::try_from(i).ok() } else { None })
         }
@@ -691,14 +691,14 @@ fn parse_positive_int_from_frontmatter(value: &serde_yaml::Value) -> Option<u32>
 
 /// claude background coercion: `true` only for literal `true`/`"true"`; log on
 /// any other non-bool, non-`"false"` value; default `false`.
-fn parse_background(value: Option<&serde_yaml::Value>, path: &Path) -> bool {
+fn parse_background(value: Option<&yaml_serde::Value>, path: &Path) -> bool {
     let Some(v) = value else {
         return false;
     };
-    let is_true_literal = matches!(v, serde_yaml::Value::Bool(true))
-        || matches!(v, serde_yaml::Value::String(s) if s == "true");
-    let is_false_literal = matches!(v, serde_yaml::Value::Bool(false))
-        || matches!(v, serde_yaml::Value::String(s) if s == "false");
+    let is_true_literal = matches!(v, yaml_serde::Value::Bool(true))
+        || matches!(v, yaml_serde::Value::String(s) if s == "true");
+    let is_false_literal = matches!(v, yaml_serde::Value::Bool(false))
+        || matches!(v, yaml_serde::Value::String(s) if s == "false");
     if !is_true_literal && !is_false_literal {
         tracing::debug!(
             path = %path.display(),
@@ -710,7 +710,7 @@ fn parse_background(value: Option<&serde_yaml::Value>, path: &Path) -> bool {
 
 /// claude memory coercion: validate against VALID_MEMORY_SCOPES; invalid -> log.
 fn parse_memory(
-    value: Option<&serde_yaml::Value>,
+    value: Option<&yaml_serde::Value>,
     path: &Path,
 ) -> Option<lingxi_core::types::WritableScope> {
     let Some(raw) = value.and_then(yaml_as_string) else {
@@ -736,7 +736,7 @@ fn parse_memory(
 }
 
 /// Parse the isolation preference; execution capability is checked by the host.
-fn parse_isolation(value: Option<&serde_yaml::Value>, path: &Path) -> Option<AgentIsolation> {
+fn parse_isolation(value: Option<&yaml_serde::Value>, path: &Path) -> Option<AgentIsolation> {
     let Some(raw) = value.and_then(yaml_as_string) else {
         return None;
     };
@@ -758,7 +758,7 @@ fn parse_isolation(value: Option<&serde_yaml::Value>, path: &Path) -> Option<Age
 /// -> log. Preserve the valid raw string as the corresponding
 /// [`AgentPermissionMode`] so both subagent spawns and main-thread `--agent`
 /// sessions can apply the oracle's permission-mode precedence.
-fn parse_permission_mode(value: Option<&serde_yaml::Value>, path: &Path) -> AgentPermissionMode {
+fn parse_permission_mode(value: Option<&yaml_serde::Value>, path: &Path) -> AgentPermissionMode {
     let Some(raw) = value.and_then(yaml_as_string) else {
         return AgentPermissionMode::Bubble;
     };
@@ -784,8 +784,8 @@ fn parse_permission_mode(value: Option<&serde_yaml::Value>, path: &Path) -> Agen
 /// claude mcpServers coercion: each array item is either a string (ByName) or
 /// an inline `{ name: config }` map (Record); invalid items are logged +
 /// skipped. Non-array input contributes nothing.
-fn parse_mcp_servers(value: Option<&serde_yaml::Value>, path: &Path) -> Vec<AgentMcpServerSpec> {
-    let Some(serde_yaml::Value::Sequence(seq)) = value else {
+fn parse_mcp_servers(value: Option<&yaml_serde::Value>, path: &Path) -> Vec<AgentMcpServerSpec> {
+    let Some(yaml_serde::Value::Sequence(seq)) = value else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -807,13 +807,13 @@ fn parse_mcp_servers(value: Option<&serde_yaml::Value>, path: &Path) -> Vec<Agen
 /// `Record` (kept RAW — the body is validated and converted by
 /// [`crate::mcp_servers::agent_mcp_specs_to_scoped_configs`], which also
 /// rejects records with more than one key, exactly like claude `obs`).
-fn parse_mcp_server_spec(item: &serde_yaml::Value) -> Option<AgentMcpServerSpec> {
+fn parse_mcp_server_spec(item: &yaml_serde::Value) -> Option<AgentMcpServerSpec> {
     match item {
-        serde_yaml::Value::String(s) => Some(AgentMcpServerSpec::ByName(s.clone())),
-        serde_yaml::Value::Mapping(_) => {
+        yaml_serde::Value::String(s) => Some(AgentMcpServerSpec::ByName(s.clone())),
+        yaml_serde::Value::Mapping(_) => {
             // YAML mapping → JSON record (non-string keys / YAML tags fail the
             // conversion → item skipped, like a zod safeParse failure).
-            let json: serde_json::Value = serde_yaml::from_value(item.clone()).ok()?;
+            let json: serde_json::Value = yaml_serde::from_value(item.clone()).ok()?;
             let serde_json::Value::Object(map) = json else {
                 return None;
             };
@@ -827,7 +827,7 @@ fn parse_mcp_server_spec(item: &serde_yaml::Value) -> Option<AgentMcpServerSpec>
 /// failure log + drop (empty). Reuses the hooks crate's settings-JSON loader by
 /// wrapping the value as `{"hooks": <value>}`.
 fn parse_hooks_from_frontmatter(
-    value: Option<&serde_yaml::Value>,
+    value: Option<&yaml_serde::Value>,
     agent_type: &str,
 ) -> Vec<hooks::HookDefinition> {
     let Some(hooks_value) = value else {
@@ -835,7 +835,7 @@ fn parse_hooks_from_frontmatter(
     };
     // Convert the untyped YAML value to JSON (can fail on non-string map keys
     // or YAML tags — guard + drop like claude's safeParse).
-    let json_value: serde_json::Value = match serde_yaml::from_value(hooks_value.clone()) {
+    let json_value: serde_json::Value = match yaml_serde::from_value(hooks_value.clone()) {
         Ok(jv) => jv,
         Err(e) => {
             tracing::debug!("Invalid hooks in agent '{agent_type}': {e}");
@@ -1555,9 +1555,9 @@ fn json_string_array_strict(value: Option<&serde_json::Value>) -> Result<Option<
 }
 
 /// Lift a validated `Vec<String>` into a YAML sequence so the shared tool-list
-/// coercion helpers (operating on `serde_yaml::Value`) can consume it.
-fn json_string_array_to_yaml(arr: Vec<String>) -> serde_yaml::Value {
-    serde_yaml::Value::Sequence(arr.into_iter().map(serde_yaml::Value::String).collect())
+/// coercion helpers (operating on `yaml_serde::Value`) can consume it.
+fn json_string_array_to_yaml(arr: Vec<String>) -> yaml_serde::Value {
+    yaml_serde::Value::Sequence(arr.into_iter().map(yaml_serde::Value::String).collect())
 }
 
 /// Strictly validate `z.array(AgentMcpServerSpecSchema()).optional()` for JSON
@@ -1603,10 +1603,10 @@ fn parse_mcp_servers_json_strict(
 /// parsed hooks on success, or `None` when the value is invalid (claude's zod
 /// throws and the whole agent is dropped — caller maps `None` -> drop).
 fn parse_hooks_from_frontmatter_strict(
-    value: &serde_yaml::Value,
+    value: &yaml_serde::Value,
     agent_type: &str,
 ) -> Option<Vec<hooks::HookDefinition>> {
-    let json_value: serde_json::Value = serde_yaml::from_value(value.clone()).ok()?;
+    let json_value: serde_json::Value = yaml_serde::from_value(value.clone()).ok()?;
     let wrapper = serde_json::json!({ "hooks": json_value });
     let raw = serde_json::to_string(&wrapper).ok()?;
     match hooks::parse_hooks_from_settings_json(&raw, hooks::HookSource::FrontMatter) {
@@ -1619,10 +1619,10 @@ fn parse_hooks_from_frontmatter_strict(
 }
 
 /// Convert a JSON value into the YAML value space so the shared frontmatter
-/// coercion helpers (which operate on `serde_yaml::Value`) can be reused for
+/// coercion helpers (which operate on `yaml_serde::Value`) can be reused for
 /// JSON agents.
-fn json_to_yaml(v: &serde_json::Value) -> serde_yaml::Value {
-    serde_yaml::to_value(v).unwrap_or(serde_yaml::Value::Null)
+fn json_to_yaml(v: &serde_json::Value) -> yaml_serde::Value {
+    yaml_serde::to_value(v).unwrap_or(yaml_serde::Value::Null)
 }
 
 /// claude `SN(Jb(),".claude",e)` — the managed policy agent directory under the

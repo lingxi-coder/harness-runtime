@@ -9435,6 +9435,13 @@ impl ApiService {
         });
     }
 
+    /// Check startup prewarm eligibility before assembling the prompt and tools.
+    pub fn supports_responses_websocket_prewarm(&self, model: &str, profile: Option<&str>) -> bool {
+        self.client
+            .supports_responses_websocket(model, profile)
+            .unwrap_or(false)
+    }
+
     /// Best-effort startup **prewarm** for OpenAI Responses WebSocket providers:
     /// send the provided (empty-history) request with `generate=false` over the
     /// session so the handshake + first round-trip are warm. Backs the

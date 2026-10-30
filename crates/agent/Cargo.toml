@@ -27,7 +27,7 @@ branding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid = { version = "1.10", features = ["v4"] }
-serde_yaml = "0.9"
+yaml_serde = "=0.10.7"
 # cc 2.1.218 agent-name validation: `name.normalize("NFKC").includes(":")` —
 # NFKC catches colon look-alikes (U+FF1A/U+FE55) before the plugin-namespace
 # reservation check. Same crate/version as `mcp`.

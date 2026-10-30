@@ -22,6 +22,7 @@ use lingxi_core::host::{
     WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager, WorktreePatch,
 };
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
@@ -195,6 +196,7 @@ struct TempIndex {
 }
 
 impl TempIndex {
+    #[cfg(unix)]
     async fn seeded_from(checkout: &Path) -> Result<Self, WorktreeError> {
         use std::os::unix::fs::DirBuilderExt;
 
@@ -261,6 +263,16 @@ impl TempIndex {
             Err(error) => return Err(WorktreeError::Io(error.to_string())),
         }
         Ok(index)
+    }
+
+    #[cfg(not(unix))]
+    async fn seeded_from(_checkout: &Path) -> Result<Self, WorktreeError> {
+        // This manager is the POSIX implementation. Windows desktop uses
+        // WindowsWorktreeManager; do not create an index in a potentially
+        // shared temp directory without the POSIX private-directory guarantee.
+        Err(WorktreeError::Io(
+            "private POSIX worktree indexes require a Unix host".into(),
+        ))
     }
 
     /// Stage everything in `checkout` except the managed worktrees.
@@ -1472,7 +1484,7 @@ mod change_summary_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod snapshot_tests {
     use super::*;
     use tempfile::TempDir;
@@ -1768,6 +1780,18 @@ mod snapshot_tests {
                 ("b".to_string(), PatchFileStatus::Added),
             ]
         );
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod non_unix_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn private_posix_index_fails_closed() {
+        let result = TempIndex::seeded_from(Path::new("unused")).await;
+        assert!(matches!(result, Err(WorktreeError::Io(message))
+            if message == "private POSIX worktree indexes require a Unix host"));
     }
 }
 

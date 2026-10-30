@@ -893,16 +893,16 @@ fn frontmatter_paths_values(raw: &str) -> Option<Vec<FrontmatterPathValue>> {
     let for_detection = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let captures = frontmatter_re().captures(for_detection)?;
     let yaml = captures.get(1)?.as_str();
-    let document: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let document: yaml_serde::Value = yaml_serde::from_str(yaml).ok()?;
     let paths = document
         .as_mapping()?
-        .get(serde_yaml::Value::String("paths".into()))?;
+        .get(yaml_serde::Value::String("paths".into()))?;
     match paths {
-        serde_yaml::Value::String(value) => Some(vec![FrontmatterPathValue::Scalar(value.clone())]),
-        serde_yaml::Value::Sequence(values) => {
+        yaml_serde::Value::String(value) => Some(vec![FrontmatterPathValue::Scalar(value.clone())]),
+        yaml_serde::Value::Sequence(values) => {
             let values = values
                 .iter()
-                .filter_map(serde_yaml::Value::as_str)
+                .filter_map(yaml_serde::Value::as_str)
                 .map(|value| FrontmatterPathValue::ListItem(value.to_string()))
                 .collect::<Vec<_>>();
             (!values.is_empty()).then_some(values)

@@ -34,8 +34,8 @@ use std::time::Instant;
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use migrations::settings_update::{
-    SettingsUpdateReceipt, read_settings_source, rollback_settings_update,
-    transform_settings_source_with_receipt,
+    read_settings_source, rollback_settings_update, transform_settings_source_with_receipt,
+    SettingsUpdateReceipt,
 };
 use serde_json::{Map, Value};
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata};
@@ -3605,11 +3605,9 @@ mod tests {
             installed["plugins"]["hello@mymkt"][0][SENSITIVE_CONFIG_KEYS_FIELD],
             serde_json::json!(["API_TOKEN"])
         );
-        assert!(
-            !std::fs::read_to_string(installed_path(&e.plugins))
-                .unwrap()
-                .contains("rotated-secret")
-        );
+        assert!(!std::fs::read_to_string(installed_path(&e.plugins))
+            .unwrap()
+            .contains("rotated-secret"));
 
         // The catalog changes the sensitive field name. Update retains the
         // old key name alongside the new schema so both can be cleaned later.
@@ -3655,18 +3653,14 @@ mod tests {
                 || async move { Ok(uninstall_credentials) },
             ))
             .unwrap();
-        assert!(
-            runtime
-                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            runtime
-                .block_on(credentials.get_plugin_secret("hello@mymkt", "NEW_TOKEN"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(runtime
+            .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+            .unwrap()
+            .is_none());
+        assert!(runtime
+            .block_on(credentials.get_plugin_secret("hello@mymkt", "NEW_TOKEN"))
+            .unwrap()
+            .is_none());
         assert!(installed_db(&e)["plugins"].get("hello@mymkt").is_none());
     }
 
@@ -3724,18 +3718,14 @@ mod tests {
                 || async move { Ok(uninstall_credentials) },
             ))
             .unwrap();
-        assert!(
-            runtime
-                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            runtime
-                .block_on(credentials.get_plugin_secret("hello@mymkt", "NEW_TOKEN"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(runtime
+            .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+            .unwrap()
+            .is_none());
+        assert!(runtime
+            .block_on(credentials.get_plugin_secret("hello@mymkt", "NEW_TOKEN"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -3786,12 +3776,10 @@ mod tests {
             ))
             .unwrap();
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(
-            runtime
-                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
-                .unwrap()
-                .is_some()
-        );
+        assert!(runtime
+            .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+            .unwrap()
+            .is_some());
         assert_eq!(
             installed_db(&e)["plugins"]["hello@mymkt"][0][SENSITIVE_CONFIG_KEYS_FIELD],
             serde_json::json!(["API_TOKEN"])
@@ -3812,12 +3800,10 @@ mod tests {
                 || async move { Ok(uninstall_credentials) },
             ))
             .unwrap();
-        assert!(
-            runtime
-                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(runtime
+            .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
