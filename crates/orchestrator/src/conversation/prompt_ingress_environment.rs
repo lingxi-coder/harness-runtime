@@ -77,7 +77,9 @@ impl ConversationOrchestrator {
     pub(crate) async fn environment_prompt_ingress_attachments(
         &self,
     ) -> Vec<PromptIngressAttachment> {
-        if !self.prompt_ingress_environment_enabled() {
+        if self.prompt_runtime.host_environment_probes_disabled
+            || !self.prompt_ingress_environment_enabled()
+        {
             return Vec::new();
         }
 

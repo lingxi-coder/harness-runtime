@@ -866,6 +866,14 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Withhold host Git/shell/OS probes from an untrusted private workspace.
+    /// This execution-only capability is not decoded from settings or history.
+    #[must_use]
+    pub fn without_host_environment_probes(mut self) -> Self {
+        self.prompt_runtime.host_environment_probes_disabled = true;
+        self
+    }
+
     /// Wire the EndConversation end-request slot (shared with the tool). The
     /// composition root passes the same `Arc` it gave
     /// [`crate::end_conversation_tool::EndConversationTool::new`]; the turn loop

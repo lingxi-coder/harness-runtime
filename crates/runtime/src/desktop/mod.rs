@@ -28,6 +28,8 @@ mod agent_skill_loader;
 pub mod app_invocation;
 pub mod auto_mode_propose;
 mod sdk;
+pub mod team_invocation;
+mod team_sandbox;
 pub use sdk::build_harness;
 
 /// Session-owned teammate registry shared with CLI hosts.
@@ -3201,6 +3203,9 @@ pub enum BuildError {
     /// A Local App invocation failed its host-owned isolation contract.
     #[error("invalid app invocation: {0}")]
     AppInvocation(#[from] app_invocation::AppInvocationError),
+    /// Host-owned Team scope or mandatory confinement is invalid.
+    #[error(transparent)]
+    TeamInvocation(#[from] team_invocation::TeamInvocationError),
     /// Settings layers could not be composed without discarding a source error.
     #[error("settings load failed: {0}")]
     Settings(#[from] lingxi_core::settings::SettingsError),
@@ -3863,7 +3868,7 @@ fn load_effective_settings_for_config_with_defaults(
 /// App invocations accept host-selected provider inputs and managed policy, not
 /// ambient model/prompt/settings overrides inherited by the desktop process.
 fn settings_environment_for_config(cfg: &DesktopConfig) -> BTreeMap<String, String> {
-    if cfg.app_invocation.is_some() {
+    if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
         BTreeMap::new()
     } else {
         std::env::vars().collect()

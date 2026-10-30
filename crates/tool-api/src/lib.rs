@@ -26,6 +26,7 @@ pub mod context;
 pub mod defer;
 pub mod host_git_root_cache;
 pub mod hosted_search;
+pub mod isolated_shell;
 pub mod model_prompt_gate;
 pub mod native_output;
 pub mod native_schema;

@@ -349,6 +349,10 @@ pub struct BuiltinToolContext {
     /// bash tool's next command observes it via [`Self::effective_sandbox_runtime`].
     pub sandbox_enabled_override: Option<Arc<std::sync::atomic::AtomicBool>>,
 
+    /// Trusted private shell policy, never taken from tool input or settings.
+    /// When set, mutable settings and /sandbox cannot weaken confinement.
+    pub isolated_shell: Option<Arc<crate::isolated_shell::IsolatedShellPolicy>>,
+
     /// Mirror of `settings.skipWebFetchPreflight` (CC 2.1.207 zod:
     /// `skipWebFetchPreflight:E.boolean().optional().describe("Skip the WebFetch
     /// blocklist check for enterprise environments with restrictive security
@@ -520,12 +524,23 @@ impl BuiltinToolContext {
         root: &std::path::Path,
         scope: sandbox::root::SandboxRootScope,
     ) -> SandboxRuntimeConfig {
+        if let Some(policy) = &self.isolated_shell {
+            // The generic Session root follows .git/commondir and grants its
+            // main repository writes. A private workspace is model-writable;
+            // its Git pointers must never expand host authority.
+            let mut cfg = policy.sandbox().clone();
+            sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
+            return cfg;
+        }
         let mut cfg = sandbox::root::rooted_at(&self.toggled_sandbox_runtime(), root, scope);
         sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
         cfg
     }
 
     fn toggled_sandbox_runtime(&self) -> SandboxRuntimeConfig {
+        if let Some(policy) = &self.isolated_shell {
+            return policy.sandbox().clone();
+        }
         match &self.sandbox_enabled_override {
             Some(cell) => {
                 let mut cfg = self.sandbox_runtime.clone();

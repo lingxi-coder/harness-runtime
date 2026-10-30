@@ -192,6 +192,7 @@ pub struct SandboxedCommand {
     auto_background_on_timeout: bool,
     background_timeout: Option<std::time::Duration>,
     process_owner: Option<String>,
+    clear_environment: bool,
 }
 
 /// Provenance of a [`SandboxedCommand`].
@@ -211,6 +212,22 @@ pub enum SandboxedTag {
 }
 
 impl SandboxedCommand {
+    /// Withhold the complete inherited environment before spawning. Only the
+    /// explicit command environment and the runner's fixed markers remain.
+    /// Private foreground runs also reap their owned process group on drop;
+    /// the ordinary background supervisor cannot carry this private boundary.
+    #[must_use]
+    pub fn with_clear_environment(mut self, clear: bool) -> Self {
+        self.clear_environment = clear;
+        self
+    }
+
+    /// Whether the platform runner must call `env_clear` before applying env.
+    #[must_use]
+    pub fn clear_environment(&self) -> bool {
+        self.clear_environment
+    }
+
     /// Attribute this OS process group to the subagent that launched it.
     #[must_use]
     pub fn with_process_owner(mut self, owner: Option<String>) -> Self {
@@ -240,6 +257,7 @@ impl SandboxedCommand {
             auto_background_on_timeout: true,
             background_timeout: None,
             process_owner: None,
+            clear_environment: false,
         }
     }
 
@@ -261,6 +279,7 @@ impl SandboxedCommand {
             auto_background_on_timeout: true,
             background_timeout: None,
             process_owner: None,
+            clear_environment: false,
         }
     }
 

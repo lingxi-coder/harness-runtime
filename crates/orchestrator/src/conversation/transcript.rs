@@ -2962,6 +2962,9 @@ impl ConversationOrchestrator {
     /// HEAD reporting `"HEAD"`), matching TS's `try { getBranch() } catch {
     /// undefined }` — a `None` is then omitted from the JSONL line.
     pub(super) async fn resolve_git_branch(&self) -> Option<String> {
+        if self.prompt_runtime.host_environment_probes_disabled {
+            return None;
+        }
         {
             let cache = self.transcript.git_branch_cache.lock().await;
             if let Some(resolved) = cache.as_ref() {

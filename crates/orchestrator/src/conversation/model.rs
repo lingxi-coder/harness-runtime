@@ -2925,6 +2925,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         cwd: &std::path::Path,
     ) -> (Option<crate::prompt::GitStatus>, Option<String>) {
+        if self.prompt_runtime.host_environment_probes_disabled {
+            return (None, None);
+        }
         {
             let cache = self.prompt_runtime.git_status_snapshot.lock().await;
             if let Some(snap) = cache.as_ref() {

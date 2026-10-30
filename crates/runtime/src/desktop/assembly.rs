@@ -754,6 +754,7 @@ pub async fn build(
     output: Arc<dyn OutputStream>,
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
+    super::team_invocation::enforce_team_config(&mut cfg)?;
     super::app_invocation::enforce_app_config(&mut cfg)?;
     // Reject malformed embedding options before opening credential storage.
     let _ = permission::PermissionPolicy::new(cfg.permission_mode)
@@ -892,6 +893,7 @@ pub async fn build_with_credential_stack(
     permission_sink: Arc<dyn PermissionRequestSink>,
     shared: SharedCredentialStack,
 ) -> Result<DesktopRuntime, BuildError> {
+    super::team_invocation::enforce_team_config(&mut cfg)?;
     super::app_invocation::enforce_app_config(&mut cfg)?;
     let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
         .with_tool_aliases(cfg.tool_aliases.clone())
@@ -933,17 +935,19 @@ pub async fn build_with_credential_stack(
         Arc::new(policy_helpers::DirectProcessRunner),
         cfg.native_policy_warning_logger.clone(),
     ));
-    native_policy_helper
-        .run_initial_local_helper(&managed_snapshot.selection)
-        .await
-        .map_err(|error| match error {
-            policy_helpers::InitialPolicyHelperError::Native(error) => {
-                BuildError::PolicyHelperStartup(error)
-            }
-            policy_helpers::InitialPolicyHelperError::SemanticWorker(error) => {
-                BuildError::NativePolicySemanticWorker(error)
-            }
-        })?;
+    if cfg.team_invocation.is_none() {
+        native_policy_helper
+            .run_initial_local_helper(&managed_snapshot.selection)
+            .await
+            .map_err(|error| match error {
+                policy_helpers::InitialPolicyHelperError::Native(error) => {
+                    BuildError::PolicyHelperStartup(error)
+                }
+                policy_helpers::InitialPolicyHelperError::SemanticWorker(error) => {
+                    BuildError::NativePolicySemanticWorker(error)
+                }
+            })?;
+    }
     let managed_snapshot = managed_policy_snapshot_cache
         .snapshot()
         .unwrap_or(managed_snapshot);
@@ -1038,8 +1042,9 @@ pub async fn build_with_credential_stack(
         let config_path = proxy_auth_global_config_path.clone();
         Arc::new(move || resolve_workspace_trust(host_trusted, &cwd, config_path.as_deref()))
     };
-    let proxy_auth_helper_enabled = std::env::var_os("CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER")
-        .is_some_and(|value| !value.is_empty());
+    let proxy_auth_helper_enabled = cfg.team_invocation.is_none()
+        && std::env::var_os("CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER")
+            .is_some_and(|value| !value.is_empty());
     // Use the exact typed effective carrier and its contributor from the one
     // settings load used by assembly. The command projection preserves UTF-16
     // units, including lone surrogates, without a second raw-stack resolution.
@@ -1094,7 +1099,8 @@ pub async fn build_with_credential_stack(
     > = proxy_auth_helper
         .as_ref()
         .map(|helper| -> Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper> { helper.clone() });
-    let vision_delegation_enabled = if cfg.app_invocation.is_some() {
+    let vision_delegation_enabled = if cfg.app_invocation.is_some() || cfg.team_invocation.is_some()
+    {
         false
     } else if cfg.restricted {
         effective_settings
@@ -1109,7 +1115,7 @@ pub async fn build_with_credential_stack(
     // session-file entries (todos/statsig/logs older than the retention period),
     // so it is flag-gated and default-OFF: a no-op unless `LINGXI_RETENTION_SWEEP`
     // is truthy. Runs once at boot on a blocking pool so it never delays startup.
-    if cfg.app_invocation.is_none() {
+    if cfg.app_invocation.is_none() && cfg.team_invocation.is_none() {
         tokio::task::spawn_blocking(memory::retention::run_startup_retention_sweep);
     }
 
@@ -1265,7 +1271,8 @@ pub async fn build_with_credential_stack(
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
     // Headless embeddings provide request state explicitly; no install-wide
     // identity or process environment is read on that path.
-    let explicit_headless = cfg.composition == Some(super::DesktopSessionComposition::HeadlessCli);
+    let explicit_headless = cfg.team_invocation.is_some()
+        || cfg.composition == Some(super::DesktopSessionComposition::HeadlessCli);
     let request_metadata = if let Some(identity) = &cfg.request_identity {
         Some(llm_runtime::RequestMetadata {
             user_id: llm_runtime::ApiService::build_api_metadata_user_id_with_extra(
@@ -1433,7 +1440,12 @@ pub async fn build_with_credential_stack(
             },
         );
     }
-    let service_built = match aws_auth_refresher(&cfg, &cwd, analytics_bus.clone())? {
+    let team_aws_auth = if cfg.team_invocation.is_some() {
+        None
+    } else {
+        aws_auth_refresher(&cfg, &cwd, analytics_bus.clone())?
+    };
+    let service_built = match team_aws_auth {
         Some(refresher) => service_built.with_aws_auth(refresher),
         None => service_built,
     };
@@ -1444,7 +1456,9 @@ pub async fn build_with_credential_stack(
     // for every normal turn (`json_schema` is `None`).
     // App tasks may use approved business tools before submitting their final
     // structured result. The shared turn-loop still enforces valid capture.
-    let service_built = if cfg.json_schema.is_some() && cfg.app_invocation.is_none() {
+    let service_built = if cfg.json_schema.is_some()
+        && (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
+    {
         service_built.with_forced_tool_choice(llm_runtime::ToolChoice::Tool {
             name: orchestrator::structured_output::STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
         })
@@ -1485,14 +1499,15 @@ pub async fn build_with_credential_stack(
     // The bridge persists the structured effort choice in the same user
     // settings file used by `/effort`. Seed it before the first turn; an
     // explicit CLI effort remains higher priority and is left untouched.
-    let persisted_reasoning_selection =
-        if cfg.initial_effort.is_none() && cfg.app_invocation.is_none() {
-            command_api::builtins::effort::load_reasoning_default_selection_at(
-                &cfg.lingxi_home.join("settings.json"),
-            )
-        } else {
-            None
-        };
+    let persisted_reasoning_selection = if cfg.initial_effort.is_none()
+        && (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
+    {
+        command_api::builtins::effort::load_reasoning_default_selection_at(
+            &cfg.lingxi_home.join("settings.json"),
+        )
+    } else {
+        None
+    };
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.bare = cfg.customization_gates.bare;
     orch_cfg.model_catalog_restriction =
@@ -1654,7 +1669,7 @@ pub async fn build_with_credential_stack(
     // project style overrides a user one and both override the builtins. A
     // `settings.outputStyle` naming a disk style now activates it
     // (`outputstyles::resolve_output_style`); absent dirs ⇒ builtin-only.
-    orch_cfg.output_style_dirs = if cfg.app_invocation.is_some() {
+    orch_cfg.output_style_dirs = if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
         Vec::new()
     } else {
         vec![
@@ -2086,16 +2101,19 @@ pub async fn build_with_credential_stack(
                         Some(std::time::Duration::from_millis(500)),
                     )
             }
-        }))
+        }));
+    if cfg.team_invocation.is_none() {
         // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
         // trailer on every NON-fork spawn. The renderer probes the boot-stable
         // environment once (cwd/git/platform/shell/OS) via the orchestrator's own
         // helpers and fills in the spawn's resolved model id per call. Lives at the
         // composition root because the `agent` crate cannot reach
         // `orchestrator::prompt` (dep cycle).
-        .with_subagent_env_renderer(std::sync::Arc::new(
-            orchestrator::prompt::subagent_env::boot_renderer(cwd.clone()),
-        ));
+        subagent_spawner_concrete =
+            subagent_spawner_concrete.with_subagent_env_renderer(std::sync::Arc::new(
+                orchestrator::prompt::subagent_env::boot_renderer(cwd.clone()),
+            ));
+    }
     if let Some(observer) = cfg.session_agent_observer.clone() {
         subagent_spawner_concrete = subagent_spawner_concrete.with_spawn_observer(observer);
     }
@@ -2292,7 +2310,7 @@ pub async fn build_with_credential_stack(
     // become the only servers.)
     for c in &cfg.cli_mcp_servers {
         let mut cli_config = c.clone();
-        if cfg.app_invocation.is_none() {
+        if cfg.app_invocation.is_none() && cfg.team_invocation.is_none() {
             cli_config.metadata.cli_owned = true;
         }
         if let Some(existing) = mcp_configs.iter_mut().find(|x| x.name == c.name) {
@@ -2357,7 +2375,7 @@ pub async fn build_with_credential_stack(
         &mut mcp_configs,
         &effective_mcp_policy,
     );
-    if cfg.app_invocation.is_some() {
+    if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
         // Managed policy may restrict selected servers but cannot silently add
         // an ungranted server to an app task. Preserve exact config provenance.
         mcp_configs.retain(|server| {
@@ -2386,10 +2404,13 @@ pub async fn build_with_credential_stack(
     // missing env vars, `servers`-vs-`mcpServers`) to stderr at startup, the way
     // claude logs them. Silent when every config is clean, so a healthy setup
     // prints nothing.
-    for w in mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global_mcp_path))
-    {
-        if let Some(diagnostics) = &cfg.diagnostics {
-            diagnostics.stderr_line(&w.to_stderr_line()).await;
+    if cfg.team_invocation.is_none() {
+        for w in
+            mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global_mcp_path))
+        {
+            if let Some(diagnostics) = &cfg.diagnostics {
+                diagnostics.stderr_line(&w.to_stderr_line()).await;
+            }
         }
     }
 
@@ -2638,7 +2659,9 @@ pub async fn build_with_credential_stack(
     let mod_settings_reader: Arc<dyn hooks::mods::ModSettingsReader> = Arc::new(
         super::mod_settings::DesktopModSettingsReader::new(cfg.clone()),
     );
-    hook_registry.attach_mod_model_policy(mod_settings_reader.clone());
+    if cfg.team_invocation.is_none() {
+        hook_registry.attach_mod_model_policy(mod_settings_reader.clone());
+    }
     let project_settings_path = cwd.join(branding::DOT_DIR).join("settings.json");
     let local_settings_path = cwd.join(branding::DOT_DIR).join("settings.local.json");
     let user_settings_path = cfg.lingxi_home.join("settings.json");
@@ -2708,7 +2731,7 @@ pub async fn build_with_credential_stack(
     }
     // Policy hooks remain authoritative under strict-plugin-only and safe
     // mode. Bare mode disables hooks entirely.
-    if !cfg.customization_gates.bare {
+    if !cfg.customization_gates.bare && cfg.team_invocation.is_none() {
         for raw in &managed_policy_layer {
             match hooks::parse_hooks_from_settings_json(
                 raw,
@@ -3033,6 +3056,9 @@ pub async fn build_with_credential_stack(
         // dangerous-rule strip with the escalation in effect. A no-op when `mode`
         // is `Default` (from == to).
         policy.set_mode(mode);
+        if cfg.team_invocation.is_some() {
+            super::team_invocation::enforce_team_permission_policy(&mut policy);
+        }
         // Resolve the active Read(deny) rules to search-exclude globs while
         // the policy is still in scope (before it moves into the gate).
         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
@@ -3518,7 +3544,10 @@ pub async fn build_with_credential_stack(
     // `o1e()` derives it from `K()` (the live session id), so the task spools
     // sit beside the session's other per-session state instead of under a uuid
     // that exists nowhere else in the process.
-    let task_output_dir = session_task_output_dir(&cwd, &main_session_uuid);
+    let task_output_dir = cfg.team_invocation.as_ref().map_or_else(
+        || session_task_output_dir(&cwd, &main_session_uuid),
+        |profile| profile.task_output_dir(),
+    );
     // Eagerly create the dir (claude-code `ensureOutputDir`'s `mkdir(recursive)`)
     // so the very first spool `allocate` (exclusive create) finds its parent.
     if let Err(e) = std::fs::create_dir_all(&task_output_dir) {
@@ -4053,7 +4082,7 @@ pub async fn build_with_credential_stack(
     //        Gated by the `CLAUDE_CODE_DISABLE_CRON` local kill-switch
     //        (claude-code `prompt.ts:34/38` — the env override that wins over the
     //        GrowthBook fleet flag, which itself defaults on).
-    let cron_scheduler = if cfg.app_invocation.is_none()
+    let cron_scheduler = if (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
         && !cron_native::is_child_runtime()
         && cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref())
     {
@@ -4128,7 +4157,9 @@ pub async fn build_with_credential_stack(
 
     // Share task delivery and cancellation with the implicit team service.
     let spawn_seam: Arc<dyn lingxi_core::host::team_spawn::TeamSpawnSeam> =
-        if cfg.app_invocation.is_none() && lingxi_core::host::env::agent_swarms_enabled() {
+        if (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
+            && lingxi_core::host::env::agent_swarms_enabled()
+        {
             let executable = std::env::current_exe()
                 .ok()
                 .filter(|path| {
@@ -4170,7 +4201,9 @@ pub async fn build_with_credential_stack(
         .set_teammate_departure_cleanup(Arc::downgrade(&departure_owner))
         .await;
 
-    if cfg.app_invocation.is_none() && lingxi_core::host::env::agent_swarms_enabled() {
+    if (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
+        && lingxi_core::host::env::agent_swarms_enabled()
+    {
         task_registry
             .set_external_teammate_controller(Arc::downgrade(&spawn_seam))
             .await;
@@ -4341,6 +4374,14 @@ pub async fn build_with_credential_stack(
             raw_layers,
         )
     };
+    // Team confinement is host authority, applied AFTER the settings/policy
+    // fold. A managed override may not disable or widen this invocation.
+    let sandbox_runtime_cfg = cfg
+        .team_invocation
+        .as_ref()
+        .map_or(sandbox_runtime_cfg, |profile| {
+            profile.shell_policy().sandbox().clone()
+        });
     // Faithful to claude-code `isSandboxingEnabled()` (sandbox-adapter.ts:532):
     // supported-platform AND deps present AND in the `enabledPlatforms` list AND
     // the user opted in via `sandbox.enabled`. We fold the `enabledPlatforms`
@@ -4408,20 +4449,21 @@ pub async fn build_with_credential_stack(
     // after `task_registry` exists — so NO deferred cell is needed; the
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
-    let teammate_spawner =
-        if cfg.app_invocation.is_none() && lingxi_core::host::env::agent_swarms_enabled() {
-            let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
-                coordinator.clone(),
-                spawn_seam.clone(),
-                Arc::new(PosixRuntime::new()),
-                output.clone(),
-                main_session_id.to_string(),
-            ));
-            spawner.initialize().await;
-            Some(spawner)
-        } else {
-            None
-        };
+    let teammate_spawner = if (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
+        && lingxi_core::host::env::agent_swarms_enabled()
+    {
+        let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
+            coordinator.clone(),
+            spawn_seam.clone(),
+            Arc::new(PosixRuntime::new()),
+            output.clone(),
+            main_session_id.to_string(),
+        ));
+        spawner.initialize().await;
+        Some(spawner)
+    } else {
+        None
+    };
     let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         Arc::new(background_agent::BackgroundAgentSpawner {
             mod_hooks: Some(hook_registry.clone()),
@@ -4588,12 +4630,22 @@ pub async fn build_with_credential_stack(
         // P1-08 trusted dirs now live inside `session_cwd` (built above from the
         // `trusted_dirs` set); `BuiltinToolContext` no longer has a standalone
         // `trusted_dirs` field — tools read `ctx.trusted_dirs()` off `session_cwd`.
-        process: Arc::new(DesktopProcess::new()),
+        process: Arc::new(
+            cfg.team_invocation
+                .as_ref()
+                .map_or_else(DesktopProcess::new, |profile| {
+                    DesktopProcess::with_task_output_dir(profile.task_output_dir())
+                }),
+        ),
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: sandbox_runtime_cfg,
         // (/sandbox) Live-toggle cell shared with the TUI (see above).
         sandbox_enabled_override: Some(sandbox_toggle.clone()),
+        isolated_shell: cfg
+            .team_invocation
+            .as_ref()
+            .map(|profile| profile.shell_policy()),
         // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the
         // domain-blocklist preflight (enterprise escape hatch). Read from the
         // merged settings via the same `Settings::load` seam as outputStyle.
@@ -4628,7 +4680,14 @@ pub async fn build_with_credential_stack(
         // temp-file cleanup, not a leaked process. Wire
         // `sandbox_runner.reset().await` into the shutdown barrier separately
         // for tidy socket/CA cleanup.
-        sandbox_runner: new_live_sandbox_runner_with_permission_gate(perms.clone()),
+        sandbox_runner: cfg.team_invocation.as_ref().map_or_else(
+            || new_live_sandbox_runner_with_permission_gate(perms.clone()),
+            |profile| {
+                Arc::new(super::team_sandbox::TeamSandboxRunner(
+                    profile.shell_policy(),
+                )) as Arc<dyn tool_api::SandboxRunner>
+            },
+        ),
         permission_mode: cfg.permission_mode,
         // (#3 shell-expansion) The base policy for embedded `!`cmd`` bodies in
         // prompt commands (`/commit` …). When enforcement is on this is the SAME
@@ -4704,12 +4763,16 @@ pub async fn build_with_credential_stack(
         // (CLI-5) PRESENCE is the gate — `None` when `y0r` says off, which is
         // the unconfigured default (its auto-mode arm needs a rollout flag that
         // defaults false, upstream included).
-        bash_edit_diff: resolve_bash_edit_diff(
-            &cfg,
-            &effective_settings,
-            Some(&managed_snapshot),
-            &main_session_uuid,
-        )?,
+        bash_edit_diff: if cfg.team_invocation.is_some() {
+            None
+        } else {
+            resolve_bash_edit_diff(
+                &cfg,
+                &effective_settings,
+                Some(&managed_snapshot),
+                &main_session_uuid,
+            )?
+        },
         // Agent execution, name routing and Mod listing share one ordered store.
         agent_name_registry: Some(subagent_spawner_arc.agent_name_registry()),
         mcp_registry: Some(mcp_registry.clone()),
@@ -4775,7 +4838,7 @@ pub async fn build_with_credential_stack(
         cfg.diagnostics.as_deref(),
     )
     .await?;
-    let coordinator_wiring = (cfg.app_invocation.is_none()
+    let coordinator_wiring = ((cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
         && (lingxi_core::host::env::agent_swarms_enabled() || cfg.session_started_as_coordinator))
         .then(|| CoordinatorWiring {
             team: coordinator.clone(),
@@ -4806,7 +4869,12 @@ pub async fn build_with_credential_stack(
     // `Arc<dyn ShellExpansionProvider>` is chained onto the dispatcher (so
     // `/commit` … expand their embedded `!`git …`` bodies) AND stashed on
     // `DesktopRuntime.shell_expansion` for the ratatui TUI's `run_core_command`.
-    let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
+    let shell_expansion_provider: Arc<dyn command_api::ShellExpansionProvider> =
+        if cfg.team_invocation.is_some() {
+            Arc::new(super::team_invocation::DisabledShellExpansion)
+        } else {
+            tool_skill::build_prompt_shell_provider(&tool_ctx)
+        };
     let mut tools_inner = ToolRegistry::new();
     // `RemoteTrigger`'s in-process OAuth resolver, backed by the credential
     // store built at (3). Reads tokens at call-time so the refresh driver wired
@@ -4906,7 +4974,7 @@ pub async fn build_with_credential_stack(
             Some(skill_session_id),
         )
         .with_prompt_cwd(tool_ctx.session_cwd.clone())
-        .with_shell_expansion(tool_skill::build_prompt_shell_provider(&tool_ctx))
+        .with_shell_expansion(shell_expansion_provider.clone())
         .with_command_snapshot_provider(command_snapshot_provider.clone()),
     );
     let _ = subagent_skill_loader_cell.set(skill_loader_arc.clone());
@@ -5798,7 +5866,7 @@ pub async fn build_with_credential_stack(
     .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
     .with_native_tool_pool_refresh_callback_available(native_tool_pool_refresh_callback_available)
     .with_native_settings_agent_context(cfg.native_settings_agent_context);
-    let orch_builder = if cfg.app_invocation.is_none() {
+    let orch_builder = if cfg.app_invocation.is_none() && cfg.team_invocation.is_none() {
         orch_builder.with_instruction_user_email_provider(instruction_identity.clone())
     } else {
         orch_builder
@@ -5961,7 +6029,7 @@ pub async fn build_with_credential_stack(
     let orch_builder = *orch_builder;
     // A normal session may load persisted todos. An app task has no authority
     // to inherit the user's ambient task-list selection through environment.
-    let orch_builder = if cfg.app_invocation.is_none() {
+    let orch_builder = if cfg.app_invocation.is_none() && cfg.team_invocation.is_none() {
         orch_builder.with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
     } else {
         orch_builder
@@ -5979,7 +6047,9 @@ pub async fn build_with_credential_stack(
     //
     // Memory selection follows the live session's model and profile; turn it
     // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
-    let (memory_prefetch_on, session_memory_on) = if cfg.app_invocation.is_some() {
+    let (memory_prefetch_on, session_memory_on) = if cfg.team_invocation.is_some() {
+        (true, true)
+    } else if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
         (false, false)
     } else {
         resolve_memory_feature_gates(
@@ -5990,16 +6060,27 @@ pub async fn build_with_credential_stack(
             is_env_truthy("LINGXI_SESSION_MEMORY"),
         )
     };
-    let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
-        (true, Some(home)) => {
-            orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
+    let orch_builder = if cfg.team_invocation.is_some() {
+        orch_builder.with_memory_prefetch(
+            orchestrator::prompt::memory_block::build_memdir_prefetch_at(
                 side_query_client.clone(),
                 Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
-                &home,
+                &cfg.lingxi_home,
                 &cfg.cwd,
-            ))
+            ),
+        )
+    } else {
+        match (memory_prefetch_on, dirs::home_dir()) {
+            (true, Some(home)) => {
+                orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
+                    side_query_client.clone(),
+                    Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+                    &home,
+                    &cfg.cwd,
+                ))
+            }
+            _ => orch_builder,
         }
-        _ => orch_builder,
     };
 
     // EndConversation: hand the orchestrator the SAME end-request slot the tool
@@ -6042,7 +6123,7 @@ pub async fn build_with_credential_stack(
     // trigger discovery — the binary's native lexical index; AKI/Haiku backends
     // are out of scope). Unset/false ⇒ no prefetch ⇒ everything inert and the
     // locked fixtures byte-identical.
-    let skill_search_on = cfg.app_invocation.is_none()
+    let skill_search_on = (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
         && (telemetry::flag_bool("EXPERIMENTAL_SKILL_SEARCH", false)
             || is_env_truthy("CLAUDE_CODE_EXPERIMENTAL_SKILL_SEARCH")
             || is_env_truthy("LINGXI_SKILL_SEARCH"));
@@ -6066,22 +6147,42 @@ pub async fn build_with_credential_stack(
     // scan re-loads next session. The current 10k/5k/3 config defaults apply.
     // Unset/false ⇒ no handle ⇒ inert,
     // so the locked fixtures stay byte-identical.
-    let orch_builder = match (session_memory_on, dirs::home_dir()) {
-        (true, Some(home)) => {
-            orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
+    let orch_builder = if cfg.team_invocation.is_some() {
+        orch_builder.with_session_memory(
+            orchestrator::prompt::memory_block::build_session_memory_handle_at(
                 side_query_client.clone(),
                 default_model_id.clone(),
                 memory::session_memory::SessionMemoryConfig {
                     enabled: true,
                     ..Default::default()
                 },
-                &home,
+                cfg.lingxi_home.clone(),
                 Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
-            ))
+            ),
+        )
+    } else {
+        match (session_memory_on, dirs::home_dir()) {
+            (true, Some(home)) => {
+                orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
+                    side_query_client.clone(),
+                    default_model_id.clone(),
+                    memory::session_memory::SessionMemoryConfig {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    &home,
+                    Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+                ))
+            }
+            _ => orch_builder,
         }
-        _ => orch_builder,
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
+    let orch_builder = if cfg.team_invocation.is_some() {
+        orch_builder.without_host_environment_probes()
+    } else {
+        orch_builder
+    };
     let orch = orchestrator::ConversationOrchestrator::into_shared(orch_builder);
     let native_settings_prompt_provider: Arc<
         dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider,
@@ -7279,7 +7380,9 @@ pub async fn build_with_credential_stack(
         });
     let model_selection_refresh =
         settings_watch::MainModelSelectionRefresh::from_config(&cfg, &default_listings);
-    let settings_watcher =
+    let settings_watcher = if cfg.team_invocation.is_some() {
+        settings_watch::SettingsWatcherHandle::empty()
+    } else {
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
             .with_permission_gate(settings_permission_gate)
             .with_classifier_auto_mode_sources(
@@ -7291,7 +7394,8 @@ pub async fn build_with_credential_stack(
             .with_native_settings_refresher(native_settings_refresher)
             .with_managed_policy_snapshot_cache(managed_policy_snapshot_cache)
             .spawn(watch_fs)
-            .await;
+            .await
+    };
 
     // (7.3) FileChanged lifecycle: start the file-changed watcher now that the
     //       orchestrator + hook registry are wired. claude-code resolves a set
@@ -7324,7 +7428,11 @@ pub async fn build_with_credential_stack(
     #[cfg(test)]
     let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
-    let file_changed_watcher = watcher.spawn(watch_fs).await;
+    let file_changed_watcher = if cfg.team_invocation.is_some() {
+        file_changed_watch::FileChangedWatcherHandle::empty()
+    } else {
+        watcher.spawn(watch_fs).await
+    };
     // Fill the `CwdChanged` firer's deferred rebinder cell now that the watcher
     // exists (it spawns AFTER the firer is built). On a mid-session `cd` the
     // firer rebinds this watcher — the watcher-rebind half of `onCwdChanged`.

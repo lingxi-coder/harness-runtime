@@ -367,6 +367,11 @@ path = "tests/desktop/sandbox_startup_test.rs"
 required-features = ["desktop"]
 
 [[test]]
+name = "team_invocation_profile"
+path = "tests/desktop/team_invocation_profile.rs"
+required-features = ["desktop"]
+
+[[test]]
 name = "settings_watch_spawn"
 path = "tests/desktop/settings_watch_spawn.rs"
 required-features = ["desktop"]

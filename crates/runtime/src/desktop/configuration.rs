@@ -261,6 +261,8 @@ pub struct DesktopConfig {
     /// Trusted, isolated Local App invocation. Hosts construct this through
     /// [`super::app_invocation::prepare_app_config`], never from renderer config.
     pub app_invocation: Option<super::app_invocation::AppInvocationProfile>,
+    /// Trusted private Team capability. Never loaded from settings or input.
+    pub team_invocation: Option<super::team_invocation::TeamInvocationProfile>,
     /// Frozen tool grants for this invocation. Clones share permanent revocation.
     pub session_tool_grant_lease: Option<tool_api::SessionToolGrantLease>,
     /// Host-owned output quota, shared with all retries and auxiliary services.
@@ -1006,6 +1008,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("host_git_root_cache", &"<host-owned cache>")
             .field("scope_output_quota", &self.scope_output_quota)
+            .field("team_invocation", &self.team_invocation.is_some())
             .field(
                 "managed_policy_snapshot_cache_initialized",
                 &self.managed_policy_snapshot_cache.is_initialized(),
@@ -1232,6 +1235,7 @@ impl Default for DesktopConfig {
             app_invocation: None,
             session_tool_grant_lease: None,
             scope_output_quota: None,
+            team_invocation: None,
             startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             managed_policy_snapshot_cache:

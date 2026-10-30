@@ -2086,6 +2086,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         // Mobile has no interactive `/sandbox` toggle (no live TUI); the frozen
         // `sandbox_runtime` above governs — full Android/iOS sandboxing intact.
         sandbox_enabled_override: None,
+        isolated_shell: None,
         // (P2-14) `settings.skipWebFetchPreflight`, read from the settings.json
         // tiers in the perms loop above (scalar-override, local wins).
         skip_web_fetch_preflight,
