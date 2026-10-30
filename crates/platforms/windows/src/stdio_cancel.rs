@@ -24,7 +24,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
-use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
@@ -81,6 +83,7 @@ pub struct CancelableStdin {
     pending: Vec<u8>,
     offset: usize,
     stopping: Arc<AtomicBool>,
+    drain_on_stop: bool,
 }
 
 impl AsyncRead for CancelableStdin {
@@ -92,7 +95,7 @@ impl AsyncRead for CancelableStdin {
         if target.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        if self.stopping.load(Ordering::SeqCst) {
+        if !self.drain_on_stop && self.stopping.load(Ordering::SeqCst) {
             return Poll::Ready(Err(interrupted()));
         }
         loop {
@@ -275,6 +278,51 @@ struct Worker {
     name: &'static str,
     thread: Option<JoinHandle<()>>,
     phase: Arc<AtomicU8>,
+}
+
+// Detached child output pipes can outlive the async operation that read them.
+// A single process-lifetime reaper keeps retrying cancellation after a future
+// is dropped, including the race between the worker's stop check and ReadFile.
+fn read_reaper() -> io::Result<&'static std_mpsc::Sender<Worker>> {
+    static REAPER: std::sync::OnceLock<Result<std_mpsc::Sender<Worker>, String>> =
+        std::sync::OnceLock::new();
+    match REAPER.get_or_init(|| {
+        let (sender, receiver) = std_mpsc::channel::<Worker>();
+        let _reaper = thread::Builder::new()
+            .name("windows-pipe-read-reaper".into())
+            .spawn(move || {
+                let mut pending: Vec<Worker> = Vec::new();
+                loop {
+                    if pending.is_empty() {
+                        match receiver.recv() {
+                            Ok(worker) => pending.push(worker),
+                            Err(_) => return,
+                        }
+                    } else if let Ok(worker) = receiver.recv_timeout(RETRY_INTERVAL) {
+                        pending.push(worker);
+                    }
+                    while let Ok(worker) = receiver.try_recv() {
+                        pending.push(worker);
+                    }
+                    pending.retain_mut(|worker| {
+                        match worker.join_if_finished() {
+                            Ok(true) => return false,
+                            Err(_) if worker.thread.is_none() => return false,
+                            _ => {}
+                        }
+                        let _ = worker.cancel_io();
+                        true
+                    });
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(sender)
+    }) {
+        Ok(sender) => Ok(sender),
+        Err(error) => Err(io::Error::other(format!(
+            "could not start pipe read reaper: {error}"
+        ))),
+    }
 }
 
 impl Worker {
@@ -504,6 +552,277 @@ pub fn open() -> io::Result<(CancelableStdin, CancelableStdout, StdioShutdown)> 
     from_owned_handles(input, output)
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct ReadMetrics {
+    bytes: std::sync::atomic::AtomicUsize,
+    queue_full: AtomicBool,
+}
+
+#[cfg(test)]
+struct TestReadGate {
+    entered: std_mpsc::Sender<()>,
+    release: std_mpsc::Receiver<()>,
+    error: i32,
+}
+
+fn start_reader(
+    input: OwnedHandle,
+    stopping: Arc<AtomicBool>,
+    name: &'static str,
+    drain_on_stop: bool,
+    snapshot: bool,
+    #[cfg(test)] metrics: Option<Arc<ReadMetrics>>,
+    #[cfg(test)] mut test_gate: Option<TestReadGate>,
+) -> io::Result<(CancelableStdin, Worker)> {
+    let phase = Arc::new(AtomicU8::new(BETWEEN_IO));
+    let (read_tx, read_rx) = mpsc::channel(READ_QUEUE);
+    let reader = {
+        let stopping = stopping.clone();
+        let phase = phase.clone();
+        thread::Builder::new().name(name.into()).spawn(move || {
+            let mut file = std::fs::File::from(input);
+            let mut bytes = vec![0; READ_SIZE];
+            // A snapshot runs only after the original reader is joined and
+            // before the handoff reader starts. No other reader can remove
+            // these bytes. The fixed quota makes concurrent descendant writes
+            // unable to keep foreground completion open forever.
+            let mut remaining = if snapshot {
+                phase.store(ENTERING_IO, Ordering::SeqCst);
+                let available = pipe_bytes_available(&file);
+                phase.store(BETWEEN_IO, Ordering::SeqCst);
+                match available {
+                    Ok(count) => Some(count as usize),
+                    Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Some(0),
+                    Err(error) => {
+                        let _ = read_tx.blocking_send(ReadEvent::Error(error));
+                        phase.store(EXITED, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            while !stopping.load(Ordering::SeqCst) {
+                if remaining == Some(0) {
+                    break;
+                }
+                phase.store(ENTERING_IO, Ordering::SeqCst);
+                let result = if stopping.load(Ordering::SeqCst) {
+                    None
+                } else {
+                    let length = remaining.unwrap_or(READ_SIZE).min(READ_SIZE);
+                    #[cfg(test)]
+                    let result = if let Some(gate) = test_gate.take() {
+                        let _ = gate.entered.send(());
+                        let _ = gate.release.recv();
+                        Err(io::Error::from_raw_os_error(gate.error))
+                    } else {
+                        file.read(&mut bytes[..length])
+                    };
+                    #[cfg(not(test))]
+                    let result = file.read(&mut bytes[..length]);
+                    Some(result)
+                };
+                phase.store(BETWEEN_IO, Ordering::SeqCst);
+                if stopping.load(Ordering::SeqCst) && !drain_on_stop {
+                    break;
+                }
+                let event = match result {
+                    None | Some(Ok(0)) => break,
+                    Some(Ok(count)) => {
+                        if let Some(remaining) = &mut remaining {
+                            *remaining -= count;
+                        }
+                        #[cfg(test)]
+                        if let Some(metrics) = &metrics {
+                            metrics.bytes.fetch_add(count, Ordering::SeqCst);
+                        }
+                        ReadEvent::Data(bytes[..count].to_vec())
+                    }
+                    Some(Err(error))
+                        if stopping.load(Ordering::SeqCst)
+                            && error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) =>
+                    {
+                        break;
+                    }
+                    Some(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                    Some(Err(error)) => ReadEvent::Error(error),
+                };
+                let terminal = matches!(event, ReadEvent::Error(_));
+                let mut pending = event;
+                loop {
+                    if stopping.load(Ordering::SeqCst) && !drain_on_stop {
+                        phase.store(EXITED, Ordering::SeqCst);
+                        return;
+                    }
+                    match read_tx.try_send(pending) {
+                        Ok(()) => break,
+                        Err(mpsc::error::TrySendError::Full(event)) => {
+                            #[cfg(test)]
+                            if let Some(metrics) = &metrics {
+                                metrics.queue_full.store(true, Ordering::SeqCst);
+                            }
+                            pending = event;
+                            thread::sleep(RETRY_INTERVAL);
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            phase.store(EXITED, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                }
+                if terminal || stopping.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            phase.store(EXITED, Ordering::SeqCst);
+        })?
+    };
+    Ok((
+        CancelableStdin {
+            receiver: read_rx,
+            pending: Vec::new(),
+            offset: 0,
+            stopping,
+            drain_on_stop,
+        },
+        Worker {
+            name,
+            thread: Some(reader),
+            phase,
+        },
+    ))
+}
+
+/// A synchronous anonymous pipe read on its own cancellable OS thread.
+///
+/// Unlike Tokio's Windows child stdio, this worker is not part of the runtime's
+/// blocking pool. A detached descendant can therefore retain the write end
+/// without keeping the supervisor's runtime alive indefinitely.
+pub(crate) struct CancelablePipeReader {
+    input: CancelableStdin,
+    worker: Option<Worker>,
+    #[cfg(test)]
+    metrics: Arc<ReadMetrics>,
+}
+
+impl CancelablePipeReader {
+    pub(crate) fn new(input: std::io::PipeReader, name: &'static str) -> io::Result<Self> {
+        Self::with_snapshot(input, name, false)
+    }
+
+    pub(crate) fn snapshot(input: std::io::PipeReader, name: &'static str) -> io::Result<Self> {
+        Self::with_snapshot(input, name, true)
+    }
+
+    fn with_snapshot(
+        input: std::io::PipeReader,
+        name: &'static str,
+        snapshot: bool,
+    ) -> io::Result<Self> {
+        // Establish the fallback before starting a worker, so an abandoned
+        // read always has somewhere to transfer its cancellation capability.
+        read_reaper()?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let metrics = Arc::new(ReadMetrics::default());
+        let (input, worker) = start_reader(
+            input.into(),
+            stopping,
+            name,
+            true,
+            snapshot,
+            #[cfg(test)]
+            Some(metrics.clone()),
+            #[cfg(test)]
+            None,
+        )?;
+        Ok(Self {
+            input,
+            worker: Some(worker),
+            #[cfg(test)]
+            metrics,
+        })
+    }
+
+    pub(crate) fn request_stop(&self) {
+        self.input.stopping.store(true, Ordering::SeqCst);
+        if let Some(worker) = &self.worker {
+            let _ = worker.cancel_io();
+        }
+    }
+
+    pub(crate) async fn shutdown(&mut self, timeout: Duration) -> io::Result<()> {
+        self.request_stop();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "shutdown timeout overflow")
+            })?;
+        let mut last_error = None;
+        while let Some(worker) = &mut self.worker {
+            match worker.join_if_finished() {
+                Ok(true) => {
+                    self.worker = None;
+                    return Ok(());
+                }
+                Err(error) if worker.thread.is_none() => {
+                    self.worker = None;
+                    return Err(error);
+                }
+                Err(error) => last_error = Some(error.to_string()),
+                Ok(false) => {}
+            }
+            if let Err(error) = worker.cancel_io() {
+                last_error = Some(error.to_string());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "{} pipe reader did not exit (phase {}, last error: {})",
+                        worker.name,
+                        worker.phase.load(Ordering::SeqCst),
+                        last_error.as_deref().unwrap_or("none")
+                    ),
+                ));
+            }
+            tokio::time::sleep_until((tokio::time::Instant::now() + RETRY_INTERVAL).min(deadline))
+                .await;
+        }
+        Ok(())
+    }
+}
+
+impl AsyncRead for CancelablePipeReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        target: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.input).poll_read(cx, target)
+    }
+}
+
+impl Drop for CancelablePipeReader {
+    fn drop(&mut self) {
+        self.request_stop();
+        if let Some(worker) = self.worker.take() {
+            // This reaper was started before the reader. It owns the original
+            // thread handle and retries until the actual OS thread exits.
+            match read_reaper().and_then(|reaper| {
+                reaper
+                    .send(worker)
+                    .map_err(|_| io::Error::other("pipe read reaper exited"))
+            }) {
+                Ok(()) => {}
+                Err(error) => tracing::error!(%error, "could not retain pipe read cancellation"),
+            }
+        }
+    }
+}
+
 fn from_owned_handles(
     input: OwnedHandle,
     output: OwnedHandle,
@@ -530,10 +849,8 @@ fn from_owned_handles_impl(
     #[cfg(test)] test_gate: Option<TestWriteGate>,
 ) -> io::Result<(CancelableStdin, CancelableStdout, StdioShutdown)> {
     let stopping = Arc::new(AtomicBool::new(false));
-    let read_phase = Arc::new(AtomicU8::new(BETWEEN_IO));
     let write_phase = Arc::new(AtomicU8::new(BETWEEN_IO));
     let last_stdout = Arc::new(Mutex::new(None));
-    let (read_tx, read_rx) = mpsc::channel(READ_QUEUE);
     let (write_tx, write_rx) = std_mpsc::channel::<WriteRequest>();
 
     // Start the writer first. If the reader cannot be started, the writer has
@@ -588,58 +905,17 @@ fn from_owned_handles_impl(
                 phase.store(EXITED, Ordering::SeqCst);
             })?
     };
-    let reader = {
-        let stopping = stopping.clone();
-        let phase = read_phase.clone();
-        thread::Builder::new()
-            .name("mcp-stdio-reader".into())
-            .spawn(move || {
-                let mut file = std::fs::File::from(input);
-                let mut bytes = vec![0; READ_SIZE];
-                while !stopping.load(Ordering::SeqCst) {
-                    phase.store(ENTERING_IO, Ordering::SeqCst);
-                    let result = if stopping.load(Ordering::SeqCst) {
-                        Err(interrupted())
-                    } else {
-                        file.read(&mut bytes)
-                    };
-                    phase.store(BETWEEN_IO, Ordering::SeqCst);
-                    if stopping.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let event = match result {
-                        Ok(0) => break,
-                        Ok(count) => ReadEvent::Data(bytes[..count].to_vec()),
-                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
-                        Err(error) => ReadEvent::Error(error),
-                    };
-                    let terminal = matches!(event, ReadEvent::Error(_));
-                    let mut pending = event;
-                    loop {
-                        if stopping.load(Ordering::SeqCst) {
-                            phase.store(EXITED, Ordering::SeqCst);
-                            return;
-                        }
-                        match read_tx.try_send(pending) {
-                            Ok(()) => break,
-                            Err(mpsc::error::TrySendError::Full(event)) => {
-                                pending = event;
-                                thread::sleep(RETRY_INTERVAL);
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                phase.store(EXITED, Ordering::SeqCst);
-                                return;
-                            }
-                        }
-                    }
-                    if terminal {
-                        break;
-                    }
-                }
-                phase.store(EXITED, Ordering::SeqCst);
-            })
-    };
-    let reader = match reader {
+    let (input, reader) = match start_reader(
+        input,
+        stopping.clone(),
+        "mcp-stdio-reader",
+        false,
+        false,
+        #[cfg(test)]
+        None,
+        #[cfg(test)]
+        None,
+    ) {
         Ok(reader) => reader,
         Err(error) => {
             stopping.store(true, Ordering::SeqCst);
@@ -669,12 +945,7 @@ fn from_owned_handles_impl(
     };
 
     Ok((
-        CancelableStdin {
-            receiver: read_rx,
-            pending: Vec::new(),
-            offset: 0,
-            stopping: stopping.clone(),
-        },
+        input,
         CancelableStdout {
             sender: Some(write_tx),
             inflight: None,
@@ -684,11 +955,7 @@ fn from_owned_handles_impl(
         },
         StdioShutdown {
             stopping,
-            input: Worker {
-                name: "stdin",
-                thread: Some(reader),
-                phase: read_phase,
-            },
+            input: reader,
             output: Worker {
                 name: "stdout",
                 thread: Some(writer),
@@ -734,6 +1001,166 @@ mod tests {
 
     fn owned(handle: &impl AsHandle) -> io::Result<OwnedHandle> {
         handle.as_handle().try_clone_to_owned()
+    }
+
+    #[tokio::test]
+    async fn child_pipe_reader_stops_while_writer_remains_open() -> io::Result<()> {
+        let (read, mut write) = std::io::pipe()?;
+        let mut reader = CancelablePipeReader::new(read, "test child output")?;
+        write.write_all(b"before stop")?;
+        let mut prefix = [0; 11];
+        tokio::time::timeout(Duration::from_secs(5), reader.read_exact(&mut prefix)).await??;
+        assert_eq!(&prefix, b"before stop");
+        let mut next = [0; 1];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), reader.read(&mut next))
+                .await
+                .is_err()
+        );
+        reader.shutdown(Duration::from_secs(5)).await?;
+        assert_eq!(
+            write.write(b"after stop").unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn child_pipe_reader_drains_past_queue_capacity() -> io::Result<()> {
+        let (read, mut write) = std::io::pipe()?;
+        let mut reader = CancelablePipeReader::new(read, "test child output")?;
+        let bytes = (0..READ_SIZE * (READ_QUEUE + 2))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let expected = bytes.clone();
+        let writer = tokio::task::spawn_blocking(move || write.write_all(&bytes));
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received)).await??;
+        writer.await.map_err(io::Error::other)??;
+        assert_eq!(received, expected);
+        reader.shutdown(Duration::from_secs(5)).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn child_pipe_snapshot_reads_buffered_bytes_without_waiting_for_writer() -> io::Result<()>
+    {
+        let (mut read, mut write) = std::io::pipe()?;
+        write.write_all(b"foreground tail")?;
+        let mut snapshot = CancelablePipeReader::snapshot(read.try_clone()?, "test snapshot")?;
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), snapshot.read_to_end(&mut tail)).await??;
+        snapshot.shutdown(Duration::from_secs(5)).await?;
+        assert_eq!(&tail, b"foreground tail");
+        write.write_all(b"later")?;
+        let mut later = [0u8; 5];
+        read.read_exact(&mut later)?;
+        assert_eq!(&later, b"later");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stopping_full_child_pipe_queue_delivers_every_completed_read() -> io::Result<()> {
+        let (read, mut write) = std::io::pipe()?;
+        let mut reader = CancelablePipeReader::new(read, "test full child output")?;
+        let thread = reader
+            .worker
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .as_handle()
+            .try_clone_to_owned()?;
+        let metrics = reader.metrics.clone();
+        let writer = tokio::task::spawn_blocking(move || write.write_all(&vec![0x51; 1024 * 1024]));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metrics.queue_full.load(Ordering::SeqCst) {
+                tokio::time::sleep(RETRY_INTERVAL).await;
+            }
+        })
+        .await?;
+        reader.request_stop();
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut received)).await??;
+        reader.shutdown(Duration::from_secs(5)).await?;
+        // SAFETY: the duplicate retains this exact worker's thread object.
+        assert_eq!(
+            unsafe { WaitForSingleObject(thread.as_raw_handle().cast(), 0) },
+            WAIT_OBJECT_0
+        );
+        let _ = writer.await.map_err(io::Error::other)?;
+        assert_eq!(received.len(), metrics.bytes.load(Ordering::SeqCst));
+        assert!(received.len() > READ_QUEUE);
+        assert!(received.iter().all(|byte| *byte == 0x51));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn child_pipe_reader_reports_real_error_racing_stop() -> io::Result<()> {
+        let (input, _write) = std::io::pipe()?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let metrics = Arc::new(ReadMetrics::default());
+        let (entered, entered_rx) = std_mpsc::channel();
+        let (release, release_rx) = std_mpsc::channel();
+        let (input, worker) = start_reader(
+            input.into(),
+            stopping,
+            "test stopped read error",
+            true,
+            false,
+            Some(metrics.clone()),
+            Some(TestReadGate {
+                entered,
+                release: release_rx,
+                error: 5, // ERROR_ACCESS_DENIED, not ERROR_OPERATION_ABORTED.
+            }),
+        )?;
+        let mut reader = CancelablePipeReader {
+            input,
+            worker: Some(worker),
+            metrics,
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(io::Error::other)?;
+        reader.request_stop();
+        release.send(()).map_err(io::Error::other)?;
+        let mut byte = [0u8; 1];
+        let error = tokio::time::timeout(Duration::from_secs(5), reader.read(&mut byte))
+            .await?
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
+        reader.shutdown(Duration::from_secs(5)).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropped_child_pipe_reader_is_joined_without_closing_writer() -> io::Result<()> {
+        let (read, _write) = std::io::pipe()?;
+        let reader = CancelablePipeReader::new(read, "test dropped child output")?;
+        let thread = reader
+            .worker
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .as_handle()
+            .try_clone_to_owned()?;
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // SAFETY: `thread` retains this worker's OS thread handle.
+                match unsafe { WaitForSingleObject(thread.as_raw_handle().cast(), 0) } {
+                    WAIT_OBJECT_0 => break,
+                    WAIT_TIMEOUT => tokio::time::sleep(RETRY_INTERVAL).await,
+                    _ => panic!("could not wait for dropped pipe reader"),
+                }
+            }
+        })
+        .await?;
+        Ok(())
     }
 
     #[tokio::test]

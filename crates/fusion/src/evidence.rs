@@ -23,14 +23,18 @@
 
 use crate::panel::PanelInternal;
 use lingxi_core::host::tool_invoker::{
-    SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker, ToolInvokerError,
+    CleanupUnverifiedReason, SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker,
+    ToolInvokerError,
 };
-use lingxi_core::host::{EvidenceCheckStatus, EvidenceKind, PanelReport};
+use lingxi_core::host::{
+    CancellationToken, EvidenceCheckStatus, EvidenceKind, FusionError, PanelReport,
+};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 #[cfg(test)]
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
@@ -41,6 +45,8 @@ pub(crate) const MAX_CHECKED_EVIDENCE: usize = 32;
 pub(crate) const CHECK_CONCURRENCY: usize = 8;
 /// Longest the whole stage may take.
 pub(crate) const CHECK_TIME_CAP: Duration = Duration::from_secs(10);
+/// Once admission closes, allow active invocations to report cleanup.
+const CHECK_CLEANUP_GRACE: Duration = Duration::from_secs(5);
 /// Most excerpt lines searched per evidence item.
 const MAX_EXCERPT_LINES: usize = 6;
 /// Shorter lines (`}`, `} else {`) match almost anywhere and prove nothing.
@@ -211,6 +217,32 @@ struct Job {
     patterns: Vec<String>,
 }
 
+#[derive(Default)]
+struct EvidenceAdmission {
+    stopping: bool,
+    active: usize,
+}
+
+struct ActiveEvidence(Arc<Mutex<EvidenceAdmission>>);
+
+impl Drop for ActiveEvidence {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active -= 1;
+    }
+}
+
+fn close_admission(state: &Mutex<EvidenceAdmission>) -> usize {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.stopping = true;
+    state.active
+}
+
 /// Choose what to check: evidence that a claim cites first, then the rest,
 /// taken round-robin across panels (in anonymous-id order) so one verbose
 /// panel cannot use up the whole budget. A panel takes part only when it has
@@ -292,7 +324,8 @@ pub(crate) async fn check_panels(
     panels: &mut [PanelInternal],
     sources: &[Option<EvidenceSource>],
     deadline: Instant,
-) {
+    cancel: &CancellationToken,
+) -> Result<(), FusionError> {
     for panel in panels.iter_mut() {
         let len = panel
             .report
@@ -302,9 +335,16 @@ pub(crate) async fn check_panels(
     }
     let jobs = plan_jobs(panels, sources);
     if jobs.is_empty() || deadline <= Instant::now() {
-        return;
+        return if cancel.is_cancelled() {
+            Err(FusionError::Cancelled)
+        } else {
+            Ok(())
+        };
     }
     let permits = Arc::new(Semaphore::new(CHECK_CONCURRENCY));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let admission = Arc::new(Mutex::new(EvidenceAdmission::default()));
+    let invocation_cancel = cancel.child_token();
     let mut tasks = JoinSet::new();
     for job in jobs {
         let Some(invoker) = sources
@@ -315,19 +355,108 @@ pub(crate) async fn check_panels(
             continue;
         };
         let permits = Arc::clone(&permits);
+        let stopping = Arc::clone(&stopping);
+        let admission = Arc::clone(&admission);
+        let invocation_cancel = invocation_cancel.clone();
         tasks.spawn(async move {
             let _permit = permits.acquire_owned().await;
-            let status = check_one(invoker.as_ref(), &job.path, &job.patterns).await;
-            (job.panel, job.evidence, status)
+            {
+                let mut state = admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.stopping || invocation_cancel.is_cancelled() || Instant::now() >= deadline
+                {
+                    return None;
+                }
+                state.active += 1;
+            }
+            let _active = ActiveEvidence(Arc::clone(&admission));
+            let status = check_one(
+                invoker.as_ref(),
+                &job.path,
+                &job.patterns,
+                &invocation_cancel,
+                &stopping,
+            )
+            .await;
+            if status.is_err() {
+                close_admission(&admission);
+                stopping.store(true, Ordering::Release);
+                invocation_cancel.cancel();
+            }
+            Some((job.panel, job.evidence, status))
         });
     }
-    // Keep whatever finished by the deadline; dropping the set aborts the rest.
-    while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, tasks.join_next()).await {
-        if let Ok((panel, evidence, status)) = joined {
-            if let Some(slot) = panels[panel].evidence_checks.get_mut(evidence) {
-                *slot = status;
+    let mut reasons = Vec::new();
+    let mut cancelled = false;
+    let mut cleanup_deadline = None;
+    while !tasks.is_empty() {
+        tokio::select! {
+            biased;
+            joined = tasks.join_next() => {
+                match joined {
+                    Some(Ok(Some((panel, evidence, status)))) => match status {
+                        Ok(status) => if let Some(slot) = panels[panel].evidence_checks.get_mut(evidence) { *slot = status; },
+                        Err(reason) => reasons.push(reason),
+                    },
+                    Some(Err(_)) => {
+                        reasons.push(CleanupUnverifiedReason::Message("evidence tool owner failed before reporting cleanup".into()));
+                        close_admission(&admission);
+                        stopping.store(true, Ordering::Release);
+                        invocation_cancel.cancel();
+                    }
+                    _ => {}
+                }
+                if stopping.load(Ordering::Acquire) && cleanup_deadline.is_none() {
+                    cleanup_deadline = Some(Instant::now() + CHECK_CLEANUP_GRACE);
+                }
+            }
+            () = cancel.cancelled(), if cleanup_deadline.is_none() => {
+                cancelled = true;
+                if close_admission(&admission) > 0 {
+                    reasons.push(CleanupUnverifiedReason::Message("evidence check was cancelled with tool invocations in flight".into()));
+                }
+                stopping.store(true, Ordering::Release);
+                invocation_cancel.cancel();
+                cleanup_deadline = Some(Instant::now() + CHECK_CLEANUP_GRACE);
+            }
+            () = tokio::time::sleep_until(deadline), if cleanup_deadline.is_none() => {
+                if close_admission(&admission) > 0 {
+                    reasons.push(CleanupUnverifiedReason::Message("evidence check exceeded its deadline with tool invocations in flight".into()));
+                }
+                stopping.store(true, Ordering::Release);
+                invocation_cancel.cancel();
+                cleanup_deadline = Some(Instant::now() + CHECK_CLEANUP_GRACE);
+            }
+            () = async { if let Some(deadline) = cleanup_deadline { tokio::time::sleep_until(deadline).await; } }, if cleanup_deadline.is_some() => {
+                if close_admission(&admission) > 0 {
+                    reasons.push(CleanupUnverifiedReason::Message("evidence tool cleanup remained pending after the grace period".into()));
+                }
+                tasks.abort_all();
+                break;
             }
         }
+    }
+    if reasons.is_empty() {
+        if cancelled || cancel.is_cancelled() {
+            Err(FusionError::Cancelled)
+        } else {
+            Ok(())
+        }
+    } else {
+        Err(FusionError::CleanupUnverified(collapse_cleanup_reasons(
+            reasons,
+        )))
+    }
+}
+
+pub(crate) fn collapse_cleanup_reasons(
+    mut reasons: Vec<CleanupUnverifiedReason>,
+) -> CleanupUnverifiedReason {
+    if reasons.len() == 1 {
+        reasons.remove(0)
+    } else {
+        CleanupUnverifiedReason::Multiple(reasons)
     }
 }
 
@@ -335,42 +464,61 @@ async fn check_one(
     invoker: &dyn ToolInvoker,
     path: &str,
     patterns: &[String],
-) -> EvidenceCheckStatus {
+    cancel: &CancellationToken,
+    stopping: &AtomicBool,
+) -> Result<EvidenceCheckStatus, CleanupUnverifiedReason> {
+    if stopping.load(Ordering::Acquire) || cancel.is_cancelled() {
+        return Ok(EvidenceCheckStatus::Unverifiable);
+    }
     if patterns.is_empty() {
-        return match grep_count(invoker, path, "^").await {
-            Ok(_) => EvidenceCheckStatus::FileExists,
-            Err(status) => status,
+        return match grep_count(invoker, path, "^", cancel).await {
+            Ok(_) => Ok(EvidenceCheckStatus::FileExists),
+            Err(CheckError::Status(status)) => Ok(status),
+            Err(CheckError::Fatal(reason)) => Err(reason),
         };
     }
     let mut found = 0;
     for pattern in patterns {
-        match grep_count(invoker, path, pattern).await {
+        if stopping.load(Ordering::Acquire) || cancel.is_cancelled() {
+            return Ok(EvidenceCheckStatus::Unverifiable);
+        }
+        match grep_count(invoker, path, pattern, cancel).await {
             Ok(0) => {}
             Ok(_) => found += 1,
-            Err(status) => return status,
+            Err(CheckError::Status(status)) => return Ok(status),
+            Err(CheckError::Fatal(reason)) => return Err(reason),
         }
     }
-    if found == patterns.len() {
+    Ok(if found == patterns.len() {
         EvidenceCheckStatus::Verified
     } else if found == 0 {
         EvidenceCheckStatus::NotFound
     } else {
         EvidenceCheckStatus::Partial
-    }
+    })
+}
+
+enum CheckError {
+    Status(EvidenceCheckStatus),
+    Fatal(CleanupUnverifiedReason),
 }
 
 async fn grep_count(
     invoker: &dyn ToolInvoker,
     path: &str,
     pattern: &str,
-) -> Result<u64, EvidenceCheckStatus> {
+    cancel: &CancellationToken,
+) -> Result<u64, CheckError> {
     let input = Utf16JsonProjection::object(vec![
         ("pattern".to_owned(), pattern.into()),
         ("path".to_owned(), path.into()),
         ("output_mode".to_owned(), "count".into()),
     ])
-    .map_err(|_| EvidenceCheckStatus::Unverifiable)?;
-    match invoker.invoke("Grep", input, host_context()).await {
+    .map_err(|_| CheckError::Status(EvidenceCheckStatus::Unverifiable))?;
+    match invoker
+        .invoke("Grep", input, host_context(cancel.clone()))
+        .await
+    {
         Ok(data) => data
             .number_at("/numMatches")
             .filter(|count| {
@@ -380,7 +528,7 @@ async fn grep_count(
                     && *count <= u64::MAX as f64
             })
             .map(|count| count as u64)
-            .ok_or(EvidenceCheckStatus::Unverifiable),
+            .ok_or(CheckError::Status(EvidenceCheckStatus::Unverifiable)),
         // Grep reports a missing search path as invalid input; it probes the
         // path only after the permission check, so this never leaks the
         // existence of a path the session may not look at.
@@ -390,24 +538,28 @@ async fn grep_count(
                 .and_then(|units| String::from_utf16(&units).ok())
                 .is_some_and(|message| message.contains("does not exist")) =>
         {
-            Err(EvidenceCheckStatus::MissingFile)
+            Err(CheckError::Status(EvidenceCheckStatus::MissingFile))
         }
         // How the invoker surfaces a permission denial or a path outside the
         // trusted workspace.
+        Err(ToolInvokerError::Abort(_)) if cancel.is_cancelled() => Err(CheckError::Fatal(
+            "evidence tool stopped without a cleanup receipt".into(),
+        )),
         Err(ToolInvokerError::Internal(_) | ToolInvokerError::Abort(_)) => {
-            Err(EvidenceCheckStatus::Denied)
+            Err(CheckError::Status(EvidenceCheckStatus::Denied))
         }
-        Err(_) => Err(EvidenceCheckStatus::Unverifiable),
+        Err(ToolInvokerError::CleanupUnverified(reason)) => Err(CheckError::Fatal(reason)),
+        Err(_) => Err(CheckError::Status(EvidenceCheckStatus::Unverifiable)),
     }
 }
 
 /// The host is the caller: no agent identity, no prompts, and a
 /// non-interactive session so an ask resolves to a denial.
-fn host_context() -> SubagentInvocationContext {
+fn host_context(cancel: CancellationToken) -> SubagentInvocationContext {
     SubagentInvocationContext {
         session_origin: None,
         available_tool_names: None,
-        cancellation_token: lingxi_core::host::CancellationToken::new(),
+        cancellation_token: cancel,
         permission_pause_observer: None,
         parent_agent_id: None,
         native_query_depth: None,
@@ -533,6 +685,152 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    struct ConcurrentFatalGrep {
+        rendezvous: tokio::sync::Barrier,
+        reasons: HashMap<String, CleanupUnverifiedReason>,
+    }
+
+    #[async_trait]
+    impl ToolInvoker for ConcurrentFatalGrep {
+        async fn invoke(
+            &self,
+            _: &str,
+            input: Utf16JsonProjection,
+            _: SubagentInvocationContext,
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            let path = input.string_at("/path").unwrap();
+            let reason = self.reasons.get(path).unwrap().clone();
+            self.rendezvous.wait().await;
+            Err(ToolInvokerError::CleanupUnverified(reason))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn incomplete_output(id: &str) -> CleanupUnverifiedReason {
+        use lingxi_core::host::tool_invoker::{
+            ProcessTreeStatus, UnverifiedCleanupOutput, UnverifiedCleanupOutputParts,
+        };
+        CleanupUnverifiedReason::Output(Arc::new(UnverifiedCleanupOutput::new(
+            UnverifiedCleanupOutputParts {
+                session_id: Some(id.into()),
+                stdout: format!("{id}-stdout"),
+                stderr: format!("{id}-stderr"),
+                stdout_truncated: true,
+                stderr_truncated: false,
+                stdout_eof: false,
+                stderr_eof: true,
+                exit_code: None,
+                timed_out: true,
+                termination_requested: Some(true),
+                tree_status: ProcessTreeStatus::Unverified,
+                cleanup_detail: "tree unknown".into(),
+                original_error: Some(format!("{id}-error")),
+            },
+        )))
+    }
+
+    #[tokio::test]
+    async fn simultaneous_unverified_greps_stop_the_stage_and_keep_both_outputs() {
+        let first = incomplete_output("first");
+        let second = incomplete_output("second");
+        let invoker: Arc<dyn ToolInvoker> = Arc::new(ConcurrentFatalGrep {
+            rendezvous: tokio::sync::Barrier::new(2),
+            reasons: [
+                ("a.rs".into(), first.clone()),
+                ("b.rs".into(), second.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let mut panels = vec![panel(
+            "P1",
+            vec![],
+            vec![
+                evidence("a", EvidenceKind::File, "a.rs", None),
+                evidence("b", EvidenceKind::File, "b.rs", None),
+            ],
+        )];
+        let error = check_panels(
+            &mut panels,
+            &[Some(EvidenceSource::workspace(invoker))],
+            Instant::now() + Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let FusionError::CleanupUnverified(CleanupUnverifiedReason::Multiple(reasons)) = error
+        else {
+            panic!("both incomplete outcomes must remain a terminal error");
+        };
+        assert_eq!(reasons.len(), 2);
+        assert!(reasons.contains(&first) && reasons.contains(&second));
+        assert_eq!(
+            panels[0].evidence_checks,
+            vec![EvidenceCheckStatus::Unverifiable; 2]
+        );
+    }
+
+    struct CancelledFatalGrep {
+        rendezvous: Arc<tokio::sync::Barrier>,
+    }
+    #[async_trait]
+    impl ToolInvoker for CancelledFatalGrep {
+        async fn invoke(
+            &self,
+            _: &str,
+            input: Utf16JsonProjection,
+            ctx: SubagentInvocationContext,
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            let path = input.string_at("/path").unwrap().to_owned();
+            self.rendezvous.wait().await;
+            ctx.cancellation_token.cancelled().await;
+            Err(ToolInvokerError::CleanupUnverified(incomplete_output(
+                &path,
+            )))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_collects_each_concurrent_unverified_grep() {
+        let rendezvous = Arc::new(tokio::sync::Barrier::new(3));
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let invoker: Arc<dyn ToolInvoker> = Arc::new(CancelledFatalGrep {
+            rendezvous: rendezvous.clone(),
+        });
+        let task = tokio::spawn(async move {
+            let mut panels = vec![panel(
+                "P1",
+                vec![],
+                vec![
+                    evidence("a", EvidenceKind::File, "a.rs", None),
+                    evidence("b", EvidenceKind::File, "b.rs", None),
+                ],
+            )];
+            check_panels(
+                &mut panels,
+                &[Some(EvidenceSource::workspace(invoker))],
+                Instant::now() + Duration::from_secs(5),
+                &child_cancel,
+            )
+            .await
+        });
+        rendezvous.wait().await;
+        cancel.cancel();
+        let error = task.await.unwrap().unwrap_err();
+        let FusionError::CleanupUnverified(CleanupUnverifiedReason::Multiple(reasons)) = error
+        else {
+            panic!("cancellation must not discard incomplete outcomes");
+        };
+        assert!(reasons.contains(&incomplete_output("a.rs")));
+        assert!(reasons.contains(&incomplete_output("b.rs")));
     }
 
     fn evidence(
@@ -683,8 +981,10 @@ mod tests {
             &mut panels,
             &[Some(EvidenceSource::workspace(invoker))],
             Instant::now() + Duration::from_secs(5),
+            &CancellationToken::new(),
         )
-        .await;
+        .await
+        .unwrap();
         use EvidenceCheckStatus as S;
         assert_eq!(
             panels[0].evidence_checks,
@@ -718,8 +1018,10 @@ mod tests {
             &mut panels,
             &[Some(EvidenceSource::workspace(invoker))],
             Instant::now() + Duration::from_secs(5),
+            &CancellationToken::new(),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             panels[0].evidence_checks,
             vec![EvidenceCheckStatus::MissingFile]
@@ -774,8 +1076,10 @@ mod tests {
             &mut panels,
             &[Some(EvidenceSource::workspace(invoker))],
             Instant::now() + Duration::from_millis(20),
+            &CancellationToken::new(),
         )
-        .await;
+        .await
+        .expect_err("an in-flight deadline must not be treated as verified cleanup");
         assert_eq!(
             panels[0].evidence_checks,
             vec![EvidenceCheckStatus::Unverifiable]
@@ -795,8 +1099,10 @@ mod tests {
             &mut panels,
             &[Some(EvidenceSource::workspace(invoker))],
             Instant::now(),
+            &CancellationToken::new(),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             panels[0].evidence_checks,
             vec![EvidenceCheckStatus::Unverifiable]
@@ -833,8 +1139,10 @@ mod tests {
             &mut panels,
             &sources,
             Instant::now() + Duration::from_secs(5),
+            &CancellationToken::new(),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             panels[0].evidence_checks,
             vec![EvidenceCheckStatus::Verified]

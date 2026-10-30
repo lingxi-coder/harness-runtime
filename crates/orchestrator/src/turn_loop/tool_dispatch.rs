@@ -41,7 +41,12 @@ pub(crate) async fn with_dispatch_execution_lease<F: std::future::Future>(
     lease: Option<std::sync::Arc<dyn Send + Sync>>,
     future: F,
 ) -> F::Output {
-    DISPATCH_EXECUTION_LEASE.scope(lease, future).await
+    DISPATCH_EXECUTION_LEASE
+        .scope(
+            lease.clone(),
+            tool_api::context::with_process_execution_lease(lease, future),
+        )
+        .await
 }
 
 pub(crate) async fn with_dispatch_work_lease<F: std::future::Future>(
@@ -7898,6 +7903,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // `Block` tools intentionally keep their existing wait-to-completion
         // behavior.
         let interrupt_behavior = tool_handle.interrupt_behavior(&effective_input);
+        let await_cleanup = tool_handle.await_cleanup_on_interrupt();
         let dispatch_cancel = ctx.cancel.clone();
         let result_context = ctx.clone();
         let (execution_record, tool_outcome) = {
@@ -7977,7 +7983,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                             };
                             tokio::pin!(tool_call);
                             match (interrupt_behavior, dispatch_cancel) {
-                                (tool_api::tool_trait::InterruptBehavior::Cancel, Some(cancel)) => {
+                                (tool_api::tool_trait::InterruptBehavior::Cancel, Some(cancel)) if !await_cleanup => {
                                     tokio::select! {
                                         biased;
                                         () = cancel.cancelled() => Err(tool_api::ToolError::Aborted),
@@ -8010,6 +8016,29 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // terminal tool result. The JoinSet aborts both tasks automatically if
         // this dispatch future is dropped by a parent turn/runtime shutdown.
         while event_tasks.join_next().await.is_some() {}
+        // A native execution record must stay Started when the process tree
+        // could still be running. Recording a terminal failure here would
+        // discard the cleanup evidence and assert a completed execution.
+        let cleanup_reason = match &tool_outcome {
+            Err(tool_api::ToolError::CleanupUnverified(detail)) => Some(detail.clone().into()),
+            Err(tool_api::ToolError::CleanupUnverifiedOutput(output)) => {
+                Some(output.clone().into())
+            }
+            Err(tool_api::ToolError::CleanupUnverifiedBatch(reasons)) => {
+                Some(tool_api::CleanupUnverifiedReason::Multiple(reasons.clone()))
+            }
+            _ => None,
+        };
+        if let Some(reason) = cleanup_reason {
+            Box::pin(crate::native_computer::note_computer_result(
+                orch,
+                &tool_handle,
+                &result_context,
+                false,
+            ))
+            .await;
+            return Err(OrchestratorError::CleanupUnverified(reason));
+        }
         // Persist the execution fact before PostToolUse can replace its output.
         // A failed terminal write leaves Started unresolved and must stop the
         // turn so recovery cannot replay an input with an unknown outcome.

@@ -956,6 +956,9 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 workflow::WorkflowError::ScriptSource(diagnostic) => {
                     return Err(tool_workflow::WorkflowLaunchError::Source(diagnostic));
                 }
+                workflow::WorkflowError::CleanupUnverified(_) => {
+                    unreachable!("body validation never starts subagents")
+                }
             };
             let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
             let workflow_name = workflow::meta_string_value(&script, "name");

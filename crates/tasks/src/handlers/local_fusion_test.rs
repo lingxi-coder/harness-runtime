@@ -322,6 +322,51 @@ struct BlockingCancelAwareExecutor {
     runs: AtomicUsize,
 }
 
+struct LateCleanupExecutor {
+    started: StdMutex<Option<oneshot::Sender<()>>>,
+    release: TokioMutex<Option<oneshot::Receiver<()>>>,
+    reason: lingxi_core::host::tool_invoker::CleanupUnverifiedReason,
+}
+
+#[async_trait]
+impl FusionExecutor for LateCleanupExecutor {
+    fn prepare(
+        self: Arc<Self>,
+        submission: FusionSubmission,
+    ) -> Result<PreparedFusionRun, FusionError> {
+        let timeout = self.effective_timeout_ms();
+        lingxi_core::host::test_support::prepared_from_oneshot(
+            submission,
+            timeout,
+            move |_request, inherit, _progress| async move {
+                if let Some(started) = self.started.lock().unwrap().take() {
+                    let _ = started.send(());
+                }
+                inherit.cancel.cancelled().await;
+                if let Some(release) = self.release.lock().await.take() {
+                    let _ = release.await;
+                }
+                Err(FusionError::CleanupUnverified(self.reason.clone()))
+            },
+        )
+    }
+}
+
+#[derive(Default)]
+struct CaptureCleanupRecorder(StdMutex<Vec<FusionRunOutcome>>);
+
+#[async_trait]
+impl FusionRunRecorder for CaptureCleanupRecorder {
+    async fn record_terminal(
+        &self,
+        outcome: FusionRunOutcome,
+        _slash_target: Option<FusionSlashPublicationTarget>,
+    ) -> lingxi_core::host::FusionPublicationReceipt {
+        self.0.lock().unwrap().push(outcome);
+        lingxi_core::host::FusionPublicationReceipt::published()
+    }
+}
+
 impl BlockingCancelAwareExecutor {
     fn new(started: oneshot::Sender<()>) -> Arc<Self> {
         Arc::new(Self {
@@ -1475,7 +1520,7 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
         .expect("terminal publish signal");
 
     (handle.cleanup.as_ref().expect("cleanup seam"))();
-    handler.drain_pending_kills().await;
+    handler.drain_pending_kills().await.unwrap();
 
     let _ = release_tx.send(());
     for _ in 0..200 {
@@ -1586,7 +1631,7 @@ async fn drain_pending_kill_request_cancel_loses_to_an_atomic_finalizing_claim()
         .clone();
     assert!(control.begin_finalizing(), "test claims the natural result");
     (handle.cleanup.as_ref().expect("cleanup seam"))();
-    handler.drain_pending_kills().await;
+    handler.drain_pending_kills().await.unwrap();
     let _ = release_tx.send(());
 
     for _ in 0..200 {
@@ -1737,6 +1782,76 @@ async fn kill_while_running_lets_executor_observe_cancellation_and_status_killed
         "status must reach Killed exactly once; got: {:?}",
         status_sink.calls()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn timed_out_stop_keeps_worker_until_late_cleanup_failure_is_recorded() {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status = Arc::new(RecordingStatusSink::default());
+    let recorder = Arc::new(CaptureCleanupRecorder::default());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let reason = CleanupUnverifiedReason::Message("private evidence".into());
+    let handler = Arc::new(make_handler_with_recorder(
+        Arc::new(LateCleanupExecutor {
+            started: StdMutex::new(Some(started_tx)),
+            release: TokioMutex::new(Some(release_rx)),
+            reason: reason.clone(),
+        }),
+        output_manager.clone(),
+        status.clone(),
+        recorder.clone(),
+    ));
+    let ctx = make_ctx(fs.clone());
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                session_origin: None,
+                request: dummy_request(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    started_rx.await.unwrap();
+    let stop_handler = handler.clone();
+    let task_id = handle.task_id.clone();
+    let stop = tokio::spawn(async move { stop_handler.kill(&task_id, ctx).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(FUSION_KILL_COMPLETION_GRACE).await;
+    assert!(stop.await.unwrap().is_err());
+    assert!(handler.workers.lock().await.contains_key(&handle.task_id));
+    assert_eq!(status.last_status(), Some(TaskStatus::Running));
+
+    release_tx.send(()).unwrap();
+    for _ in 0..200 {
+        if status.last_status() == Some(TaskStatus::Failed) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status.last_status(), Some(TaskStatus::Failed));
+    assert_eq!(status.errors()[0].1, "Fusion cleanup could not be verified");
+    assert!(matches!(&recorder.0.lock().unwrap()[0].result,
+        Err(FusionError::CleanupUnverified(actual)) if actual == &reason));
+    let spool = output_manager.path_for(&handle.task_id).unwrap();
+    let content = fs
+        .read_file(&spool.to_string_lossy(), None, None)
+        .await
+        .unwrap()
+        .content;
+    assert!(!content.contains("private evidence"));
+}
+
+#[tokio::test]
+async fn dropped_fusion_worker_is_not_a_completion_receipt() {
+    let (sender, receiver) = watch::channel(WorkerCompletion::Running);
+    drop(WorkerCompletionSignal(sender));
+    assert!(wait_for_worker(receiver).await.is_err());
 }
 
 /// [Round-4 review finding 10] Killing a running `/fusion` whose executor

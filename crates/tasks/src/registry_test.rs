@@ -7675,6 +7675,76 @@ struct SinkKillingHandler {
     sink: Arc<crate::registry_status_sink::RegistryStatusSink>,
 }
 
+struct FinalizingWorkflowHandler;
+
+#[async_trait]
+impl Task for FinalizingWorkflowHandler {
+    fn name(&self) -> &str {
+        "finalizing-workflow"
+    }
+
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalWorkflow
+    }
+
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        Ok(TaskHandle::new("w-finalizing".into(), None))
+    }
+
+    async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        Ok(())
+    }
+
+    async fn has_live_worker(&self, _task_id: &str) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn stop_does_not_mark_a_finalizing_workflow_as_killed() {
+    let (_dir, mut registry) = make_registry();
+    registry.register_handler(TaskType::LocalWorkflow, Arc::new(FinalizingWorkflowHandler));
+    let id = registry
+        .spawn(
+            TaskType::LocalWorkflow,
+            TaskSpawnInput::LocalWorkflow {
+                session_uuid: None,
+                session_origin: None,
+                workflow_id: "wf".into(),
+                script: "return 1".into(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: None,
+                invocation_mode: None,
+                workflow_source: None,
+                script_is_verbatim_builtin: None,
+                transcript_subdir: None,
+                launched_from_subagent: false,
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            "workflow".into(),
+        )
+        .await
+        .unwrap();
+    registry.set_status(&id, TaskStatus::Running).await.unwrap();
+    assert!(registry.kill(&id).await.is_err());
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Running
+    );
+    assert_eq!(
+        registry.spawned.read().await.get(&id),
+        Some(&TaskType::LocalWorkflow)
+    );
+}
+
 #[async_trait]
 impl Task for SinkKillingHandler {
     fn name(&self) -> &str {

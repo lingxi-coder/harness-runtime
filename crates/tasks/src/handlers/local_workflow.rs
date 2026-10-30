@@ -42,12 +42,12 @@ use lingxi_core::host::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry}
 #[cfg(test)]
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use lingxi_core::host::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
-    SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
+    BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance, SubagentResult, SubagentSpawnError,
+    SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -765,66 +765,77 @@ enum WorkflowBridgeRequest {
     AgentBatch(Vec<(String, String)>, oneshot::Sender<Vec<String>>),
 }
 
-/// A live worker-cancel record: the background-task handle plus the runtime that
-/// minted it, so [`Task::kill`] / cleanup can cancel the in-flight worker without
-/// a fresh [`TaskContext`]. (Each handler keeps its own — the fields are private;
-/// `pub` so it can appear in [`LocalWorkflowHandler::workers_map`]'s return type.)
+/// A live worker-cancel record, shared with the registry while work remains.
+#[derive(Clone)]
 pub struct WorkerCancel {
-    handle: BackgroundTaskHandle,
-    runtime: Arc<dyn RuntimeSpawner>,
     /// Cooperative-cancel flag shared with the running script thread's engine
     /// interrupt handler. Flipped by [`Task::kill`] / cleanup so a runaway
     /// pure-JS loop aborts instead of leaking the OS thread.
     cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// Worker completion signal. `kill` waits briefly on this after flipping
-    /// the cooperative cancel flag so an in-flight batch can unwind before the
-    /// runtime fallback aborts the task.
-    completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
+    completion_rx: watch::Receiver<WorkerCompletion>,
     /// Natural completion owns the terminal transition once this flips. Kill
     /// and cleanup must not abort the outcome/status commit window.
     finalizing: bool,
 }
 
-struct WorkerCompletionSignal(Option<oneshot::Sender<()>>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkerCompletion {
+    Running,
+    Finished,
+    Abandoned,
+}
+
+struct WorkerCompletionSignal(watch::Sender<WorkerCompletion>);
 
 impl WorkerCompletionSignal {
-    fn new(tx: oneshot::Sender<()>) -> Self {
-        Self(Some(tx))
+    fn complete(&self) {
+        self.0.send_replace(WorkerCompletion::Finished);
     }
 }
 
 impl Drop for WorkerCompletionSignal {
     fn drop(&mut self) {
-        if let Some(tx) = self.0.take() {
-            let _ = tx.send(());
+        let running = *self.0.borrow() == WorkerCompletion::Running;
+        if running {
+            self.0.send_replace(WorkerCompletion::Abandoned);
         }
     }
 }
 
 async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    let mut completion_rx = rec
-        .completion_rx
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let completed = if let Some(completion_rx) = completion_rx.as_mut() {
-        tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx)
-            .await
-            .is_ok()
-    } else {
-        false
-    };
-    if !completed {
-        rec.runtime
-            .cancel(&rec.handle)
-            .await
-            .map_err(|error| TaskError::Io(error.to_string()))?;
-        if let Some(completion_rx) = completion_rx {
-            let _ = completion_rx.await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        wait_for_worker(rec.completion_rx),
+    )
+    .await
+    .map_err(|_| {
+        TaskError::Internal(
+            "workflow cancellation is pending; cleanup has not been verified".into(),
+        )
+    })?
+}
+
+async fn wait_for_worker(
+    mut completion: watch::Receiver<WorkerCompletion>,
+) -> Result<(), TaskError> {
+    loop {
+        let state = *completion.borrow_and_update();
+        match state {
+            WorkerCompletion::Finished => return Ok(()),
+            WorkerCompletion::Abandoned => {
+                return Err(TaskError::Internal(
+                    "workflow worker stopped before its terminal outcome was observed".into(),
+                ))
+            }
+            WorkerCompletion::Running => {}
         }
+        completion.changed().await.map_err(|_| {
+            TaskError::Internal(
+                "workflow worker completion channel closed before its terminal outcome".into(),
+            )
+        })?;
     }
-    Ok(())
 }
 
 /// Background [`Task`] that runs a workflow script and spools its result.
@@ -1033,30 +1044,35 @@ impl LocalWorkflowHandler {
 
     /// Drain records queued by [`TaskHandle::cleanup`] and cancel each worker
     /// future for real (the async counterpart of the synchronous cleanup closure).
-    pub async fn drain_pending_kills(&self) {
+    ///
+    /// # Errors
+    /// Returns an error if any worker has not published its terminal outcome.
+    pub async fn drain_pending_kills(&self) -> Result<(), TaskError> {
         let pending = {
             let mut pending = self.pending_kill.lock().unwrap();
             std::mem::take(&mut *pending)
         };
+        let mut failure = None;
         for task_id in pending {
-            let rec = {
-                let mut workers = self.workers.lock().await;
-                if workers.get(&task_id).is_some_and(|rec| rec.finalizing) {
-                    None
-                } else {
-                    workers.remove(&task_id)
-                }
-            };
+            let rec = self.cancellation_record(&task_id).await;
             let Some(rec) = rec else {
                 continue;
             };
-            let _ = cancel_workflow_worker(rec).await;
-            if !self.status_sink.is_terminal(&task_id).await {
-                self.status_sink
-                    .set_status(&task_id, TaskStatus::Killed)
-                    .await;
+            if let Err(error) = cancel_workflow_worker(rec).await {
+                failure.get_or_insert(error);
             }
         }
+        failure.map_or(Ok(()), Err)
+    }
+
+    async fn cancellation_record(&self, task_id: &str) -> Option<WorkerCancel> {
+        let workers = self.workers.lock().await;
+        let rec = workers.get(task_id)?;
+        if rec.finalizing {
+            return None;
+        }
+        rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        Some(rec.clone())
     }
 }
 
@@ -1131,9 +1147,14 @@ impl WorkflowIsolationSpawner {
                 }
             })
             .await;
-        if let (Some(manager), Some(handle)) = (self.worktree.as_ref(), worktree.as_ref()) {
-            let _ =
-                lingxi_core::host::worktree::agent_worktree_result(manager.as_ref(), handle).await;
+        // A child whose process tree is unverified may still be using its
+        // worktree. Keep it intact for the host's recovery owner.
+        if !matches!(&result, Err(SubagentSpawnError::CleanupUnverified { .. })) {
+            if let (Some(manager), Some(handle)) = (self.worktree.as_ref(), worktree.as_ref()) {
+                let _ =
+                    lingxi_core::host::worktree::agent_worktree_result(manager.as_ref(), handle)
+                        .await;
+            }
         }
         result
     }
@@ -1615,7 +1636,9 @@ fn projection_to_text(content: Utf16JsonProjection) -> String {
 /// prelude resolves the `agent()` promise with `null` — claude-code's contract
 /// (`if (Be.skipped) return null` / `if (Be.apiError) return null`). `null` is
 /// falsy, so `.filter(Boolean)` still drops it, while explicit `=== null` / `??`
-/// checks now behave correctly. (An empty-but-successful agent still returns "".)
+/// checks now behave correctly. Cleanup failures are handled before this
+/// projection, and never use the null sentinel. (An empty successful agent
+/// still returns "".)
 fn result_to_string(result: Result<SubagentResult, SubagentSpawnError>) -> String {
     match result {
         Ok(SubagentResult::Completed { content, .. }) => projection_to_text(content),
@@ -1630,6 +1653,9 @@ fn subagent_failure_reason(result: &Result<SubagentResult, SubagentSpawnError>) 
         Ok(SubagentResult::Completed { .. }) => None,
         Ok(SubagentResult::Failed { reason, .. }) => Some(reason.clone()),
         Ok(SubagentResult::Killed { .. }) => Some("subagent was cancelled".to_string()),
+        Err(SubagentSpawnError::CleanupUnverified { .. }) => {
+            Some("subagent cleanup could not be verified".to_string())
+        }
         Err(error) => Some(error.to_string()),
     }
 }
@@ -2867,6 +2893,10 @@ async fn run_workflow_script_with_live_updates_recorded(
     // Script try/catch must not turn an accounting failure into permission
     // for another paid call, including later calls in the same batch.
     let output_accounting_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The script may catch a rejected agent() promise or turn it into null in
+    // parallel(). Keep host cleanup failures outside that language boundary.
+    let cleanup_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cleanup_reasons = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let emit_phase_telemetry_here = workflow_metrics_out.is_none();
     let workflow_metrics = workflow_metrics_out
@@ -3005,6 +3035,17 @@ async fn run_workflow_script_with_live_updates_recorded(
             }
             continue;
         }
+        if cleanup_failed.load(Ordering::Acquire) {
+            let error = wf_throw(
+                "workflow child cleanup could not be verified; further dispatch is disabled",
+            );
+            match work {
+                WorkflowBridgeRequest::AgentBatch(calls, reply) => {
+                    let _ = reply.send(vec![error; calls.len()]);
+                }
+            }
+            continue;
+        }
         match work {
             WorkflowBridgeRequest::AgentBatch(calls, reply) => {
                 // Phase A — sequential, in call order: prefix-cache decision per call.
@@ -3081,6 +3122,8 @@ async fn run_workflow_script_with_live_updates_recorded(
                     let output_scope = output_scope.clone();
                     let output_run_id = output_execution_id.clone();
                     let output_accounting_failed = output_accounting_failed.clone();
+                    let cleanup_failed = cleanup_failed.clone();
+                    let cleanup_reasons = cleanup_reasons.clone();
                     let nested_fs = nested_fs.clone();
                     let nested_plugin_workflows = nested_plugin_workflows.clone();
                     let budget_total = token_budget_total;
@@ -3094,6 +3137,9 @@ async fn run_workflow_script_with_live_updates_recorded(
                     async move {
                         if output_accounting_failed.load(Ordering::Acquire) {
                             return wf_throw("workflow output accounting failed; further dispatch is disabled");
+                        }
+                        if cleanup_failed.load(Ordering::Acquire) {
+                            return wf_throw("workflow child cleanup could not be verified; further dispatch is disabled");
                         }
                         if !matches!(&plan, Plan::Resolve(_)) {
                             if let Some(total) = budget_total.filter(|&t| t > 0) {
@@ -3386,6 +3432,9 @@ async fn run_workflow_script_with_live_updates_recorded(
                         if output_accounting_failed.load(Ordering::Acquire) {
                             return wf_throw("workflow output accounting failed; further dispatch is disabled");
                         }
+                        if cleanup_failed.load(Ordering::Acquire) {
+                            return wf_throw("workflow child cleanup could not be verified; further dispatch is disabled");
+                        }
                         let raw = if let Some(observer) = observer.clone() {
                             spawner
                                 .spawn_workflow_with_observer(
@@ -3404,6 +3453,13 @@ async fn run_workflow_script_with_live_updates_recorded(
                         } else {
                             spawner.spawn(request, inherit).await
                         };
+                        if let Err(SubagentSpawnError::CleanupUnverified { reason, .. }) = &raw {
+                            cleanup_reasons
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push(reason.clone());
+                            cleanup_failed.store(true, Ordering::Release);
+                        }
                         let terminal_error = subagent_failure_reason(&raw);
                         if let (Some(scope), Ok(result)) = (&output_scope, &raw) {
                             let recorded = known_workflow_agent_output(result).and_then(|tokens| {
@@ -3485,6 +3541,13 @@ async fn run_workflow_script_with_live_updates_recorded(
                                 }
                             }
                         }
+                        if matches!(&raw, Err(SubagentSpawnError::CleanupUnverified { .. })) {
+                            // Fail the individual promise even when the script
+                            // did not request ordinary throwOnError behavior.
+                            // The host latch above remains authoritative if JS
+                            // catches this rejection.
+                            return wf_throw("workflow child cleanup could not be verified");
+                        }
                         if opts.get("throwOnError").and_then(Value::as_bool) == Some(true) {
                             if let Some(error) = terminal_error {
                                 return wf_throw(&format!("Workflow agent {label:?} failed: {error}"));
@@ -3518,7 +3581,21 @@ async fn run_workflow_script_with_live_updates_recorded(
         workflow::WorkflowError::Engine(
             "workflow script thread terminated without an outcome".into(),
         )
-    })??;
+    });
+    let mut reasons = std::mem::take(
+        &mut *cleanup_reasons
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if !reasons.is_empty() {
+        let reason = if reasons.len() == 1 {
+            reasons.pop().expect("one cleanup reason")
+        } else {
+            lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Multiple(reasons)
+        };
+        return Err(workflow::WorkflowError::CleanupUnverified(reason));
+    }
+    let outcome = outcome??;
 
     // Standalone callers (the public test/host seam) still emit here; the
     // production task passes the metrics out so it can preserve Claude Code's
@@ -3750,7 +3827,7 @@ impl Task for LocalWorkflowHandler {
         // record `kill` flips. `false` until killed.
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        let (completion_tx, completion_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = watch::channel(WorkerCompletion::Running);
         // Cloned for kill-detection in tengu_workflow_completed status derivation
         // (oracle §7: `abortController?.signal.aborted ? "killed" : error ? "failed" : "completed"`).
         let completed_cancel = cancel.clone();
@@ -3767,7 +3844,7 @@ impl Task for LocalWorkflowHandler {
         let script_size_chars = workflow_script_size_chars(&script);
         let worker = Box::pin({
             async move {
-                let _completion_signal = WorkerCompletionSignal::new(completion_tx);
+                let completion_signal = WorkerCompletionSignal(completion_tx);
                 let registered = wait_for_workflow_registration(
                     &status_sink,
                     &runtime,
@@ -3777,6 +3854,7 @@ impl Task for LocalWorkflowHandler {
                 .await;
                 if !registered {
                     workers.lock().await.remove(&worker_task_id);
+                    completion_signal.complete();
                     return;
                 }
 
@@ -4010,10 +4088,9 @@ impl Task for LocalWorkflowHandler {
                     output_scope,
                 );
                 let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
-                // Natural completion and TaskStop race on the worker map. Once
-                // finalization wins, cancellation must not tear down the
-                // telemetry/journal/outcome commit window. If kill already
-                // removed the record, it owns the terminal Killed transition.
+                // Natural completion and TaskStop arbitrate on the worker map.
+                // Cancellation leaves the record in place until the real
+                // outcome, including any late cleanup evidence, is observed.
                 let may_finalize = {
                     let mut workers = workers.lock().await;
                     match workers.get_mut(&worker_task_id) {
@@ -4025,6 +4102,7 @@ impl Task for LocalWorkflowHandler {
                     }
                 };
                 if !may_finalize {
+                    completion_signal.complete();
                     return;
                 }
                 let elapsed_ms = run_start.elapsed().as_millis() as i64;
@@ -4037,15 +4115,17 @@ impl Task for LocalWorkflowHandler {
                 // total token/tool-call rollups come from terminal subagent results.
                 {
                     let agent_count_val = workflow_metrics_snapshot.call_count as i64;
-                    let status_str = if completed_cancel.load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        "killed"
-                    } else {
-                        match &outcome {
-                            Ok(_) => "completed",
-                            Err(_) => "failed",
-                        }
-                    };
+                    let status_str =
+                        if matches!(&outcome, Err(workflow::WorkflowError::CleanupUnverified(_))) {
+                            "failed"
+                        } else if completed_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            "killed"
+                        } else {
+                            match &outcome {
+                                Ok(_) => "completed",
+                                Err(_) => "failed",
+                            }
+                        };
                     let mut md: LogEventMetadata = HashMap::new();
                     md.insert(
                         "workflow_run_id".to_string(),
@@ -4158,6 +4238,12 @@ impl Task for LocalWorkflowHandler {
                 // only that value. Spool I/O is best-effort — a write failure
                 // must not mask the result.
                 let (payload, status) = match outcome {
+                    Err(e @ workflow::WorkflowError::CleanupUnverified(_)) => {
+                        (e.to_string(), TaskStatus::Failed)
+                    }
+                    Ok(_) if completed_cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                        (String::new(), TaskStatus::Killed)
+                    }
                     Ok(out) => (out.result.unwrap_or_default(), TaskStatus::Completed),
                     Err(e) if completed_cancel.load(std::sync::atomic::Ordering::Relaxed) => {
                         (e.to_string(), TaskStatus::Killed)
@@ -4172,12 +4258,12 @@ impl Task for LocalWorkflowHandler {
                     .finish_workflow_terminal(&worker_task_id, terminal_outcome, status)
                     .await;
                 workers.lock().await.remove(&worker_task_id);
+                completion_signal.complete();
             }
         });
 
         let mut workers = self.workers.lock().await;
-        let bg_handle = ctx
-            .runtime
+        ctx.runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
             .await
             .map_err(|e| TaskError::Internal(e.to_string()))?;
@@ -4185,10 +4271,8 @@ impl Task for LocalWorkflowHandler {
         workers.insert(
             task_id.clone(),
             WorkerCancel {
-                handle: bg_handle,
-                runtime: ctx.runtime.clone(),
                 cancel,
-                completion_rx: StdMutex::new(Some(completion_rx)),
+                completion_rx,
                 finalizing: false,
             },
         );
@@ -4210,43 +4294,29 @@ impl Task for LocalWorkflowHandler {
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
-        // Finalization and kill arbitrate on the same worker-map lock. A worker
-        // that already owns finalization must finish its atomic outcome/status
-        // commit; otherwise kill removes the record and owns Killed.
-        let rec = {
-            let mut workers = self.workers.lock().await;
-            if workers.get(task_id).is_some_and(|rec| rec.finalizing) {
-                return Ok(());
-            }
-            workers.remove(task_id)
+        let Some(rec) = self.cancellation_record(task_id).await else {
+            return Ok(());
         };
-        if let Some(rec) = rec {
-            cancel_workflow_worker(rec).await?;
-        }
-        if !self.status_sink.is_terminal(task_id).await {
-            self.status_sink
-                .set_status(task_id, TaskStatus::Killed)
-                .await;
-        }
-        Ok(())
+        cancel_workflow_worker(rec).await
     }
 
     async fn drain_shutdown(&self) -> Result<(), TaskError> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let completions = {
             let workers = self.workers.lock().await;
             workers
                 .values()
-                .filter_map(|worker| {
-                    worker
-                        .completion_rx
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                })
+                .map(|worker| worker.completion_rx.clone())
                 .collect::<Vec<_>>()
         };
         for completion in completions {
-            let _ = completion.await;
+            tokio::time::timeout_at(deadline, wait_for_worker(completion))
+                .await
+                .map_err(|_| {
+                    TaskError::Internal(
+                        "workflow workers did not finish within the shutdown budget".into(),
+                    )
+                })??;
         }
         Ok(())
     }

@@ -314,6 +314,9 @@ pub enum WorkflowError {
     /// Acorn rejected source syntax; exact UTF-16 units are retained for the
     /// model-facing diagnostic.
     ScriptSource(lingxi_core::types::utf16_json::Utf16JsonProjection),
+    /// A started child has not established cleanup. This is a host failure,
+    /// not a script exception that `try/catch` or `parallel()` may suppress.
+    CleanupUnverified(lingxi_core::host::tool_invoker::CleanupUnverifiedReason),
 }
 
 impl std::fmt::Display for WorkflowError {
@@ -322,6 +325,9 @@ impl std::fmt::Display for WorkflowError {
             Self::Engine(e) => write!(f, "workflow engine error: {e}"),
             Self::Script(e) => write!(f, "workflow script error: {e}"),
             Self::ScriptSource(source) => f.write_str(source.string_at("").unwrap_or_default()),
+            Self::CleanupUnverified(_) => {
+                f.write_str("workflow child cleanup could not be verified")
+            }
         }
     }
 }
@@ -337,7 +343,7 @@ impl WorkflowError {
     ) -> Option<&lingxi_core::types::utf16_json::Utf16JsonProjection> {
         match self {
             Self::ScriptSource(source) => Some(source),
-            Self::Engine(_) | Self::Script(_) => None,
+            Self::Engine(_) | Self::Script(_) | Self::CleanupUnverified(_) => None,
         }
     }
 }

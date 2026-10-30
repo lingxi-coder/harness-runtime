@@ -1094,10 +1094,11 @@ impl FusionRunControl {
     /// Atomically choose the terminal result owned by the common supervisor.
     ///
     /// A successful natural result crosses the irreversible `Finalizing`
-    /// boundary; an error owns `Terminal` directly. If cancellation already
-    /// won either claim, its result is authoritative. Keeping the phase read,
-    /// winner selection, and transition under one lock prevents a cancellation
-    /// claim from landing between a stale read and a failed natural claim.
+    /// boundary; an error owns `Terminal` directly. Cancellation wins over an
+    /// ordinary result, but cannot erase evidence that cleanup is unverified.
+    /// Keeping the phase read, winner selection, and transition under one lock
+    /// prevents a cancellation claim from landing between a stale read and a
+    /// failed natural claim.
     fn claim_supervisor_result(
         &self,
         natural: Result<FusionResult, FusionError>,
@@ -1106,7 +1107,7 @@ impl FusionRunControl {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.cancel_claimed {
+        if state.cancel_claimed && !matches!(&natural, Err(FusionError::CleanupUnverified(_))) {
             return Err(FusionError::Cancelled);
         }
         match state.phase {
@@ -3383,6 +3384,10 @@ pub enum FusionError {
     /// Caller cancelled.
     #[error("fusion cancelled")]
     Cancelled,
+    /// A tool or subagent may still own a process. The structured evidence
+    /// must cross the Fusion boundary without becoming an ordinary failure.
+    #[error("{0}")]
+    CleanupUnverified(crate::host::tool_invoker::CleanupUnverifiedReason),
     /// Implement mode cannot run here (no git worktrees, sandbox off, low
     /// disk, workspace too large to snapshot). Refused before any spend and
     /// never downgraded to analysis mode.
@@ -3441,6 +3446,9 @@ enum FusionErrorWire {
     PanelSetIncomplete,
     TimedOutEmpty,
     Cancelled,
+    CleanupUnverified {
+        reason: crate::host::tool_invoker::CleanupUnverifiedReason,
+    },
     ImplementUnavailable {
         message: String,
     },
@@ -3492,6 +3500,7 @@ impl From<FusionError> for FusionErrorWire {
             FusionError::PanelSetIncomplete => Self::PanelSetIncomplete,
             FusionError::TimedOutEmpty => Self::TimedOutEmpty,
             FusionError::Cancelled => Self::Cancelled,
+            FusionError::CleanupUnverified(reason) => Self::CleanupUnverified { reason },
             FusionError::ImplementUnavailable(message) => Self::ImplementUnavailable { message },
             FusionError::Internal => Self::Internal,
         }
@@ -3545,6 +3554,7 @@ impl From<FusionErrorWire> for FusionError {
             FusionErrorWire::PanelSetIncomplete => Self::PanelSetIncomplete,
             FusionErrorWire::TimedOutEmpty => Self::TimedOutEmpty,
             FusionErrorWire::Cancelled => Self::Cancelled,
+            FusionErrorWire::CleanupUnverified { reason } => Self::CleanupUnverified(reason),
             FusionErrorWire::ImplementUnavailable { message } => {
                 Self::ImplementUnavailable(message)
             }
@@ -4958,6 +4968,38 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_unverified_fusion_error_round_trips_structured_reasons() {
+        use crate::host::tool_invoker::{
+            CleanupUnverifiedReason, ReportedExitCode, ReportedShellPayload,
+            ReportedShellPayloadParts, ReportedShellStream,
+        };
+        let payload = ReportedShellPayload::new(ReportedShellPayloadParts {
+            stdout: ReportedShellStream::Present {
+                utf16: vec![0xd800, 65],
+                host_truncated: false,
+            },
+            stderr: ReportedShellStream::Missing,
+            exit_code: ReportedExitCode::Missing,
+            combined_truncated: Some(true),
+            timed_out: None,
+            tool_result_is_error: false,
+            payload_is_error: None,
+            interrupted: None,
+        });
+        let error = FusionError::CleanupUnverified(CleanupUnverifiedReason::Multiple(vec![
+            CleanupUnverifiedReason::Message("pending".into()),
+            CleanupUnverifiedReason::ReportedPayload(Arc::new(payload)),
+        ]));
+        let encoded = serde_json::to_value(&error).unwrap();
+        assert_eq!(encoded["error"], "cleanup_unverified");
+        assert_eq!(
+            serde_json::from_value::<FusionError>(encoded).unwrap(),
+            error
+        );
+        assert!(!error.guarantees_zero_provider_calls());
+    }
+
+    #[test]
     fn dimensions_require_snake_case() {
         assert!(normalize_dimensions(vec!["EvidenceQuality".into()]).is_err());
         assert!(normalize_dimensions(vec!["evidence-quality".into()]).is_err());
@@ -5049,6 +5091,144 @@ mod tests {
             assert!(
                 !natural.request_cancel(),
                 "cancellation cannot steal the natural claim for {origin:?}"
+            );
+        }
+    }
+
+    fn unverified_cleanup_test_reason() -> crate::host::tool_invoker::CleanupUnverifiedReason {
+        use crate::host::tool_invoker::{
+            CleanupUnverifiedReason, ProcessTreeStatus, ReportedExitCode, ReportedShellPayload,
+            ReportedShellPayloadParts, ReportedShellStream, UnverifiedCleanupOutput,
+            UnverifiedCleanupOutputParts,
+        };
+        CleanupUnverifiedReason::Multiple(vec![
+            CleanupUnverifiedReason::Output(Arc::new(UnverifiedCleanupOutput::new(
+                UnverifiedCleanupOutputParts {
+                    session_id: Some("session-one".into()),
+                    stdout: "stdout-one".into(),
+                    stderr: "stderr-one".into(),
+                    stdout_truncated: false,
+                    stderr_truncated: true,
+                    stdout_eof: false,
+                    stderr_eof: true,
+                    exit_code: None,
+                    timed_out: true,
+                    termination_requested: Some(true),
+                    tree_status: ProcessTreeStatus::Unverified,
+                    cleanup_detail: "still running".into(),
+                    original_error: Some("read failed".into()),
+                },
+            ))),
+            CleanupUnverifiedReason::ReportedPayload(Arc::new(ReportedShellPayload::new(
+                ReportedShellPayloadParts {
+                    stdout: ReportedShellStream::Present {
+                        utf16: vec![0xd800, 65],
+                        host_truncated: false,
+                    },
+                    stderr: ReportedShellStream::Missing,
+                    exit_code: ReportedExitCode::Missing,
+                    combined_truncated: None,
+                    timed_out: None,
+                    tool_result_is_error: false,
+                    payload_is_error: None,
+                    interrupted: None,
+                },
+            ))),
+        ])
+    }
+
+    #[test]
+    fn cleanup_evidence_wins_supervisor_cancellation_races() {
+        for origin in [FusionOrigin::Agent, FusionOrigin::Slash] {
+            for _ in 0..16 {
+                let (_, control, _) = terminal_test_control(origin);
+                assert!(control.activate_at(Instant::now()));
+                let expected = FusionError::CleanupUnverified(unverified_cleanup_test_reason());
+                let barrier = Arc::new(std::sync::Barrier::new(3));
+                std::thread::scope(|scope| {
+                    let cancel_control = control.clone();
+                    let cancel_barrier = Arc::clone(&barrier);
+                    let cancel = scope.spawn(move || {
+                        cancel_barrier.wait();
+                        cancel_control.request_cancel()
+                    });
+                    let result_control = control.clone();
+                    let result_barrier = Arc::clone(&barrier);
+                    let result_error = expected.clone();
+                    let result = scope.spawn(move || {
+                        result_barrier.wait();
+                        result_control.claim_supervisor_result(Err(result_error))
+                    });
+                    barrier.wait();
+                    let _ = cancel.join().unwrap();
+                    assert_eq!(result.join().unwrap(), Err(expected));
+                });
+            }
+
+            let (_, control, _) = terminal_test_control(origin);
+            assert!(control.activate_at(Instant::now()));
+            assert!(control.request_cancel());
+            assert_eq!(
+                control.claim_supervisor_result(Err(FusionError::Internal)),
+                Err(FusionError::Cancelled),
+                "cancellation still wins against an ordinary failure"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_supervisor_keeps_all_cleanup_evidence_after_cancel() {
+        for origin in [FusionOrigin::Agent, FusionOrigin::Slash] {
+            let (session_id, control, summary) = terminal_test_control(origin);
+            let (recorder, seen_rx, _) =
+                ProbeTerminalRecorder::new(false, false, FusionPublicationReceipt::not_required());
+            let capability = terminal_test_capability(recorder, origin, session_id);
+            let runner_control = control.clone();
+            let expected = FusionError::CleanupUnverified(unverified_cleanup_test_reason());
+            let runner_error = expected.clone();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let prepared =
+                PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+                    let _ = started_tx.send(());
+                    runner_control.cancel().cancelled().await;
+                    FusionRunOutcome::from_control(&runner_control, Err(runner_error))
+                })
+                .with_terminal_capability(capability);
+            let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+            started_rx
+                .await
+                .expect("the runner must start before cancellation");
+            assert!(control.request_cancel());
+            let (recorded, _) = seen_rx.await.expect("the recorder must see the terminal");
+            assert_eq!(recorded.result, Err(expected.clone()));
+            let visible = waiter.await.expect("activation waiter joins");
+            assert_eq!(visible.result, Err(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_cleanup_terminal_claim_cannot_replace_evidence() {
+        for origin in [FusionOrigin::Agent, FusionOrigin::Slash] {
+            let (session_id, control, summary) = terminal_test_control(origin);
+            let (recorder, seen_rx, release) =
+                ProbeTerminalRecorder::new(true, false, FusionPublicationReceipt::not_required());
+            let capability = terminal_test_capability(recorder, origin, session_id);
+            let runner_control = control.clone();
+            let expected = FusionError::CleanupUnverified(unverified_cleanup_test_reason());
+            let runner_error = expected.clone();
+            let prepared =
+                PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+                    FusionRunOutcome::from_control(&runner_control, Err(runner_error))
+                })
+                .with_terminal_capability(capability);
+            let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+            let (recorded, _) = seen_rx.await.expect("the recorder must see the terminal");
+            assert!(!control.request_cancel());
+            assert_eq!(recorded.result, Err(expected.clone()));
+            release.expect("the recorder is blocked").add_permits(1);
+            assert_eq!(
+                waiter.await.expect("activation waiter joins").result,
+                Err(expected)
             );
         }
     }

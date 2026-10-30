@@ -105,6 +105,50 @@ fn client_post_ids(result: &Utf16JsonProjection) -> Result<Vec<u64>, ModError> {
         .collect()
 }
 
+enum ClientRunHeldResult {
+    Stale,
+    Rejected,
+    Accepted(Vec<u64>),
+}
+
+fn client_run_held_result(result: &Utf16JsonProjection) -> Result<ClientRunHeldResult, ModError> {
+    let fields = result
+        .object_entries()
+        .ok_or_else(|| ModError::Protocol("Client runHeld result must be an object".into()))?;
+    if let Some(stale) = result.at_pointer("/stale") {
+        // The worker only reports stale before dispatching the callback. Do
+        // not turn contradictory or malformed replies into a safe no-op.
+        if stale.as_bool() != Some(true) || fields.len() != 1 {
+            return Err(ModError::Protocol(
+                "Client runHeld result has an invalid stale status".into(),
+            ));
+        }
+        return Ok(ClientRunHeldResult::Stale);
+    }
+    let accepted = result
+        .at_pointer("/accepted")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| ModError::Protocol("Client runHeld result has no accepted flag".into()))?;
+    let post_ids = client_post_ids(result)?;
+    // The worker emits exactly accepted and postIds after dispatch. Unknown
+    // fields could contradict acceptance or describe a fault, so never treat
+    // them as either a safe rejection or a successful execution.
+    if fields.len() != 2 {
+        return Err(ModError::Protocol(
+            "Client runHeld result has unexpected fields".into(),
+        ));
+    }
+    if accepted {
+        Ok(ClientRunHeldResult::Accepted(post_ids))
+    } else if post_ids.is_empty() {
+        Ok(ClientRunHeldResult::Rejected)
+    } else {
+        Err(ModError::Protocol(
+            "Client runHeld rejected with post IDs".into(),
+        ))
+    }
+}
+
 /// Convert worker-private numeric held handles into the public Client frame's
 /// plugin-scoped `press` carrier, without materializing the worker tree as a
 /// serde value or losing exact string/key UTF-16 units.
@@ -284,6 +328,11 @@ impl ClientPostActionGuard {
             ));
         }
         if pending.is_empty() {
+            if self.cancellation.is_cancelled() {
+                return Err(ModError::Unavailable(
+                    "Client post action was cancelled".into(),
+                ));
+            }
             self.settled = true;
             return Ok(());
         }
@@ -320,6 +369,11 @@ impl ClientPostActionGuard {
                     // An old worker epoch cannot settle a current action.
                 }
             }
+        }
+        if self.cancellation.is_cancelled() {
+            return Err(ModError::Unavailable(
+                "Client post action was cancelled".into(),
+            ));
         }
         self.settled = true;
         Ok(())
@@ -3174,15 +3228,13 @@ impl ModHost {
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
             let frame = self.run_client_worker_operation(operation).await?;
             self.update_instance_props(&instance.runtime_id, props.clone());
-            if let Some(frame) = self.frame_for_worker_result(
-                &instance.runtime_id,
-                instance.revision,
-                &plugin,
-                &frame,
-            ) {
-                self.emit_client_frame(session, &instance.runtime_id, instance.revision, &frame)
-                    .await;
-            }
+            let frame = self
+                .frame_for_worker_result(&instance.runtime_id, instance.revision, &plugin, &frame)
+                .ok_or_else(|| {
+                    ModError::Unavailable("Client message produced no current frame".into())
+                })?;
+            self.emit_client_frame(session, &instance.runtime_id, instance.revision, &frame)
+                .await?;
             response
                 .set_field("props", props)
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
@@ -3317,6 +3369,37 @@ impl ModHost {
             && instance.revision == data.parents.get(site)?.revision
             && instance.key.identity == *identity)
             .then(|| instance.clone())
+    }
+
+    fn client_instance_is_current(
+        &self,
+        data: &ClientUiHostData,
+        instance: &ClientUiInstance,
+    ) -> bool {
+        data.instances
+            .get(&instance.runtime_id)
+            .is_some_and(|current| {
+                current.key == instance.key
+                    && current.revision == instance.revision
+                    && current.worker_generation == instance.worker_generation
+                    && current.mounted
+                    && current.worker_fault.is_none()
+            })
+            && data
+                .instance_by_identity
+                .get(&instance.key)
+                .map(String::as_str)
+                == Some(instance.runtime_id.as_str())
+            && data.parents.get(&instance.key.site).is_some_and(|parent| {
+                parent.revision == instance.revision
+                    && parent.clients.contains_key(&instance.key.identity)
+            })
+            && self.client_ui.fault_registry.is_drawn(
+                &crate::mod_ui_fault::ClientUiFaultAddress::new(
+                    instance.key.site.clone(),
+                    instance.key.identity.clone(),
+                ),
+            )
     }
 
     fn update_instance_props(&self, runtime_id: &str, props: Utf16JsonProjection) {
@@ -3580,20 +3663,24 @@ impl ModHost {
         runtime_id: &str,
         revision: u64,
         frame: &Utf16JsonProjection,
-    ) {
+    ) -> Result<(), ModError> {
         let Some(instance_key) = lock(&self.client_ui.data)
             .instances
             .get(runtime_id)
             .map(|instance| instance.key.clone())
         else {
-            return;
+            return Err(ModError::Unavailable(
+                "Client runtime was removed before its frame was delivered".into(),
+            ));
         };
         let (Ok(frame_sequence), Ok(has_pointer_listener), Ok(has_key_listener)) = (
             frame.subprojection("/frameSequence"),
             frame.subprojection("/hasPointerListener"),
             frame.subprojection("/hasKeyListener"),
         ) else {
-            return;
+            return Err(ModError::Protocol(
+                "Client frame metadata is missing".into(),
+            ));
         };
         let mut public = match Utf16JsonProjection::object(vec![
             (
@@ -3605,21 +3692,23 @@ impl ModHost {
             ("hasKeyListener".into(), has_key_listener),
         ]) {
             Ok(public) => public,
-            Err(_) => return,
+            Err(error) => return Err(ModError::Protocol(error.to_string())),
         };
-        let Ok(tree) = frame.subprojection("/tree") else {
-            return;
-        };
-        if public.set_field("tree", tree).is_err() {
-            return;
-        }
+        let tree = frame
+            .subprojection("/tree")
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
+        public
+            .set_field("tree", tree)
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
         let (parent, client) = client_frame_identity_projections(&instance_key);
-        if public.set_field("parent", parent).is_err()
-            || public.set_field("client", client).is_err()
-        {
-            return;
-        }
+        public
+            .set_field("parent", parent)
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
+        public
+            .set_field("client", client)
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
         session.emit_mod_ui_client_frame(runtime_id, &public).await;
+        Ok(())
     }
 
     async fn mount_client_from_parent(
@@ -4054,13 +4143,15 @@ impl ModHost {
             Err(error) => return Err(error.into()),
         };
         if let Some(post_action) = post_action.as_mut() {
-            if result
-                .at_pointer("/stale")
-                .and_then(|value| value.as_bool())
-                != Some(true)
-            {
-                let post_ids = client_post_ids(&result)?;
-                post_action.wait_for_posts(&post_ids).await?;
+            match client_run_held_result(&result)? {
+                ClientRunHeldResult::Stale | ClientRunHeldResult::Rejected => {
+                    return Ok(host_generated_json(
+                        json!({"handled":false,"renderRevision":revision}),
+                    ));
+                }
+                ClientRunHeldResult::Accepted(post_ids) => {
+                    post_action.wait_for_posts(&post_ids).await?;
+                }
             }
         }
         if kind == "unmount" {
@@ -4111,15 +4202,36 @@ impl ModHost {
                 .and_then(|value| value.as_bool())
                 == Some(true)
             {
+                if kind == "runHeld" {
+                    // The callback already ran; a stale follow-up frame is
+                    // not evidence that the action had no side effects.
+                    return Err(ModError::Unavailable(
+                        "Client runHeld was accepted but its follow-up frame is stale".into(),
+                    ));
+                }
                 return Ok(host_generated_json(
                     json!({"handled":false,"renderRevision":revision}),
                 ));
             }
-            return self
+            let frame = self
                 .frame_for_worker_result(runtime_id, revision, &plugin, &rendered)
                 .ok_or_else(|| {
                     ModError::Protocol("Client operation produced no render frame".into())
-                });
+                })?;
+            if kind == "runHeld" {
+                let data = lock(&self.client_ui.data);
+                if !self.client_instance_is_current(&data, &instance)
+                    || post_action
+                        .as_ref()
+                        .is_some_and(|action| action.cancellation.is_cancelled())
+                {
+                    return Err(ModError::Unavailable(
+                        "Client runHeld completed after its runtime changed or was cancelled"
+                            .into(),
+                    ));
+                }
+            }
+            return Ok(frame);
         }
         if kind == "setProps" {
             self.update_instance_props(
@@ -4479,7 +4591,8 @@ impl ModHost {
                         .current_instance(&instance.key.site, &instance.key.identity)
                         .is_some()
                     {
-                        self.emit_client_frame(session, &runtime_id, instance.revision, &frame)
+                        let _ = self
+                            .emit_client_frame(session, &runtime_id, instance.revision, &frame)
                             .await;
                     }
                 }
@@ -4520,10 +4633,19 @@ impl ModHost {
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => return Ok(()),
-                        response = self.dispatch_client_message(&request, session) => response?,
+                        response = self.dispatch_client_message(&request, session) => response,
                     }
                 } else {
-                    self.dispatch_client_message(&request, session).await?
+                    self.dispatch_client_message(&request, session).await
+                };
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(post_ack) = post_ack.take() {
+                            post_ack.fail(&format!("Client message outcome is unknown: {error}"));
+                        }
+                        return Err(error);
+                    }
                 };
                 if post_ack
                     .as_ref()
@@ -4537,7 +4659,15 @@ impl ModHost {
                     != Some(false)
                 {
                     if let Some(post_ack) = post_ack.take() {
-                        post_ack.complete();
+                        // Keep the instance check and acknowledgement under
+                        // the same lock as Host removal. Removal can otherwise
+                        // win between the check and the Settled notification.
+                        let data = lock(&self.client_ui.data);
+                        if self.client_instance_is_current(&data, &instance) {
+                            post_ack.complete();
+                        } else {
+                            post_ack.fail("Client runtime changed before the post completed");
+                        }
                     }
                 }
             }
@@ -4712,6 +4842,47 @@ mod tests {
         serde_json::from_str(&source).expect("test projection serializes as JSON")
     }
 
+    #[test]
+    fn run_held_reply_requires_an_unambiguous_acceptance() {
+        let reply = |value| host_generated_json(value);
+        assert!(matches!(
+            client_run_held_result(&reply(json!({"stale":true}))),
+            Ok(ClientRunHeldResult::Stale)
+        ));
+        assert!(matches!(
+            client_run_held_result(&reply(json!({"accepted":false,"postIds":[]}))),
+            Ok(ClientRunHeldResult::Rejected)
+        ));
+        assert!(matches!(
+            client_run_held_result(&reply(json!({"accepted":true,"postIds":[]}))),
+            Ok(ClientRunHeldResult::Accepted(post_ids)) if post_ids.is_empty()
+        ));
+        match client_run_held_result(&reply(json!({"accepted":true,"postIds":[0,2]}))).unwrap() {
+            ClientRunHeldResult::Accepted(post_ids) => assert_eq!(post_ids, vec![0, 2]),
+            _ => panic!("accepted callback must preserve its synchronous post IDs"),
+        }
+        for invalid in [
+            json!({}),
+            json!({"accepted":"true","postIds":[]}),
+            json!({"accepted":true}),
+            json!({"accepted":false,"postIds":[0]}),
+            json!({"stale":false}),
+            json!({"stale":true,"accepted":true,"postIds":[]}),
+            json!({"stale":true,"fault":{"phase":"run"}}),
+            json!({"accepted":false,"postIds":[],"fault":{"phase":"run"}}),
+            json!({"accepted":true,"postIds":[],"fault":{"phase":"run"}}),
+            json!({"stale":true,"unexpected":true}),
+            json!({"accepted":false,"postIds":[],"unexpected":true}),
+            json!({"accepted":true,"postIds":[],"unexpected":true}),
+            json!([]),
+        ] {
+            assert!(
+                client_run_held_result(&reply(invalid.clone())).is_err(),
+                "malformed or contradictory reply must remain an error: {invalid}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn client_post_action_keeps_early_acks_and_releases_on_worker_epoch_end() {
         let registry = Arc::new(ClientPostAckRegistry::default());
@@ -4768,6 +4939,29 @@ mod tests {
         );
         waiter.await.unwrap().unwrap();
 
+        let mut cancelled_after_ack = registry
+            .register("cancelled-after-ack".into(), "runtime-b".into())
+            .unwrap();
+        cancelled_after_ack.bind_worker_epoch(9).unwrap();
+        registry.notify(
+            "cancelled-after-ack",
+            "runtime-b",
+            9,
+            ClientPostAck::Settled {
+                worker_epoch: 9,
+                post_id: 0,
+            },
+        );
+        registry.fail_runtime("runtime-b", "runtime removed");
+        assert!(cancelled_after_ack.wait_for_posts(&[0]).await.is_err());
+
+        let mut cancelled_without_posts = registry
+            .register("cancelled-without-posts".into(), "runtime-c".into())
+            .unwrap();
+        cancelled_without_posts.bind_worker_epoch(9).unwrap();
+        registry.fail_runtime("runtime-c", "runtime removed");
+        assert!(cancelled_without_posts.wait_for_posts(&[]).await.is_err());
+
         let mut interrupted = registry
             .register("interrupted-action".into(), "runtime-b".into())
             .unwrap();
@@ -4794,6 +4988,7 @@ mod tests {
         frames: StdMutex<Vec<(String, Value)>>,
         raw_frames: StdMutex<Vec<(String, Utf16JsonProjection)>>,
         frame_gate: StdMutex<Option<UiLifecycleFrameGate>>,
+        model_gate: StdMutex<Option<UiLifecycleModelGate>>,
         logs: StdMutex<Vec<String>>,
         allow_non_scalar_frames: bool,
         invalidations: StdMutex<Vec<Value>>,
@@ -4801,8 +4996,16 @@ mod tests {
 
     struct UiLifecycleFrameGate {
         runtime_id: String,
+        expected_text: &'static str,
         entered: std::sync::Arc<tokio::sync::Notify>,
         release: std::sync::Arc<tokio::sync::Notify>,
+        delivered: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    struct UiLifecycleModelGate {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        completed: Arc<tokio::sync::Notify>,
     }
 
     #[async_trait::async_trait]
@@ -4816,6 +5019,12 @@ mod tests {
         }
 
         async fn model(&self) -> String {
+            let gate = lock(&self.model_gate).take();
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+                gate.completed.notify_one();
+            }
             "test-model".into()
         }
 
@@ -4836,16 +5045,16 @@ mod tests {
         async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
             let gate = {
                 let mut gate = lock(&self.frame_gate);
-                if gate
-                    .as_ref()
-                    .is_some_and(|gate| gate.runtime_id == runtime_id)
-                {
+                if gate.as_ref().is_some_and(|gate| {
+                    gate.runtime_id == runtime_id
+                        && projection_tree_contains_text(frame, gate.expected_text)
+                }) {
                     gate.take()
                 } else {
                     None
                 }
             };
-            if let Some(gate) = gate {
+            if let Some(gate) = gate.as_ref() {
                 gate.entered.notify_one();
                 gate.release.notified().await;
             }
@@ -4859,6 +5068,9 @@ mod tests {
                     self.allow_non_scalar_frames,
                     "test frame must be a serde_json Value: {error}"
                 ),
+            }
+            if let Some(gate) = gate {
+                gate.delivered.notify_one();
             }
         }
 
@@ -6057,6 +6269,10 @@ mod tests {
                         surface.post({ noProps: true });
                         return;
                       }
+                      if (value.startsWith('host-removal-')) {
+                        surface.post({ hostRemovalRace: value });
+                        return;
+                      }
                       surface.post({ title: `Input changed (${event.kind}): ${value}` });
                     },
                   }),
@@ -6095,6 +6311,14 @@ mod tests {
                   return client;
                 });
                 on('ui.message', async (_$, event, next) => {
+                  if (event.data.hostRemovalRace) {
+                    if (event.data.hostRemovalRace !== 'host-removal-during-frame') {
+                      await _$.session.model();
+                    }
+                    return event.data.hostRemovalRace === 'host-removal-no-props'
+                      ? { handled: true }
+                      : { handled: true, props: { title: event.data.hostRemovalRace } };
+                  }
                   if (event.data.block) {
                     _$.ui.log('blocking ui.message reached');
                     await new Promise(resolve => {
@@ -6352,6 +6576,30 @@ mod tests {
                 > test_value(&mount)["frameSequence"].as_u64().unwrap()
         );
 
+        let old_input_handle = tree_press_handle_for_key(mounted_tree, "query").unwrap();
+        let current_input_handle = tree_press_handle_for_key(&posted["tree"], "query").unwrap();
+        assert_ne!(old_input_handle, current_input_handle);
+        for handle in [old_input_handle, MAX_JS_SAFE_INTEGER] {
+            let rejected = host
+                .dispatch_client_ui_operation(
+                    host_generated_json(json!({
+                        "type":"runHeld",
+                        "runtimeId":runtime_id,
+                        "render_revision":revision,
+                        "handle":handle,
+                        "event":{"kind":"change","value":"rejected handle ran"},
+                    })),
+                    session.as_ref(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                test_value(&rejected),
+                json!({"handled":false,"renderRevision":revision}),
+                "old and unknown handles are rejected without producing a frame"
+            );
+        }
+
         let client_press = |element: &str, event: Value| {
             host_generated_json(json!({
                 "subtype":"ui_client_press",
@@ -6418,6 +6666,15 @@ mod tests {
                 tree_contains_text(&frame["tree"], "Input changed (change): typed")
             })
             .await;
+        assert!(!lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &runtime_id
+                    && tree_contains_text(
+                        &frame["tree"],
+                        "Input changed (change): rejected handle ran",
+                    )
+            }));
         assert!(tree_press_handle_for_key(&changed_input_frame["tree"], "query").is_some());
         // The background `ui.message` frame above is an intermediate frame.
         // runHeld settles its synchronous posts and then returns the current
@@ -6427,10 +6684,13 @@ mod tests {
             tree_press_handle_for_key(&test_value(&changed_callback)["tree"], "query").unwrap();
         let entered = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let delivered = std::sync::Arc::new(tokio::sync::Notify::new());
         *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
             runtime_id: runtime_id.clone(),
+            expected_text: "BARRIER UPPERCASE",
             entered: entered.clone(),
             release: release.clone(),
+            delivered: delivered.clone(),
         });
         let barrier_operation = host_generated_json(json!({
             "type":"runHeld",
@@ -6454,6 +6714,9 @@ mod tests {
             "runHeld waits while synchronous post props are being applied and emitted"
         );
         release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), delivered.notified())
+            .await
+            .expect("the intermediate post frame was delivered after release");
         let barrier_callback = barrier_task.await.unwrap().unwrap();
         let barrier_value = test_value(&barrier_callback);
         let barrier_tree = &barrier_value["tree"];
@@ -6907,6 +7170,219 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(test_value(&recovered_commit)["handled"], true);
+
+        // Once the callback posts, a concurrent worker unmount can make the
+        // final render stale. That is an unknown outcome, never a safe no-op.
+        let recovered_posted = wait_for_client_frame(
+            &session_impl,
+            &recovered_runtime,
+            "recovered initial post",
+            |frame| tree_contains_text(&frame["tree"], "posted"),
+        )
+        .await;
+        let race_handle = tree_press_handle_for_key(&recovered_posted["tree"], "query").unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        let race_frame_text = "Input changed (change): accepted before unmount";
+        assert!(!lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &recovered_runtime
+                    && tree_contains_text(&frame["tree"], race_frame_text)
+            }));
+        *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
+            runtime_id: recovered_runtime.clone(),
+            expected_text: race_frame_text,
+            entered: entered.clone(),
+            release: release.clone(),
+            delivered: delivered.clone(),
+        });
+        let race_operation = host_generated_json(json!({
+            "type":"runHeld",
+            "runtimeId":recovered_runtime,
+            "render_revision":recovered_revision,
+            "handle":race_handle,
+            "event":{"kind":"change","value":"accepted before unmount"},
+        }));
+        let race_host = host.clone();
+        let race_session = session.clone();
+        let race_task = tokio::spawn(async move {
+            race_host
+                .dispatch_client_ui_operation(race_operation, race_session.as_ref())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("the accepted callback's unique post reached frame emission");
+        assert!(!lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &recovered_runtime
+                    && tree_contains_text(&frame["tree"], race_frame_text)
+            }));
+        assert!(!race_task.is_finished());
+        let worker_generation = lock(&host.client_ui.data).instances[&recovered_runtime]
+            .worker_generation
+            .unwrap();
+        let worker_unmount = host
+            .run_client_worker_operation(host_generated_json(json!({
+                "type":"unmount",
+                "runtimeId":recovered_runtime,
+                "generation":worker_generation,
+            })))
+            .await
+            .map_err(ModError::from)
+            .unwrap();
+        assert_eq!(test_value(&worker_unmount)["unmounted"], true);
+        assert!(
+            !race_task.is_finished(),
+            "the callback's post remains unsettled until its frame is delivered"
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), delivered.notified())
+            .await
+            .expect("the accepted callback's frame was delivered after release");
+        assert!(lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &recovered_runtime
+                    && tree_contains_text(&frame["tree"], race_frame_text)
+            }));
+        let race_error = tokio::time::timeout(Duration::from_secs(2), race_task)
+            .await
+            .expect("the accepted action resolves after post settlement")
+            .unwrap()
+            .unwrap_err();
+        assert!(race_error
+            .to_string()
+            .contains("accepted but its follow-up frame is stale"));
+
+        // A Host removal first erases the instance under the data lock and
+        // only afterwards cancels its posts. Exercise that gap explicitly:
+        // the worker stays mounted, so a follow-up render alone can succeed.
+        for race_value in [
+            "host-removal-before-frame",
+            "host-removal-no-props",
+            "host-removal-during-frame",
+        ] {
+            let parent = host
+                .dispatch_client_ui_control(
+                    host_generated_json(render(json!({}))),
+                    session.as_ref(),
+                )
+                .await
+                .unwrap();
+            let revision = parent.render_revision.unwrap();
+            let mount = host
+                .dispatch_client_ui_operation(
+                    host_generated_json(json!({
+                        "type":"mount", "surface":"desktop", "component":"Pane",
+                        "instance_id":"pane-1", "plugin":"review", "client":"card",
+                        "module":client_module, "render_revision":revision,
+                        "columns":80, "rows":24,
+                    })),
+                    session.as_ref(),
+                )
+                .await
+                .unwrap();
+            let runtime_id = test_value(&mount)["runtimeId"].as_str().unwrap().to_owned();
+            let commit = host
+                .dispatch_client_ui_operation(
+                    host_generated_json(json!({
+                        "type":"draw_commit", "surface":"desktop", "component":"Pane",
+                        "instance_id":"pane-1", "render_revision":revision,
+                        "clients":[{"plugin":"review","key":"card","module":client_module}],
+                    })),
+                    session.as_ref(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(test_value(&commit)["handled"], true);
+            let posted = wait_for_client_frame(&session_impl, &runtime_id, "race setup", |frame| {
+                tree_contains_text(&frame["tree"], "posted")
+            })
+            .await;
+            let handle = tree_press_handle_for_key(&posted["tree"], "query").unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let completed = Arc::new(tokio::sync::Notify::new());
+            if race_value == "host-removal-during-frame" {
+                *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
+                    runtime_id: runtime_id.clone(),
+                    expected_text: race_value,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    delivered: completed.clone(),
+                });
+            } else {
+                *lock(&session_impl.model_gate) = Some(UiLifecycleModelGate {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    completed: completed.clone(),
+                });
+            }
+            let operation = host_generated_json(json!({
+                "type":"runHeld", "runtimeId":runtime_id, "render_revision":revision,
+                "handle":handle, "event":{"kind":"change","value":race_value},
+            }));
+            let race_host = host.clone();
+            let race_session = session.clone();
+            let action = tokio::spawn(async move {
+                race_host
+                    .dispatch_client_ui_operation(operation, race_session.as_ref())
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), entered.notified())
+                .await
+                .expect("the real ui.message hook reached its controlled gate");
+            assert!(!action.is_finished(), "the post is still in flight");
+            assert!(!lock(&session_impl.frames).iter().any(|(id, frame)| {
+                id == &runtime_id && tree_contains_text(&frame["tree"], race_value)
+            }));
+            let generation = {
+                let mut data = lock(&host.client_ui.data);
+                let instance = data.instances.get(&runtime_id).unwrap().clone();
+                remove_instance_if_current(&mut data, &runtime_id, &instance.key);
+                instance.worker_generation.unwrap()
+            };
+            // Intentionally delay fail_post_actions_for_runtime until after
+            // the action returns, matching the production removal window.
+            release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), completed.notified())
+                .await
+                .expect("the gated session API or frame delivery completed");
+            let result = tokio::time::timeout(Duration::from_secs(2), action)
+                .await
+                .expect("the accepted action resolves")
+                .unwrap();
+            let error = result.expect_err(
+                "a post for a removed Host instance must not be acknowledged as delivered",
+            );
+            let expected_error = if race_value == "host-removal-before-frame" {
+                "Client runtime was removed before its frame was delivered"
+            } else {
+                "Client runtime changed before the post completed"
+            };
+            assert!(
+                error.to_string().contains(expected_error),
+                "{race_value}: unexpected error {error}"
+            );
+            let delivered = lock(&session_impl.frames).iter().any(|(id, frame)| {
+                id == &runtime_id && tree_contains_text(&frame["tree"], race_value)
+            });
+            assert_eq!(delivered, race_value == "host-removal-during-frame");
+            host.client_ui
+                .fail_post_actions_for_runtime(&runtime_id, "test removal cleanup");
+            let cleanup = host
+                .run_client_worker_operation(host_generated_json(json!({
+                    "type":"unmount", "runtimeId":runtime_id, "generation":generation,
+                })))
+                .await
+                .map_err(ModError::from)
+                .unwrap();
+            assert_eq!(test_value(&cleanup)["unmounted"], true);
+        }
 
         // Timer failures have no operation result. The Host emits a local
         // fault snapshot immediately, even though this plugin has no

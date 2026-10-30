@@ -68,6 +68,17 @@ fn make_streaming_orch_with_tracker(
     tokio::sync::mpsc::Receiver<CostState>,
     Arc<MockOutputStream>,
 ) {
+    make_streaming_orch_with_budget(turns, None)
+}
+
+fn make_streaming_orch_with_budget(
+    turns: Vec<Vec<llm_runtime::HistoryEvent>>,
+    max_budget_nano_usd: Option<u64>,
+) -> (
+    Arc<ConversationOrchestrator>,
+    tokio::sync::mpsc::Receiver<CostState>,
+    Arc<MockOutputStream>,
+) {
     let (tx, rx) = mpsc::channel(8);
     let tracker = Arc::new(CostTracker::new(
         SessionId::new(),
@@ -85,6 +96,7 @@ fn make_streaming_orch_with_tracker(
 
     let mut cfg = OrchestratorConfig::default();
     cfg.model = "claude-opus-4-6".into(); // priced in builtin_reference catalog
+    cfg.max_budget_nano_usd = max_budget_nano_usd;
 
     let orch = ConversationOrchestrator::into_shared(
         ConversationOrchestrator::new_with_streaming(
@@ -102,6 +114,60 @@ fn make_streaming_orch_with_tracker(
     );
 
     (orch, rx, output)
+}
+
+#[tokio::test]
+async fn final_response_over_budget_returns_error_before_any_end_turn() {
+    for stop_reason in ["end_turn", "stop_sequence"] {
+        let stream = scripted![
+            message_start_with_usage("msg_01", "claude-opus-4-6", start_usage_with_input(1_000)),
+            content_block_start_text(0),
+            text_delta(0, "hi"),
+            content_block_stop(0),
+            message_delta_stop_with_usage(stop_reason, final_usage(1_000, 500)),
+            message_stop(),
+        ];
+        let (orch, _rx, output) = make_streaming_orch_with_budget(vec![stream], Some(1_000_000));
+        let error = orch.run_turn_streaming("hello").await.unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                orchestrator::OrchestratorError::MaxBudgetReached { .. }
+            ),
+            "{stop_reason}: {error:?}"
+        );
+        assert!(
+            !output
+                .snapshot()
+                .await
+                .iter()
+                .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })),
+            "{stop_reason}: the host must receive the budget error before any terminal event"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rewake_over_budget_leaves_the_error_visible_to_its_host() {
+    let stream = scripted![
+        message_start_with_usage("rewake", "claude-opus-4-6", start_usage_with_input(1_000)),
+        content_block_start_text(0),
+        text_delta(0, "hi"),
+        content_block_stop(0),
+        message_delta_stop_with_usage("end_turn", final_usage(1_000, 500)),
+        message_stop(),
+    ];
+    let (orch, _rx, output) = make_streaming_orch_with_budget(vec![stream], Some(1_000_000));
+    let error = orch.run_async_hook_rewake(None).await.unwrap_err();
+    assert!(matches!(
+        error,
+        orchestrator::OrchestratorError::MaxBudgetReached { .. }
+    ));
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
 }
 
 /// Streaming turn with known usage → `CostTracker` must receive a snapshot

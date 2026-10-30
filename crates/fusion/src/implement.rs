@@ -84,6 +84,13 @@ pub(crate) struct Workspaces {
 }
 
 impl Workspaces {
+    /// An unverified process may still be using a panel worktree. Do not
+    /// discard that workspace just because the Fusion future returned.
+    pub(crate) fn preserve_on_unverified(&mut self) {
+        self.armed = false;
+        tracing::warn!("fusion: retaining panel worktrees because process cleanup is unverified");
+    }
+
     /// Check the host, snapshot the workspace and create one worktree per
     /// panel, named after the anonymous id the panel will report under
     /// (`anon_rank[i]` is spawn index `i`'s rank). Nothing is spent here, so

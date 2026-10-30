@@ -1865,6 +1865,9 @@ impl Tool for WorkflowTool {
                                 &diagnostic,
                             )));
                         }
+                        WorkflowError::CleanupUnverified(_) => {
+                            unreachable!("determinism validation never starts subagents")
+                        }
                     };
                     return Err(ValidationError(msg.into()));
                 }

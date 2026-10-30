@@ -717,6 +717,7 @@ pub(crate) async fn surface_terminal_api_error(
 ///   a prompt-avoiding agent and must not be converted into `model_error`.
 /// - `RecoveryInterrupted` — lifecycle cancellation must reach the host as
 ///   an interruption rather than a provider failure or user rejection.
+/// - `CleanupUnverified` — an owned process may still be running.
 /// Mirrors claude-code, whose top-level `catch` is reached only AFTER the retry
 /// layer has handled 429/529; everything else falls through to `model_error`.
 #[must_use]
@@ -724,7 +725,8 @@ pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
     match e {
         OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::RepeatedOverloaded
-        | OrchestratorError::RecoveryInterrupted => true,
+        | OrchestratorError::RecoveryInterrupted
+        | OrchestratorError::CleanupUnverified(_) => true,
         OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => matches!(
             error.classification_source(),
             LlmError::RateLimited { .. }
@@ -1204,6 +1206,16 @@ mod model_error_kind_regression {
         let interruption = OrchestratorError::RecoveryInterrupted;
         assert!(is_carveout_propagated(&interruption));
         let envelope = crate::conversation::classify_api_error(&interruption);
+        assert_eq!(envelope.error, None);
+        assert_eq!(envelope.api_error_status, None);
+        assert_eq!(envelope.terminal_reason, None);
+    }
+
+    #[test]
+    fn unverified_cleanup_propagates_without_a_provider_error_category() {
+        let error = OrchestratorError::CleanupUnverified("close failed".into());
+        assert!(is_carveout_propagated(&error));
+        let envelope = crate::conversation::classify_api_error(&error);
         assert_eq!(envelope.error, None);
         assert_eq!(envelope.api_error_status, None);
         assert_eq!(envelope.terminal_reason, None);

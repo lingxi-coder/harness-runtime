@@ -591,6 +591,25 @@ impl HostToolRequest {
 
 tokio::task_local! {
     static HOST_TOOL_CANCELLATION: HostToolCancellation;
+    static PROCESS_EXECUTION_LEASE: Option<Arc<dyn Send + Sync>>;
+}
+
+/// Carry the originating turn's execution lease through a tool invocation.
+/// A process runner must clone it into work that can outlive the caller.
+pub async fn with_process_execution_lease<F: std::future::Future>(
+    lease: Option<Arc<dyn Send + Sync>>,
+    future: F,
+) -> F::Output {
+    PROCESS_EXECUTION_LEASE.scope(lease, future).await
+}
+
+/// Capture the current invocation's execution lease before starting a process.
+#[must_use]
+pub fn process_execution_lease() -> Option<Arc<dyn Send + Sync>> {
+    PROCESS_EXECUTION_LEASE
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
 }
 
 /// Apply a host cancellation policy only while polling this call's future.
@@ -942,6 +961,32 @@ impl ToolUseContext {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn process_execution_lease_is_scoped_and_not_implicitly_inherited() {
+        let lease: std::sync::Arc<dyn Send + Sync> = std::sync::Arc::new(());
+        assert!(super::process_execution_lease().is_none());
+        super::with_process_execution_lease(Some(lease.clone()), async {
+            assert!(std::sync::Arc::ptr_eq(
+                &super::process_execution_lease().unwrap(),
+                &lease
+            ));
+            assert!(
+                tokio::spawn(async { super::process_execution_lease().is_none() })
+                    .await
+                    .unwrap()
+            );
+            super::with_process_execution_lease(None, async {
+                assert!(super::process_execution_lease().is_none());
+            })
+            .await;
+            assert!(std::sync::Arc::ptr_eq(
+                &super::process_execution_lease().unwrap(),
+                &lease
+            ));
+        })
+        .await;
+        assert!(super::process_execution_lease().is_none());
+    }
     use super::*;
 
     struct CleanupRunner {

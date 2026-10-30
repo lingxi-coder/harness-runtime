@@ -81,10 +81,25 @@ impl ConversationOrchestrator {
         order: LoopGuardOrder,
         state: &mut TurnLoopState,
     ) -> Result<GuardVerdict, OrchestratorError> {
+        self.run_turn_loop_guards_with_cancel_drain(order, state, false)
+            .await
+    }
+
+    pub(super) async fn run_turn_loop_guards_with_cancel_drain(
+        &self,
+        order: LoopGuardOrder,
+        state: &mut TurnLoopState,
+        stop_drain_on_cancel: bool,
+    ) -> Result<GuardVerdict, OrchestratorError> {
         if order.drains() {
             // Before the limits on purpose, so a message that arrived during the
             // previous step is not dropped by `max_turns` or the budget.
-            self.drain_mid_turn_input().await?;
+            if stop_drain_on_cancel {
+                self.drain_mid_turn_input_until_cancelled(&state.user_cancel)
+                    .await?;
+            } else {
+                self.drain_mid_turn_input().await?;
+            }
         }
         {
             let session = self.session.lock().await;
@@ -138,9 +153,18 @@ impl ConversationOrchestrator {
 pub(crate) enum StepExit {
     /// Run another iteration.
     Continue,
+    /// A late input was acknowledged after a natural response. Cancellation
+    /// must be checked before and after the next loop's drain and limits.
+    ContinueAfterFinalDrain,
     /// End the loop with this id as the turn's final message, then run the
     /// epilogue.
     FinishThroughEpilogue(MessageId),
+    /// Natural completion whose terminal event is still pending until the
+    /// epilogue and final budget/cancellation checks have settled.
+    FinishNaturalThroughEpilogue(MessageId),
+    /// Forced completion retains its terminal reason and publication guard
+    /// until the epilogue and budget check have settled.
+    FinishForcedThroughEpilogue(MessageId, DeferredTerminal),
     /// Return this outcome from the driver without running the epilogue.
     ReturnDirect(ConversationOutcome),
 }
@@ -153,7 +177,7 @@ pub(crate) enum StepExit {
 /// this verdict through the same code and then name it themselves — `run_turn`
 /// raises `Err(MaxTurnsReached)` for `MaxTurns` where `run_turn_with_cancel`
 /// returns `Ok(TurnOutcome::MaxTurns)`, and streaming turns `EndTurn` into a
-/// `Complete` that still gets the loop's final drain where a tool-requested end
+/// `NaturalComplete` that gets the loop's final drain where a tool-requested end
 /// gets `ForcedComplete` instead. §3.2 keeps those apart, so this reports the
 /// EVENT and leaves the naming at each call site, exactly as [`GuardVerdict`]
 /// does for the guards.
@@ -167,7 +191,7 @@ pub(crate) enum TurnEndVerdict {
     StopHookTerminated(ConversationOutcome),
     /// The Stop-hook blocking branch hit `max_turns`.
     MaxTurns,
-    /// Natural end of turn, end event already emitted, with the id of the final
-    /// message for the entries that report one.
+    /// End of turn with the final message id. Natural streaming completion
+    /// publishes its terminal only after its final input drain and epilogue.
     EndTurn(MessageId),
 }

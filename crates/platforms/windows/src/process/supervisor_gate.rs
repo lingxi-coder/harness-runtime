@@ -6,7 +6,8 @@
 #![allow(unsafe_code)]
 use mobile_linux_api::ProcessError;
 use std::ffi::c_void;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::OnceLock;
 
 type Handle = *mut c_void;
@@ -71,6 +72,7 @@ extern "system" {
     ) -> i32;
     fn GetCurrentProcess() -> Handle;
     fn GetStdHandle(which: u32) -> Handle;
+    fn SetStdHandle(which: u32, handle: Handle) -> i32;
     fn GetHandleInformation(handle: Handle, flags: *mut u32) -> i32;
     fn SetHandleInformation(handle: Handle, mask: u32, flags: u32) -> i32;
     fn IsProcessInJob(process: Handle, job: Handle, result: *mut i32) -> i32;
@@ -80,12 +82,192 @@ extern "system" {
     fn OpenThread(access: u32, inherit: i32, id: u32) -> Handle;
     fn GetProcessIdOfThread(thread: Handle) -> u32;
     fn ResumeThread(thread: Handle) -> u32;
+    fn CreateProcessW(
+        application: *const u16,
+        command: *mut u16,
+        process_attributes: *const c_void,
+        thread_attributes: *const c_void,
+        inherit: i32,
+        flags: u32,
+        environment: *const c_void,
+        directory: *const u16,
+        startup: *const windows_sys::Win32::System::Threading::STARTUPINFOW,
+        process: *mut windows_sys::Win32::System::Threading::PROCESS_INFORMATION,
+    ) -> i32;
     #[cfg(test)]
     fn OpenProcess(access: u32, inherit: i32, id: u32) -> Handle;
     #[cfg(test)]
     fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
     #[cfg(test)]
     fn CloseHandle(handle: Handle) -> i32;
+}
+
+/// Spawn the post-foreground output drainer with exactly three inherited
+/// handles. Rust's regular Command inherits every inheritable process handle;
+/// the explicit STARTUPINFOEX list prevents leaking supervisor capabilities.
+pub(super) fn spawn_output_drainer(
+    stdout: &std::io::PipeReader,
+    stderr: &std::io::PipeReader,
+    executable: &std::path::Path,
+    args: &[&str],
+) -> Result<(OwnedHandle, std::io::PipeReader), ProcessError> {
+    use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+    use windows_sys::Win32::System::Threading::{
+        DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+        UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    fn inheritable(handle: &impl AsHandle) -> Result<OwnedHandle, ProcessError> {
+        let mut duplicate = std::ptr::null_mut();
+        // SAFETY: both process pseudo-handles identify this process, and the
+        // source is borrowed for the duration of DuplicateHandle.
+        if unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                handle.as_handle().as_raw_handle(),
+                GetCurrentProcess(),
+                &mut duplicate,
+                0,
+                1,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(error("duplicate drainer handle"));
+        }
+        // SAFETY: success transfers ownership of a fresh HANDLE.
+        Ok(unsafe { OwnedHandle::from_raw_handle(duplicate) })
+    }
+
+    let (ack_read, ack_write) = std::io::pipe().map_err(|e| ProcessError::Io(e.to_string()))?;
+    let stdin = inheritable(stdout)?;
+    let stdout = inheritable(&ack_write)?;
+    let stderr = inheritable(stderr)?;
+    let handles = [
+        stdin.as_raw_handle(),
+        stdout.as_raw_handle(),
+        stderr.as_raw_handle(),
+    ];
+    let mut size = 0;
+    // SAFETY: the documented sizing call accepts a null attribute list.
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+    if size == 0 {
+        return Err(error("size drainer startup attributes"));
+    }
+    // usize gives the opaque buffer the platform's pointer alignment.
+    let words = size.div_ceil(std::mem::size_of::<usize>());
+    let mut storage = vec![0usize; words];
+    let attributes = storage.as_mut_ptr().cast();
+    // SAFETY: storage has at least size initialized bytes and pointer alignment.
+    if unsafe { InitializeProcThreadAttributeList(attributes, 1, 0, &mut size) } == 0 {
+        return Err(error("initialize drainer startup attributes"));
+    }
+    struct AttributeList(*mut c_void);
+    impl Drop for AttributeList {
+        fn drop(&mut self) {
+            // SAFETY: this owns one successfully initialized list, whose
+            // backing storage outlives the guard.
+            unsafe { DeleteProcThreadAttributeList(self.0) };
+        }
+    }
+    let _attributes_guard = AttributeList(attributes);
+    // SAFETY: the handle array and list both remain valid through CreateProcess.
+    if unsafe {
+        UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            handles.as_ptr().cast(),
+            std::mem::size_of_val(&handles),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    } == 0
+    {
+        return Err(error("set drainer inherited handle list"));
+    }
+    let application: Vec<u16> = executable.as_os_str().encode_wide().chain([0]).collect();
+    let mut command = std::ffi::OsString::from("\"");
+    command.push(executable);
+    command.push("\"");
+    for arg in args {
+        // All arguments are fixed internal ASCII identifiers without quoting.
+        if arg.contains([' ', '\t', '"']) {
+            return Err(ProcessError::Io("invalid drainer argument".into()));
+        }
+        command.push(" ");
+        command.push(arg);
+    }
+    let mut command: Vec<u16> = command.encode_wide().chain([0]).collect();
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = handles[0];
+    startup.StartupInfo.hStdOutput = handles[1];
+    startup.StartupInfo.hStdError = handles[2];
+    startup.lpAttributeList = attributes;
+    let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: all pointers remain valid for this synchronous call. The only
+    // inherited HANDLEs are the three entries in the attribute list.
+    if unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | 0x0800_0000, // CREATE_NO_WINDOW
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup.StartupInfo,
+            &mut process,
+        )
+    } == 0
+    {
+        return Err(error("spawn output drainer"));
+    }
+    // SAFETY: CreateProcess returned distinct owned process and thread handles.
+    let process_handle = unsafe { OwnedHandle::from_raw_handle(process.hProcess) };
+    drop(unsafe { OwnedHandle::from_raw_handle(process.hThread) });
+    drop(ack_write);
+    Ok((process_handle, ack_read))
+}
+
+pub(super) fn stop_output_drainer(process: &OwnedHandle) {
+    use windows_sys::Win32::System::Threading::TerminateProcess;
+    // SAFETY: this held handle identifies only the drainer we just created.
+    unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+}
+
+/// Consume the two private read handles passed as stdin/stderr to the drainer.
+/// Clearing the standard slots first prevents a failed worker from leaving a
+/// second, unserviced read handle open and blocking the corresponding writer.
+pub(super) fn take_output_drainer_inputs() -> Result<[OwnedHandle; 2], ProcessError> {
+    let stdin_id = -10i32 as u32;
+    let stderr_id = -12i32 as u32;
+    // SAFETY: these are borrowed handles installed solely for the drainer.
+    let stdin = unsafe { GetStdHandle(stdin_id) };
+    let stderr = unsafe { GetStdHandle(stderr_id) };
+    if stdin.is_null()
+        || stderr.is_null()
+        || stdin == -1isize as Handle
+        || stderr == -1isize as Handle
+        || stdin == stderr
+    {
+        return Err(ProcessError::Io("invalid output drainer inputs".into()));
+    }
+    // SAFETY: this dedicated helper performs no further stdin/stderr I/O;
+    // ownership is taken only after clearing each process standard slot.
+    if unsafe { SetStdHandle(stdin_id, std::ptr::null_mut()) } == 0 {
+        return Err(error("clear drainer stdin"));
+    }
+    let stdin = unsafe { OwnedHandle::from_raw_handle(stdin) };
+    if unsafe { SetStdHandle(stderr_id, std::ptr::null_mut()) } == 0 {
+        return Err(error("clear drainer stderr"));
+    }
+    let stderr = unsafe { OwnedHandle::from_raw_handle(stderr) };
+    Ok([stdin, stderr])
 }
 
 // Static handles are intentionally never dropped during normal Rust shutdown.
@@ -584,30 +766,89 @@ mod tests {
 
     #[test]
     fn windows_foreground_detached_helper() {
+        use std::io::Write;
         let Some(directory) = std::env::var_os("LINGXI_DETACHED_JOB_TEST_DIR") else {
             return;
         };
         let directory = PathBuf::from(directory);
         if std::env::var_os("LINGXI_DETACHED_JOB_CHILD").is_some() {
+            if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_PIPE").is_some() {
+                println!("detached-stdout-ready");
+            }
+            if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_STDERR").is_some() {
+                eprintln!("detached-stderr-ready");
+            }
+            std::fs::write(directory.join("child.pid"), std::process::id().to_string()).unwrap();
             std::fs::write(directory.join("started"), "ready").unwrap();
-            let until = std::time::Instant::now() + Duration::from_secs(30);
+            // Longer than the parent test's explicit supervisor deadline, so
+            // a blocked supervisor fails before this safeguard ends the child.
+            let until = std::time::Instant::now() + Duration::from_secs(120);
             while std::time::Instant::now() < until {
                 if directory.join("release").exists() {
+                    let short = std::env::var_os("LINGXI_DETACHED_JOB_SHORT_OUTPUT").is_some();
+                    let count = if short { 1024 } else { 256 * 1024 };
+                    // These writes happen only after the test observed the
+                    // supervisor process exit. Exceed the pipe capacity in
+                    // both directions so retaining an unread handle is not
+                    // enough to pass this regression.
+                    if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_PIPE").is_some() {
+                        std::io::stdout()
+                            .write_all(&vec![if short { 1 } else { b'o' }; count])
+                            .unwrap();
+                        std::io::stdout().flush().unwrap();
+                    }
+                    if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_STDERR").is_some() {
+                        std::io::stderr()
+                            .write_all(&vec![if short { 2 } else { b'e' }; count])
+                            .unwrap();
+                        std::io::stderr().flush().unwrap();
+                    }
+                    std::fs::write(directory.join("written"), "both streams written").unwrap();
+                    while !directory.join("exit").exists() {
+                        assert!(
+                            std::time::Instant::now() < until,
+                            "detached fixture exit timed out"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     std::fs::write(directory.join("finished"), "survived").unwrap();
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            return;
+            panic!("detached fixture was not released before its safety deadline");
+        }
+        if std::env::var_os("LINGXI_DETACHED_JOB_LARGE_FOREGROUND_OUTPUT").is_some() {
+            std::io::stdout()
+                .write_all(&vec![b'O'; 128 * 1024])
+                .unwrap();
+            std::io::stderr()
+                .write_all(&vec![b'E'; 128 * 1024])
+                .unwrap();
+            std::io::stdout().flush().unwrap();
+            std::io::stderr().flush().unwrap();
+        }
+        if std::env::var_os("LINGXI_DETACHED_JOB_INHERIT_EXTRA_HANDLES").is_some() {
+            // Deliberately model inherited pipe handles that remain marked
+            // inheritable even though the child's stdio will be redirected.
+            super::make_standard_handles_inheritable_for_test().unwrap();
+        } else {
+            // Windows Command inherits every inheritable handle, even when a
+            // particular standard stream is redirected to NUL. Clear these
+            // originals to make each explicit stdio-inheritance case precise.
+            // Stdio::inherit still duplicates the selected stream for spawn.
+            super::protect_standard_handles().unwrap();
         }
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args([DETACHED_HELPER, "--exact", "--nocapture"])
             .env("LINGXI_DETACHED_JOB_CHILD", "1")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null());
+            .stdin(Stdio::null());
         if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_PIPE").is_none() {
             command.stdout(Stdio::null());
+        }
+        if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_STDERR").is_none() {
+            command.stderr(Stdio::null());
         }
         let _detached = command.spawn().unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(10);
@@ -661,6 +902,7 @@ mod tests {
             // Always release the bounded descendant before asserting, including
             // a failure in the foreground path under test.
             std::fs::write(directory.path().join("release"), "release").unwrap();
+            std::fs::write(directory.path().join("exit"), "exit").unwrap();
             let result = result.unwrap().unwrap();
             assert!(
                 matches!(result.outcome, ForegroundOutcome::Completed(output) if output.exit_code == 0 && !output.timed_out)
@@ -675,6 +917,14 @@ mod tests {
             return;
         };
         let directory = PathBuf::from(std::env::var_os("LINGXI_JOB_LIFECYCLE_DIR").unwrap());
+        if role == "timeout_output" {
+            use std::io::Write;
+            std::io::stdout().write_all(&vec![3; 32 * 1024]).unwrap();
+            std::io::stdout().flush().unwrap();
+            std::fs::write(directory.join("timeout-output.ready"), "ready").unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
         if role == "descendant" {
             std::fs::write(directory.join("descendant.ready"), "ready").unwrap();
         } else {

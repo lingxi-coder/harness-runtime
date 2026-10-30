@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::conversation::ConversationOrchestrator;
@@ -12,6 +12,53 @@ use serde_json::json;
 use tool_api::registry::ToolRegistry;
 
 struct CountingSideClient(AtomicUsize);
+
+struct TestPublicationGuard {
+    current: AtomicBool,
+    attempts: AtomicUsize,
+    invalidate_after_publish: AtomicBool,
+    hold_next_publish: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl hooks::attachment::HookPublicationGuard for TestPublicationGuard {
+    fn is_current(&self) -> bool {
+        self.current.load(Ordering::SeqCst)
+    }
+
+    fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+        None
+    }
+
+    fn publish_if_current<'a>(
+        &'a self,
+        publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.hold_next_publish.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            if !self.current.load(Ordering::SeqCst) {
+                return false;
+            }
+            publication.await;
+            if self.invalidate_after_publish.swap(false, Ordering::SeqCst) {
+                self.current.store(false, Ordering::SeqCst);
+            }
+            true
+        })
+    }
+
+    fn commit_if_current<'a>(
+        &'a self,
+        mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        hooks::attachment::HookPublicationGuard::publish_if_current(self, mutation)
+    }
+}
 
 #[async_trait::async_trait]
 impl sidequery::SideQueryClient for CountingSideClient {
@@ -232,4 +279,142 @@ async fn interrupted_admission_propagates_without_provider_error_or_rejection() 
             );
         }
     }
+}
+
+#[tokio::test]
+async fn tool_requested_terminal_retains_publication_guard_until_final_emit() {
+    for remains_current in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (orch, _, _, _, _, output) = fixture(root.path(), "prompt.section", None).await;
+        let guard = Arc::new(TestPublicationGuard {
+            current: AtomicBool::new(true),
+            attempts: AtomicUsize::new(0),
+            invalidate_after_publish: AtomicBool::new(false),
+            hold_next_publish: AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut state = super::TurnLoopState::new(&orch, MessageId::new(), None);
+        let disposition = orch
+            .finish_tool_requested_streaming_end(&mut state, MessageId::new(), Some(guard.clone()))
+            .await
+            .unwrap();
+        let super::StreamingIterationDisposition::ForcedComplete(_, terminal) = disposition else {
+            panic!("tool-requested end must remain a forced completion");
+        };
+        assert_eq!(guard.attempts.load(Ordering::SeqCst), 1);
+        assert!(!output
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| matches!(event, lingxi_core::host::OutputEvent::EndTurn { .. })));
+        guard.current.store(remains_current, Ordering::SeqCst);
+        orch.publish_deferred_terminal(terminal, &None).await;
+        assert_eq!(guard.attempts.load(Ordering::SeqCst), 2);
+        let reasons = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            if remains_current {
+                vec!["end_turn"]
+            } else {
+                vec![]
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelled_tool_terminal_does_not_persist_interruption_after_guard_reset() {
+    let root = tempfile::tempdir().unwrap();
+    let (orch, _, _, _, _, output) = fixture(root.path(), "prompt.section", None).await;
+    let guard = Arc::new(TestPublicationGuard {
+        current: AtomicBool::new(true),
+        attempts: AtomicUsize::new(0),
+        invalidate_after_publish: AtomicBool::new(false),
+        hold_next_publish: AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut state = super::TurnLoopState::new(&orch, MessageId::new(), None);
+    let disposition = orch
+        .finish_tool_requested_streaming_end(&mut state, MessageId::new(), Some(guard.clone()))
+        .await
+        .unwrap();
+    let super::StreamingIterationDisposition::ForcedComplete(_, terminal) = disposition else {
+        panic!("tool-requested end must remain a forced completion");
+    };
+    guard.invalidate_after_publish.store(true, Ordering::SeqCst);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    orch.publish_deferred_terminal(terminal, &Some(cancel))
+        .await;
+    assert_eq!(guard.attempts.load(Ordering::SeqCst), 3);
+    assert!(output.snapshot().await.iter().any(|event| matches!(
+        event,
+        lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "aborted_tools"
+    )));
+    let session = orch.session();
+    assert!(!serde_json::to_string(&session.lock().await.history)
+        .unwrap()
+        .contains("[Request interrupted by user for tool use]"));
+}
+
+#[tokio::test]
+async fn cancellation_while_waiting_for_tool_terminal_guard_changes_terminal_reason() {
+    let root = tempfile::tempdir().unwrap();
+    let (orch, _, _, _, _, output) = fixture(root.path(), "prompt.section", None).await;
+    let orch = Arc::new(orch);
+    let guard = Arc::new(TestPublicationGuard {
+        current: AtomicBool::new(true),
+        attempts: AtomicUsize::new(0),
+        invalidate_after_publish: AtomicBool::new(false),
+        hold_next_publish: AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut state = super::TurnLoopState::new(&orch, MessageId::new(), None);
+    let disposition = orch
+        .finish_tool_requested_streaming_end(&mut state, MessageId::new(), Some(guard.clone()))
+        .await
+        .unwrap();
+    let super::StreamingIterationDisposition::ForcedComplete(_, terminal) = disposition else {
+        panic!("tool-requested end must remain a forced completion");
+    };
+    guard.hold_next_publish.store(true, Ordering::SeqCst);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.publish_deferred_terminal(terminal, &Some(cancel))
+                .await;
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), guard.entered.notified())
+        .await
+        .expect("terminal waits for its publication guard");
+    cancel.cancel();
+    guard.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("terminal publication completes")
+        .unwrap();
+    let reasons = output
+        .snapshot()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reasons, ["aborted_tools"]);
 }

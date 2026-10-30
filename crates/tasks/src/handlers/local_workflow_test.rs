@@ -941,6 +941,128 @@ async fn run_bridge(script: &str, spawner: Arc<EchoSpawner>) -> workflow::RunOut
     .expect("workflow runs to completion")
 }
 
+struct FatalWorkflowSpawner {
+    calls: std::sync::atomic::AtomicUsize,
+    reason: lingxi_core::host::tool_invoker::CleanupUnverifiedReason,
+}
+
+struct LateFatalWorkflowSpawner {
+    started: StdMutex<Option<oneshot::Sender<()>>>,
+    release: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl SubagentSpawner for LateFatalWorkflowSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        if let Some(started) = self.started.lock().unwrap().take() {
+            let _ = started.send(());
+        }
+        if let Some(release) = self.release.lock().await.take() {
+            let _ = release.await;
+        }
+        Err(SubagentSpawnError::CleanupUnverified {
+            agent_id: lingxi_core::types::AgentId::new(),
+            reason: lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Message(
+                "private evidence".into(),
+            ),
+        })
+    }
+}
+
+#[async_trait]
+impl SubagentSpawner for FatalWorkflowSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(SubagentSpawnError::CleanupUnverified {
+            agent_id: lingxi_core::types::AgentId::new(),
+            reason: self.reason.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn cleanup_fatal_survives_script_catching_and_stops_later_dispatch() {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+    let reason = CleanupUnverifiedReason::Message("private evidence".into());
+    for script in [
+        "try { await agent('first'); } catch (_) {} try { await agent('later'); } catch (_) {} return 'success';",
+        "await parallel([() => agent('first')]); try { await agent('later'); } catch (_) {} return 'success';",
+    ] {
+        let spawner = Arc::new(FatalWorkflowSpawner {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            reason: reason.clone(),
+        });
+        let error = run_workflow_script(
+            script,
+            DEFAULT_WORKFLOW_SUBAGENT,
+            "",
+            spawner.clone(),
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+        )
+        .await
+        .expect_err("cleanup is a host failure even if the script returns success");
+        assert!(!error.to_string().contains("private evidence"));
+        assert!(matches!(error, workflow::WorkflowError::CleanupUnverified(actual) if actual == reason));
+        assert_eq!(spawner.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn workflow_stop_keeps_late_cleanup_failure_and_never_reports_killed() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let output = Arc::new(TaskOutputManager::new(dir.path().to_path_buf(), fs.clone()));
+    let sink = Arc::new(RecordingSink::default());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let spawner = Arc::new(LateFatalWorkflowSpawner {
+        started: StdMutex::new(Some(started_tx)),
+        release: tokio::sync::Mutex::new(Some(release_rx)),
+    });
+    let handler = make_handler(spawner, output.clone(), sink.clone());
+    let ctx = make_ctx(fs.clone());
+    let handle = handler
+        .spawn(
+            workflow_input("try { await agent('first'); } catch (_) {} return 'success';"),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    started_rx.await.unwrap();
+    assert!(handler.kill(&handle.task_id, ctx).await.is_err());
+    assert!(handler.workers.lock().await.contains_key(&handle.task_id));
+    assert_eq!(sink.last_status(), Some(TaskStatus::Running));
+
+    release_tx.send(()).unwrap();
+    assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
+    let output_path = output.path_for(&handle.task_id).unwrap();
+    let text = fs
+        .read_file(&output_path.to_string_lossy(), None, None)
+        .await
+        .unwrap()
+        .content;
+    assert!(text.contains("cleanup could not be verified"));
+    assert!(!text.contains("private evidence"));
+}
+
 /// Reproduction for the "/workflows task stuck running" report: the production
 /// path wires a progress channel (`Some(ptx)`) and joins the run future with a
 /// `drain` that reads the channel until all senders drop — the exact pattern the
@@ -2807,7 +2929,7 @@ async fn workflow_kill_preserves_terminal_status_when_sink_already_knows_task_is
     let sink = Arc::new(RecordingSink::default());
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let spawner = Arc::new(BlockingWorkflowObserverSpawner::new(started_tx));
-    let handler = make_handler(spawner, mgr, sink.clone());
+    let handler = make_handler(spawner.clone(), mgr, sink.clone());
     let ctx = make_ctx(fs.clone());
 
     let handle = handler
@@ -2822,10 +2944,11 @@ async fn workflow_kill_preserves_terminal_status_when_sink_already_knows_task_is
 
     sink.set_status(&handle.task_id, TaskStatus::Completed)
         .await;
-    handler
-        .kill(&handle.task_id, ctx)
-        .await
-        .expect("kill should succeed");
+    let stop = handler.kill(&handle.task_id, ctx).await;
+    assert!(
+        stop.is_err(),
+        "a stale terminal row is not proof that the child exited"
+    );
 
     assert_eq!(
         sink.last_status(),
@@ -2833,9 +2956,17 @@ async fn workflow_kill_preserves_terminal_status_when_sink_already_knows_task_is
         "kill must not overwrite an already-terminal workflow status"
     );
     assert!(
-        handler.workers.lock().await.is_empty(),
-        "a stale terminal status must not leave a live workflow worker orphaned"
+        handler.workers.lock().await.contains_key(&handle.task_id),
+        "the worker remains owned while the child is unresolved"
     );
+    spawner.release_all();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while handler.workers.lock().await.contains_key(&handle.task_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("released child is observed");
 }
 
 #[tokio::test]
@@ -2849,7 +2980,7 @@ async fn workflow_drain_pending_kills_preserves_terminal_status() {
     let sink = Arc::new(RecordingSink::default());
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let spawner = Arc::new(BlockingWorkflowObserverSpawner::new(started_tx));
-    let handler = make_handler(spawner, mgr, sink.clone());
+    let handler = make_handler(spawner.clone(), mgr, sink.clone());
 
     let handle = handler
         .spawn(workflow_input("await agent('blocked');"), make_ctx(fs))
@@ -2864,7 +2995,10 @@ async fn workflow_drain_pending_kills_preserves_terminal_status() {
     sink.set_status(&handle.task_id, TaskStatus::Completed)
         .await;
     (handle.cleanup.as_ref().expect("cleanup seam"))();
-    handler.drain_pending_kills().await;
+    handler
+        .drain_pending_kills()
+        .await
+        .expect_err("child remains unresolved");
 
     assert_eq!(
         sink.last_status(),
@@ -2872,9 +3006,17 @@ async fn workflow_drain_pending_kills_preserves_terminal_status() {
         "drain must not overwrite an already-terminal workflow status"
     );
     assert!(
-        handler.workers.lock().await.is_empty(),
-        "cleanup must still tear down a live worker behind a stale terminal status"
+        handler.workers.lock().await.contains_key(&handle.task_id),
+        "cleanup must retain the still-running worker"
     );
+    spawner.release_all();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while handler.workers.lock().await.contains_key(&handle.task_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("released child is observed");
 }
 
 #[tokio::test]
@@ -2945,7 +3087,7 @@ async fn workflow_drain_preserves_terminalizing_outcome_window() {
         .expect("terminal publish signal");
 
     (handle.cleanup.as_ref().expect("cleanup seam"))();
-    handler.drain_pending_kills().await;
+    handler.drain_pending_kills().await.unwrap();
 
     let _ = release_tx.send(());
     for _ in 0..400 {
@@ -2973,7 +3115,7 @@ async fn workflow_cleanup_records_cancellation_even_when_worker_map_is_contended
     let sink = Arc::new(RecordingSink::default());
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let spawner = Arc::new(BlockingWorkflowObserverSpawner::new(started_tx));
-    let handler = make_handler(spawner, mgr, sink.clone());
+    let handler = make_handler(spawner.clone(), mgr, sink.clone());
     let workers = handler.workers_map();
 
     let handle = handler
@@ -2990,7 +3132,12 @@ async fn workflow_cleanup_records_cancellation_even_when_worker_map_is_contended
     (handle.cleanup.as_ref().expect("cleanup seam"))();
     drop(workers_guard);
 
-    handler.drain_pending_kills().await;
+    handler
+        .drain_pending_kills()
+        .await
+        .expect_err("child remains unresolved");
+    assert!(handler.workers.lock().await.contains_key(&handle.task_id));
+    spawner.release_all();
     assert_eq!(
         await_terminal(&sink).await,
         TaskStatus::Killed,

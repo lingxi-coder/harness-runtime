@@ -500,6 +500,942 @@ pub enum ToolInvocationContextModifierError {
     Poisoned,
 }
 
+/// Whether the process tree was proven to have stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProcessTreeStatus {
+    /// The producer has an authoritative receipt that the tree was reaped.
+    VerifiedReaped,
+    /// Cleanup was requested or attempted without proof that the tree exited.
+    Unverified,
+}
+
+/// Evidence captured when a process result is incomplete.
+///
+/// EOF and truncation describe independent facts: reaching EOF does not mean
+/// every byte was retained, and an untruncated prefix does not prove EOF.
+/// `exit_code` is `None` when the real exit status is unknown, independently
+/// of whether the process tree has been reaped.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnverifiedCleanupOutputParts {
+    /// Native raw-stdio session identity, when one was assigned.
+    pub session_id: Option<String>,
+    /// Captured stdout. Invalid UTF-8 may already have been replaced by the producer.
+    pub stdout: String,
+    /// Captured stderr. Invalid UTF-8 may already have been replaced by the producer.
+    pub stderr: String,
+    /// The stdout prefix does not include all observed output.
+    pub stdout_truncated: bool,
+    /// The stderr prefix does not include all observed output.
+    pub stderr_truncated: bool,
+    /// The producer observed EOF for stdout.
+    pub stdout_eof: bool,
+    /// The producer observed EOF for stderr.
+    pub stderr_eof: bool,
+    /// The observed exit code; absent rather than fabricated if unknown.
+    pub exit_code: Option<i32>,
+    /// The host's execution deadline elapsed.
+    pub timed_out: bool,
+    /// Whether termination was requested; `None` means the fact is unknown.
+    /// A request does not itself prove that any process stopped.
+    pub termination_requested: Option<bool>,
+    /// Whether the producer proved that the process tree was reaped.
+    pub tree_status: ProcessTreeStatus,
+    /// Diagnostic detail about the incomplete result or cleanup status.
+    pub cleanup_detail: String,
+    /// The original read or stop failure, if one occurred.
+    pub original_error: Option<String>,
+}
+
+impl std::fmt::Debug for UnverifiedCleanupOutputParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnverifiedCleanupOutputParts")
+            .field("has_session_id", &self.session_id.is_some())
+            .field("stdout_bytes", &self.stdout.len())
+            .field("stderr_bytes", &self.stderr.len())
+            .field("stdout_truncated", &self.stdout_truncated)
+            .field("stderr_truncated", &self.stderr_truncated)
+            .field("stdout_eof", &self.stdout_eof)
+            .field("stderr_eof", &self.stderr_eof)
+            .field("exit_code", &self.exit_code)
+            .field("timed_out", &self.timed_out)
+            .field("termination_requested", &self.termination_requested)
+            .field("tree_status", &self.tree_status)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Maximum retained Unicode scalar values per captured stream.
+pub const MAX_UNVERIFIED_OUTPUT_CHARS: usize = 30_000;
+
+/// Maximum retained Unicode scalar values for each process diagnostic.
+pub const MAX_UNVERIFIED_METADATA_CHARS: usize = 4_096;
+
+/// Whether diagnostic metadata was truncated and a digest of its full input.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnverifiedCleanupOutputMetadata {
+    /// The cleanup detail was shortened before being retained.
+    pub cleanup_detail_truncated: bool,
+    /// SHA-256 of the original cleanup detail when it was shortened.
+    pub cleanup_detail_sha256: Option<String>,
+    /// The original operation error was shortened before being retained.
+    pub original_error_truncated: bool,
+    /// SHA-256 of the original operation error when it was shortened.
+    pub original_error_sha256: Option<String>,
+}
+
+/// A read-only snapshot with bounded streams, never a successful process result.
+/// Diagnostics are capped when retained; session identity must be validated
+/// before binding, and decoding untrusted input needs an earlier size limit.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UnverifiedCleanupOutput {
+    parts: UnverifiedCleanupOutputParts,
+    metadata: UnverifiedCleanupOutputMetadata,
+}
+
+impl UnverifiedCleanupOutput {
+    /// Bound each stream to the Shell output character limit. Retain the
+    /// producer's truncation flags even if no additional truncation is needed.
+    #[must_use]
+    pub fn new(mut parts: UnverifiedCleanupOutputParts) -> Self {
+        fn bounded_prefix(value: &str) -> (String, bool) {
+            let end = value
+                .char_indices()
+                .nth(MAX_UNVERIFIED_OUTPUT_CHARS)
+                .map_or(value.len(), |(index, _)| index);
+            (value[..end].to_owned(), end < value.len())
+        }
+        let (stdout, stdout_truncated) = bounded_prefix(&parts.stdout);
+        let (stderr, stderr_truncated) = bounded_prefix(&parts.stderr);
+        parts.stdout = stdout;
+        parts.stderr = stderr;
+        parts.stdout_truncated |= stdout_truncated;
+        parts.stderr_truncated |= stderr_truncated;
+        fn bound_diagnostic(value: &mut String) -> (bool, Option<String>) {
+            let end = value
+                .char_indices()
+                .nth(MAX_UNVERIFIED_METADATA_CHARS)
+                .map_or(value.len(), |(index, _)| index);
+            let truncated = end < value.len();
+            let digest = truncated.then(|| {
+                format!(
+                    "{:x}",
+                    <sha2::Sha256 as sha2::Digest>::digest(value.as_bytes())
+                )
+            });
+            *value = value[..end].to_owned();
+            (truncated, digest)
+        }
+        let (cleanup_detail_truncated, cleanup_detail_sha256) =
+            bound_diagnostic(&mut parts.cleanup_detail);
+        let (original_error_truncated, original_error_sha256) = parts
+            .original_error
+            .as_mut()
+            .map_or((false, None), bound_diagnostic);
+        Self {
+            parts,
+            metadata: UnverifiedCleanupOutputMetadata {
+                cleanup_detail_truncated,
+                cleanup_detail_sha256,
+                original_error_truncated,
+                original_error_sha256,
+            },
+        }
+    }
+
+    /// The retained output and all producer-supplied observations.
+    #[must_use]
+    pub fn parts(&self) -> &UnverifiedCleanupOutputParts {
+        &self.parts
+    }
+
+    /// Truncation information for the retained diagnostic metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &UnverifiedCleanupOutputMetadata {
+        &self.metadata
+    }
+}
+
+impl std::fmt::Debug for UnverifiedCleanupOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnverifiedCleanupOutput")
+            .field("parts", &self.parts)
+            .field(
+                "cleanup_detail_truncated",
+                &self.metadata.cleanup_detail_truncated,
+            )
+            .field(
+                "original_error_truncated",
+                &self.metadata.original_error_truncated,
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Display for UnverifiedCleanupOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("process cleanup could not be verified")
+    }
+}
+
+impl serde::Serialize for UnverifiedCleanupOutput {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Borrowed<'a> {
+            parts: &'a UnverifiedCleanupOutputParts,
+            metadata: &'a UnverifiedCleanupOutputMetadata,
+        }
+        serde::Serialize::serialize(
+            &Borrowed {
+                parts: &self.parts,
+                metadata: &self.metadata,
+            },
+            serializer,
+        )
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UnverifiedCleanupOutput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Owned {
+            parts: UnverifiedCleanupOutputParts,
+            #[serde(default)]
+            metadata: UnverifiedCleanupOutputMetadata,
+        }
+        let incoming = <Owned as serde::Deserialize>::deserialize(deserializer)?;
+        let valid_digest = |digest: &Option<String>| {
+            digest.as_ref().is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        };
+        if incoming.metadata.cleanup_detail_truncated
+            != valid_digest(&incoming.metadata.cleanup_detail_sha256)
+            || (!incoming.metadata.cleanup_detail_truncated
+                && incoming.metadata.cleanup_detail_sha256.is_some())
+            || incoming.metadata.original_error_truncated
+                != valid_digest(&incoming.metadata.original_error_sha256)
+            || (!incoming.metadata.original_error_truncated
+                && incoming.metadata.original_error_sha256.is_some())
+            || (incoming.metadata.original_error_truncated
+                && incoming.parts.original_error.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "invalid diagnostic truncation metadata",
+            ));
+        }
+        let mut output = Self::new(incoming.parts);
+        if incoming.metadata.cleanup_detail_truncated {
+            output.metadata.cleanup_detail_truncated = true;
+            output.metadata.cleanup_detail_sha256 = incoming.metadata.cleanup_detail_sha256;
+        }
+        if incoming.metadata.original_error_truncated {
+            output.metadata.original_error_truncated = true;
+            output.metadata.original_error_sha256 = incoming.metadata.original_error_sha256;
+        }
+        Ok(output)
+    }
+}
+
+/// The shape of a reported exit field that did not provide a valid exit code.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReportedExitCode {
+    /// The field was absent.
+    Missing,
+    /// The field was explicitly null.
+    Null,
+    /// The field was neither a number nor null.
+    InvalidType,
+    /// A non-finite number, retaining its IEEE-754 representation.
+    NonFinite { bits: u64 },
+    /// A non-integral number, retaining its IEEE-754 representation.
+    NonInteger { bits: u64 },
+    /// An integral number outside the supported exit-code range.
+    OutOfRange { bits: u64 },
+}
+
+/// A shell stream as reported by the tool, without invented EOF information.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReportedShellStream {
+    /// The field was absent.
+    Missing,
+    /// The field was explicitly null.
+    Null,
+    /// The field was not a string.
+    InvalidType,
+    /// Exact source UTF-16, possibly truncated only by this observation.
+    Present {
+        /// Original UTF-16 units, including unpaired surrogates.
+        utf16: Vec<u16>,
+        /// This observation discarded source units because of its own limit.
+        host_truncated: bool,
+    },
+}
+
+impl std::fmt::Debug for ReportedShellStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("Missing"),
+            Self::Null => f.write_str("Null"),
+            Self::InvalidType => f.write_str("InvalidType"),
+            Self::Present {
+                utf16,
+                host_truncated,
+            } => f
+                .debug_struct("Present")
+                .field("utf16_units", &utf16.len())
+                .field("host_truncated", host_truncated)
+                .finish(),
+        }
+    }
+}
+
+/// Independently reported shell fields; missing flags remain unknown.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReportedShellPayloadParts {
+    /// Reported standard output.
+    pub stdout: ReportedShellStream,
+    /// Reported standard error.
+    pub stderr: ReportedShellStream,
+    /// The absent or invalid exit code field.
+    pub exit_code: ReportedExitCode,
+    /// The source's combined truncation flag, if supplied as a boolean.
+    pub combined_truncated: Option<bool>,
+    /// The source's timeout flag, if supplied as a boolean.
+    pub timed_out: Option<bool>,
+    /// The tool transport's independent error flag.
+    pub tool_result_is_error: bool,
+    /// The payload's independent error flag, if supplied as a boolean.
+    pub payload_is_error: Option<bool>,
+    /// The payload's interrupted flag, if supplied as a boolean.
+    pub interrupted: Option<bool>,
+}
+
+/// A bounded observation of an invalid or missing shell result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedShellPayload {
+    parts: ReportedShellPayloadParts,
+}
+
+impl ReportedShellPayload {
+    /// Retain at most the output limit in Unicode scalars per stream while
+    /// preserving the exact UTF-16 units and not splitting surrogate pairs.
+    #[must_use]
+    pub fn new(mut parts: ReportedShellPayloadParts) -> Self {
+        fn bound(stream: &mut ReportedShellStream) {
+            let ReportedShellStream::Present {
+                utf16,
+                host_truncated,
+            } = stream
+            else {
+                return;
+            };
+            let mut index = 0;
+            let mut scalars = 0;
+            while index < utf16.len() && scalars < MAX_UNVERIFIED_OUTPUT_CHARS {
+                let high = (0xd800..=0xdbff).contains(&utf16[index]);
+                if high
+                    && utf16
+                        .get(index + 1)
+                        .is_some_and(|low| (0xdc00..=0xdfff).contains(low))
+                {
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                scalars += 1;
+            }
+            *host_truncated |= index < utf16.len();
+            *utf16 = utf16[..index].to_vec();
+        }
+        bound(&mut parts.stdout);
+        bound(&mut parts.stderr);
+        Self { parts }
+    }
+
+    /// The retained fields and their independent source flags.
+    #[must_use]
+    pub fn parts(&self) -> &ReportedShellPayloadParts {
+        &self.parts
+    }
+}
+
+impl serde::Serialize for ReportedShellPayload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.parts, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReportedShellPayload {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let parts = <ReportedShellPayloadParts as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self::new(parts))
+    }
+}
+
+/// The independent operation whose error accompanied an incomplete outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PriorFailureOrigin {
+    /// A child Agent's terminal error, which may include provider failure.
+    Agent,
+    /// An independent provider stream or request error.
+    Provider,
+    /// A Mod dispatcher or plugin error.
+    Mod,
+    /// A terminal computer-input cleanup error.
+    InputCleanup,
+    /// A nested tool was not found; the text is the reported tool name.
+    ToolNotFound,
+    /// A nested tool rejected its input.
+    ToolInvalidInput,
+    /// A nested tool failed schema or precondition validation.
+    ToolValidation,
+    /// A nested tool was aborted.
+    ToolAbort,
+    /// A nested tool returned an internal failure.
+    ToolInternal,
+}
+
+/// A bounded observation of an independent error, never proof of cleanup.
+/// Raw text is intentionally absent from Debug and Display. Oversize errors
+/// retain a prefix and SHA-256 over their original UTF-16LE units; the digest
+/// is not the original text and does not prove it was stored elsewhere.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PriorFailureContext {
+    origin: PriorFailureOrigin,
+    utf16: Vec<u16>,
+    original_units: Option<usize>,
+    truncated: bool,
+    original_sha256: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for PriorFailureContext {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            origin: PriorFailureOrigin,
+            utf16: Vec<u16>,
+            original_units: Option<usize>,
+            truncated: bool,
+            original_sha256: Option<String>,
+        }
+        let wire = <Wire as serde::Deserialize>::deserialize(deserializer)?;
+        let retained = Self::from_utf16(wire.origin, &wire.utf16);
+        let valid_hash = wire.original_sha256.as_ref().is_some_and(|hash| {
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        let valid_length = match wire.original_units {
+            Some(length) if wire.truncated => length > wire.utf16.len(),
+            Some(length) => length == wire.utf16.len(),
+            None => wire.utf16.is_empty() && !wire.truncated,
+        };
+        if retained.truncated
+            || !valid_length
+            || wire.truncated != valid_hash
+            || (!wire.truncated && wire.original_sha256.is_some())
+        {
+            return Err(serde::de::Error::custom("invalid prior failure context"));
+        }
+        Ok(Self {
+            origin: wire.origin,
+            utf16: retained.utf16,
+            original_units: wire.original_units,
+            truncated: wire.truncated,
+            original_sha256: wire.original_sha256,
+        })
+    }
+}
+
+/// Maximum retained independent errors attached to one incomplete outcome.
+pub const MAX_PRIOR_FAILURE_CONTEXTS: usize = 16;
+
+impl PriorFailureContext {
+    fn from_units(origin: PriorFailureOrigin, units: impl Iterator<Item = u16>) -> Self {
+        use sha2::Digest;
+        let mut source = units.peekable();
+        let mut retained = Vec::new();
+        let mut original_units = 0_usize;
+        let mut scalars = 0_usize;
+        let mut hash = sha2::Sha256::new();
+        while let Some(unit) = source.next() {
+            hash.update(unit.to_le_bytes());
+            original_units = original_units.saturating_add(1);
+            let pair = (0xd800..=0xdbff).contains(&unit)
+                && source
+                    .peek()
+                    .is_some_and(|low| (0xdc00..=0xdfff).contains(low));
+            let low = if pair { source.next() } else { None };
+            if let Some(low) = low {
+                hash.update(low.to_le_bytes());
+                original_units = original_units.saturating_add(1);
+            }
+            if scalars < MAX_UNVERIFIED_METADATA_CHARS {
+                retained.push(unit);
+                if let Some(low) = low {
+                    retained.push(low);
+                }
+            }
+            scalars = scalars.saturating_add(1);
+        }
+        let truncated = scalars > MAX_UNVERIFIED_METADATA_CHARS;
+        Self {
+            origin,
+            utf16: retained,
+            original_units: Some(original_units),
+            truncated,
+            original_sha256: truncated.then(|| format!("{:x}", hash.finalize())),
+        }
+    }
+
+    /// Record a UTF-8 error without allocating an unbounded UTF-16 copy.
+    #[must_use]
+    pub fn from_text(origin: PriorFailureOrigin, text: &str) -> Self {
+        Self::from_units(origin, text.encode_utf16())
+    }
+
+    /// Record exact UTF-16, including unpaired surrogate units.
+    #[must_use]
+    pub fn from_utf16(origin: PriorFailureOrigin, units: &[u16]) -> Self {
+        Self::from_units(origin, units.iter().copied())
+    }
+
+    /// Snapshot an ordinary ToolInvokerError without confusing it with the
+    /// separate incomplete process result.
+    #[must_use]
+    pub fn from_tool_error(error: &ToolInvokerError) -> Option<Self> {
+        let (origin, projection) = match error {
+            ToolInvokerError::NotFound(name) => {
+                return Some(Self::from_text(PriorFailureOrigin::ToolNotFound, name));
+            }
+            ToolInvokerError::Abort(message) => {
+                return Some(Self::from_text(PriorFailureOrigin::ToolAbort, message));
+            }
+            ToolInvokerError::InvalidInput(value) => (PriorFailureOrigin::ToolInvalidInput, value),
+            ToolInvokerError::Validation(value) => (PriorFailureOrigin::ToolValidation, value),
+            ToolInvokerError::Internal(value) => (PriorFailureOrigin::ToolInternal, value),
+            ToolInvokerError::CleanupUnverified(_) => return None,
+        };
+        Some(
+            match projection
+                .at_pointer("")
+                .and_then(|value| value.code_units())
+            {
+                Some(units) => Self::from_utf16(origin, units),
+                None => Self {
+                    origin,
+                    utf16: Vec::new(),
+                    original_units: None,
+                    truncated: false,
+                    original_sha256: None,
+                },
+            },
+        )
+    }
+
+    /// Source error category.
+    #[must_use]
+    pub fn origin(&self) -> PriorFailureOrigin {
+        self.origin
+    }
+    /// Exact retained prefix; an absent source is distinguished by `original_units`.
+    #[must_use]
+    pub fn utf16(&self) -> &[u16] {
+        &self.utf16
+    }
+    /// Original unit count, or `None` for a non-string error projection.
+    #[must_use]
+    pub fn original_units(&self) -> Option<usize> {
+        self.original_units
+    }
+    /// Whether this observation omitted part of the source text.
+    #[must_use]
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+    /// Digest of the complete UTF-16LE source only when a prefix was retained.
+    #[must_use]
+    pub fn original_sha256(&self) -> Option<&str> {
+        self.original_sha256.as_deref()
+    }
+}
+
+impl std::fmt::Debug for PriorFailureContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PriorFailureContext")
+            .field("origin", &self.origin)
+            .field("retained_units", &self.utf16.len())
+            .field("original_units", &self.original_units)
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An incomplete process outcome carried through the scheduler and host.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CleanupUnverifiedReason {
+    /// A cleanup failure without captured process output.
+    Message(String),
+    /// Bounded output and original evidence; sharing avoids copying it for
+    /// every queued tool stopped by the same failure.
+    Output(Arc<UnverifiedCleanupOutput>),
+    /// A shell response lacking a valid exit status, with its source fields.
+    ReportedPayload(Arc<ReportedShellPayload>),
+    /// An independently observed error accompanying the incomplete outcome.
+    WithContext {
+        /// The original incomplete outcome, unchanged.
+        reason: Arc<CleanupUnverifiedReason>,
+        /// Bounded independent error observations.
+        contexts: Vec<PriorFailureContext>,
+        /// Contexts omitted after the count limit; their contents are unavailable.
+        omitted_context_count: usize,
+    },
+    /// Independent incomplete outcomes from concurrent tool invocations.
+    Multiple(Vec<CleanupUnverifiedReason>),
+}
+
+impl std::fmt::Debug for CleanupUnverifiedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(_) => f.write_str("Message(<redacted>)"),
+            Self::Output(output) => f.debug_tuple("Output").field(output).finish(),
+            Self::ReportedPayload(payload) => {
+                f.debug_tuple("ReportedPayload").field(payload).finish()
+            }
+            Self::WithContext {
+                reason,
+                contexts,
+                omitted_context_count,
+            } => f
+                .debug_struct("WithContext")
+                .field("reason", reason)
+                .field("contexts", contexts)
+                .field("omitted_context_count", omitted_context_count)
+                .finish(),
+            Self::Multiple(reasons) => f.debug_tuple("Multiple").field(reasons).finish(),
+        }
+    }
+}
+
+impl serde::Serialize for CleanupUnverifiedReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        enum Borrowed<'a> {
+            Message(&'a str),
+            Output(&'a UnverifiedCleanupOutput),
+            ReportedPayload(&'a ReportedShellPayload),
+            WithContext {
+                reason: &'a CleanupUnverifiedReason,
+                contexts: &'a [PriorFailureContext],
+                omitted_context_count: usize,
+            },
+            Multiple(&'a [CleanupUnverifiedReason]),
+        }
+        match self {
+            Self::Message(message) => {
+                serde::Serialize::serialize(&Borrowed::Message(message), serializer)
+            }
+            Self::Output(output) => {
+                serde::Serialize::serialize(&Borrowed::Output(output), serializer)
+            }
+            Self::ReportedPayload(payload) => {
+                serde::Serialize::serialize(&Borrowed::ReportedPayload(payload), serializer)
+            }
+            Self::WithContext {
+                reason,
+                contexts,
+                omitted_context_count,
+            } => serde::Serialize::serialize(
+                &Borrowed::WithContext {
+                    reason,
+                    contexts,
+                    omitted_context_count: *omitted_context_count,
+                },
+                serializer,
+            ),
+            Self::Multiple(reasons) => {
+                serde::Serialize::serialize(&Borrowed::Multiple(reasons), serializer)
+            }
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CleanupUnverifiedReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        enum Owned {
+            Message(String),
+            Output(UnverifiedCleanupOutput),
+            ReportedPayload(ReportedShellPayload),
+            WithContext {
+                reason: Box<CleanupUnverifiedReason>,
+                contexts: Vec<PriorFailureContext>,
+                omitted_context_count: usize,
+            },
+            Multiple(Vec<CleanupUnverifiedReason>),
+        }
+        match <Owned as serde::Deserialize>::deserialize(deserializer)? {
+            Owned::Message(message) => Ok(Self::Message(message)),
+            Owned::Output(output) => Ok(Self::Output(Arc::new(output))),
+            Owned::ReportedPayload(payload) => Ok(Self::ReportedPayload(Arc::new(payload))),
+            Owned::WithContext {
+                reason,
+                mut contexts,
+                mut omitted_context_count,
+            } => {
+                if contexts.len() > MAX_PRIOR_FAILURE_CONTEXTS {
+                    omitted_context_count = omitted_context_count
+                        .saturating_add(contexts.len() - MAX_PRIOR_FAILURE_CONTEXTS);
+                    contexts.truncate(MAX_PRIOR_FAILURE_CONTEXTS);
+                    contexts.shrink_to_fit();
+                }
+                Ok(Self::WithContext {
+                    reason: Arc::from(reason),
+                    contexts,
+                    omitted_context_count,
+                })
+            }
+            Owned::Multiple(reasons) => Ok(Self::Multiple(reasons)),
+        }
+    }
+}
+
+impl From<String> for CleanupUnverifiedReason {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for CleanupUnverifiedReason {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
+impl From<Box<UnverifiedCleanupOutput>> for CleanupUnverifiedReason {
+    fn from(output: Box<UnverifiedCleanupOutput>) -> Self {
+        Self::Output(Arc::from(output))
+    }
+}
+
+impl CleanupUnverifiedReason {
+    /// Attach an independently observed failure without relabeling it as a
+    /// second process outcome. The context itself is not cleanup proof.
+    #[must_use]
+    pub fn with_context(self, context: PriorFailureContext) -> Self {
+        match self {
+            Self::WithContext {
+                reason,
+                mut contexts,
+                mut omitted_context_count,
+            } => {
+                if contexts.len() < MAX_PRIOR_FAILURE_CONTEXTS {
+                    contexts.push(context);
+                } else {
+                    omitted_context_count = omitted_context_count.saturating_add(1);
+                }
+                Self::WithContext {
+                    reason,
+                    contexts,
+                    omitted_context_count,
+                }
+            }
+            reason => Self::WithContext {
+                reason: Arc::new(reason),
+                contexts: vec![context],
+                omitted_context_count: 0,
+            },
+        }
+    }
+    /// The producer's diagnostic detail, without the host-facing prefix.
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Message(message) => message,
+            Self::Output(output) => &output.parts().cleanup_detail,
+            Self::ReportedPayload(_) => "shell result did not contain a valid exit status",
+            Self::WithContext { reason, .. } => reason.detail(),
+            Self::Multiple(_) => "process outcome evidence is incomplete",
+        }
+    }
+}
+
+impl std::fmt::Display for CleanupUnverifiedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(_) | Self::Output(_) => {
+                f.write_str("process cleanup could not be verified")
+            }
+            Self::ReportedPayload(_) => {
+                f.write_str("shell result did not contain a valid exit status")
+            }
+            Self::WithContext { reason, .. } => write!(f, "{reason} (additional error retained)"),
+            Self::Multiple(reasons) => {
+                write!(f, "{} process outcomes are incomplete", reasons.len())
+            }
+        }
+    }
+}
+
+/// Upper bounds for a host implementing cleanup-owner admission. A host may
+/// enforce lower limits; it must reject admission before the side effect when
+/// it cannot reserve the requested space.
+pub const MAX_CLEANUP_OWNERS_PER_SESSION: usize = 32;
+/// Global owner-slot ceiling across all sessions in the host process.
+pub const MAX_CLEANUP_OWNERS_PER_PROCESS: usize = 256;
+/// Maximum reserved in-memory evidence bytes for one owner.
+pub const MAX_CLEANUP_EVIDENCE_BYTES_PER_OWNER: usize = 512 * 1024;
+/// Maximum number of observations in one owner's aggregate.
+pub const MAX_CLEANUP_OBSERVATIONS_PER_OWNER: usize = 32;
+/// Maximum recursive aggregate depth accepted for one owner's evidence.
+pub const MAX_CLEANUP_EVIDENCE_DEPTH: usize = 32;
+
+/// A host-assigned correlation ID. It is not an authentication credential.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CleanupOriginId(String);
+
+impl CleanupOriginId {
+    /// Accept a bounded identifier minted by the trusted host.
+    #[must_use]
+    pub fn new(value: &str) -> Option<Self> {
+        (!value.is_empty()
+            && value.len() <= 128
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            }))
+        .then(|| Self(value.to_owned()))
+    }
+
+    /// The host-assigned identifier, for an authorized in-process consumer.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CleanupOriginId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CleanupOriginId(<redacted>)")
+    }
+}
+
+/// Trusted classification of the capability that can start external work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupOwnerOrigin {
+    /// A child Agent invocation.
+    Agent,
+    /// A background local Agent invocation.
+    BackgroundAgent,
+    /// A Dream task.
+    Dream,
+    /// A specific host-owned hook invocation.
+    Hook { invocation_id: CleanupOriginId },
+    /// A specific Fusion run and task.
+    Fusion {
+        run_id: CleanupOriginId,
+        task_id: CleanupOriginId,
+    },
+    /// A specific workflow run and agent call.
+    Workflow {
+        run_id: CleanupOriginId,
+        call_id: CleanupOriginId,
+    },
+}
+
+/// Admission facts supplied by trusted host code before starting external work.
+/// The authority independently verifies session, recipient, and generation;
+/// none of these correlation fields authenticates a caller on its own.
+#[derive(Clone)]
+pub struct CleanupOwnerRequest {
+    /// Canonical host session ID.
+    pub session_id: SessionId,
+    /// The Agent receiving the work, when applicable.
+    pub recipient: Option<AgentId>,
+    /// The host-owned invocation or task.
+    pub origin: CleanupOwnerOrigin,
+    /// Correlation with a tool call, if available and host-validated.
+    pub tool_use_id: Option<crate::types::ToolUseId>,
+    /// Memory reserved before starting work; at most the owner evidence limit.
+    pub evidence_budget_bytes: usize,
+}
+
+/// Fixed, non-sensitive admission failures. An unavailable authority rejects
+/// high-risk work before spawning; it does not claim a process exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum CleanupAdmissionError {
+    /// Host lifecycle capability or cold recovery is unavailable.
+    #[error("cleanup admission is unavailable")]
+    Unavailable,
+    /// A prior owner in this or an older generation remains unresolved.
+    #[error("session cleanup is unresolved")]
+    Fenced,
+    /// The host cannot reserve bounded owner or evidence capacity.
+    #[error("cleanup admission capacity is exhausted")]
+    Capacity,
+    /// A caller's session or recipient does not match the trusted authority.
+    #[error("cleanup admission identity did not match")]
+    IdentityMismatch,
+}
+
+/// What happened when an owner reported evidence. Both states remain fatal;
+/// an unavailable record must never be represented as a complete observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupRecordDisposition {
+    /// The complete admitted observation is held by the host owner.
+    Retained,
+    /// Some evidence could not be retained or accounted for.
+    EvidenceUnavailable,
+}
+
+/// A fixed indication that an admitted operation no longer has a waiter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupAbandonCause {
+    /// The original caller dropped its wait.
+    CallerDropped,
+    /// A bounded wait expired.
+    DeadlineExpired,
+    /// The responsible supervisor became unavailable.
+    SupervisorUnavailable,
+}
+
+/// Opaque, host-minted capability for one admitted owner. A report fences the
+/// session atomically and is not a verified-reaping receipt. The host must
+/// keep polling and own any actual task after its caller abandons the wait.
+pub trait CleanupOwner: Send + Sync {
+    /// Retain or explicitly mark unavailable the incomplete observation.
+    fn report_unverified(&self, reason: CleanupUnverifiedReason) -> CleanupRecordDisposition;
+    /// Report an abandoned wait while keeping the actual owner alive.
+    fn report_abandoned(&self, cause: CleanupAbandonCause) -> CleanupRecordDisposition;
+}
+
+/// An admitted model request, cancelled by the host if an owner becomes fatal.
+/// The host must keep its admission until this capability is dropped.
+pub trait CleanupModelPermit: Send + Sync {
+    /// Cancellation is notification only; it does not prove any tree exited.
+    fn cancellation_token(&self) -> tokio_util::sync::CancellationToken;
+}
+
+/// Host-owned session/generation authority. A concrete implementation must
+/// atomically reserve a unique, non-reusable owner identity and the evidence
+/// quota before allowing a side effect. It must retain pending work and late
+/// receipts independently of the caller, enforce the limits above, reject old
+/// or mismatched owners, and keep older unresolved generations fenced. Only a
+/// trusted supervisor can establish verified cleanup; this interface exposes
+/// no caller-controlled success method. Missing durable recovery is fatal on
+/// restart, not permission to forget unresolved owners.
+pub trait CleanupAdmissionAuthority: Send + Sync {
+    /// Atomically check the session fence and reserve owner/evidence capacity.
+    fn reserve(
+        &self,
+        request: CleanupOwnerRequest,
+    ) -> Result<Arc<dyn CleanupOwner>, CleanupAdmissionError>;
+    /// Atomically admit a model request against the same session fence.
+    fn admit_model(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Arc<dyn CleanupModelPermit>, CleanupAdmissionError>;
+    /// Inspect the fence, without using this alone to authorize a new request.
+    fn check_session(&self, session_id: SessionId) -> Result<(), CleanupAdmissionError>;
+}
+
 /// Failure modes for [`ToolInvoker::invoke`].
 #[derive(Debug, Error)]
 pub enum ToolInvokerError {
@@ -518,6 +1454,10 @@ pub enum ToolInvokerError {
     /// recoverable `tool_result` and continue the model loop.
     #[error("{0}")]
     Abort(String),
+    /// A tool's process outcome is incomplete and the caller must not continue
+    /// the model loop as if the tool had returned an ordinary recoverable error.
+    #[error("{0}")]
+    CleanupUnverified(CleanupUnverifiedReason),
     /// Any other internal failure.
     #[error("ToolInvoker: internal error: {}", .0.string_at("").unwrap_or_default())]
     Internal(Utf16JsonProjection),
@@ -539,6 +1479,7 @@ impl ToolInvokerError {
                 message.clone()
             }
             Self::Abort(message) => message.clone().into(),
+            Self::CleanupUnverified(reason) => reason.to_string().into(),
         }
     }
     /// Native result wrappers differ for pre-execution validation and thrown errors.
@@ -887,5 +1828,137 @@ mod source_error_projection_tests {
                     .collect()
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod incomplete_output_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_metadata_retains_hash_and_survives_structured_roundtrip() {
+        let cleanup = format!("{}tail", "界".repeat(MAX_UNVERIFIED_METADATA_CHARS * 64));
+        let original = format!("{}tail", "错".repeat(MAX_UNVERIFIED_METADATA_CHARS * 64));
+        let digest = |value: &str| {
+            format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(value.as_bytes())
+            )
+        };
+        let output = UnverifiedCleanupOutput::new(UnverifiedCleanupOutputParts {
+            session_id: Some("session".into()),
+            stdout: "partial out".into(),
+            stderr: "partial err".into(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_eof: false,
+            stderr_eof: true,
+            exit_code: None,
+            timed_out: false,
+            termination_requested: Some(true),
+            tree_status: ProcessTreeStatus::Unverified,
+            cleanup_detail: cleanup.clone(),
+            original_error: Some(original.clone()),
+        });
+        assert_eq!(
+            output.parts().cleanup_detail.chars().count(),
+            MAX_UNVERIFIED_METADATA_CHARS
+        );
+        assert_eq!(
+            output
+                .parts()
+                .original_error
+                .as_ref()
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_UNVERIFIED_METADATA_CHARS
+        );
+        assert!(output.parts().cleanup_detail.capacity() < cleanup.len() / 2);
+        assert!(output.parts().original_error.as_ref().unwrap().capacity() < original.len() / 2);
+        assert!(output.metadata().cleanup_detail_truncated);
+        assert!(output.metadata().original_error_truncated);
+        assert_eq!(
+            output.metadata().cleanup_detail_sha256.as_deref(),
+            Some(digest(&cleanup).as_str())
+        );
+        assert_eq!(
+            output.metadata().original_error_sha256.as_deref(),
+            Some(digest(&original).as_str())
+        );
+        assert_eq!(output.to_string(), "process cleanup could not be verified");
+        assert!(!format!("{output:?}").contains("partial out"));
+        let mut spare_detail = String::with_capacity(1_000_000);
+        spare_detail.push_str("detail");
+        let mut spare_original = String::with_capacity(1_000_000);
+        spare_original.push_str("original");
+        let mut parts = output.parts().clone();
+        parts.cleanup_detail = spare_detail;
+        parts.original_error = Some(spare_original);
+        let short = UnverifiedCleanupOutput::new(parts);
+        assert!(short.parts().cleanup_detail.capacity() < 100);
+        assert!(short.parts().original_error.as_ref().unwrap().capacity() < 100);
+        assert!(!short.metadata().cleanup_detail_truncated);
+        assert!(!short.metadata().original_error_truncated);
+        assert_eq!(short.metadata().cleanup_detail_sha256, None);
+        assert_eq!(short.metadata().original_error_sha256, None);
+        let reason = CleanupUnverifiedReason::Multiple(vec![
+            CleanupUnverifiedReason::Message("another incomplete process".into()),
+            CleanupUnverifiedReason::Output(Arc::new(output)),
+        ]);
+        assert!(!format!("{reason:?}").contains("partial out"));
+        let encoded = serde_json::to_string(&reason).unwrap();
+        let decoded: CleanupUnverifiedReason = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, reason);
+    }
+
+    #[test]
+    fn reported_shell_retains_unknown_fields_and_exact_utf16_boundary() {
+        let mut source = vec![b'a' as u16; MAX_UNVERIFIED_OUTPUT_CHARS - 1];
+        source.extend([0xd83d, 0xde00, 0xd800]);
+        let mut spare_stderr = Vec::with_capacity(1_000_000);
+        spare_stderr.extend([0xdc00, b'x' as u16]);
+        let payload = ReportedShellPayload::new(ReportedShellPayloadParts {
+            stdout: ReportedShellStream::Present {
+                utf16: source,
+                host_truncated: false,
+            },
+            stderr: ReportedShellStream::Present {
+                utf16: spare_stderr,
+                host_truncated: false,
+            },
+            exit_code: ReportedExitCode::NonInteger {
+                bits: 1.5_f64.to_bits(),
+            },
+            combined_truncated: None,
+            timed_out: Some(false),
+            tool_result_is_error: true,
+            payload_is_error: None,
+            interrupted: Some(true),
+        });
+        let ReportedShellStream::Present {
+            utf16,
+            host_truncated,
+        } = &payload.parts().stdout
+        else {
+            panic!("stdout must remain a reported string");
+        };
+        assert!(*host_truncated);
+        assert_eq!(utf16.len(), MAX_UNVERIFIED_OUTPUT_CHARS + 1);
+        assert_eq!(&utf16[utf16.len() - 2..], &[0xd83d, 0xde00]);
+        assert!(
+            matches!(&payload.parts().stderr, ReportedShellStream::Present { utf16, host_truncated: false } if utf16.as_slice() == [0xdc00, b'x' as u16])
+        );
+        assert!(
+            matches!(&payload.parts().stderr, ReportedShellStream::Present { utf16, .. } if utf16.capacity() < 100)
+        );
+        assert_eq!(payload.parts().combined_truncated, None);
+        assert_eq!(payload.parts().payload_is_error, None);
+        let reason = CleanupUnverifiedReason::ReportedPayload(Arc::new(payload));
+        let batch = CleanupUnverifiedReason::Multiple(vec![reason.clone()]);
+        assert_eq!(batch.detail(), "process outcome evidence is incomplete");
+        let encoded = serde_json::to_string(&reason).unwrap();
+        let decoded: CleanupUnverifiedReason = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, reason);
     }
 }

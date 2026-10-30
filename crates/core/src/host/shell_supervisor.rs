@@ -299,6 +299,23 @@ fn admit_supervisor_start(
     ))
 }
 
+fn require_supervisor_commit_gate(
+    runner: &dyn ProcessRunner,
+    command: &SandboxedCommand,
+) -> Result<(), ProcessError> {
+    if !runner.supports_supervisor_commit_gate(command) {
+        return Err(error(
+            "runner cannot coordinate supervisor completion and stop",
+        ));
+    }
+    if !runner.supports_supervisor_cleanup_receipt(command) {
+        return Err(error(
+            "runner cannot retain supervisor cleanup ownership and receipts",
+        ));
+    }
+    Ok(())
+}
+
 async fn send<T: Serialize>(stream: &mut BoxStream, value: &T) -> Result<(), ProcessError> {
     let mut bytes = serde_json::to_vec(value).map_err(error)?;
     bytes.push(b'\n');
@@ -1401,7 +1418,7 @@ pub async fn execute(
 
 struct ServerSink {
     inner: Arc<dyn BackgroundExitSink>,
-    state: Arc<tokio::sync::Mutex<ServerState>>,
+    state: Arc<SharedServerState>,
     directory: PathBuf,
     stop: Arc<tokio::sync::Notify>,
     done: CancellationToken,
@@ -1409,6 +1426,128 @@ struct ServerSink {
     spawned: Arc<tokio::sync::Notify>,
     cancelled: CancellationToken,
 }
+
+// The runner must hold this gate while releasing its last process identity.
+// A stop request takes the same gate before it can be acknowledged. In
+// particular, checking a cancellation token before releasing ownership is
+// insufficient: the stop can arrive between the check and the release.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CompletionDecision {
+    #[default]
+    Pending,
+    Stopped,
+    Committed,
+    Failed,
+}
+
+#[derive(Default)]
+struct CompletionGate(Mutex<CompletionDecision>);
+
+impl CompletionGate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CompletionDecision> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn commit(
+        &self,
+        action: &mut dyn FnMut() -> Result<(), ProcessError>,
+    ) -> Result<bool, ProcessError> {
+        let mut decision = self.lock();
+        match *decision {
+            CompletionDecision::Pending => {
+                // This is also the conservative state if the action panics.
+                *decision = CompletionDecision::Failed;
+                action()?;
+                *decision = CompletionDecision::Committed;
+                Ok(true)
+            }
+            CompletionDecision::Stopped => Ok(false),
+            // The physical release has already been committed. Do not replay
+            // an action when the core subsequently observes the result.
+            CompletionDecision::Committed => Ok(true),
+            CompletionDecision::Failed => Err(unverified_shell_error(
+                "supervisor completion did not establish ownership release",
+            )),
+        }
+    }
+
+    fn stop(&self) -> Result<(), ProcessError> {
+        let mut decision = self.lock();
+        match *decision {
+            CompletionDecision::Pending | CompletionDecision::Stopped => {
+                *decision = CompletionDecision::Stopped;
+                Ok(())
+            }
+            CompletionDecision::Committed => Err(error("shell already completed")),
+            CompletionDecision::Failed => Err(unverified_shell_error(
+                "supervisor completion failed; cleanup remains unverified",
+            )),
+        }
+    }
+
+    fn decision(&self) -> CompletionDecision {
+        *self.lock()
+    }
+}
+
+// Keep the synchronous decision gate beside, rather than inside, the async
+// state mutex so runners can participate without blocking on an async lock.
+// The only nesting is async state -> completion gate; commit actions must not
+// acquire the async state or call external callbacks.
+struct SharedServerState {
+    gate: CompletionGate,
+    state: tokio::sync::Mutex<ServerState>,
+    handoff_changed: tokio::sync::Notify,
+}
+
+impl SharedServerState {
+    fn new(state: ServerState) -> Self {
+        Self {
+            gate: CompletionGate::default(),
+            state: tokio::sync::Mutex::new(state),
+            handoff_changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ServerState> {
+        self.state.lock().await
+    }
+}
+
+// A Start request can be dropped while the child-owning runner or its
+// background reaper is still alive. Never let that abandon an unaccepted
+// handoff without first competing for the same stop/commit decision.
+struct StartAbandonGuard {
+    state: Arc<SharedServerState>,
+    stop: CancellationToken,
+    kill: Arc<tokio::sync::Notify>,
+    armed: bool,
+}
+
+impl StartAbandonGuard {
+    fn request_stop(&self) {
+        let result = self.state.gate.stop();
+        if result.is_ok() || self.state.gate.decision() == CompletionDecision::Failed {
+            self.stop.cancel();
+            self.kill.notify_one();
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartAbandonGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.request_stop();
+        }
+    }
+}
+
 #[derive(Default)]
 struct ServerState {
     nonce: Option<String>,
@@ -1422,6 +1561,7 @@ struct ServerState {
     cleanup_verified: bool,
     terminal_notification_pending: bool,
     backgrounded: bool,
+    handoff_accepted: bool,
     spawn_accepted: bool,
 }
 
@@ -1468,28 +1608,99 @@ fn server_can_finish(state: &ServerState) -> bool {
         && (state.handoff.is_none() || state.receipt_persisted)
 }
 
+fn response_proves_no_retained_owner(response: &Response) -> bool {
+    match response {
+        Response::Started {
+            result:
+                ForegroundRunResult {
+                    outcome: ForegroundOutcome::Completed(_),
+                    ..
+                },
+            handoff: None,
+        } => true,
+        Response::Error {
+            no_child_started: true,
+            ..
+        } => true,
+        Response::Error { message, .. } => message == "supervisor command cancelled",
+        _ => false,
+    }
+}
+
 fn signal_server_stop(
     state: &ServerState,
+    gate: &CompletionGate,
     kill: &tokio::sync::Notify,
     stop: &CancellationToken,
 ) -> Result<(), ProcessError> {
-    if state.backgrounded {
-        if state_leader_only_natural(state) {
-            return Err(error("naturally exited shell released its process group"));
+    if state.backgrounded && state_leader_only_natural(state) {
+        return Err(error("naturally exited shell released its process group"));
+    }
+    if let Err(cause) = gate.stop() {
+        // Failed release is not an acknowledged stop, but a retained runner
+        // may still be able to retry cleanup with its original identity.
+        if gate.decision() == CompletionDecision::Failed {
+            if state.backgrounded {
+                kill.notify_one();
+            }
+            stop.cancel();
         }
+        return Err(cause);
+    }
+    if state.backgrounded {
         // A recorded failure is an observation, not a finished job. The
         // retained runner may use another notification to retry its cleanup.
         if !state.cleanup_verified {
             kill.notify_one();
         }
-    } else {
-        stop.cancel();
     }
+    // The handoff waiter observes this token even after the runner has moved
+    // into its background reaper. Notify permits alone could be consumed by
+    // the reaper's other stop wait.
+    stop.cancel();
     Ok(())
 }
 
 #[async_trait::async_trait]
 impl BackgroundExitSink for ServerSink {
+    async fn wait_for_supervisor_handoff(&self) -> Result<bool, ProcessError> {
+        loop {
+            let changed = self.state.handoff_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let current = self.state.lock().await;
+                match self.state.gate.decision() {
+                    CompletionDecision::Stopped => return Ok(false),
+                    CompletionDecision::Failed => {
+                        return Err(unverified_shell_error("supervisor handoff decision failed"));
+                    }
+                    CompletionDecision::Committed if !current.handoff_accepted => {
+                        return Err(unverified_shell_error(
+                            "supervisor released background ownership before acceptance",
+                        ));
+                    }
+                    CompletionDecision::Pending | CompletionDecision::Committed => {}
+                }
+                if current.handoff_accepted {
+                    return Ok(true);
+                }
+            }
+            tokio::select! {
+                biased;
+                () = self.cancelled.cancelled() => {},
+                _ = changed => {},
+            }
+        }
+    }
+
+    fn commit_foreground(
+        &self,
+        action: &mut dyn FnMut() -> Result<(), ProcessError>,
+    ) -> Result<bool, ProcessError> {
+        self.state.gate.commit(action)
+    }
+
     async fn on_spawn(&self, _: &str, pid: u32) -> Result<(), ProcessError> {
         let birth = platform()
             .process_start_identity(pid)
@@ -1706,7 +1917,7 @@ pub async fn run_supervisor(
 // Start or closing a disconnected foreground host.
 async fn cancel_and_join_runner<F>(
     mut running: std::pin::Pin<&mut F>,
-    state: &tokio::sync::Mutex<ServerState>,
+    state: &SharedServerState,
     mut signal: impl FnMut(),
 ) -> Result<(), ProcessError>
 where
@@ -1716,15 +1927,34 @@ where
         signal();
         tokio::select! {
             biased;
-            result = &mut running => break result?,
+            result = &mut running => break result,
             _ = tokio::time::sleep(Duration::from_millis(10)) => {},
         }
     };
-    let ForegroundOutcome::MovedToBackground(handle) = result.outcome else {
-        // Strict runners return Completed only after verifying the entire
-        // owned process tree. Ordinary completion retains its existing rules.
-        return Ok(());
+    let result = match result {
+        // A cooperating runner emits this marker only after its retained
+        // process identity has been stopped and cleanup verified.
+        Err(ProcessError::Io(message)) if message == "supervisor command cancelled" => {
+            return Ok(());
+        }
+        Err(cause) => return Err(cause),
+        Ok(result) => result,
     };
+    let ForegroundOutcome::MovedToBackground(handle) = result.outcome else {
+        // A completed output alone does not prove that a previously accepted
+        // stop terminated and reaped the original process group/Job.
+        return Err(unverified_shell_error(
+            "runner returned completion after stop without cleanup proof",
+        ));
+    };
+    settle_cancelled_handoff(&handle, state, signal).await
+}
+
+async fn settle_cancelled_handoff(
+    handle: &ProcessHandle,
+    state: &SharedServerState,
+    mut signal: impl FnMut(),
+) -> Result<(), ProcessError> {
     // The runner's future may hand the process to its background reaper at
     // exactly the same time cancellation wins. Keep signalling that reaper and
     // wait for its identity-matched terminal report; the handoff alone is not
@@ -1741,7 +1971,10 @@ where
             if handoff.pid != handle.pid || handoff.task_id != handle.task_id {
                 return Err(unverified_shell_error("cancelled handoff identity changed"));
             }
-            if let Some(code) = current.exit_code {
+            if let Some(code) = current
+                .exit_code
+                .filter(|_| !current.terminal_notification_pending)
+            {
                 let terminal = TerminalInfo {
                     exit_code: code,
                     stop_cause: current.stop_cause.clone(),
@@ -1759,6 +1992,32 @@ where
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+fn publish_handoff(
+    state: &mut ServerState,
+    gate: &CompletionGate,
+    handle: &ProcessHandle,
+    directory: &Path,
+) -> Result<(ShellProcessHandoff, CompletionDecision), ProcessError> {
+    let handoff = state
+        .handoff
+        .clone()
+        .ok_or_else(|| unverified_shell_error("runner did not report shell spawn"))?;
+    if handoff.pid != handle.pid || handoff.task_id != handle.task_id {
+        return Err(unverified_shell_error(
+            "background handoff identity changed",
+        ));
+    }
+    // The state mutex is also held by Kill while it sets the gate. Switching
+    // to the background signal and observing the winning decision therefore
+    // cannot miss a stop that arrived while the runner transferred ownership.
+    state.backgrounded = true;
+    let decision = gate.decision();
+    if state.exit_code.is_some() {
+        persist_server_receipt(state, directory);
+    }
+    Ok((handoff, decision))
+}
 pub async fn run_at(
     directory: PathBuf,
     factory: fn(&Path) -> Arc<dyn BackgroundExitSink>,
@@ -1767,7 +2026,7 @@ pub async fn run_at(
     platform().validate_directory(&directory)?;
     let socket = platform().endpoint(&directory);
     let listener = platform().listen(&directory).await?;
-    let state = Arc::new(tokio::sync::Mutex::new(ServerState::default()));
+    let state = Arc::new(SharedServerState::new(ServerState::default()));
     let background = Arc::new(tokio::sync::Notify::new());
     let stop = CancellationToken::new();
     let spawned = Arc::new(tokio::sync::Notify::new());
@@ -1809,6 +2068,7 @@ pub async fn run_at(
                 return;
             };
             let is_start = matches!(&request, Request::Start(_));
+            let mut start_guard = None;
             let response = match request {
                 Request::AwaitSpawn { nonce } => loop {
                     let notified = spawned.notified();
@@ -1897,6 +2157,24 @@ pub async fn run_at(
                         on_demand: Some(background),
                     });
                     let process = platform().runner(&start.output);
+                    if let Err(cause) = require_supervisor_commit_gate(process.as_ref(), &command) {
+                        let _ = send(
+                            &mut stream,
+                            &Response::Error {
+                                message: response_error_message(cause),
+                                no_child_started: true,
+                            },
+                        )
+                        .await;
+                        done.cancel();
+                        return;
+                    }
+                    start_guard = Some(StartAbandonGuard {
+                        state: state.clone(),
+                        stop: stop.clone(),
+                        kill: kill.clone(),
+                        armed: true,
+                    });
                     let run = async {
                         if start.explicit {
                             process.spawn_background(&command).await.map(|handle| {
@@ -1925,19 +2203,58 @@ pub async fn run_at(
                             // A pre-exec capability wait has no active child
                             // registration yet. Cancel that acceptance wait so
                             // the platform closes its gate and joins spawn.
-                            stop.cancel();
-                            let _ = cancel_and_join_runner(run.as_mut(), &state, || { kill.notify_one(); platform().cancel_active_processes(); }).await;
+                            let requested = {
+                                let current = state.lock().await;
+                                signal_server_stop(&current, &state.gate, &kill, &stop)
+                            };
+                            let safely_settled = if requested.is_ok() || state.gate.decision() == CompletionDecision::Failed {
+                                cancel_and_join_runner(run.as_mut(), &state, || { kill.notify_one(); platform().cancel_active_processes(); }).await.is_ok()
+                            } else {
+                                // A natural completion already released its
+                                // ownership under the gate; a disconnected
+                                // client must not subsequently stop it.
+                                match run.as_mut().await {
+                                    Ok(result) => match result.outcome {
+                                        ForegroundOutcome::Completed(_) => true,
+                                        ForegroundOutcome::MovedToBackground(handle) => {
+                                            // The background writer may still
+                                            // be publishing its terminal receipt.
+                                            let mut current = state.lock().await;
+                                            let _ = publish_handoff(&mut current, &state.gate, &handle, &directory);
+                                            false
+                                        }
+                                    },
+                                    Err(_) => false,
+                                }
+                            };
                             let mut current = state.lock().await;
                             current.delivered = true;
-                            if current.exit_code.is_none() || server_can_finish(&current) {
+                            if safely_settled || server_can_finish(&current) {
                                 done.cancel();
                             }
                             return;
                         }
                     };
                     let result = match result {
-                        Ok(result) if matches!(&result.outcome, ForegroundOutcome::Completed(output) if !output.timed_out) => {
-                            platform().complete_foreground(strict_host).map(|()| result)
+                        Ok(result)
+                            if matches!(&result.outcome, ForegroundOutcome::Completed(_)) =>
+                        {
+                            let timed_out = matches!(&result.outcome, ForegroundOutcome::Completed(output) if output.timed_out);
+                            let mut finish = || {
+                                if timed_out {
+                                    Ok(())
+                                } else {
+                                    platform().complete_foreground(strict_host)
+                                }
+                            };
+                            match state.gate.commit(&mut finish) {
+                                Ok(true) => Ok(result),
+                                // A cooperating runner must return the exact
+                                // cancellation error only after cleanup proof.
+                                // A Completed result here is not that proof.
+                                Ok(false) => Err(unverified_shell_error("runner completed after an accepted stop without a cleanup receipt")),
+                                Err(cause) => Err(cause),
+                            }
                         }
                         other => other,
                     };
@@ -1946,20 +2263,62 @@ pub async fn run_at(
                             let handoff = if let ForegroundOutcome::MovedToBackground(handle) =
                                 &result.outcome
                             {
-                                let mut state = state.lock().await;
-                                let handoff = state
-                                    .handoff
-                                    .clone()
-                                    .ok_or_else(|| error("runner did not report shell spawn"));
-                                let Ok(handoff) = handoff else {
-                                    return;
+                                let published = {
+                                    let mut current = state.lock().await;
+                                    publish_handoff(&mut current, &state.gate, handle, &directory)
                                 };
-                                if handoff.pid != handle.pid {
+                                let (handoff, decision) = match published {
+                                    Ok(published) => published,
+                                    Err(cause) => {
+                                        if let Some(guard) = &start_guard {
+                                            guard.request_stop();
+                                        }
+                                        let _ = send(
+                                            &mut stream,
+                                            &Response::Error {
+                                                message: response_error_message(cause),
+                                                no_child_started: false,
+                                            },
+                                        )
+                                        .await;
+                                        let mut current = state.lock().await;
+                                        current.delivered = true;
+                                        if server_can_finish(&current) {
+                                            done.cancel();
+                                        }
+                                        return;
+                                    }
+                                };
+                                if matches!(
+                                    decision,
+                                    CompletionDecision::Stopped | CompletionDecision::Failed
+                                ) {
+                                    let settled = settle_cancelled_handoff(handle, &state, || {
+                                        kill.notify_one();
+                                        platform().cancel_active_processes();
+                                    })
+                                    .await;
+                                    let cleanup_verified = settled.is_ok();
+                                    let cause = match (decision, settled) {
+                                        (CompletionDecision::Stopped, Ok(())) => error("supervisor command cancelled"),
+                                        (CompletionDecision::Failed, Ok(())) => error("foreground commit failed; background cleanup was verified"),
+                                        (CompletionDecision::Pending | CompletionDecision::Committed, Ok(())) => unverified_shell_error("unexpected completion decision during cancelled handoff"),
+                                        (_, Err(cause)) => cause,
+                                    };
+                                    let _ = send(
+                                        &mut stream,
+                                        &Response::Error {
+                                            message: response_error_message(cause),
+                                            no_child_started: false,
+                                        },
+                                    )
+                                    .await;
+                                    let mut current = state.lock().await;
+                                    current.delivered = true;
+                                    if cleanup_verified || server_can_finish(&current) {
+                                        done.cancel();
+                                    }
                                     return;
-                                }
-                                state.backgrounded = true;
-                                if state.exit_code.is_some() {
-                                    persist_server_receipt(&mut state, &directory);
                                 }
                                 Some(handoff)
                             } else {
@@ -1983,6 +2342,7 @@ pub async fn run_at(
                         | Request::SpawnAccepted { nonce } => nonce,
                         _ => unreachable!(),
                     };
+                    let state_shared = state.clone();
                     let mut state = state.lock().await;
                     if state.nonce.as_ref() != Some(nonce) {
                         Response::Error {
@@ -2017,7 +2377,7 @@ pub async fn run_at(
                                 Response::Ack
                             }
                             Request::Kill { .. } => {
-                                match signal_server_stop(&state, &kill, &stop) {
+                                match signal_server_stop(&state, &state_shared.gate, &kill, &stop) {
                                     Ok(()) => Response::Ack,
                                     Err(cause) => Response::Error {
                                         message: response_error_message(cause),
@@ -2061,12 +2421,27 @@ pub async fn run_at(
                     let current = state.lock().await;
                     matches!(accepted,Some(Request::Accepted{nonce}) if current.nonce.as_ref()==Some(&nonce))
                 };
-                if valid {
-                    let _ = send(&mut stream, &Response::Ack).await;
-                }
+                let acknowledged = if valid {
+                    matches!(
+                        tokio::time::timeout(
+                            Duration::from_secs(10),
+                            send(&mut stream, &Response::Ack)
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    )
+                } else {
+                    false
+                };
                 let mut current = state.lock().await;
-                if !valid {
-                    kill.notify_one();
+                if acknowledged {
+                    current.handoff_accepted = true;
+                    state.handoff_changed.notify_waiters();
+                    if let Some(guard) = &mut start_guard {
+                        guard.disarm();
+                    }
+                } else {
+                    let _ = signal_server_stop(&current, &state.gate, &kill, &stop);
                 }
                 current.delivered = true;
                 if server_can_finish(&current) {
@@ -2076,7 +2451,7 @@ pub async fn run_at(
             if finished {
                 let mut current = state.lock().await;
                 current.delivered = true;
-                if current.exit_code.is_none() || server_can_finish(&current) {
+                if response_proves_no_retained_owner(&response) || server_can_finish(&current) {
                     done.cancel();
                 }
             }
@@ -2087,6 +2462,345 @@ pub async fn run_at(
 #[cfg(test)]
 mod registration_tests {
     use super::*;
+
+    struct EmptySink;
+    #[async_trait::async_trait]
+    impl BackgroundExitSink for EmptySink {
+        async fn on_exit(&self, _: &str, _: Option<i32>) {}
+    }
+
+    fn handoff_test_sink() -> (Arc<SharedServerState>, ServerSink) {
+        let state = Arc::new(SharedServerState::new(ServerState {
+            backgrounded: true,
+            ..Default::default()
+        }));
+        let sink = ServerSink {
+            inner: Arc::new(EmptySink),
+            state: state.clone(),
+            directory: PathBuf::new(),
+            stop: Arc::new(tokio::sync::Notify::new()),
+            done: CancellationToken::new(),
+            template: handoff("handoff-wait", "owner"),
+            spawned: Arc::new(tokio::sync::Notify::new()),
+            cancelled: CancellationToken::new(),
+        };
+        (state, sink)
+    }
+
+    async fn assert_wait_is_pending<F: std::future::Future>(future: std::pin::Pin<&mut F>) {
+        let mut future = future;
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handoff_waits_for_ack_before_natural_release() {
+        let (state, sink) = handoff_test_sink();
+        let waiting = sink.wait_for_supervisor_handoff();
+        tokio::pin!(waiting);
+        assert_wait_is_pending(waiting.as_mut()).await;
+        {
+            let mut current = state.lock().await;
+            current.handoff_accepted = true;
+            state.handoff_changed.notify_waiters();
+        }
+        assert!(waiting.await.unwrap());
+        let mut released = false;
+        assert!(sink
+            .commit_foreground(&mut || {
+                released = true;
+                Ok(())
+            })
+            .unwrap());
+        assert!(released);
+    }
+
+    #[tokio::test]
+    async fn unaccepted_handoff_drop_stops_before_background_release() {
+        let (state, sink) = handoff_test_sink();
+        let waiting = sink.wait_for_supervisor_handoff();
+        tokio::pin!(waiting);
+        assert_wait_is_pending(waiting.as_mut()).await;
+        let guard = StartAbandonGuard {
+            state: state.clone(),
+            stop: sink.cancelled.clone(),
+            kill: sink.stop.clone(),
+            armed: true,
+        };
+        let notified = sink.stop.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        drop(guard);
+        assert!(!waiting.await.unwrap());
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .unwrap();
+        assert!(!sink
+            .commit_foreground(&mut || panic!("stop won before acceptance"))
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn accepted_ack_cannot_override_a_previously_accepted_stop() {
+        let (state, sink) = handoff_test_sink();
+        let waiting = sink.wait_for_supervisor_handoff();
+        tokio::pin!(waiting);
+        assert_wait_is_pending(waiting.as_mut()).await;
+        {
+            let mut current = state.lock().await;
+            signal_server_stop(&current, &state.gate, &sink.stop, &sink.cancelled).unwrap();
+            // The acknowledgement write may complete after stop won.
+            current.handoff_accepted = true;
+            state.handoff_changed.notify_waiters();
+        }
+        assert!(!waiting.await.unwrap());
+        assert!(!sink
+            .commit_foreground(&mut || panic!("stop must win"))
+            .unwrap());
+    }
+
+    #[test]
+    fn unknown_start_error_is_not_a_no_child_or_cleanup_receipt() {
+        let error = Response::Error {
+            message: "runner failed".into(),
+            no_child_started: false,
+        };
+        assert!(!response_proves_no_retained_owner(&error));
+        let no_child = Response::Error {
+            message: "spawn rejected before starting".into(),
+            no_child_started: true,
+        };
+        assert!(response_proves_no_retained_owner(&no_child));
+        let cancelled = Response::Error {
+            message: "supervisor command cancelled".into(),
+            no_child_started: false,
+        };
+        assert!(response_proves_no_retained_owner(&cancelled));
+    }
+
+    #[test]
+    fn supervisor_admission_requires_gate_and_independent_cleanup_capability() {
+        struct Runner {
+            gate: bool,
+            cleanup: bool,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for Runner {
+            fn supports_supervisor_commit_gate(&self, _: &SandboxedCommand) -> bool {
+                self.gate
+            }
+            fn supports_supervisor_cleanup_receipt(&self, _: &SandboxedCommand) -> bool {
+                self.cleanup
+            }
+            async fn run(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<mobile_linux_api::ProcessOutput, ProcessError> {
+                panic!("admission must not spawn")
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                panic!("admission must not spawn")
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                panic!("admission must not kill")
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let command = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: "shell".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: HashMap::new(),
+                timeout: None,
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "test".into(),
+            },
+        )
+        .mark_supervisor_request();
+        for (gate, cleanup, accepted) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            assert_eq!(
+                require_supervisor_commit_gate(&Runner { gate, cleanup }, &command).is_ok(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_stop_blocks_both_foreground_releases() {
+        let gate = CompletionGate::default();
+        let mut released = Vec::new();
+        gate.stop().unwrap();
+        let mut action = || {
+            released.push("payload");
+            released.push("supervisor");
+            Ok(())
+        };
+        assert!(!gate.commit(&mut action).unwrap());
+        assert!(released.is_empty());
+        // A retry of an accepted stop remains a stop request.
+        gate.stop().unwrap();
+        assert_eq!(gate.decision(), CompletionDecision::Stopped);
+    }
+
+    #[test]
+    fn completion_and_stop_are_serialized_across_both_releases() {
+        let gate = Arc::new(CompletionGate::default());
+        let (payload_sent, payload_received) = std::sync::mpsc::channel();
+        let (finish_sent, finish_received) = std::sync::mpsc::channel();
+        let (attempt_sent, attempt_received) = std::sync::mpsc::channel();
+        let (result_sent, result_received) = std::sync::mpsc::channel();
+
+        let committing = {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                let mut action = || {
+                    payload_sent.send(()).unwrap();
+                    finish_received.recv().unwrap();
+                    Ok(()) // The supervisor release follows the payload.
+                };
+                gate.commit(&mut action)
+            })
+        };
+        payload_received.recv().unwrap();
+        assert!(matches!(
+            gate.0.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        let stopping = {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                attempt_sent.send(()).unwrap();
+                result_sent.send(gate.stop()).unwrap();
+            })
+        };
+        attempt_received.recv().unwrap();
+        assert!(matches!(
+            result_received.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        finish_sent.send(()).unwrap();
+        assert!(committing.join().unwrap().unwrap());
+        assert!(result_received.recv().unwrap().is_err());
+        stopping.join().unwrap();
+        assert_eq!(gate.decision(), CompletionDecision::Committed);
+        let mut replayed = false;
+        assert!(gate
+            .commit(&mut || {
+                replayed = true;
+                Ok(())
+            })
+            .unwrap());
+        assert!(
+            !replayed,
+            "an already committed release must not be repeated"
+        );
+    }
+
+    #[test]
+    fn failed_or_panicking_release_never_acknowledges_a_later_stop() {
+        let failed = CompletionGate::default();
+        let mut payload_released = false;
+        let result = failed.commit(&mut || {
+            payload_released = true;
+            Err(error("injected supervisor release failure"))
+        });
+        assert!(result.is_err());
+        assert!(payload_released);
+        assert_eq!(failed.decision(), CompletionDecision::Failed);
+        assert!(failed.stop().is_err());
+        assert!(failed.commit(&mut || Ok(())).is_err());
+
+        let panicked = CompletionGate::default();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = panicked.commit(&mut || panic!("injected release panic"));
+        }))
+        .is_err());
+        assert_eq!(panicked.decision(), CompletionDecision::Failed);
+        assert!(panicked.stop().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_during_handoff_remains_bound_to_the_original_process() {
+        let handoff = handoff("handoff-race", "owner");
+        let handle = ProcessHandle {
+            task_id: handoff.task_id.clone(),
+            pid: handoff.pid,
+        };
+        let mut state = ServerState {
+            handoff: Some(handoff),
+            ..Default::default()
+        };
+        let gate = CompletionGate::default();
+        let stop = CancellationToken::new();
+        let kill = tokio::sync::Notify::new();
+        signal_server_stop(&state, &gate, &kill, &stop).unwrap();
+        assert!(stop.is_cancelled());
+        let directory = tempfile::tempdir().unwrap();
+        let (_, decision) = publish_handoff(&mut state, &gate, &handle, directory.path()).unwrap();
+        assert_eq!(decision, CompletionDecision::Stopped);
+        assert!(state.backgrounded);
+        assert!(!gate
+            .commit(&mut || panic!("stop must prevent release"))
+            .unwrap());
+
+        // A retry after the handoff must reach the held background owner.
+        let notified = kill.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        signal_server_stop(&state, &gate, &kill, &stop).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_sink_and_kill_use_the_same_completion_gate() {
+        struct Sink;
+        #[async_trait::async_trait]
+        impl BackgroundExitSink for Sink {
+            async fn on_exit(&self, _: &str, _: Option<i32>) {}
+        }
+        let state = Arc::new(SharedServerState::new(ServerState::default()));
+        let sink = ServerSink {
+            inner: Arc::new(Sink),
+            state: state.clone(),
+            directory: PathBuf::new(),
+            stop: Arc::new(tokio::sync::Notify::new()),
+            done: CancellationToken::new(),
+            template: handoff("shared-gate", "owner"),
+            spawned: Arc::new(tokio::sync::Notify::new()),
+            cancelled: CancellationToken::new(),
+        };
+        let mut releases = 0;
+        assert!(sink
+            .commit_foreground(&mut || {
+                releases += 1;
+                Ok(())
+            })
+            .unwrap());
+        let current = state.lock().await;
+        let stop = CancellationToken::new();
+        assert!(signal_server_stop(&current, &state.gate, &sink.stop, &stop).is_err());
+        assert_eq!(releases, 1);
+        assert!(!stop.is_cancelled());
+    }
+
     fn handoff(id: &str, owner: &str) -> ShellProcessHandoff {
         ShellProcessHandoff {
             supervisor_directory_identity: None,
@@ -2461,7 +3175,7 @@ mod recovery_tests {
             .parent()
             .unwrap()
             .to_path_buf();
-        let state = Arc::new(tokio::sync::Mutex::new(ServerState {
+        let state = Arc::new(SharedServerState::new(ServerState {
             handoff: Some(handoff.clone()),
             delivered: true,
             ..Default::default()
@@ -2552,7 +3266,7 @@ mod recovery_tests {
             .to_path_buf();
         let sink = ServerSink {
             inner: Arc::new(Sink),
-            state: Arc::new(tokio::sync::Mutex::new(ServerState {
+            state: Arc::new(SharedServerState::new(ServerState {
                 handoff: Some(handoff.clone()),
                 delivered: true,
                 ..Default::default()
@@ -2662,7 +3376,7 @@ mod recovery_tests {
             pid: handoff.pid,
         };
         let live = track(handoff.clone(), true);
-        let state = Arc::new(tokio::sync::Mutex::new(ServerState {
+        let state = Arc::new(SharedServerState::new(ServerState {
             handoff: Some(handoff.clone()),
             backgrounded: true,
             delivered: true,
@@ -2705,8 +3419,13 @@ mod recovery_tests {
                         cleanup_verified: current.cleanup_verified,
                     },
                     Request::Kill { nonce } if nonce == server_nonce => {
-                        signal_server_stop(&current, &server_kill, &CancellationToken::new())
-                            .unwrap();
+                        signal_server_stop(
+                            &current,
+                            &server_state.gate,
+                            &server_kill,
+                            &CancellationToken::new(),
+                        )
+                        .unwrap();
                         Response::Ack
                     }
                     _ => panic!("unexpected supervisor request"),
@@ -2786,7 +3505,7 @@ mod recovery_tests {
             let inner = Arc::new(Sink::default());
             let sink = ServerSink {
                 inner: inner.clone(),
-                state: Arc::new(tokio::sync::Mutex::new(ServerState {
+                state: Arc::new(SharedServerState::new(ServerState {
                     handoff: Some(handoff.clone()),
                     backgrounded: true,
                     delivered: true,
@@ -2887,7 +3606,7 @@ mod recovery_tests {
             let live = track(handoff.clone(), true);
             let sink = ServerSink {
                 inner: Arc::new(Sink::default()),
-                state: Arc::new(tokio::sync::Mutex::new(ServerState {
+                state: Arc::new(SharedServerState::new(ServerState {
                     handoff: Some(handoff.clone()),
                     backgrounded: true,
                     delivered: true,
@@ -2952,7 +3671,7 @@ mod recovery_tests {
         });
         let sink = Arc::new(ServerSink {
             inner: inner.clone(),
-            state: Arc::new(tokio::sync::Mutex::new(ServerState {
+            state: Arc::new(SharedServerState::new(ServerState {
                 handoff: Some(handoff.clone()),
                 backgrounded: true,
                 delivered: true,
@@ -3012,7 +3731,7 @@ mod recovery_tests {
         let inner = Arc::new(Sink::default());
         let sink = Arc::new(ServerSink {
             inner: inner.clone(),
-            state: Arc::new(tokio::sync::Mutex::new(ServerState {
+            state: Arc::new(SharedServerState::new(ServerState {
                 handoff: Some(handoff.clone()),
                 backgrounded: true,
                 delivered: true,
@@ -3072,7 +3791,7 @@ mod recovery_tests {
         let inner = Arc::new(Sink::default());
         let sink = ServerSink {
             inner: inner.clone(),
-            state: Arc::new(tokio::sync::Mutex::new(ServerState {
+            state: Arc::new(SharedServerState::new(ServerState {
                 handoff: Some(h.clone()),
                 backgrounded: true,
                 delivered: true,
@@ -3123,7 +3842,7 @@ mod recovery_tests {
             let source = Arc::new(Sink::default());
             let server = ServerSink {
                 inner: source,
-                state: Arc::new(tokio::sync::Mutex::new(ServerState {
+                state: Arc::new(SharedServerState::new(ServerState {
                     handoff: Some(handoff.clone()),
                     delivered: true,
                     ..Default::default()
@@ -3556,19 +4275,11 @@ mod cancellation_join_tests {
         let release = completed.clone();
         let run = async move {
             release.notified().await;
-            Ok(ForegroundRunResult {
-                outcome: ForegroundOutcome::Completed(mobile_linux_api::ProcessOutput {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                    timed_out: false,
-                }),
-                output_file: None,
-            })
+            Err(error("supervisor command cancelled"))
         };
         tokio::pin!(run);
         let signals = std::sync::atomic::AtomicUsize::new(0);
-        let state = tokio::sync::Mutex::new(ServerState::default());
+        let state = SharedServerState::new(ServerState::default());
         let stopping = cancel_and_join_runner(run.as_mut(), &state, || {
             signals.fetch_add(1, Ordering::SeqCst);
         });
@@ -3587,6 +4298,28 @@ mod cancellation_join_tests {
     }
 
     #[tokio::test]
+    async fn ordinary_completion_after_stop_is_not_a_cleanup_receipt() {
+        let run = async {
+            Ok(ForegroundRunResult {
+                outcome: ForegroundOutcome::Completed(mobile_linux_api::ProcessOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    timed_out: false,
+                }),
+                output_file: None,
+            })
+        };
+        tokio::pin!(run);
+        let state = SharedServerState::new(ServerState::default());
+        let result = cancel_and_join_runner(run.as_mut(), &state, || {}).await;
+        let Err(ProcessError::Io(message)) = result else {
+            panic!("ordinary completion must not be accepted as cleanup proof");
+        };
+        assert!(message.starts_with(crate::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED));
+    }
+
+    #[tokio::test]
     async fn cancellation_after_background_handoff_waits_for_the_real_terminal_report() {
         struct Sink;
         #[async_trait::async_trait]
@@ -3594,7 +4327,7 @@ mod cancellation_join_tests {
             async fn on_exit(&self, _: &str, _: Option<i32>) {}
         }
 
-        let state = Arc::new(tokio::sync::Mutex::new(ServerState {
+        let state = Arc::new(SharedServerState::new(ServerState {
             handoff: Some(handoff()),
             ..Default::default()
         }));
@@ -3635,13 +4368,67 @@ mod cancellation_join_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_handoff_waits_while_terminal_callback_is_in_progress() {
+        #[derive(Default)]
+        struct HeldCallback {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl BackgroundExitSink for HeldCallback {
+            async fn on_exit(&self, _: &str, _: Option<i32>) {}
+            async fn on_exit_outcome_unknown(&self, _: &str, _: Option<i32>) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        }
+        let state = Arc::new(SharedServerState::new(ServerState {
+            handoff: Some(handoff()),
+            ..Default::default()
+        }));
+        let directory = tempfile::tempdir().unwrap();
+        let callback = Arc::new(HeldCallback::default());
+        let sink = Arc::new(ServerSink {
+            inner: callback.clone(),
+            state: state.clone(),
+            directory: directory.path().into(),
+            stop: Arc::new(tokio::sync::Notify::new()),
+            done: CancellationToken::new(),
+            template: handoff(),
+            spawned: Arc::new(tokio::sync::Notify::new()),
+            cancelled: CancellationToken::new(),
+        });
+        let callback_task = tokio::spawn(async move {
+            sink.on_exit_with_proof("cancel-race", Some(0), None, true)
+                .await;
+        });
+        callback.entered.notified().await;
+        let handle = ProcessHandle {
+            task_id: "cancel-race".into(),
+            pid: 123,
+        };
+        let mut settling = Box::pin(settle_cancelled_handoff(&handle, &state, || {}));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(settling.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(settling);
+        callback.release.notify_one();
+        callback_task.await.unwrap();
+        assert!(settle_cancelled_handoff(&handle, &state, || {})
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
     async fn cancelled_handoff_rejects_unverified_or_wrong_identity() {
         for wrong_identity in [false, true] {
             let mut h = handoff();
             if wrong_identity {
                 h.pid += 1;
             }
-            let state = tokio::sync::Mutex::new(ServerState {
+            let state = SharedServerState::new(ServerState {
                 handoff: Some(h),
                 exit_code: Some(None),
                 stop_cause: Some("wait_unverified:injected".into()),
@@ -3677,7 +4464,7 @@ mod cancellation_join_tests {
 
         for verified_before_delivery in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let state = Arc::new(tokio::sync::Mutex::new(ServerState::default()));
+            let state = Arc::new(SharedServerState::new(ServerState::default()));
             let done = CancellationToken::new();
             let sink = ServerSink {
                 inner: Arc::new(Sink),

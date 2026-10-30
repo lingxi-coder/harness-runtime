@@ -87,6 +87,16 @@ pub enum SubagentEvent {
         agent_id: AgentId,
         /// Human-readable error message.
         error: String,
+        /// Host-only process evidence. Serialization carries only a fatal
+        /// marker; the receiving host must treat the original evidence as
+        /// unavailable rather than interpreting the event as an ordinary error.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "cleanup_fatal_serde::serialize",
+            deserialize_with = "cleanup_fatal_serde::deserialize"
+        )]
+        cleanup_unverified: Option<lingxi_core::host::tool_invoker::CleanupUnverifiedReason>,
         /// Cross-turn summed usage from every SUCCESSFUL turn before the one
         /// that failed (same accumulation [`Self::Completed::cumulative_usage`]
         /// carries). Finding [9]/[11]: a `Failed` termination (provider
@@ -149,6 +159,30 @@ pub enum SubagentEvent {
         /// Shared session-agent stream index assigned to the visible row.
         message_index: u64,
     },
+}
+
+mod cleanup_fatal_serde {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<CleanupUnverifiedReason>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(value.is_some())
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<CleanupUnverifiedReason>, D::Error> {
+        if bool::deserialize(deserializer)? {
+            Ok(Some(CleanupUnverifiedReason::Message(
+                "cleanup evidence is unavailable after event serialization".into(),
+            )))
+        } else {
+            Err(serde::de::Error::custom("invalid cleanup failure marker"))
+        }
+    }
 }
 
 /// `#[serde(default = ...)]` for [`SubagentEvent::Completed::usage_complete`]
@@ -292,6 +326,8 @@ fn invocation_context_for_tool(
 }
 
 struct AgentStreamAttempt {
+    cleanup_unverified: Option<lingxi_core::host::tool_invoker::CleanupUnverifiedReason>,
+    prior_failure: Option<String>,
     response: Option<
         Result<
             (
@@ -325,6 +361,8 @@ struct AgentStreamAttempt {
 impl AgentStreamAttempt {
     fn failed(error: LlmError, request_messages: Vec<ConversationMessage>) -> Self {
         Self {
+            cleanup_unverified: None,
+            prior_failure: None,
             response: Some(Err((Vec::new(), error))),
             assistant_rows: Vec::new(),
             ordered_rows: Vec::new(),
@@ -397,6 +435,7 @@ async fn stage_assistant_row(
     retryable_body: &std::sync::atomic::AtomicBool,
     live_output_started: &std::sync::atomic::AtomicBool,
     tool_effects_started: &std::sync::atomic::AtomicBool,
+    attempt_cancellation: &CancellationToken,
     emitted_assistant_row_ids: &mut std::collections::HashSet<MessageId>,
     assistant_row_models: &mut std::collections::HashMap<MessageId, String>,
     executor: &mut live_tools::LiveAgentToolExecutor,
@@ -530,7 +569,7 @@ async fn stage_assistant_row(
             concurrency_safe,
             context: call_context,
         };
-        if defer_local_work {
+        if defer_local_work || attempt_cancellation.is_cancelled() {
             executor.add_call_deferred(call, true);
         } else {
             tool_effects_started.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -878,7 +917,10 @@ fn live_tool_result_block(
             provider_id,
             invocation,
         )),
-        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(_)) => None,
+        Err(
+            lingxi_core::host::tool_invoker::ToolInvokerError::Abort(_)
+            | lingxi_core::host::tool_invoker::ToolInvokerError::CleanupUnverified(_),
+        ) => None,
         Err(error) => Some(ContentBlock::ToolResult {
             tool_use_id: id.clone(),
             content: error.model_tool_result_content(),
@@ -1006,6 +1048,7 @@ async fn accumulate_agent_stream_live(
     retryable_body: &std::sync::atomic::AtomicBool,
     live_output_started: &std::sync::atomic::AtomicBool,
     tool_effects_started: &std::sync::atomic::AtomicBool,
+    attempt_cancellation: &CancellationToken,
     lifecycle: &std::sync::Mutex<lingxi_core::host::tool_use_lifecycle::ToolUseLifecycleTracker>,
     out_tx: &mpsc::Sender<SubagentEvent>,
 ) -> AgentStreamAttempt {
@@ -1039,6 +1082,7 @@ async fn accumulate_agent_stream_live(
 
     loop {
         enum Next {
+            Cancelled,
             Event(Option<Result<HistoryEvent, LlmError>>),
             Tool(
                 Option<(
@@ -1053,13 +1097,27 @@ async fn accumulate_agent_stream_live(
         let next = if executor.has_inflight() {
             tokio::select! {
                 biased;
+                _ = attempt_cancellation.cancelled() => Next::Cancelled,
                 completion = executor.next_completion() => Next::Tool(completion),
                 event = stream.next() => Next::Event(event),
             }
         } else {
-            Next::Event(stream.next().await)
+            tokio::select! {
+                biased;
+                _ = attempt_cancellation.cancelled() => Next::Cancelled,
+                event = stream.next() => Next::Event(event),
+            }
         };
         let item = match next {
+            Next::Cancelled => {
+                response_error = Some((
+                    accumulator.partial_content().to_vec(),
+                    LlmError::StreamInterrupted {
+                        message: "agent interrupted".into(),
+                    },
+                ));
+                break;
+            }
             Next::Tool(Some((index, result))) => {
                 if let Some(dispatch) = dispatch.as_ref() {
                     let call = executor.call(index).cloned();
@@ -1075,6 +1133,9 @@ async fn accumulate_agent_stream_live(
                     )
                     .await;
                     executor.record_completion(index, result, dispatch);
+                    if executor.cleanup_unverified().is_some() {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -1130,7 +1191,7 @@ async fn accumulate_agent_stream_live(
                 // executor owns the outstanding ids, so cancel all work and
                 // remove every tracked id even when the event's discarded
                 // list is empty or contains no tool block.
-                let removal = executor.reset_for_server_fallback(None);
+                let removal = executor.reset_for_server_fallback(None).await;
                 if let Some(removal) = removal {
                     let idle_update = lifecycle
                         .lock()
@@ -1194,7 +1255,7 @@ async fn accumulate_agent_stream_live(
                     let reason = Some(
                         lingxi_core::host::tool_use_lifecycle::ToolUseRemovalReason::FallbackSweep,
                     );
-                    if let Some(removal) = executor.reset_for_server_fallback(reason) {
+                    if let Some(removal) = executor.reset_for_server_fallback(reason).await {
                         let idle_update = lifecycle
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1202,6 +1263,9 @@ async fn accumulate_agent_stream_live(
                         publish_local_agent_idle_fact(ctx, idle_update).await;
                     }
                     prior_siblings.clear();
+                    if executor.cleanup_unverified().is_some() {
+                        break;
+                    }
                 }
                 for (row, model) in removed_rows {
                     emit_fallback_tombstone(
@@ -1261,6 +1325,7 @@ async fn accumulate_agent_stream_live(
                     retryable_body,
                     live_output_started,
                     tool_effects_started,
+                    attempt_cancellation,
                     &mut emitted_assistant_row_ids,
                     &mut assistant_row_models,
                     &mut executor,
@@ -1291,7 +1356,7 @@ async fn accumulate_agent_stream_live(
                         &fallback.event,
                     );
                     partial_response = Some(completed.clone());
-                    let removal = executor.reset_for_server_fallback(None);
+                    let removal = executor.reset_for_server_fallback(None).await;
                     if let Some(removal) = removal {
                         let idle_update = lifecycle
                             .lock()
@@ -1365,6 +1430,7 @@ async fn accumulate_agent_stream_live(
                         retryable_body,
                         live_output_started,
                         tool_effects_started,
+                        attempt_cancellation,
                         &mut emitted_assistant_row_ids,
                         &mut assistant_row_models,
                         &mut executor,
@@ -1402,7 +1468,10 @@ async fn accumulate_agent_stream_live(
                         live_output_started,
                     )
                     .await;
-                    if let Some(dispatch) = dispatch.as_ref() {
+                    if let Some(dispatch) = dispatch
+                        .as_ref()
+                        .filter(|_| !attempt_cancellation.is_cancelled())
+                    {
                         executor.start_queued_calls(dispatch);
                     }
                 }
@@ -1417,10 +1486,8 @@ async fn accumulate_agent_stream_live(
     }
 
     if response_error.is_some() || declined_fallback.is_some() {
-        // The Native query finalizer drains completed results before it
-        // discards the executor. Preserve every future already ready at this
-        // boundary, cancel the rest before dropping them, and do not start
-        // queued calls while handling a failed provider stream.
+        // Preserve results already ready at the boundary, cancel and join all
+        // started calls, and retain any late unverified cleanup outcome.
         let completed = executor.abort_inflight_and_collect_ready().await;
         for (index, result) in completed {
             let call = executor.call(index).cloned();
@@ -1441,7 +1508,7 @@ async fn accumulate_agent_stream_live(
             // Calls held for host-side response qualification have never run.
             // Clear their pending lifecycle ids on this failed attempt without
             // manufacturing ToolResults for effects that were never started.
-            if let Some(removal) = executor.reset_for_server_fallback(None) {
+            if let Some(removal) = executor.reset_for_server_fallback(None).await {
                 let idle_update = lifecycle
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1451,25 +1518,43 @@ async fn accumulate_agent_stream_live(
         }
     } else if let Some(dispatch) = dispatch.as_ref() {
         while executor.has_inflight() {
-            if let Some((index, result)) = executor.next_completion().await {
+            let completion = tokio::select! {
+                biased;
+                _ = attempt_cancellation.cancelled() => {
+                    let completed = executor.abort_inflight_and_collect_ready().await;
+                    for (index, result) in completed {
+                        executor.record_completion_without_scheduling(index, result);
+                    }
+                    break;
+                }
+                completion = executor.next_completion() => completion,
+            };
+            if let Some((index, result)) = completion {
                 let call = executor.call(index).cloned();
-                publish_live_tool_completion(
-                    call,
-                    &result,
-                    ctx,
-                    out_tx,
-                    &mut ordered_rows,
-                    &mut je_rows,
-                    &mut early_tool_result_ids,
-                    lifecycle,
-                )
-                .await;
+                if !executor.cancellation_requested() {
+                    publish_live_tool_completion(
+                        call,
+                        &result,
+                        ctx,
+                        out_tx,
+                        &mut ordered_rows,
+                        &mut je_rows,
+                        &mut early_tool_result_ids,
+                        lifecycle,
+                    )
+                    .await;
+                }
                 executor.record_completion(index, result, dispatch);
             }
         }
         executor.mark_completed_normally();
     }
+    let cleanup_unverified = executor.cleanup_unverified().cloned();
     let tool_calls = executor.into_calls();
+    let prior_failure = response_error
+        .as_ref()
+        .map(|(_, error)| error.to_string())
+        .or_else(|| declined_fallback.clone());
     let response = if declined_fallback.is_some() {
         None
     } else {
@@ -1488,6 +1573,8 @@ async fn accumulate_agent_stream_live(
         partial_response = Some(accumulator.partial_snapshot());
     }
     AgentStreamAttempt {
+        cleanup_unverified,
+        prior_failure,
         response,
         assistant_rows,
         ordered_rows,
@@ -1727,9 +1814,14 @@ pub async fn run_subagent(
     snapshot_cleanup.completed = true;
 }
 
+struct AgentInputCleanupError {
+    message: String,
+    cleanup_unverified: Option<lingxi_core::host::tool_invoker::CleanupUnverifiedReason>,
+}
+
 fn cleanup_agent_inputs(
     ctx: &SubagentContext,
-) -> llm_runtime::BoxFuture<'static, Result<(), String>> {
+) -> llm_runtime::BoxFuture<'static, Result<(), AgentInputCleanupError>> {
     let owner = ctx
         .tool_invoker
         .clone()
@@ -1739,10 +1831,23 @@ fn cleanup_agent_inputs(
             for attempt in 0..3 {
                 match invoker.cleanup_computer_inputs(agent_id, session_id).await {
                     Ok(()) => return Ok(()),
+                    Err(lingxi_core::host::tool_invoker::ToolInvokerError::CleanupUnverified(
+                        reason,
+                    )) => {
+                        return Err(AgentInputCleanupError {
+                            message: format!(
+                                "Computer input cleanup failed for Agent {agent_id}: {reason}. The desktop remains reserved until this owner's inputs are released."
+                            ),
+                            cleanup_unverified: Some(reason),
+                        });
+                    }
                     Err(error) if attempt == 2 => {
-                        return Err(format!(
-                            "Computer input cleanup failed for Agent {agent_id}: {error}. The desktop remains reserved until this owner's inputs are released."
-                        ));
+                        return Err(AgentInputCleanupError {
+                            message: format!(
+                                "Computer input cleanup failed for Agent {agent_id}: {error}. The desktop remains reserved until this owner's inputs are released."
+                            ),
+                            cleanup_unverified: None,
+                        });
                     }
                     Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
                 }
@@ -1899,7 +2004,16 @@ async fn run_subagent_inner(
                         SubagentEvent::Completed { result, .. } => {
                             Some(("completed", completed_result_text(result)))
                         }
-                        SubagentEvent::Failed { .. } => Some(("failed", None)),
+                        SubagentEvent::Failed {
+                            cleanup_unverified: None,
+                            ..
+                        } => Some(("failed", None)),
+                        // Hooks may themselves start work. Until cleanup is
+                        // verified they must not run for this fatal outcome.
+                        SubagentEvent::Failed {
+                            cleanup_unverified: Some(_),
+                            ..
+                        } => None,
                         // Killed does not fire SubagentStop (claude: an aborted
                         // child throws before reaching its stop hooks).
                         SubagentEvent::Killed { .. } => None,
@@ -3181,11 +3295,53 @@ async fn emit_failed(
     hook_usage: &llm_runtime::ExecutionUsage,
     hook_model_selection: &hooks::HookModelSelection,
 ) {
+    emit_failed_with_cleanup(
+        ctx,
+        out_tx,
+        transcript,
+        history,
+        written,
+        agent_id,
+        error,
+        cumulative_usage,
+        hook_usage,
+        hook_model_selection,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn emit_failed_with_cleanup(
+    ctx: &SubagentContext,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    transcript: Option<&crate::transcript::AgentTranscriptWriter>,
+    history: &mut [lingxi_core::types::ConversationMessage],
+    written: &mut usize,
+    agent_id: AgentId,
+    error: String,
+    cumulative_usage: llm_runtime::ExecutionUsage,
+    hook_usage: &llm_runtime::ExecutionUsage,
+    hook_model_selection: &hooks::HookModelSelection,
+    mut cleanup_unverified: Option<lingxi_core::host::tool_invoker::CleanupUnverifiedReason>,
+) {
     flush_transcript(transcript, history, written).await;
     emit_transcript_snapshot(out_tx, agent_id, history).await;
     let error = match cleanup_agent_inputs(ctx).await {
         Ok(()) => error,
-        Err(cleanup_error) => format!("{error}; {cleanup_error}"),
+        Err(cleanup_error) => {
+            if let Some(reason) = cleanup_error.cleanup_unverified {
+                cleanup_unverified = Some(match cleanup_unverified {
+                    Some(previous) => {
+                        lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Multiple(vec![
+                            previous, reason,
+                        ])
+                    }
+                    None => reason,
+                });
+            }
+            format!("{error}; {}", cleanup_error.message)
+        }
     };
     if let Some(writer) = transcript {
         let _ = writer.record_terminal("failed", Some(&error)).await;
@@ -3200,6 +3356,7 @@ async fn emit_failed(
         .send(SubagentEvent::Failed {
             agent_id,
             error,
+            cleanup_unverified,
             cumulative_usage,
         })
         .await;
@@ -3252,13 +3409,14 @@ async fn cleanup_before_terminal(
 ) -> bool {
     if let Err(error) = cleanup_agent_inputs(ctx).await {
         if let Some(writer) = transcript {
-            let _ = writer.record_terminal("failed", Some(&error)).await;
+            let _ = writer.record_terminal("failed", Some(&error.message)).await;
         }
         publish_prompt_hook_transcript(ctx, history, hook_usage, hook_model_selection);
         let _ = out_tx
             .send(SubagentEvent::Failed {
                 agent_id: ctx.agent_id,
-                error,
+                error: error.message,
+                cleanup_unverified: error.cleanup_unverified,
                 cumulative_usage,
             })
             .await;
@@ -3707,11 +3865,15 @@ async fn run_subagent_loop(
             Ok(messages) => history.extend(messages),
             Err(error) => {
                 emit_transcript_snapshot(&out_tx, agent_id, history).await;
-                let error = match cleanup_agent_inputs(&ctx).await {
-                    Ok(()) => format!("Could not preload agent skills: {error}"),
-                    Err(cleanup_error) => {
-                        format!("Could not preload agent skills: {error}; {cleanup_error}")
-                    }
+                let (error, cleanup_unverified) = match cleanup_agent_inputs(&ctx).await {
+                    Ok(()) => (format!("Could not preload agent skills: {error}"), None),
+                    Err(cleanup_error) => (
+                        format!(
+                            "Could not preload agent skills: {error}; {}",
+                            cleanup_error.message
+                        ),
+                        cleanup_error.cleanup_unverified,
+                    ),
                 };
                 publish_prompt_hook_transcript(
                     &ctx,
@@ -3723,6 +3885,7 @@ async fn run_subagent_loop(
                     .send(SubagentEvent::Failed {
                         agent_id,
                         error,
+                        cleanup_unverified,
                         cumulative_usage: llm_runtime::ExecutionUsage::default(),
                     })
                     .await;
@@ -4251,6 +4414,8 @@ async fn run_subagent_loop(
                     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let tool_effects_started =
                     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let attempt_cancellation = CancellationToken::new();
+                let mut interrupted = false;
                 // (M9) A wake message injected below rides into the next
                 // round-trip as a user turn. The runner is already active here.
                 if let Some(content) = wake_message.take() {
@@ -4469,6 +4634,7 @@ async fn run_subagent_loop(
                         &retryable_body,
                         &live_output_started,
                         &tool_effects_started,
+                        &attempt_cancellation,
                         local_agent_tool_uses.as_ref(),
                         &out_tx,
                     )
@@ -4495,6 +4661,11 @@ async fn run_subagent_loop(
                                 match ev {
                                     Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                                         if let Some(turn) = mod_turn.as_mut() { turn.aborted(); }
+                                        if tool_effects_started.load(std::sync::atomic::Ordering::Relaxed) {
+                                            interrupted = true;
+                                            attempt_cancellation.cancel();
+                                            break api_call.await;
+                                        }
                                         emit_killed(&ctx, &out_tx, transcript.as_ref(), history,
                                             &mut transcript_written, agent_id, &last_usage, live_hook_model_selection,).await;
                                         return;
@@ -4545,6 +4716,11 @@ async fn run_subagent_loop(
                                         if let Some(executor) = &ctx.hook_executor {
                                             executor.discard_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id, ctx.subagent_stop_firer.as_ref());
                                         }
+                                        if tool_effects_started.load(std::sync::atomic::Ordering::Relaxed) {
+                                            interrupted = true;
+                                            attempt_cancellation.cancel();
+                                            break api_call.await;
+                                        }
                                         emit_killed(&ctx,
                                             &out_tx,
                                             transcript.as_ref(),
@@ -4589,6 +4765,38 @@ async fn run_subagent_loop(
                     }
                 };
 
+                if interrupted {
+                    if let Some(reason) = attempt_result.cleanup_unverified {
+                        emit_failed_with_cleanup(
+                            &ctx,
+                            &out_tx,
+                            transcript.as_ref(),
+                            history,
+                            &mut transcript_written,
+                            agent_id,
+                            reason.to_string(),
+                            cumulative_usage.clone(),
+                            &last_usage,
+                            live_hook_model_selection,
+                            Some(reason),
+                        )
+                        .await;
+                    } else {
+                        emit_killed(
+                            &ctx,
+                            &out_tx,
+                            transcript.as_ref(),
+                            history,
+                            &mut transcript_written,
+                            agent_id,
+                            &last_usage,
+                            live_hook_model_selection,
+                        )
+                        .await;
+                    }
+                    return;
+                }
+
                 if mod_step_active {
                     let completed = if let Some(turn) = mod_turn.as_mut() {
                         turn.drain_physical()
@@ -4609,7 +4817,8 @@ async fn run_subagent_loop(
                     let interrupted_body = retry_response_body
                         && matches!(error.classification_source(), LlmError::Transport { .. })
                         && stream_opened.load(std::sync::atomic::Ordering::Relaxed);
-                    if attempt_result.declined_fallback.is_none()
+                    if attempt_result.cleanup_unverified.is_none()
+                        && attempt_result.declined_fallback.is_none()
                         && !live_output_started.load(std::sync::atomic::Ordering::Relaxed)
                         && (is_workflow_watchdog_timeout(error) || interrupted_body)
                         && (!retry_response_body
@@ -4664,6 +4873,44 @@ async fn run_subagent_loop(
                     }
                 }
                 first_visible_response = false;
+                if let Some(mut reason) = pending_attempt.cleanup_unverified.take() {
+                    let mut assistant_rows = std::mem::take(&mut pending_attempt.assistant_rows);
+                    let je_rows = std::mem::take(&mut pending_attempt.je_rows);
+                    append_live_stream_rows(
+                        std::mem::take(&mut pending_attempt.ordered_rows),
+                        &je_rows,
+                        &mut assistant_rows,
+                        transcript.as_ref(),
+                        history,
+                        &mut transcript_written,
+                        None,
+                    )
+                    .await;
+                    if let Some(prior) = pending_attempt.prior_failure.take() {
+                        reason = reason.with_context(
+                            lingxi_core::host::tool_invoker::PriorFailureContext::from_text(
+                                lingxi_core::host::tool_invoker::PriorFailureOrigin::Provider,
+                                &prior,
+                            ),
+                        );
+                    }
+                    let error = reason.to_string();
+                    emit_failed_with_cleanup(
+                        &ctx,
+                        &out_tx,
+                        transcript.as_ref(),
+                        history,
+                        &mut transcript_written,
+                        agent_id,
+                        error,
+                        cumulative_usage.clone(),
+                        &last_usage,
+                        live_hook_model_selection,
+                        Some(reason),
+                    )
+                    .await;
+                    return;
+                }
                 if let Some(error) = pending_attempt.declined_fallback.take() {
                     let mut declined_assistant_rows =
                         std::mem::take(&mut pending_attempt.assistant_rows);
@@ -5505,6 +5752,27 @@ async fn run_subagent_loop(
                                 .await;
                                 return;
                             }
+                            Err(
+                                lingxi_core::host::tool_invoker::ToolInvokerError::CleanupUnverified(
+                                    reason,
+                                ),
+                            ) => {
+                                emit_failed_with_cleanup(
+                                    &ctx,
+                                    &out_tx,
+                                    transcript.as_ref(),
+                                    history,
+                                    &mut transcript_written,
+                                    agent_id,
+                                    reason.to_string(),
+                                    cumulative_usage.clone(),
+                                    &last_usage,
+                                    live_hook_model_selection,
+                                    Some(reason),
+                                )
+                                .await;
+                                return;
+                            }
                             Err(error) => {
                                 if !early_tool_result_ids.contains(tool_use_id) {
                                     tool_results.push(ContentBlock::ToolResult {
@@ -5844,6 +6112,11 @@ async fn run_subagent_loop(
                         || (force_structured_tool.is_some() && structured_parse_retry_cap > 0);
                     let next_lifecycle = local_agent_tool_uses.clone();
                     let next_out_tx = out_tx.clone();
+                    let next_cancellation = CancellationToken::new();
+                    let response_cancellation = next_cancellation.clone();
+                    let next_tool_effects_started =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let response_effects_started = next_tool_effects_started.clone();
                     let next_response = async move {
                         let first = remainder.next().await?;
                         let stream = futures::stream::once(async move { first })
@@ -5851,7 +6124,6 @@ async fn run_subagent_loop(
                             .boxed();
                         let next_retryable_body = std::sync::atomic::AtomicBool::new(true);
                         let next_live_output_started = std::sync::atomic::AtomicBool::new(false);
-                        let next_tool_effects_started = std::sync::atomic::AtomicBool::new(false);
                         Some(
                             accumulate_agent_stream_live(
                                 stream,
@@ -5868,7 +6140,8 @@ async fn run_subagent_loop(
                                 next_defer_local_work,
                                 &next_retryable_body,
                                 &next_live_output_started,
-                                &next_tool_effects_started,
+                                &response_effects_started,
+                                &response_cancellation,
                                 next_lifecycle.as_ref(),
                                 &next_out_tx,
                             )
@@ -5886,6 +6159,20 @@ async fn run_subagent_loop(
                                     match event {
                                         Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                                             if let Some(turn) = mod_turn.as_mut() { turn.aborted(); }
+                                            if next_tool_effects_started.load(std::sync::atomic::Ordering::Relaxed) {
+                                                next_cancellation.cancel();
+                                                if let Some(attempt) = next_response.await {
+                                                    if let Some(reason) = attempt.cleanup_unverified {
+                                                        emit_failed_with_cleanup(
+                                                            &ctx, &out_tx, transcript.as_ref(), history,
+                                                            &mut transcript_written, agent_id, reason.to_string(),
+                                                            cumulative_usage.clone(), &last_usage, live_hook_model_selection,
+                                                            Some(reason),
+                                                        ).await;
+                                                        return;
+                                                    }
+                                                }
+                                            }
                                             emit_killed(&ctx, &out_tx, transcript.as_ref(), history,
                                                 &mut transcript_written, agent_id, &last_usage, live_hook_model_selection,).await;
                                             return;

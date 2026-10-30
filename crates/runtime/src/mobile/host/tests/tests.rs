@@ -7,6 +7,8 @@ include!("../reasoning_preference_tests.rs");
 mod attach_recovery_tests;
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
+#[path = "bash_payload_tests.rs"]
+mod bash_payload_tests;
 #[path = "device_tools_tests.rs"]
 mod device_tools_tests;
 #[path = "mod_origin_tests.rs"]
@@ -15,6 +17,8 @@ mod mod_origin_tests;
 mod prompt_hooks_recovery_tests;
 #[path = "prompt_suggestion_tests.rs"]
 mod prompt_suggestion_tests;
+#[path = "real_shell_runner_tests.rs"]
+mod real_shell_runner_tests;
 #[path = "turn_step_recovery_tests.rs"]
 mod turn_step_recovery_tests;
 use std::collections::HashMap;
@@ -5767,8 +5771,8 @@ impl MobileBashProcess {
 struct InterruptibleMobileBashProcess {
     commands: StdMutex<Vec<String>>,
     started: Notify,
-    release: Notify,
-    joined: AtomicBool,
+    release: Arc<Notify>,
+    joined: Arc<AtomicBool>,
     killed_owner: StdMutex<Option<String>>,
 }
 
@@ -5776,13 +5780,25 @@ struct InterruptibleMobileBashProcess {
 struct GatedCancelMobileBashProcess {
     commands: StdMutex<Vec<String>>,
     started: Notify,
-    stop_started: Notify,
-    allow_stop: Notify,
-    stopped: Notify,
+    stop_started: Arc<Notify>,
+    allow_stop: Arc<Notify>,
+    stop_request: Arc<Notify>,
+}
+
+struct NotifyOnDrop(Arc<Notify>);
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 #[async_trait]
 impl lingxi_core::host::ProcessRunner for GatedCancelMobileBashProcess {
+    fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
         command: &lingxi_core::host::SandboxedCommand,
@@ -5791,8 +5807,25 @@ impl lingxi_core::host::ProcessRunner for GatedCancelMobileBashProcess {
             .lock()
             .unwrap()
             .push(command.inner().args.last().cloned().unwrap_or_default());
+        // This fake has no OS process. Its separate worker models ownership
+        // across engine-runtime destruction and holds the exact command guard.
+        let guard = command.lifetime_guard().cloned().expect("turn guard");
+        let receipt = command.cleanup_receipt().cloned().expect("cleanup receipt");
+        let stop = self.stop_request.clone();
+        let stop_started = self.stop_started.clone();
+        let allow_stop = self.allow_stop.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        super::mobile_automation_runtime().spawn(async move {
+            let _guard = guard;
+            stop.notified().await;
+            stop_started.notify_one();
+            allow_stop.notified().await;
+            receipt.mark_verified();
+            let _ = result_tx.send(());
+        });
+        let _drop_cancel = NotifyOnDrop(self.stop_request.clone());
         self.started.notify_one();
-        self.stopped.notified().await;
+        let _ = result_rx.await;
         Ok(mobile_linux_api::ProcessOutput {
             stdout: "partial stdout".into(),
             stderr: "partial stderr".into(),
@@ -5816,9 +5849,7 @@ impl lingxi_core::host::ProcessRunner for GatedCancelMobileBashProcess {
     }
 
     async fn kill_owner_processes(&self, _: &str) -> Vec<u32> {
-        self.stop_started.notify_one();
-        self.allow_stop.notified().await;
-        self.stopped.notify_one();
+        self.stop_request.notify_one();
         vec![42]
     }
 
@@ -5830,12 +5861,270 @@ impl lingxi_core::host::ProcessRunner for GatedCancelMobileBashProcess {
 #[derive(Default)]
 struct TimedOutMobileBashProcess;
 
+/// Simulates a platform quarantine without creating an actual OS process.
+#[derive(Default)]
+struct UnverifiedMobileBashProcess {
+    guard: StdMutex<Option<lingxi_core::host::sandbox::BackendPlanHandle>>,
+    wait_for_cancel: bool,
+    started: Notify,
+    release: Notify,
+}
+
+#[tokio::test]
+async fn incomplete_shell_result_stays_user_gated_without_a_completed_bash_result() {
+    use tool_api::ProcessTreeStatus::{Unverified, VerifiedReaped};
+    for (statuses, detail_truncated, original_truncated) in [
+        (vec![VerifiedReaped], false, false),
+        (vec![Unverified], true, false),
+        (vec![VerifiedReaped, VerifiedReaped], false, true),
+        (vec![VerifiedReaped, Unverified], true, true),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = super::DurableTurnStore::new(tmp.path().join("turns"));
+        store
+            .admit_queued_prompt(
+                "session",
+                Some(256),
+                Some(256),
+                source_text("printf partial"),
+                Some(client::protocol::commands::PromptModeDto::Bash),
+                vec![],
+            )
+            .unwrap();
+        store.claim_queued_bash("session", 256, true).unwrap();
+        let turn = Arc::new(super::ActiveTurn::new_owned(Some(256), "session".into(), 1));
+        let listener = Arc::new(FakeListener::default());
+        let sink = ListenerSink::arc(listener.clone());
+        let all_verified = statuses.iter().all(|status| *status == VerifiedReaped);
+        let mut reasons: Vec<tool_api::CleanupUnverifiedReason> = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, tree_status)| {
+                let observation = tool_api::UnverifiedCleanupOutput::new(
+                    tool_api::UnverifiedCleanupOutputParts {
+                        session_id: Some(format!("raw-session-{index}")),
+                        stdout: "partial stdout".into(),
+                        stderr: "partial stderr".into(),
+                        stdout_truncated: false,
+                        stderr_truncated: true,
+                        stdout_eof: true,
+                        stderr_eof: false,
+                        exit_code: None,
+                        timed_out: true,
+                        termination_requested: true,
+                        tree_status,
+                        cleanup_detail: if index == 0 && detail_truncated {
+                            "d".repeat(tool_api::MAX_UNVERIFIED_METADATA_CHARS + 1)
+                        } else {
+                            "missing exit status".into()
+                        },
+                        original_error: Some(if index == 0 && original_truncated {
+                            "e".repeat(tool_api::MAX_UNVERIFIED_METADATA_CHARS + 1)
+                        } else {
+                            "read failed".into()
+                        }),
+                    },
+                );
+                Box::new(observation).into()
+            })
+            .collect();
+        let reason = if reasons.len() == 1 {
+            reasons.pop().unwrap()
+        } else {
+            tool_api::CleanupUnverifiedReason::Multiple(reasons)
+        };
+        super::report_cleanup_unverified(&turn, &store, &sink, &reason).await;
+
+        let checkpoint = store.load("session", 256).unwrap();
+        assert_eq!(
+            checkpoint.state,
+            Some(client::protocol::events::TurnRecoveryStateDto::WaitingForUser)
+        );
+        assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::BashClaimed);
+        assert!(!checkpoint.safe_to_resume);
+        assert!(checkpoint.bash_result.is_none());
+        assert!(turn.cleanup_unverified.load(Ordering::Acquire));
+        let (kind, notice) = if all_verified {
+            ("shell_result_incomplete", "Shell result is incomplete")
+        } else {
+            (
+                "shell_cleanup_unverified",
+                "Shell cleanup could not be verified",
+            )
+        };
+        assert!(checkpoint
+            .reason
+            .as_deref()
+            .is_some_and(|text| text.starts_with(kind)));
+        let expected_suffix = match (detail_truncated, original_truncated) {
+            (false, false) => "",
+            (true, false) => " [cleanup detail truncated]",
+            (false, true) => " [original error truncated]",
+            (true, true) => " [cleanup detail and original error truncated]",
+        };
+        assert!(checkpoint
+            .reason
+            .as_deref()
+            .unwrap()
+            .ends_with(expected_suffix));
+        assert!(listener.received.lock().await.iter().any(|event| matches!(event,
+            ClientEvent::SystemNotice { message, is_error: true } if message.display().starts_with(notice))));
+    }
+}
+
 #[async_trait]
-impl lingxi_core::host::ProcessRunner for TimedOutMobileBashProcess {
+impl lingxi_core::host::ProcessRunner for UnverifiedMobileBashProcess {
+    fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
-        _command: &lingxi_core::host::SandboxedCommand,
+        command: &lingxi_core::host::SandboxedCommand,
     ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        *self.guard.lock().unwrap() = command.lifetime_guard().cloned();
+        assert!(self.guard.lock().unwrap().is_some());
+        if self.wait_for_cancel {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        command
+            .cleanup_receipt()
+            .unwrap()
+            .mark_unverified("fake close failed".into());
+        Err(mobile_linux_api::ProcessError::Io(
+            "fake close failed".into(),
+        ))
+    }
+    async fn spawn_background(
+        &self,
+        _: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
+    }
+    async fn kill(
+        &self,
+        _: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), mobile_linux_api::ProcessError> {
+        Ok(())
+    }
+    async fn kill_owner_processes(&self, _: &str) -> Vec<u32> {
+        self.release.notify_one();
+        Vec::new()
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn unverified_mobile_bash_cleanup_retains_claim_and_session_owner() {
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let process = Arc::new(UnverifiedMobileBashProcess::default());
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    let handle = new_engine_with_streaming(
+        config,
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(process.clone())
+                .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+        ),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle.submit(ClientCommand::SendPrompt {
+            session_id: Some(session_id.clone()), text: "printf quarantine".into(),
+            prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash), images: Vec::new(), turn_id: Some(259),
+            visualization_context: None,
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if handle.active_cancel.lock().await.is_none() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("failed tool unwinds");
+        let checkpoint = handle.durable_turns.load(&session_id, 259).unwrap();
+        assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::WaitingForUser));
+        assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::BashClaimed);
+        assert!(!checkpoint.safe_to_resume && checkpoint.bash_result.is_none());
+        assert!(checkpoint.reason.as_deref().is_some_and(|reason| reason.contains("fake close failed")));
+        assert!(matches!(handle.submit(ClientCommand::ResumeTurn { session_id: session_id.clone(), turn_id: 259 }).await,
+            Err(ClientError::Rejected { .. })));
+        assert!(listener.received.lock().await.iter().any(|event| matches!(event,
+            ClientEvent::SystemNotice { message, is_error: true } if message.display().contains("fake close failed"))));
+        // Explicitly drop the fake quarantine only after proving the fence; it
+        // does not prove that a real mobile guest stopped.
+        process.guard.lock().unwrap().take();
+    });
+}
+
+#[test]
+fn cancelling_mobile_bash_with_unverified_cleanup_never_terminalizes_the_claim() {
+    use crate::mobile::test_support::{
+        new_engine_with_streaming, test_config, FakeProcessAdmittingSandbox,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let process = Arc::new(UnverifiedMobileBashProcess {
+        wait_for_cancel: true,
+        ..Default::default()
+    });
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
+    let mut config = test_config(tmp.path());
+    config.enable_mobile_linux_shell();
+    let handle = new_engine_with_streaming(
+        config,
+        Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_process_runner(process.clone())
+                .with_sandbox(Arc::new(FakeProcessAdmittingSandbox)),
+        ),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle.submit(ClientCommand::SendPrompt {
+            session_id: Some(session_id.clone()), text: "printf quarantine".into(),
+            prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash), images: Vec::new(),
+            turn_id: Some(261), visualization_context: None,
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), process.started.notified()).await.unwrap();
+        let result = handle.submit(ClientCommand::Cancel { session_id: Some(session_id.clone()), turn_id: Some(261) }).await;
+        assert!(matches!(result, Err(ClientError::Internal { .. })));
+        let checkpoint = handle.durable_turns.load(&session_id, 261).unwrap();
+        assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::WaitingForUser));
+        assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::BashClaimed);
+        assert!(!checkpoint.safe_to_resume && checkpoint.bash_result.is_none());
+        assert!(!listener.received.lock().await.iter().any(|event| matches!(event,
+            ClientEvent::TurnRecoveryState { snapshot } if snapshot.turn_id == 261 && snapshot.state == TurnRecoveryStateDto::Cancelled)));
+        process.guard.lock().unwrap().take();
+    });
+}
+
+#[async_trait]
+impl lingxi_core::host::ProcessRunner for TimedOutMobileBashProcess {
+    fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+        true
+    }
+
+    async fn run(
+        &self,
+        command: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        command.cleanup_receipt().unwrap().mark_verified();
         Ok(mobile_linux_api::ProcessOutput {
             stdout: "timeout partial output".into(),
             stderr: "timeout partial error".into(),
@@ -5874,19 +6163,37 @@ impl InterruptibleMobileBashProcess {
 
 #[async_trait]
 impl lingxi_core::host::ProcessRunner for InterruptibleMobileBashProcess {
+    fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
         command: &lingxi_core::host::SandboxedCommand,
     ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        let receipt = command.cleanup_receipt().cloned().expect("cleanup receipt");
+        let guard = command.lifetime_guard().cloned().expect("turn guard");
         let command = command.inner().args.last().cloned().unwrap_or_default();
         self.commands
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(command.clone());
         if command == "printf interrupted-mobile-bash" {
+            let release = self.release.clone();
+            let joined = self.joined.clone();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            super::mobile_automation_runtime().spawn(async move {
+                let _guard = guard;
+                release.notified().await;
+                joined.store(true, Ordering::Release);
+                receipt.mark_verified();
+                let _ = result_tx.send(());
+            });
+            let _drop_cancel = NotifyOnDrop(self.release.clone());
             self.started.notify_one();
-            self.release.notified().await;
-            self.joined.store(true, Ordering::Release);
+            let _ = result_rx.await;
+        } else {
+            receipt.mark_verified();
         }
         Ok(mobile_linux_api::ProcessOutput {
             stdout: "partial stdout".into(),
@@ -6194,6 +6501,25 @@ fn dropping_running_bash_never_replays_its_uncertain_command() {
             })
             .await
             .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            process.stop_started.notified(),
+        )
+        .await
+        .expect("dropping the engine requests the independent fake cleanup");
+        assert!(
+            matches!(
+                resumed
+                    .submit(ClientCommand::ResumeTurn {
+                        session_id: resumed.active_session_id(),
+                        turn_id: 260,
+                    })
+                    .await,
+                Err(ClientError::Rejected { .. })
+            ),
+            "the original session owner remains fenced while cleanup is pending"
+        );
+        process.allow_stop.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
                 match resumed
@@ -6400,6 +6726,10 @@ fn install_mobile_bash_probe_hooks(root: &std::path::Path, respond_to_bash: bool
 
 #[async_trait]
 impl lingxi_core::host::ProcessRunner for MobileBashProcess {
+    fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
         command: &lingxi_core::host::SandboxedCommand,
@@ -6409,6 +6739,7 @@ impl lingxi_core::host::ProcessRunner for MobileBashProcess {
             .lock()
             .unwrap()
             .push(inner.args.last().cloned().unwrap_or_default());
+        command.cleanup_receipt().unwrap().mark_verified();
         Ok(mobile_linux_api::ProcessOutput {
             stdout: "mobile stdout".into(),
             stderr: "mobile stderr".into(),
@@ -9675,6 +10006,7 @@ fn cancelled_owner_rejects_side_effect_admission_without_internal_error() {
         super::report_owned_turn_error(
             &handle.inner.orchestrator,
             &turn,
+            &handle.durable_turns,
             &handle.event_sink,
             &handle.inner.message_output,
             &orchestrator::OrchestratorError::RecoveryInterrupted,
@@ -10972,6 +11304,167 @@ fn dropping_live_mobile_engine_requests_lifecycle_quiesce() {
     assert!(turn.cancel.is_cancelled());
     assert!(turn.is_quiescing());
     assert_eq!(reason.get(), CancelReason::LifecyclePause);
+}
+
+#[test]
+fn failed_owner_publishes_unverified_cleanup_before_joiner_notifies_waiters() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    for abort in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (handle, _) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            let owner = handle.reserve_turn(Some(276)).await.unwrap();
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let task_entered = entered.clone();
+            let task_release = release.clone();
+            let task = tokio::spawn(async move {
+                task_entered.notify_one();
+                task_release.notified().await;
+                panic!("injected owner task failure");
+            });
+            let abort_handle = task.abort_handle();
+            owner.set_task_handle(task);
+            entered.notified().await;
+
+            // The first waiter takes the JoinHandle; the second must observe the
+            // same cleanup outcome through the shared completion notification.
+            let mut first = Box::pin(handle.wait_for_turn_release(&owner, false));
+            assert!(poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending());
+            let mut second = Box::pin(handle.wait_for_turn_release(&owner, false));
+            assert!(poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending());
+            if abort {
+                abort_handle.abort();
+            } else {
+                release.notify_one();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(first, second);
+            })
+            .await
+            .unwrap();
+            assert!(owner.cleanup_unverified.load(Ordering::Acquire));
+            assert!(owner.completed.load(Ordering::Acquire));
+            assert!(handle.active_cancel.lock().await.is_none());
+        });
+    }
+}
+
+#[test]
+fn cancel_does_not_terminalize_after_owner_task_panics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, listener) = build_submit_handle(tmp.path());
+
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .durable_turns
+            .begin(&session_id, 277, "prompt".into(), None, Vec::new())
+            .unwrap();
+        handle
+            .durable_turns
+            .transition(&session_id, 277, TurnRecoveryStateDto::Running, false, None)
+            .unwrap();
+        let owner = handle.reserve_turn(Some(277)).await.unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let task_entered = entered.clone();
+        let task_release = release.clone();
+        owner.set_task_handle(tokio::spawn(async move {
+            task_entered.notify_one();
+            task_release.notified().await;
+            panic!("injected owner task failure");
+        }));
+        entered.notified().await;
+
+        let cancelling_handle = handle.clone();
+        let cancel_session = session_id.clone();
+        let cancel = tokio::spawn(async move {
+            cancelling_handle
+                .submit(ClientCommand::Cancel {
+                    session_id: Some(cancel_session),
+                    turn_id: Some(277),
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), owner.cancel.cancelled())
+            .await
+            .unwrap();
+        release.notify_one();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("cleanup could not be verified"));
+        let checkpoint = handle.durable_turns.load(&session_id, 277).unwrap();
+        assert_ne!(checkpoint.state, Some(TurnRecoveryStateDto::Cancelled));
+        assert!(!checkpoint.safe_to_resume);
+        assert!(!listener.received.lock().await.iter().any(|event| matches!(
+            projected_turn_event(event),
+            ClientEvent::TurnEnded {
+                outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
+                ..
+            }
+        )));
+    });
+}
+
+#[test]
+fn cancel_after_terminal_claim_still_reports_unverified_owner_cleanup() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(tmp.path());
+
+    handle.runtime().block_on(async {
+        let session_id = handle.active_session_id();
+        handle
+            .durable_turns
+            .begin(&session_id, 278, "prompt".into(), None, Vec::new())
+            .unwrap();
+        handle
+            .durable_turns
+            .transition(&session_id, 278, TurnRecoveryStateDto::Completed, false, None)
+            .unwrap();
+        let owner = handle.reserve_turn(Some(278)).await.unwrap();
+        owner.terminal_emitted.store(true, Ordering::Release);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let task_entered = entered.clone();
+        let task_release = release.clone();
+        owner.set_task_handle(tokio::spawn(async move {
+            task_entered.notify_one();
+            task_release.notified().await;
+            panic!("injected owner task failure after terminal claim");
+        }));
+        entered.notified().await;
+
+        let mut cancel = Box::pin(handle.cancel_active_turn(&session_id, Some(278)));
+        assert!(poll_fn(|cx| Poll::Ready(cancel.as_mut().poll(cx)))
+            .await
+            .is_pending());
+        assert!(owner.task.lock().unwrap().is_none());
+        assert!(!owner.cancel.is_cancelled());
+        release.notify_one();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), cancel)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("cleanup could not be verified"));
+        assert_eq!(
+            handle.durable_turns.load(&session_id, 278).unwrap().state,
+            Some(TurnRecoveryStateDto::Completed)
+        );
+        assert!(!owner.cancel.is_cancelled());
+    });
 }
 
 #[test]

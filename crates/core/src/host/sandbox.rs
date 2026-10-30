@@ -176,6 +176,358 @@ impl std::fmt::Debug for BackendPlanHandle {
     }
 }
 
+/// Trusted process-owner acknowledgement, independent of process output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessCleanupStatus {
+    /// No final cleanup acknowledgement has arrived.
+    Pending,
+    /// The platform verified cleanup, or that no process was started.
+    Verified,
+    /// The platform cannot establish that cleanup completed.
+    Unverified(String),
+}
+
+/// One immutable view of cleanup status and any incomplete-output observation.
+#[derive(Debug, Clone)]
+pub struct ProcessCleanupSnapshot {
+    /// The owner's final cleanup acknowledgement, if known.
+    pub status: ProcessCleanupStatus,
+    /// The caller's wait elapsed, independently of the owner's eventual result.
+    pub wait_expired: bool,
+    /// The specific proof, if a claimed owner supplied one. A generic
+    /// `Verified` status by itself does not identify which proof was used.
+    pub evidence: Option<ProcessCleanupEvidence>,
+    /// Producer-side truncation of an otherwise completed output, if reported.
+    pub output_truncation: Option<ProcessCleanupOutputTruncation>,
+    /// Captured incomplete output, never a successful process result.
+    pub observation: Option<Arc<crate::host::tool_invoker::UnverifiedCleanupOutput>>,
+}
+
+/// Independent per-stream truncation facts for a completed process output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessCleanupOutputTruncation {
+    /// Some observed stdout bytes were not retained.
+    pub stdout_truncated: bool,
+    /// Some observed stderr bytes were not retained.
+    pub stderr_truncated: bool,
+}
+
+/// The specific fact that supports a claimed owner's verified cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessCleanupEvidence {
+    /// No process was started by this owner.
+    NoProcessStarted,
+    /// The backend supplied an identity-bound process-tree exit receipt.
+    TreeReaped,
+}
+
+/// Capability identifying one owner of a receipt. It cannot be reconstructed
+/// from a session ID and is never reused by a subsequent execution.
+#[derive(Debug, Clone)]
+pub struct ProcessCleanupOwnerToken(Arc<()>);
+
+/// Final evidence supplied by the owner of a claimed receipt.
+#[derive(Debug, Clone)]
+pub enum ProcessCleanupOwnerOutcome {
+    /// The owner established that it did not start a process.
+    NoProcessStarted,
+    /// The backend supplied an identity-bound process-tree exit receipt.
+    TreeReaped,
+    /// Cleanup is not proven, with a diagnostic reason.
+    Unverified(String),
+}
+
+/// A claimed receipt rejected a conflicting or malformed update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessCleanupOwnerError {
+    /// This receipt has already been claimed by an owner.
+    AlreadyClaimed,
+    /// A final status was already published.
+    AlreadyFinalized,
+    /// The supplied token belongs to a different execution.
+    WrongOwner,
+    /// A session identity is empty, too long, or contains invalid characters.
+    InvalidSessionId,
+    /// The receipt is already bound to a different session.
+    SessionAlreadyBound,
+    /// The observation does not name the bound session.
+    SessionMismatch,
+    /// Diagnostic metadata exceeds the bounded receipt capacity.
+    MetadataTooLong,
+    /// A negative sentinel is not an observed process exit code.
+    InvalidExitCode,
+    /// The final outcome conflicts with the session or observation evidence.
+    OutcomeMismatch,
+}
+
+#[derive(Debug)]
+struct ProcessCleanupState {
+    status: ProcessCleanupStatus,
+    wait_expired: bool,
+    owner: Option<Arc<()>>,
+    session_id: Option<String>,
+    evidence: Option<ProcessCleanupEvidence>,
+    output_truncation: Option<ProcessCleanupOutputTruncation>,
+    observation: Option<Arc<crate::host::tool_invoker::UnverifiedCleanupOutput>>,
+}
+
+/// A single-assignment cleanup receipt shared with the actual process owner.
+/// Writers are trusted host/runner code: this receipt prevents process output
+/// from impersonating an acknowledgement, not malicious code in this process.
+#[derive(Debug)]
+pub struct ProcessCleanupReceipt {
+    state: std::sync::Mutex<ProcessCleanupState>,
+}
+
+impl Default for ProcessCleanupReceipt {
+    fn default() -> Self {
+        Self {
+            state: std::sync::Mutex::new(ProcessCleanupState {
+                status: ProcessCleanupStatus::Pending,
+                wait_expired: false,
+                owner: None,
+                session_id: None,
+                evidence: None,
+                output_truncation: None,
+                observation: None,
+            }),
+        }
+    }
+}
+
+impl ProcessCleanupReceipt {
+    /// Mark this caller's bounded wait as expired without changing the
+    /// underlying cleanup outcome; a later close may still verify cleanup.
+    pub fn mark_wait_expired(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wait_expired = true;
+    }
+
+    /// Whether the runner's caller-facing wait expired at least once.
+    #[must_use]
+    pub fn wait_expired(&self) -> bool {
+        self.snapshot().wait_expired
+    }
+
+    /// Read the owner's final acknowledgement, if any.
+    #[must_use]
+    pub fn status(&self) -> ProcessCleanupStatus {
+        self.snapshot().status
+    }
+
+    /// Read status, wait state, and observation from one atomic snapshot.
+    #[must_use]
+    pub fn snapshot(&self) -> ProcessCleanupSnapshot {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ProcessCleanupSnapshot {
+            status: state.status.clone(),
+            wait_expired: state.wait_expired,
+            evidence: state.evidence,
+            output_truncation: state.output_truncation,
+            observation: state.observation.clone(),
+        }
+    }
+
+    /// Record verified cleanup. A previously unverified result cannot be reset.
+    pub fn mark_verified(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.owner.is_none() && matches!(state.status, ProcessCleanupStatus::Pending) {
+            state.status = ProcessCleanupStatus::Verified;
+        }
+    }
+
+    /// Record an ambiguous cleanup. This cannot overwrite an earlier receipt.
+    pub fn mark_unverified(&self, detail: String) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.owner.is_none() && matches!(state.status, ProcessCleanupStatus::Pending) {
+            state.status = ProcessCleanupStatus::Unverified(detail);
+        }
+    }
+
+    /// Claim this receipt once. Once claimed, generic `mark_*` calls cannot
+    /// finish it; only this token can atomically publish the final evidence.
+    pub fn claim_owner(&self) -> Result<ProcessCleanupOwnerToken, ProcessCleanupOwnerError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(state.status, ProcessCleanupStatus::Pending) {
+            return Err(ProcessCleanupOwnerError::AlreadyFinalized);
+        }
+        if state.owner.is_some() {
+            return Err(ProcessCleanupOwnerError::AlreadyClaimed);
+        }
+        let identity = Arc::new(());
+        state.owner = Some(identity.clone());
+        Ok(ProcessCleanupOwnerToken(identity))
+    }
+
+    /// Bind the exact raw session before publishing any session observation.
+    /// IDs are validated rather than truncated, which would change identity.
+    pub fn bind_session(
+        &self,
+        owner: &ProcessCleanupOwnerToken,
+        session_id: &str,
+    ) -> Result<(), ProcessCleanupOwnerError> {
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(ProcessCleanupOwnerError::InvalidSessionId);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state
+            .owner
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, &owner.0))
+        {
+            return Err(ProcessCleanupOwnerError::WrongOwner);
+        }
+        if !matches!(state.status, ProcessCleanupStatus::Pending) {
+            return Err(ProcessCleanupOwnerError::AlreadyFinalized);
+        }
+        match &state.session_id {
+            Some(existing) if existing != session_id => {
+                Err(ProcessCleanupOwnerError::SessionAlreadyBound)
+            }
+            Some(_) => Ok(()),
+            None => {
+                state.session_id = Some(session_id.to_owned());
+                Ok(())
+            }
+        }
+    }
+
+    /// Publish status and an optional incomplete-output observation together.
+    /// Only a trusted backend-specific tree receipt justifies `TreeReaped`.
+    pub fn finish_owned(
+        &self,
+        owner: &ProcessCleanupOwnerToken,
+        outcome: ProcessCleanupOwnerOutcome,
+        observation: Option<Arc<crate::host::tool_invoker::UnverifiedCleanupOutput>>,
+    ) -> Result<(), ProcessCleanupOwnerError> {
+        use crate::host::tool_invoker::ProcessTreeStatus;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state
+            .owner
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, &owner.0))
+        {
+            return Err(ProcessCleanupOwnerError::WrongOwner);
+        }
+        if !matches!(state.status, ProcessCleanupStatus::Pending) {
+            return Err(ProcessCleanupOwnerError::AlreadyFinalized);
+        }
+        if observation
+            .as_ref()
+            .is_some_and(|value| value.parts().session_id.as_deref() != state.session_id.as_deref())
+        {
+            return Err(ProcessCleanupOwnerError::SessionMismatch);
+        }
+        if observation
+            .as_ref()
+            .is_some_and(|value| value.parts().exit_code.is_some_and(|code| code < 0))
+        {
+            return Err(ProcessCleanupOwnerError::InvalidExitCode);
+        }
+        const MAX_METADATA_BYTES: usize = 16_384;
+        if observation.as_ref().is_some_and(|value| {
+            value.parts().cleanup_detail.len() > MAX_METADATA_BYTES
+                || value
+                    .parts()
+                    .original_error
+                    .as_ref()
+                    .is_some_and(|error| error.len() > MAX_METADATA_BYTES)
+        }) || matches!(&outcome, ProcessCleanupOwnerOutcome::Unverified(detail) if detail.len() > MAX_METADATA_BYTES)
+        {
+            return Err(ProcessCleanupOwnerError::MetadataTooLong);
+        }
+        let (status, evidence) = match outcome {
+            ProcessCleanupOwnerOutcome::NoProcessStarted
+                if state.session_id.is_none() && observation.is_none() =>
+            {
+                (
+                    ProcessCleanupStatus::Verified,
+                    Some(ProcessCleanupEvidence::NoProcessStarted),
+                )
+            }
+            ProcessCleanupOwnerOutcome::TreeReaped
+                if state.session_id.is_some()
+                    && observation.as_ref().is_none_or(|value| {
+                        value.parts().tree_status == ProcessTreeStatus::VerifiedReaped
+                    }) =>
+            {
+                (
+                    ProcessCleanupStatus::Verified,
+                    Some(ProcessCleanupEvidence::TreeReaped),
+                )
+            }
+            ProcessCleanupOwnerOutcome::Unverified(detail)
+                if observation.as_ref().is_none_or(|value| {
+                    value.parts().tree_status == ProcessTreeStatus::Unverified
+                }) =>
+            {
+                (ProcessCleanupStatus::Unverified(detail), None)
+            }
+            _ => return Err(ProcessCleanupOwnerError::OutcomeMismatch),
+        };
+        state.status = status;
+        state.evidence = evidence;
+        state.observation = observation;
+        Ok(())
+    }
+
+    /// Publish a complete process result with explicit output truncation.
+    /// The caller must already hold an exact-session tree-reaped receipt,
+    /// both stream EOFs, and the real process exit status.
+    pub fn finish_owned_complete(
+        &self,
+        owner: &ProcessCleanupOwnerToken,
+        truncation: ProcessCleanupOutputTruncation,
+    ) -> Result<(), ProcessCleanupOwnerError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state
+            .owner
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, &owner.0))
+        {
+            return Err(ProcessCleanupOwnerError::WrongOwner);
+        }
+        if !matches!(state.status, ProcessCleanupStatus::Pending) {
+            return Err(ProcessCleanupOwnerError::AlreadyFinalized);
+        }
+        if state.session_id.is_none() {
+            return Err(ProcessCleanupOwnerError::OutcomeMismatch);
+        }
+        state.status = ProcessCleanupStatus::Verified;
+        state.evidence = Some(ProcessCleanupEvidence::TreeReaped);
+        state.output_truncation = Some(truncation);
+        Ok(())
+    }
+}
+
 /// Opaque newtype — only constructible via [`Sandbox::prepare`],
 /// [`Sandbox::bypass_with_audit`], [`SandboxedCommand::__new_sandboxed`], or
 /// [`SandboxedCommand::__new_sandboxed_with_plan`] (the seams external
@@ -189,6 +541,7 @@ pub struct SandboxedCommand {
     tag: SandboxedTag,
     plan: Option<BackendPlanHandle>,
     lifetime_guard: Option<BackendPlanHandle>,
+    cleanup_receipt: Option<Arc<ProcessCleanupReceipt>>,
     background: Option<crate::host::process::BackgroundTaskBinding>,
     auto_background_on_timeout: bool,
     background_timeout: Option<std::time::Duration>,
@@ -267,6 +620,7 @@ impl SandboxedCommand {
             tag,
             plan: None,
             lifetime_guard: None,
+            cleanup_receipt: None,
             background: None,
             auto_background_on_timeout: true,
             background_timeout: None,
@@ -291,6 +645,7 @@ impl SandboxedCommand {
             tag,
             plan: Some(plan),
             lifetime_guard: None,
+            cleanup_receipt: None,
             background: None,
             auto_background_on_timeout: true,
             background_timeout: None,
@@ -312,6 +667,19 @@ impl SandboxedCommand {
     #[must_use]
     pub fn lifetime_guard(&self) -> Option<&BackendPlanHandle> {
         self.lifetime_guard.as_ref()
+    }
+
+    /// Attach the invocation's trusted cleanup acknowledgement.
+    #[must_use]
+    pub fn with_cleanup_receipt(mut self, receipt: Arc<ProcessCleanupReceipt>) -> Self {
+        self.cleanup_receipt = Some(receipt);
+        self
+    }
+
+    /// Capture the receipt when process ownership moves to another task.
+    #[must_use]
+    pub fn cleanup_receipt(&self) -> Option<&Arc<ProcessCleanupReceipt>> {
+        self.cleanup_receipt.as_ref()
     }
 
     /// Bind a caller-owned task identity to this command, so that backgrounding
@@ -401,6 +769,276 @@ mod m2_01_tests {
         fn assert_bounds<T: Send + Sync + Clone>() {}
         assert_bounds::<BackendPlanHandle>();
         assert_bounds::<SandboxedCommand>();
+    }
+
+    #[test]
+    fn cleanup_receipt_is_shared_and_terminal_states_are_monotonic() {
+        let receipt = Arc::new(ProcessCleanupReceipt::default());
+        let command = SandboxedCommand::__new_sandboxed(
+            cmd_for_plan_tests(),
+            SandboxedTag::Wrapped {
+                backend: SandboxBackend::None,
+            },
+        )
+        .with_cleanup_receipt(Arc::clone(&receipt));
+        let clone = command.clone();
+        let shared = clone.cleanup_receipt().unwrap();
+        assert!(Arc::ptr_eq(shared, &receipt));
+        assert_eq!(shared.status(), ProcessCleanupStatus::Pending);
+        shared.mark_unverified("close failed".into());
+        receipt.mark_verified();
+        receipt.mark_unverified("later error".into());
+        assert_eq!(
+            receipt.status(),
+            ProcessCleanupStatus::Unverified("close failed".into())
+        );
+        assert!(matches!(
+            receipt.claim_owner(),
+            Err(ProcessCleanupOwnerError::AlreadyFinalized)
+        ));
+
+        let verified = ProcessCleanupReceipt::default();
+        verified.mark_wait_expired();
+        verified.mark_verified();
+        assert!(verified.wait_expired());
+        verified.mark_unverified("later error".into());
+        assert_eq!(verified.status(), ProcessCleanupStatus::Verified);
+    }
+
+    fn incomplete_output(
+        session_id: Option<&str>,
+        tree_status: crate::host::tool_invoker::ProcessTreeStatus,
+    ) -> Arc<crate::host::tool_invoker::UnverifiedCleanupOutput> {
+        use crate::host::tool_invoker::{UnverifiedCleanupOutput, UnverifiedCleanupOutputParts};
+        Arc::new(UnverifiedCleanupOutput::new(UnverifiedCleanupOutputParts {
+            session_id: session_id.map(str::to_owned),
+            stdout: "early".into(),
+            stderr: "late".into(),
+            stdout_truncated: false,
+            stderr_truncated: true,
+            stdout_eof: true,
+            stderr_eof: false,
+            exit_code: None,
+            timed_out: true,
+            termination_requested: Some(true),
+            tree_status,
+            cleanup_detail: "cleanup evidence".into(),
+            original_error: Some("original read error".into()),
+        }))
+    }
+
+    #[test]
+    fn claimed_cleanup_receipt_binds_identity_and_publishes_evidence_atomically() {
+        use crate::host::tool_invoker::ProcessTreeStatus;
+        let receipt = ProcessCleanupReceipt::default();
+        let owner = receipt.claim_owner().unwrap();
+        assert!(matches!(
+            receipt.claim_owner(),
+            Err(ProcessCleanupOwnerError::AlreadyClaimed)
+        ));
+        receipt.mark_verified();
+        receipt.mark_unverified("unrelated generic failure".into());
+        assert_eq!(receipt.status(), ProcessCleanupStatus::Pending);
+        assert_eq!(
+            receipt.bind_session(&owner, ""),
+            Err(ProcessCleanupOwnerError::InvalidSessionId)
+        );
+        assert_eq!(
+            receipt.bind_session(&owner, &"a".repeat(129)),
+            Err(ProcessCleanupOwnerError::InvalidSessionId)
+        );
+        assert_eq!(
+            receipt.bind_session(&owner, "bad/session"),
+            Err(ProcessCleanupOwnerError::InvalidSessionId)
+        );
+        receipt.bind_session(&owner, "session-1").unwrap();
+        receipt.bind_session(&owner, "session-1").unwrap();
+        assert_eq!(
+            receipt.bind_session(&owner, "session-2"),
+            Err(ProcessCleanupOwnerError::SessionAlreadyBound)
+        );
+
+        let different = ProcessCleanupReceipt::default();
+        let other_owner = different.claim_owner().unwrap();
+        assert_eq!(
+            receipt.finish_owned(
+                &other_owner,
+                ProcessCleanupOwnerOutcome::Unverified("wrong".into()),
+                None
+            ),
+            Err(ProcessCleanupOwnerError::WrongOwner)
+        );
+        assert_eq!(
+            receipt.finish_owned(
+                &owner,
+                ProcessCleanupOwnerOutcome::TreeReaped,
+                Some(incomplete_output(
+                    Some("session-2"),
+                    ProcessTreeStatus::VerifiedReaped
+                ))
+            ),
+            Err(ProcessCleanupOwnerError::SessionMismatch)
+        );
+        assert_eq!(
+            receipt.finish_owned(
+                &owner,
+                ProcessCleanupOwnerOutcome::TreeReaped,
+                Some(incomplete_output(
+                    Some("session-1"),
+                    ProcessTreeStatus::Unverified
+                ))
+            ),
+            Err(ProcessCleanupOwnerError::OutcomeMismatch)
+        );
+        let mut invalid_parts = incomplete_output(Some("session-1"), ProcessTreeStatus::Unverified)
+            .parts()
+            .clone();
+        invalid_parts.exit_code = Some(-1);
+        assert_eq!(
+            receipt.finish_owned(
+                &owner,
+                ProcessCleanupOwnerOutcome::Unverified("unknown exit".into()),
+                Some(Arc::new(
+                    crate::host::tool_invoker::UnverifiedCleanupOutput::new(invalid_parts)
+                ))
+            ),
+            Err(ProcessCleanupOwnerError::InvalidExitCode)
+        );
+        assert_eq!(
+            receipt.finish_owned(
+                &owner,
+                ProcessCleanupOwnerOutcome::Unverified("x".repeat(16_385)),
+                None
+            ),
+            Err(ProcessCleanupOwnerError::MetadataTooLong)
+        );
+        assert_eq!(receipt.status(), ProcessCleanupStatus::Pending);
+
+        let evidence = incomplete_output(Some("session-1"), ProcessTreeStatus::VerifiedReaped);
+        receipt
+            .finish_owned(
+                &owner,
+                ProcessCleanupOwnerOutcome::TreeReaped,
+                Some(evidence.clone()),
+            )
+            .unwrap();
+        receipt.mark_wait_expired();
+        let snapshot = receipt.snapshot();
+        assert_eq!(snapshot.status, ProcessCleanupStatus::Verified);
+        assert!(snapshot.wait_expired);
+        assert_eq!(snapshot.evidence, Some(ProcessCleanupEvidence::TreeReaped));
+        assert!(Arc::ptr_eq(
+            snapshot.observation.as_ref().unwrap(),
+            &evidence
+        ));
+        assert_eq!(
+            snapshot
+                .observation
+                .unwrap()
+                .parts()
+                .original_error
+                .as_deref(),
+            Some("original read error")
+        );
+        assert_eq!(
+            receipt.finish_owned(
+                &owner,
+                ProcessCleanupOwnerOutcome::Unverified("later".into()),
+                None
+            ),
+            Err(ProcessCleanupOwnerError::AlreadyFinalized)
+        );
+    }
+
+    #[test]
+    fn claimed_no_process_and_reaped_tree_are_distinct() {
+        let receipt = ProcessCleanupReceipt::default();
+        let owner = receipt.claim_owner().unwrap();
+        assert_eq!(
+            receipt.finish_owned(&owner, ProcessCleanupOwnerOutcome::TreeReaped, None),
+            Err(ProcessCleanupOwnerError::OutcomeMismatch)
+        );
+        receipt
+            .finish_owned(&owner, ProcessCleanupOwnerOutcome::NoProcessStarted, None)
+            .unwrap();
+        assert_eq!(receipt.status(), ProcessCleanupStatus::Verified);
+        assert_eq!(
+            receipt.snapshot().evidence,
+            Some(ProcessCleanupEvidence::NoProcessStarted)
+        );
+        assert!(receipt.snapshot().observation.is_none());
+    }
+
+    #[test]
+    fn completed_output_retains_independent_truncation_flags() {
+        let receipt = ProcessCleanupReceipt::default();
+        let owner = receipt.claim_owner().unwrap();
+        assert_eq!(
+            receipt.finish_owned_complete(
+                &owner,
+                ProcessCleanupOutputTruncation {
+                    stdout_truncated: true,
+                    stderr_truncated: false,
+                }
+            ),
+            Err(ProcessCleanupOwnerError::OutcomeMismatch)
+        );
+        receipt.bind_session(&owner, "session-1").unwrap();
+        receipt
+            .finish_owned_complete(
+                &owner,
+                ProcessCleanupOutputTruncation {
+                    stdout_truncated: true,
+                    stderr_truncated: false,
+                },
+            )
+            .unwrap();
+        let snapshot = receipt.snapshot();
+        assert_eq!(snapshot.status, ProcessCleanupStatus::Verified);
+        assert_eq!(snapshot.evidence, Some(ProcessCleanupEvidence::TreeReaped));
+        assert_eq!(
+            snapshot.output_truncation,
+            Some(ProcessCleanupOutputTruncation {
+                stdout_truncated: true,
+                stderr_truncated: false,
+            })
+        );
+        assert!(snapshot.observation.is_none());
+    }
+
+    #[test]
+    fn generic_completion_cannot_race_a_claimed_output_publication() {
+        use crate::host::tool_invoker::ProcessTreeStatus;
+        let receipt = Arc::new(ProcessCleanupReceipt::default());
+        let owner = receipt.claim_owner().unwrap();
+        receipt.bind_session(&owner, "session-1").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let generic_receipt = receipt.clone();
+            let generic_barrier = barrier.clone();
+            scope.spawn(move || {
+                generic_barrier.wait();
+                generic_receipt.mark_unverified("generic failure".into());
+                generic_receipt.mark_verified();
+            });
+            barrier.wait();
+            receipt
+                .finish_owned(
+                    &owner,
+                    ProcessCleanupOwnerOutcome::Unverified("no tree receipt".into()),
+                    Some(incomplete_output(
+                        Some("session-1"),
+                        ProcessTreeStatus::Unverified,
+                    )),
+                )
+                .unwrap();
+        });
+        let snapshot = receipt.snapshot();
+        assert_eq!(
+            snapshot.status,
+            ProcessCleanupStatus::Unverified("no tree receipt".into())
+        );
+        assert_eq!(snapshot.observation.unwrap().parts().stdout, "early");
     }
 
     #[test]

@@ -40,6 +40,7 @@ impl MobileEngineHandle {
         let questions = self.ask_user_question_broker.clone();
         let task_turn = turn.clone();
         let recovery_guard = task_turn.tool_recovery_guard(self.durable_turns.clone());
+        let durable_turns = self.durable_turns.clone();
         let scope_orch = orch.clone();
         let (mut result_tx, result_rx) = oneshot::channel();
         let task = self.runtime().spawn(async move {
@@ -74,8 +75,15 @@ impl MobileEngineHandle {
                     };
                     questions.cancel_closed().await;
                     if let Err(error) = &result {
-                        report_owned_turn_error(&orch, &task_turn, &sink, &message_output, error)
-                            .await;
+                        report_owned_turn_error(
+                            &orch,
+                            &task_turn,
+                            &durable_turns,
+                            &sink,
+                            &message_output,
+                            error,
+                        )
+                        .await;
                     } else {
                         let cancelled = task_turn.cancel.is_cancelled()
                             || matches!(result, Ok(RealtimeAgentEnd::Cancelled));

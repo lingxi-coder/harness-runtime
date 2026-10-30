@@ -34,6 +34,18 @@ use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+fn preserve_workspaces_on_unverified<T>(
+    result: Result<T, FusionError>,
+    workspaces: &mut Option<Workspaces>,
+) -> Result<T, FusionError> {
+    if matches!(&result, Err(FusionError::CleanupUnverified(_))) {
+        if let Some(workspaces) = workspaces {
+            workspaces.preserve_on_unverified();
+        }
+    }
+    result
+}
+
 /// Catch a panic while polling an owned orchestration future. The prepared
 /// supervisor still holds the lease/fact cells outside this future, so it can
 /// synchronously settle them before publishing the terminal envelope.
@@ -739,6 +751,9 @@ impl FusionOrchestrator {
                 // Panels have already executed. A host diagnostic such as
                 // InvalidConfiguration must not regain a preflight/zero-call
                 // meaning and refund their lifetime spawn quota.
+                if let Err(FusionError::CleanupUnverified(reason)) = &panel_result {
+                    return Err(FusionError::CleanupUnverified(reason.clone()));
+                }
                 return Err(FusionError::Internal);
             }
         }
@@ -867,7 +882,7 @@ impl FusionOrchestrator {
         // Implement mode: worktrees exist before anything is admitted or
         // reserved, so every refusal here costs nothing. Dropping them on any
         // later error or cancel discards them (see `Workspaces`).
-        let workspaces = match request.mode {
+        let mut workspaces = match request.mode {
             FusionPanelMode::Analysis => None,
             FusionPanelMode::Implement => Some(
                 self.prepare_workspaces(config, &resolved, &inherit, &progress, &run_id)
@@ -931,7 +946,7 @@ impl FusionOrchestrator {
             "panel",
         )?;
 
-        let (mut panels, panels_ms) = self
+        let panel_result = self
             .run_panel_stage(
                 config,
                 &request,
@@ -950,7 +965,9 @@ impl FusionOrchestrator {
                 &settlement,
                 workspaces.as_ref(),
             )
-            .await?;
+            .await;
+        let (mut panels, panels_ms) =
+            preserve_workspaces_on_unverified(panel_result, &mut workspaces)?;
         if let Some(workspaces) = &workspaces {
             progress::emit(
                 &progress,
@@ -1143,18 +1160,17 @@ impl FusionOrchestrator {
             return Ok(result);
         }
 
-        tokio::select! {
-            biased;
-            () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
-            () = self.check_evidence(
+        let evidence_result = self
+            .check_evidence(
                 config,
                 &mut panels,
                 &inherit,
                 workspaces.as_ref(),
                 &progress,
                 operational_deadline,
-            ) => {}
-        }
+            )
+            .await;
+        preserve_workspaces_on_unverified(evidence_result, &mut workspaces)?;
 
         // [Round-5 review items 1/2/4] Every stage from here to
         // `finalize_result` refreshes both survives-a-drop money cells
@@ -1174,10 +1190,8 @@ impl FusionOrchestrator {
             &facts,
             started,
         );
-        let outcome = tokio::select! {
-            biased;
-            () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
-            outcome = self.run_analysis(
+        let analysis_result = self
+            .run_analysis(
                 config,
                 &request,
                 &resolved,
@@ -1188,8 +1202,12 @@ impl FusionOrchestrator {
                 &resolved_egress,
                 &stage_settlement,
                 &inherit,
-            ) => outcome,
-        };
+            )
+            .await;
+        let outcome = preserve_workspaces_on_unverified(analysis_result, &mut workspaces)?;
+        if inherit.cancel.is_cancelled() {
+            return Err(FusionError::Cancelled);
+        }
 
         let result = self
             .finalize_result(
@@ -1311,7 +1329,7 @@ impl FusionOrchestrator {
         workspaces: Option<&Workspaces>,
         progress: &Option<Sender<FusionProgress>>,
         operational_deadline: Instant,
-    ) {
+    ) -> Result<(), FusionError> {
         let analyst_reserve = Self::analyst_reserve(config);
         let now = Instant::now();
         let deadline = operational_deadline
@@ -1350,7 +1368,7 @@ impl FusionOrchestrator {
                 })
                 .collect(),
         };
-        evidence::check_panels(panels, &sources, deadline).await;
+        evidence::check_panels(panels, &sources, deadline, &inherit.cancel).await
     }
 
     /// `run_inner`'s tail: emit the terminal progress stage, compute the
@@ -1603,7 +1621,7 @@ impl FusionOrchestrator {
         // stage — see `StageSettlement`.
         stage_settlement: &StageSettlement<'_>,
         inherit: &FusionInheritance,
-    ) -> AnalysisOutcome {
+    ) -> Result<AnalysisOutcome, FusionError> {
         progress::emit(
             progress,
             FusionStage::Analyzing,
@@ -1650,6 +1668,17 @@ impl FusionOrchestrator {
                 .await;
                 (Some(analysis), None)
             }
+            Err((AnalystError::CleanupUnverified(reason), acc)) => {
+                Self::record_failed_analyst_usage(
+                    acc,
+                    &mut usage,
+                    &mut priced_analyst,
+                    &mut analyst_usage_incomplete,
+                    analyst_attempted,
+                    stage_settlement,
+                );
+                return Err(FusionError::CleanupUnverified(reason));
+            }
             Err((error, acc)) => {
                 // F004: an analyst failure after every panel was paid for
                 // degrades to material without analysis, never a hard error.
@@ -1662,6 +1691,7 @@ impl FusionOrchestrator {
                         "structured_output_unsupported",
                     ),
                     AnalystError::Failed(category) => (category.clone(), "analysis_failed"),
+                    AnalystError::CleanupUnverified(_) => unreachable!("handled above"),
                 };
                 Self::record_failed_analyst_usage(
                     acc,
@@ -1684,7 +1714,7 @@ impl FusionOrchestrator {
             }
         };
 
-        AnalysisOutcome {
+        Ok(AnalysisOutcome {
             analysis,
             analysis_failure,
             analyst_ms,
@@ -1692,7 +1722,7 @@ impl FusionOrchestrator {
             priced_analyst,
             analyst_usage_incomplete,
             analyst_attempted,
-        }
+        })
     }
 
     /// `run_analysis` helper (round-3 review finding 8): when the
@@ -1942,12 +1972,6 @@ impl FusionOrchestrator {
         };
         let analysis_outcome = tokio::select! {
             biased;
-            () = tokio::time::sleep_until(operational_deadline) => {
-                let latest = latest
-                    .lock()
-                    .map_or_else(|poisoned| poisoned.into_inner().clone(), |latest| latest.clone());
-                Err((AnalystError::Failed("timeout".into()), latest))
-            }
             outcome = self.analyze(
                 config,
                 request,
@@ -1958,6 +1982,28 @@ impl FusionOrchestrator {
                 inherit,
                 run_id,
             ) => outcome,
+            () = inherit.cancel.cancelled() => {
+                let latest = latest
+                    .lock()
+                    .map_or_else(|poisoned| poisoned.into_inner().clone(), |latest| latest.clone());
+                let error = if config.analyst_uses_tools(request) && latest.calls > 0 {
+                    AnalystError::CleanupUnverified("tool analyst was cancelled before its cleanup outcome was observed".into())
+                } else {
+                    AnalystError::Failed("cancelled".into())
+                };
+                Err((error, latest))
+            }
+            () = tokio::time::sleep_until(operational_deadline) => {
+                let latest = latest
+                    .lock()
+                    .map_or_else(|poisoned| poisoned.into_inner().clone(), |latest| latest.clone());
+                let error = if config.analyst_uses_tools(request) && latest.calls > 0 {
+                    AnalystError::CleanupUnverified("tool analyst deadline expired before its cleanup outcome was observed".into())
+                } else {
+                    AnalystError::Failed("timeout".into())
+                };
+                Err((error, latest))
+            }
         };
         let attempted = latest
             .lock()
@@ -2163,8 +2209,10 @@ impl FusionOrchestrator {
                     // Drive cancellation cleanup to completion. In
                     // particular, `run_panels` aborts and joins every child
                     // before the facts snapshot or reservation is settled.
-                    let _ = run_future.as_mut().await;
-                    Err(FusionError::Cancelled)
+                    match run_future.as_mut().await {
+                        Ok(Err(error @ FusionError::CleanupUnverified(_))) => Err(error),
+                        _ => Err(FusionError::Cancelled),
+                    }
                 }
             },
             () = tokio::time::sleep_until(deadline) => {
@@ -2184,8 +2232,10 @@ impl FusionOrchestrator {
                     // A full-deadline timeout is a terminal decision, but it
                     // is not permission to leave spawned panels mutating
                     // allocation/usage facts in the background.
-                    let _ = run_future.as_mut().await;
-                    Err(FusionError::TimedOutEmpty)
+                    match run_future.as_mut().await {
+                        Ok(Err(error @ FusionError::CleanupUnverified(_))) => Err(error),
+                        _ => Err(FusionError::TimedOutEmpty),
+                    }
                 }
             }
         };
@@ -3356,6 +3406,7 @@ fn fusion_error_label(error: &FusionError) -> &'static str {
         FusionError::PanelSetIncomplete => "panel_set_incomplete",
         FusionError::TimedOutEmpty => "timed_out_empty",
         FusionError::Cancelled => "cancelled",
+        FusionError::CleanupUnverified(_) => "cleanup_unverified",
         FusionError::ImplementUnavailable(_) => "implement_unavailable",
         FusionError::Internal => "internal",
     }

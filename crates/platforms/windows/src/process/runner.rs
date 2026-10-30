@@ -281,6 +281,12 @@ fn require_native_supervisor_for_strict(cmd: &SandboxedCommand) -> Result<(), Pr
 
 #[async_trait]
 impl ProcessRunner for WindowsProcess {
+    fn supports_supervisor_commit_gate(&self, command: &SandboxedCommand) -> bool {
+        // This only attests participation in the stop/commit and handoff
+        // protocol; it is not a receipt proving every Job member has exited.
+        cfg!(windows) && command.is_supervisor_request()
+    }
+
     fn supports_background_lifetime_guard(&self) -> bool {
         true
     }

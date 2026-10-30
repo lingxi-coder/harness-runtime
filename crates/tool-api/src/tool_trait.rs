@@ -489,6 +489,12 @@ pub trait Tool: Send + Sync {
         InterruptBehavior::Block
     }
 
+    /// Whether an interruptible invocation handles cancellation itself and
+    /// returns only after bounded cleanup or an explicit uncertain outcome.
+    fn await_cleanup_on_interrupt(&self) -> bool {
+        false
+    }
+
     /// Normalize the input to a form suitable for replay / observability.
     ///
     /// Tools may strip secrets, redact paths, or canonicalize ordering.
@@ -936,8 +942,15 @@ pub struct ValidationError(
     pub Utf16JsonProjection,
 );
 
+pub use lingxi_core::host::tool_invoker::{
+    CleanupUnverifiedReason, ProcessTreeStatus, ReportedExitCode, ReportedShellPayload,
+    ReportedShellPayloadParts, ReportedShellStream, UnverifiedCleanupOutput,
+    UnverifiedCleanupOutputMetadata, UnverifiedCleanupOutputParts, MAX_UNVERIFIED_METADATA_CHARS,
+    MAX_UNVERIFIED_OUTPUT_CHARS,
+};
+
 /// Error returned by [`Tool::call`] and related dispatcher operations.
-#[derive(Debug, Clone, Error)]
+#[derive(Clone, Error)]
 #[non_exhaustive]
 pub enum ToolError {
     /// No tool registered under the requested name.
@@ -959,6 +972,17 @@ pub enum ToolError {
     /// The call was aborted (interrupt, cancellation).
     #[error("aborted")]
     Aborted,
+    /// The process may still be running because its cleanup could not be verified.
+    #[error("process cleanup could not be verified")]
+    CleanupUnverified(String),
+    /// The process outcome is incomplete. Captured output must remain an
+    /// observation even if the tree was reaped but the exit code is unknown.
+    #[error("process result is incomplete")]
+    CleanupUnverifiedOutput(Box<UnverifiedCleanupOutput>),
+    /// One or more process observations are incomplete. No item is an
+    /// ordinary tool result; preserve each observation for the host.
+    #[error("process outcome evidence is incomplete")]
+    CleanupUnverifiedBatch(Vec<CleanupUnverifiedReason>),
     /// Internal error: tool implementation bug or unexpected state.
     #[error("internal: {0}")]
     Internal(String),
@@ -1058,6 +1082,92 @@ pub enum ToolError {
     Transport(Utf16JsonProjection),
 }
 
+impl std::fmt::Debug for ToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(value) => f.debug_tuple("NotFound").field(value).finish(),
+            Self::InvalidInput(value) => f.debug_tuple("InvalidInput").field(value).finish(),
+            Self::PermissionDenied(value) => {
+                f.debug_tuple("PermissionDenied").field(value).finish()
+            }
+            Self::Io(value) => f.debug_tuple("Io").field(value).finish(),
+            Self::Aborted => f.write_str("Aborted"),
+            Self::CleanupUnverified(_) => f.write_str("CleanupUnverified(<redacted>)"),
+            Self::CleanupUnverifiedOutput(output) => f
+                .debug_tuple("CleanupUnverifiedOutput")
+                .field(output)
+                .finish(),
+            Self::CleanupUnverifiedBatch(reasons) => f
+                .debug_tuple("CleanupUnverifiedBatch")
+                .field(reasons)
+                .finish(),
+            Self::Internal(value) => f.debug_tuple("Internal").field(value).finish(),
+            Self::InteractionRequired(value) => {
+                f.debug_tuple("InteractionRequired").field(value).finish()
+            }
+            Self::EditWithoutRead { path } => f
+                .debug_struct("EditWithoutRead")
+                .field("path", path)
+                .finish(),
+            Self::FileModifiedExternally { path } => f
+                .debug_struct("FileModifiedExternally")
+                .field("path", path)
+                .finish(),
+            Self::PartialViewMustReread { path } => f
+                .debug_struct("PartialViewMustReread")
+                .field("path", path)
+                .finish(),
+            Self::FileContentMismatch { path } => f
+                .debug_struct("FileContentMismatch")
+                .field("path", path)
+                .finish(),
+            Self::FileTooLarge { size, limit } => f
+                .debug_struct("FileTooLarge")
+                .field("size", size)
+                .field("limit", limit)
+                .finish(),
+            Self::PathBlocked { path } => {
+                f.debug_struct("PathBlocked").field("path", path).finish()
+            }
+            Self::BinaryFile { path, reason } => f
+                .debug_struct("BinaryFile")
+                .field("path", path)
+                .field("reason", reason)
+                .finish(),
+            Self::Timeout { timeout_ms } => f
+                .debug_struct("Timeout")
+                .field("timeout_ms", timeout_ms)
+                .finish(),
+            Self::OutputTruncated { limit } => f
+                .debug_struct("OutputTruncated")
+                .field("limit", limit)
+                .finish(),
+            Self::SubagentFailed {
+                agent_id,
+                reason,
+                terminal_hooks_owned,
+            } => f
+                .debug_struct("SubagentFailed")
+                .field("agent_id", agent_id)
+                .field("reason", reason)
+                .field("terminal_hooks_owned", terminal_hooks_owned)
+                .finish(),
+            Self::McpFailure {
+                server,
+                tool,
+                detail,
+            } => f
+                .debug_struct("McpFailure")
+                .field("server", server)
+                .field("tool", tool)
+                .field("detail", detail)
+                .finish(),
+            Self::LspFailure(value) => f.debug_tuple("LspFailure").field(value).finish(),
+            Self::Transport(value) => f.debug_tuple("Transport").field(value).finish(),
+        }
+    }
+}
+
 impl ToolError {
     /// The BARE, model-facing message — the string claude-code would have
     /// thrown as `error.message` and rendered verbatim into the `tool_result`
@@ -1095,6 +1205,56 @@ impl ToolError {
             // exact model-facing message (no LingXi-only prefix to strip).
             other => other.to_string().into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod unverified_cleanup_output_tests {
+    use super::*;
+
+    #[test]
+    fn retains_bounded_output_and_independent_evidence() {
+        assert_eq!(
+            MAX_UNVERIFIED_OUTPUT_CHARS,
+            crate::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        );
+        let output = UnverifiedCleanupOutput::new(UnverifiedCleanupOutputParts {
+            session_id: Some("session-1".into()),
+            stdout: format!("{}tail", "字".repeat(MAX_UNVERIFIED_OUTPUT_CHARS)),
+            stderr: "stderr-prefix".into(),
+            stdout_truncated: false,
+            stderr_truncated: true,
+            stdout_eof: true,
+            stderr_eof: false,
+            exit_code: None,
+            timed_out: true,
+            termination_requested: Some(true),
+            tree_status: ProcessTreeStatus::VerifiedReaped,
+            cleanup_detail: "exit status not observed".into(),
+            original_error: Some("stop read failed".into()),
+        });
+        let parts = output.parts();
+        assert_eq!(parts.stdout.chars().count(), MAX_UNVERIFIED_OUTPUT_CHARS);
+        assert!(!parts.stdout.contains("tail"));
+        assert_eq!(parts.stderr, "stderr-prefix");
+        assert!(parts.stdout_truncated);
+        assert!(parts.stderr_truncated);
+        assert!(parts.stdout_eof);
+        assert!(!parts.stderr_eof);
+        assert_eq!(parts.exit_code, None);
+        assert!(parts.timed_out);
+        assert_eq!(parts.termination_requested, Some(true));
+        assert_eq!(parts.tree_status, ProcessTreeStatus::VerifiedReaped);
+        assert_eq!(parts.original_error.as_deref(), Some("stop read failed"));
+        assert_eq!(parts.session_id.as_deref(), Some("session-1"));
+        let error = ToolError::CleanupUnverifiedOutput(Box::new(output));
+        assert!(!format!("{error:?}").contains("stderr-prefix"));
+        assert!(!format!("{error:?}").contains('字'));
+        assert!(!error.to_string().contains("stderr-prefix"));
+        assert_eq!(error.to_string(), "process result is incomplete");
+        let error = ToolError::CleanupUnverified("secret native diagnostic".into());
+        assert!(!format!("{error:?}").contains("secret native diagnostic"));
+        assert!(!error.to_string().contains("secret native diagnostic"));
     }
 }
 

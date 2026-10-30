@@ -1779,6 +1779,23 @@ fn fusion_tool_result_with_settlement(
     output
 }
 
+fn cleanup_reason_to_tool_error(
+    reason: lingxi_core::host::tool_invoker::CleanupUnverifiedReason,
+) -> ToolError {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+    match reason {
+        CleanupUnverifiedReason::Message(message) => ToolError::CleanupUnverified(message),
+        CleanupUnverifiedReason::Output(output) => {
+            ToolError::CleanupUnverifiedOutput(Box::new(std::sync::Arc::unwrap_or_clone(output)))
+        }
+        reason @ (CleanupUnverifiedReason::ReportedPayload(_)
+        | CleanupUnverifiedReason::WithContext { .. }) => {
+            ToolError::CleanupUnverifiedBatch(vec![reason])
+        }
+        CleanupUnverifiedReason::Multiple(reasons) => ToolError::CleanupUnverifiedBatch(reasons),
+    }
+}
+
 /// Map a terminal [`lingxi_core::host::FusionError`] to the [`ToolError`] surfaced
 /// to the model (F008). Explicit arms for the load-bearing distinctions the
 /// generic `InvalidInput(other.to_string())` fallback erased:
@@ -1810,6 +1827,7 @@ fn fusion_tool_error(err: lingxi_core::host::FusionError) -> ToolError {
     use lingxi_core::host::FusionError;
     match err {
         FusionError::Cancelled => ToolError::Aborted,
+        FusionError::CleanupUnverified(reason) => cleanup_reason_to_tool_error(reason),
         FusionError::Internal
         | FusionError::AllPanelsFailed
         | FusionError::AllPanelsFailedPreflight
@@ -4251,6 +4269,19 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     .into(),
                 ))
             }
+            Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::CleanupUnverified {
+                reason,
+                ..
+            }) => {
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "async_spawn_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                Err(cleanup_reason_to_tool_error(reason))
+            }
             Err(e) => {
                 Self::emit_failed(
                     bus,
@@ -6397,7 +6428,15 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // own shells in its agent-run cleanup (`nHn`), for any outcome. Only
         // shells this agent started are killed, so the main session's and other
         // agents' background work is untouched.
-        if let Some(agent_id) = outcome.as_ref().ok().map(subagent_result_agent_id) {
+        let finished_agent_id = match &outcome {
+            Ok(result) => Some(subagent_result_agent_id(result)),
+            Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::CleanupUnverified {
+                agent_id,
+                ..
+            }) => Some(*agent_id),
+            Err(_) => None,
+        };
+        if let Some(agent_id) = finished_agent_id {
             if let Some(registry) = self.ctx.task_registry.as_ref() {
                 let retains_owned_work = matches!(
                     &outcome,
@@ -6425,8 +6464,18 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // in `lingxi_core::host::worktree::agent_worktree_result` (shared with the ASYNC
         // lifecycle owner in the local_agent task handler); it runs for ANY
         // outcome so a worktree never leaks on a failed/killed agent.
+        let cleanup_unverified = matches!(
+            &outcome,
+            Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::CleanupUnverified { .. })
+        );
         let worktree_result: Option<(String, String)> = match foreground_worktree_result {
             Some(result) => result,
+            None if cleanup_unverified => agent_worktree.as_ref().map(|handle| {
+                (
+                    handle.path.to_string_lossy().into_owned(),
+                    handle.branch_name.clone(),
+                )
+            }),
             None => match &agent_worktree {
                 Some(handle) => {
                     lingxi_core::host::worktree::agent_worktree_result(
@@ -6689,6 +6738,13 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 )
                 .await;
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
+            }
+            Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::CleanupUnverified {
+                reason,
+                ..
+            }) => {
+                Self::emit_failed(&bus, &invocation_id, "subagent_failed", duration_ms).await;
+                Err(cleanup_reason_to_tool_error(reason))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 if let Some(token) = &agent_spawn_token {

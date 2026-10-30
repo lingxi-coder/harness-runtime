@@ -11,16 +11,17 @@ use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
 use lingxi_core::host::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionError, FusionExecutor,
-    FusionInheritance, FusionOrigin, FusionPreparedSummary, FusionResult, FusionRunFacts,
-    FusionRunId, FusionRunIdentity, FusionRunOutcome, FusionRunRecorderFactory,
-    FusionSlashPublicationTarget, FusionStatus, FusionSubmission, FusionTerminalCapability,
-    PreparedFusionRun, RuntimeSpawner, SubagentInheritance, ToolInvoker,
+    BudgetEnforcerHandle, FusionActivation, FusionError, FusionExecutor, FusionInheritance,
+    FusionOrigin, FusionPreparedSummary, FusionResult, FusionRunFacts, FusionRunId,
+    FusionRunIdentity, FusionRunOutcome, FusionRunRecorderFactory, FusionSlashPublicationTarget,
+    FusionStatus, FusionSubmission, FusionTerminalCapability, PreparedFusionRun,
+    SubagentInheritance, ToolInvoker,
 };
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tokio_util::sync::CancellationToken;
 
 pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
@@ -28,12 +29,8 @@ pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
 const HANDLER_NAME: &str = "local_fusion";
 
 /// Bounded wait `kill`/`drain_pending_kills` give the worker to unwind
-/// through its own finalize path (`FusionOrchestrator::run`'s cooperative
-/// `cancel.cancelled()` branch — CANCELLED telemetry, `Cancelled` progress,
-/// `run_panels`' abort+join, explicit lease release) after firing `cancel`,
-/// before falling back to `runtime.cancel` (a hard `JoinHandle::abort()` that
-/// would skip all of that — F012). Mirrors `local_workflow`'s
-/// `cancel_workflow_worker`.
+/// through its own finalize path after firing cancellation. Expiration does
+/// not abort the worker: an outstanding child may still have evidence to send.
 const FUSION_KILL_COMPLETION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long host shutdown waits for handler-owned Fusion workers that already
@@ -41,68 +38,71 @@ const FUSION_KILL_COMPLETION_GRACE: std::time::Duration = std::time::Duration::f
 /// it; an overrun is reported rather than parked on.
 const FUSION_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
+#[derive(Clone)]
 struct WorkerCancel {
-    handle: BackgroundTaskHandle,
-    runtime: Arc<dyn RuntimeSpawner>,
     control: lingxi_core::host::FusionRunControl,
-    /// Worker completion signal, fired (via [`WorkerCompletionSignal`]'s
-    /// `Drop`) once the spawned worker future is fully done — naturally, or
-    /// forcibly on `runtime.cancel`'s own abort. `kill`/`drain_pending_kills`
-    /// wait on this for up to [`FUSION_KILL_COMPLETION_GRACE`] before falling
-    /// back to the hard abort, so a cooperative `cancel()` gets a real chance
-    /// to run `FusionOrchestrator::run`'s own finalize path (F012).
-    completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
+    cancel_claimed: Arc<AtomicBool>,
+    completion_rx: watch::Receiver<WorkerCompletion>,
 }
 
-/// Fires its held oneshot on drop, unconditionally — whichever path the
-/// worker future exits through (normal completion, the early
-/// `may_finalize == false` return, or a forced `abort()` dropping the task
-/// mid-poll). Held as the worker future's own first local so its lifetime
-/// exactly brackets "the worker is done, one way or another".
-struct WorkerCompletionSignal(Option<oneshot::Sender<()>>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkerCompletion {
+    Running,
+    Finished,
+    Abandoned,
+}
+
+/// Distinguish a completed terminal projection from a dropped worker future.
+struct WorkerCompletionSignal(watch::Sender<WorkerCompletion>);
 
 impl WorkerCompletionSignal {
-    fn new(tx: oneshot::Sender<()>) -> Self {
-        Self(Some(tx))
+    fn complete(&self) {
+        self.0.send_replace(WorkerCompletion::Finished);
     }
 }
 
 impl Drop for WorkerCompletionSignal {
     fn drop(&mut self) {
-        if let Some(tx) = self.0.take() {
-            let _ = tx.send(());
+        let running = *self.0.borrow() == WorkerCompletion::Running;
+        if running {
+            self.0.send_replace(WorkerCompletion::Abandoned);
         }
     }
 }
 
-/// `cancel()` the worker, then wait up to [`FUSION_KILL_COMPLETION_GRACE`] for
-/// its own completion signal before falling back to `runtime.cancel` (a hard
-/// abort that bypasses `FusionOrchestrator::run`'s cooperative cancel branch —
-/// F012). Mirrors `local_workflow::cancel_workflow_worker`.
+async fn wait_for_worker(
+    mut completion: watch::Receiver<WorkerCompletion>,
+) -> Result<(), TaskError> {
+    loop {
+        let state = *completion.borrow_and_update();
+        match state {
+            WorkerCompletion::Finished => return Ok(()),
+            WorkerCompletion::Abandoned => {
+                return Err(TaskError::Internal(
+                    "Fusion worker stopped before its terminal outcome was observed".into(),
+                ))
+            }
+            WorkerCompletion::Running => {}
+        }
+        completion.changed().await.map_err(|_| {
+            TaskError::Internal(
+                "Fusion worker completion channel closed before its terminal outcome".into(),
+            )
+        })?;
+    }
+}
+
+/// Wait for the owned worker without discarding it on a timeout.
 async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     rec.control.cancel().cancel();
-    let mut completion_rx = rec
-        .completion_rx
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let completed = if let Some(completion_rx) = completion_rx.as_mut() {
-        tokio::time::timeout(FUSION_KILL_COMPLETION_GRACE, completion_rx)
-            .await
-            .is_ok()
-    } else {
-        false
-    };
-    if !completed {
-        rec.runtime
-            .cancel(&rec.handle)
-            .await
-            .map_err(|error| TaskError::Io(error.to_string()))?;
-        if let Some(completion_rx) = completion_rx {
-            let _ = completion_rx.await;
-        }
-    }
-    Ok(())
+    tokio::time::timeout(
+        FUSION_KILL_COMPLETION_GRACE,
+        wait_for_worker(rec.completion_rx),
+    )
+    .await
+    .map_err(|_| {
+        TaskError::Internal("Fusion cancellation is pending; cleanup has not been verified".into())
+    })?
 }
 
 /// Terminal-outcome half of `spawn`'s worker future: write the spool body /
@@ -231,9 +231,15 @@ async fn finalize_fusion_outcome(
                 .await;
         }
         Err(err) => {
-            let _ = output_manager
-                .append(worker_spool_path, &err.to_string())
-                .await;
+            // Cleanup observations can contain command output and other
+            // sensitive data. Keep the task's public diagnostic fixed; the
+            // structured reason belongs to the trusted cleanup owner.
+            let diagnostic = if matches!(err, FusionError::CleanupUnverified(_)) {
+                "Fusion cleanup could not be verified".to_string()
+            } else {
+                err.to_string()
+            };
+            let _ = output_manager.append(worker_spool_path, &diagnostic).await;
             disclose_facts_or_partial_usage(
                 status_sink,
                 worker_task_id,
@@ -246,7 +252,7 @@ async fn finalize_fusion_outcome(
                 .set_fusion_publication(worker_task_id, outcome.publication.clone())
                 .await;
             status_sink
-                .set_fusion_error(worker_task_id, err.to_string())
+                .set_fusion_error(worker_task_id, diagnostic)
                 .await;
             status_sink
                 .set_status(worker_task_id, TaskStatus::Failed)
@@ -353,10 +359,7 @@ struct FusionWorkerArgs {
     worker_spool_path: std::path::PathBuf,
     worker_task_id: String,
     activation_rx: Option<oneshot::Receiver<FusionActivation>>,
-    /// Held for its `Drop` side effect only — fires the completion signal
-    /// unconditionally once this future is done, whichever path it exits
-    /// through. Never read.
-    #[allow(dead_code)]
+    /// Distinguishes a published terminal result from an abandoned future.
     completion_signal: WorkerCompletionSignal,
 }
 
@@ -374,13 +377,14 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
         worker_spool_path,
         worker_task_id,
         activation_rx,
-        completion_signal: _completion_signal,
+        completion_signal,
     } = args;
     let activation = if let Some(activation_rx) = activation_rx {
         match activation_rx.await {
             Ok(activation) => activation,
             Err(_) => {
                 workers.lock().await.remove(&worker_task_id);
+                completion_signal.complete();
                 return;
             }
         }
@@ -389,6 +393,7 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     };
     let Some(prepared) = prepared else {
         workers.lock().await.remove(&worker_task_id);
+        completion_signal.complete();
         return;
     };
     status_sink
@@ -430,41 +435,8 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     // conversion could fabricate an outcome without publishing the control's
     // terminal receipt, leaving quota/task waiters blocked forever.
     let outcome = prepared.activate(activation, Some(prog_tx)).await;
-    // Natural completion and TaskStop race on this same worker-map lock.
-    // The prepared control is the lifecycle authority. Once it reaches
-    // Finalizing or Terminal, kill cannot remove the record from underneath
-    // the commit→terminal-record window.
-    let may_finalize = {
-        let mut workers = workers.lock().await;
-        workers.get_mut(&worker_task_id).is_some()
-    };
     let (last_realized_output_tokens, last_egress_profiles) =
         forwarder.await.unwrap_or((None, None));
-    if !may_finalize {
-        // [Round-4 review finding 10] `kill`/`drain_pending_kills` both
-        // remove this worker's record from `workers` BEFORE firing
-        // `cancel` (see their own comments), so `finalize_fusion_outcome`'s
-        // `Err(FusionError::Cancelled)` arm — and the `disclose_partial_usage`
-        // it calls — can never run for a user-stopped `/fusion`: by the
-        // time `executor.run` returns `Err(Cancelled)` here, the record is
-        // already gone and `may_finalize` is `false`. `kill`/
-        // `drain_pending_kills` still write the terminal `Killed` status
-        // themselves; this call recovers only the disclosure that arm
-        // would otherwise have written — the egress profiles / realized
-        // token usage the forwarder above already latched from the
-        // progress channel before the record was removed. A no-op when
-        // nothing ever egressed (both `last_*` are `None`), matching
-        // `disclose_partial_usage`'s own guard.
-        disclose_facts_or_partial_usage(
-            &status_sink,
-            &worker_task_id,
-            &outcome.facts,
-            last_realized_output_tokens,
-            last_egress_profiles,
-        )
-        .await;
-        return;
-    }
     finalize_fusion_outcome(
         &outcome,
         &output_manager,
@@ -476,6 +448,7 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     )
     .await;
     workers.lock().await.remove(&worker_task_id);
+    completion_signal.complete();
 }
 
 /// Handler for [`TaskType::LocalFusion`].
@@ -520,7 +493,11 @@ impl LocalFusionHandler {
     }
 
     /// Drain kill requests queued by the synchronous cleanup closure.
-    pub async fn drain_pending_kills(&self) {
+    /// Process every queued cancellation while retaining unresolved workers.
+    ///
+    /// # Errors
+    /// Returns an error if any worker has not published its terminal outcome.
+    pub async fn drain_pending_kills(&self) -> Result<(), TaskError> {
         let pending = {
             let mut pending = self
                 .pending_kill
@@ -528,34 +505,35 @@ impl LocalFusionHandler {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             std::mem::take(&mut *pending)
         };
+        let mut failure = None;
         for task_id in pending {
-            if self.status_sink.is_terminal(&task_id).await {
-                continue;
-            }
-            let rec = {
-                let mut workers = self.workers.lock().await;
-                let cancel_won = workers
-                    .get(&task_id)
-                    .is_some_and(|rec| rec.control.request_cancel());
-                if cancel_won {
-                    workers.remove(&task_id)
-                } else {
-                    None
-                }
-            };
+            let rec = self.claim_cancellation(&task_id).await;
             let Some(rec) = rec else { continue };
-            let _ = cancel_fusion_worker(rec).await;
-            if !self.status_sink.is_terminal(&task_id).await {
-                self.status_sink
-                    .set_status(&task_id, TaskStatus::Killed)
-                    .await;
+            if let Err(error) = cancel_fusion_worker(rec).await {
+                failure.get_or_insert(error);
             }
         }
+        failure.map_or(Ok(()), Err)
+    }
+
+    async fn claim_cancellation(&self, task_id: &str) -> Option<WorkerCancel> {
+        let workers = self.workers.lock().await;
+        let rec = workers.get(task_id)?;
+        if rec.control.request_cancel() {
+            rec.cancel_claimed.store(true, Ordering::Release);
+        } else if !rec.cancel_claimed.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(rec.clone())
     }
 }
 
 #[async_trait]
 impl Task for LocalFusionHandler {
+    async fn has_live_worker(&self, task_id: &str) -> bool {
+        self.workers.lock().await.contains_key(task_id)
+    }
+
     fn name(&self) -> &str {
         HANDLER_NAME
     }
@@ -677,7 +655,7 @@ impl Task for LocalFusionHandler {
         } else {
             (None, None)
         };
-        let (completion_tx, completion_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = watch::channel(WorkerCompletion::Running);
 
         let worker = Box::pin(run_fusion_worker(FusionWorkerArgs {
             prepared: Some(prepared),
@@ -687,25 +665,20 @@ impl Task for LocalFusionHandler {
             worker_spool_path,
             worker_task_id,
             activation_rx,
-            // Fires unconditionally when this future is done — naturally, or
-            // forced by `runtime.cancel`'s hard abort — so `kill`'s bounded
-            // wait can tell the two apart (F012).
-            completion_signal: WorkerCompletionSignal::new(completion_tx),
+            completion_signal: WorkerCompletionSignal(completion_tx),
         }));
 
         let mut workers = self.workers.lock().await;
-        let bg_handle = ctx
-            .runtime
+        ctx.runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
             .await
             .map_err(|e| TaskError::Internal(e.to_string()))?;
         workers.insert(
             task_id.clone(),
             WorkerCancel {
-                handle: bg_handle,
-                runtime: ctx.runtime.clone(),
                 control: prepared_control,
-                completion_rx: StdMutex::new(Some(completion_rx)),
+                cancel_claimed: Arc::new(AtomicBool::new(false)),
+                completion_rx,
             },
         );
         drop(workers);
@@ -730,34 +703,10 @@ impl Task for LocalFusionHandler {
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
-        if self.status_sink.is_terminal(task_id).await {
+        let Some(rec) = self.claim_cancellation(task_id).await else {
             return Ok(());
-        }
-        let rec = {
-            let mut workers = self.workers.lock().await;
-            let Some(rec) = workers.get(task_id) else {
-                return Ok(());
-            };
-            // Claim cancellation atomically with the lifecycle phase check.
-            // A separate is_finalizing()/is_terminal() read lets natural
-            // finalization win immediately afterward while kill still removes
-            // the worker record. Publication is suppressed by the recorder,
-            // which builds an outbox only for a successful result -- this path
-            // skips the legacy sink but does not by itself stop a publication.
-            if !rec.control.request_cancel() {
-                return Ok(());
-            }
-            workers
-                .remove(task_id)
-                .expect("worker record was present for the cancellation claim")
         };
-        cancel_fusion_worker(rec).await?;
-        if !self.status_sink.is_terminal(task_id).await {
-            self.status_sink
-                .set_status(task_id, TaskStatus::Killed)
-                .await;
-        }
-        Ok(())
+        cancel_fusion_worker(rec).await
     }
 
     async fn drain_shutdown(&self) -> Result<(), TaskError> {
@@ -766,19 +715,15 @@ impl Task for LocalFusionHandler {
             let workers = self.workers.lock().await;
             workers
                 .values()
-                .filter_map(|worker| {
-                    worker
-                        .completion_rx
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                })
+                .map(|worker| worker.completion_rx.clone())
                 .collect::<Vec<_>>()
         };
         let mut timed_out = 0_usize;
         for completion in completions {
-            if tokio::time::timeout_at(deadline, completion).await.is_err() {
-                timed_out += 1;
+            match tokio::time::timeout_at(deadline, wait_for_worker(completion)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => timed_out += 1,
             }
         }
         if timed_out > 0 {

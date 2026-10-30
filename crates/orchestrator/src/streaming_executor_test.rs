@@ -1820,7 +1820,8 @@ mod tests {
             MessageId::new(),
             "provider disconnected after completed tool",
         )
-        .await;
+        .await
+        .unwrap();
 
         let raw = std::fs::read_to_string(path).expect("accepted result and attachment persisted");
         let lines: Vec<&str> = raw.lines().filter(|line| !line.trim().is_empty()).collect();
@@ -3376,7 +3377,7 @@ mod tests {
         assert_eq!(exec.tools[2].status, ToolStatus::Queued);
         assert_no_actor_start(&mut started).await;
 
-        let (synthetics, removal) = exec.abandon_after_model_error("wire failed").await;
+        let (synthetics, removal) = exec.abandon_after_model_error("wire failed").await.unwrap();
         assert_eq!(synthetics.len(), 2);
         assert_eq!(
             removal.ids,

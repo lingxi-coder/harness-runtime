@@ -634,6 +634,39 @@ async fn wait_until(at: Option<tokio::time::Instant>) {
     }
 }
 
+/// A naturally completed background leader may release its Job only after
+/// the receiving host has accepted its handoff. Keep stop and the background
+/// deadline observable while waiting for that acceptance.
+async fn wait_for_background_handoff(
+    sink: Option<&dyn lingxi_core::host::BackgroundExitSink>,
+    deadline: &mut DrainDeadline,
+) -> Result<bool, ProcessError> {
+    let stop = sink.and_then(|sink| sink.stop_notify());
+    let accepted = async {
+        match sink {
+            Some(sink) => sink.wait_for_supervisor_handoff().await,
+            None => Ok(true),
+        }
+    };
+    tokio::select! {
+        biased;
+        () = wait_for_stop(&stop) => {
+            deadline.requested_stop = true;
+            Ok(false)
+        }
+        () = wait_until(deadline.at) => {
+            deadline.expired = true;
+            Ok(false)
+        }
+        result = accepted => {
+            if matches!(&result, Ok(false)) {
+                deadline.requested_stop = true;
+            }
+            result
+        }
+    }
+}
+
 /// Let an accepted output append finish without preventing a stop from reaching
 /// the held job. A stuck append on a managed host is an explicit failure after
 /// a bounded grace period, rather than an indefinitely unreported stop.
@@ -730,17 +763,59 @@ where
     }
 }
 
+fn commit_foreground_jobs(
+    deadline: &DrainDeadline,
+    sink: Option<&dyn lingxi_core::host::BackgroundExitSink>,
+    supervised: bool,
+) -> Result<bool, ProcessError> {
+    let mut action = || {
+        deadline.completed_foreground()?;
+        #[cfg(windows)]
+        if supervised && !deadline.strict_host {
+            // This and the payload release run while the shared stop gate is
+            // held, so an acknowledged stop cannot land between the releases.
+            super::supervisor_gate::disarm_supervisor_on_close()?;
+        }
+        #[cfg(not(windows))]
+        let _ = supervised;
+        Ok(())
+    };
+    if let Some(sink) = sink {
+        sink.commit_foreground(&mut action)
+    } else {
+        action().map(|()| true)
+    }
+}
+
+fn commit_verified_cleanup(
+    sink: Option<&dyn lingxi_core::host::BackgroundExitSink>,
+) -> Result<bool, ProcessError> {
+    let mut no_op = || Ok(());
+    match sink {
+        Some(sink) => sink.commit_foreground(&mut no_op),
+        None => Ok(true),
+    }
+}
+
 async fn finish_foreground(
     capture: &mut Capture,
     child: &mut tokio::process::Child,
     guard: &mut StreamingProcessTreeGuard,
     deadline: &mut DrainDeadline,
     stop: &Option<std::sync::Arc<tokio::sync::Notify>>,
+    supervised: bool,
 ) -> Result<(), ProcessError> {
-    if !deadline.strict_host {
+    if !deadline.strict_host && !deadline.verify_supervised_stop {
         flush_capture(capture, false).await?;
         finalize_capture(capture, false).await?;
-        return deadline.completed_foreground();
+        return match commit_foreground_jobs(
+            deadline,
+            capture.binding.on_exit.as_deref(),
+            supervised,
+        )? {
+            true => Ok(()),
+            false => Err(ProcessError::Io("supervisor command cancelled".into())),
+        };
     }
 
     // The child leader has exited, but its Job may still contain descendants.
@@ -750,7 +825,7 @@ async fn finish_foreground(
         ..DrainControl::default()
     };
     let mut result = output_with_stop(
-        flush_capture(capture, true),
+        flush_capture(capture, deadline.strict_host),
         child,
         deadline,
         &mut control,
@@ -759,7 +834,7 @@ async fn finish_foreground(
     .await;
     if result.is_ok() && !control.stop_handled {
         result = output_with_stop(
-            finalize_capture(capture, true),
+            finalize_capture(capture, deadline.strict_host),
             child,
             deadline,
             &mut control,
@@ -783,7 +858,7 @@ async fn finish_foreground(
         });
     }
     #[cfg(windows)]
-    {
+    if deadline.strict_host {
         // A managed host completion is also a verified cleanup boundary. A
         // shell can exit after detaching descendants with redirected output;
         // pipe EOF and the leader's exit alone do not prove the Job is empty.
@@ -796,18 +871,33 @@ async fn finish_foreground(
             terminate_and_reap(deadline, child, guard).await?;
         }
     }
-    deadline.completed_foreground()
+    match commit_foreground_jobs(deadline, capture.binding.on_exit.as_deref(), supervised)? {
+        true => Ok(()),
+        false => {
+            deadline.verify_lease |= deadline.verify_supervised_stop;
+            match terminate_and_reap(deadline, child, guard).await {
+                Ok(_) => Err(ProcessError::Io("supervisor command cancelled".into())),
+                Err(cleanup) => Err(ProcessError::Io(format!(
+                    "supervisor command cancelled; cleanup failed: {cleanup}"
+                ))),
+            }
+        }
+    }
 }
 
-async fn drain(
+async fn drain<R, E>(
     child: &mut tokio::process::Child,
-    stdout: &mut tokio::process::ChildStdout,
-    stderr: &mut tokio::process::ChildStderr,
+    stdout: &mut R,
+    stderr: &mut E,
     capture: &mut Capture,
     mut eof: [bool; 2],
     deadline: &mut DrainDeadline,
     already_stopped: bool,
-) -> Result<std::process::ExitStatus, ProcessError> {
+) -> Result<std::process::ExitStatus, ProcessError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    E: tokio::io::AsyncRead + Unpin,
+{
     let mut out = [0; 8192];
     let mut err = [0; 8192];
     let stop = capture
@@ -857,20 +947,195 @@ async fn drain(
     }
 }
 
+#[cfg(windows)]
+async fn drain_exited_foreground_tail(
+    child: &mut tokio::process::Child,
+    stdout: &mut crate::stdio_cancel::CancelablePipeReader,
+    stderr: &mut crate::stdio_cancel::CancelablePipeReader,
+    capture: &mut Capture,
+    mut eof: [bool; 2],
+    deadline: &mut DrainDeadline,
+) -> Result<[bool; 2], ProcessError> {
+    let stop = capture
+        .binding
+        .on_exit
+        .as_ref()
+        .and_then(|sink| sink.stop_notify());
+    let mut control = DrainControl::default();
+    let grace = tokio::time::sleep(std::time::Duration::from_millis(50));
+    tokio::pin!(grace);
+    let mut out = [0; 8192];
+    let mut err = [0; 8192];
+    while !eof.iter().all(|value| *value) {
+        tokio::select! {
+            biased;
+            () = wait_for_stop(&stop), if !control.stop_handled => {
+                stop_background(child, deadline, &mut control, false).await?;
+                break;
+            }
+            () = wait_until(deadline.at), if !control.deadline_handled => {
+                stop_background(child, deadline, &mut control, true).await?;
+                break;
+            }
+            () = &mut grace => break,
+            result = stdout.read(&mut out), if !eof[0] => {
+                let n = result.map_err(io_error)?;
+                eof[0] = n == 0;
+                capture_chunk_with_stop(capture, &out[..n], false, n == 0, child, deadline, &mut control, &stop).await?;
+            }
+            result = stderr.read(&mut err), if !eof[1] => {
+                let n = result.map_err(io_error)?;
+                eof[1] = n == 0;
+                capture_chunk_with_stop(capture, &err[..n], true, n == 0, child, deadline, &mut control, &stop).await?;
+            }
+        }
+        if control.stop_handled {
+            break;
+        }
+    }
+    Ok(eof)
+}
+
+#[cfg(windows)]
+async fn stop_capture_readers(
+    stdout: &mut crate::stdio_cancel::CancelablePipeReader,
+    stderr: &mut crate::stdio_cancel::CancelablePipeReader,
+    capture: &mut Capture,
+    child: &mut tokio::process::Child,
+    deadline: &mut DrainDeadline,
+) -> Result<(), ProcessError> {
+    // Stop both first: one pending read must not postpone cancellation of the
+    // other. A cancellation request is not proof that its thread has exited.
+    drain_capture_readers(stdout, stderr, capture, child, deadline, true).await
+}
+
+#[cfg(windows)]
+async fn drain_capture_readers(
+    stdout: &mut crate::stdio_cancel::CancelablePipeReader,
+    stderr: &mut crate::stdio_cancel::CancelablePipeReader,
+    capture: &mut Capture,
+    child: &mut tokio::process::Child,
+    deadline: &mut DrainDeadline,
+    cancel_reads: bool,
+) -> Result<(), ProcessError> {
+    if cancel_reads {
+        stdout.request_stop();
+        stderr.request_stop();
+    }
+    let limit = std::time::Duration::from_secs(5);
+    // A worker may already have read a chunk, or be waiting to enqueue it
+    // behind a full bounded queue. Consume both queues while stopping; waiting
+    // for the threads first would deadlock and dropping them would lose output.
+    {
+        let mut eof = [false; 2];
+        let mut out = [0; 8192];
+        let mut err = [0; 8192];
+        let stop = capture
+            .binding
+            .on_exit
+            .as_ref()
+            .and_then(|sink| sink.stop_notify());
+        let mut control = DrainControl::default();
+        let mut retry = tokio::time::interval(std::time::Duration::from_millis(10));
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let drain_limit = tokio::time::sleep(limit);
+        tokio::pin!(drain_limit);
+        while !eof.iter().all(|value| *value) {
+            tokio::select! {
+                // The deadline only interrupts waiting for readers. Once a
+                // chunk has entered the output sink, let that append settle
+                // under its existing stop contract before returning an error.
+                _ = &mut drain_limit => {
+                    return Err(ProcessError::Io("output reader drain timed out".into()));
+                }
+                // The first cancel may have raced the worker's last stop
+                // check immediately before ReadFile. Keep requesting it while
+                // consuming the queue, not only after the reader reports EOF.
+                _ = retry.tick(), if cancel_reads => {
+                    stdout.request_stop();
+                    stderr.request_stop();
+                }
+                () = wait_for_stop(&stop), if !control.stop_handled => {
+                    stop_background(child, deadline, &mut control, false).await?;
+                }
+                result = stdout.read(&mut out), if !eof[0] => {
+                    let n = result.map_err(io_error)?;
+                    eof[0] = n == 0;
+                    capture_chunk_with_stop(capture, &out[..n], false, n == 0 && !cancel_reads, child, deadline, &mut control, &stop).await?;
+                }
+                result = stderr.read(&mut err), if !eof[1] => {
+                    let n = result.map_err(io_error)?;
+                    eof[1] = n == 0;
+                    capture_chunk_with_stop(capture, &err[..n], true, n == 0 && !cancel_reads, child, deadline, &mut control, &stop).await?;
+                }
+            }
+        }
+        // Even if stop won, EOF is only a channel event. Join the actual OS
+        // threads below before the caller reports or releases cleanup.
+    }
+    let (stdout, stderr) = tokio::join!(stdout.shutdown(limit), stderr.shutdown(limit));
+    match (stdout, stderr) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(out), Err(err)) => Err(ProcessError::Io(format!(
+            "stdout reader shutdown failed: {out}; stderr reader shutdown failed: {err}"
+        ))),
+        (Err(error), _) | (_, Err(error)) => Err(io_error(error)),
+    }
+}
+
+#[cfg(windows)]
+async fn capture_pipe_snapshots(
+    stdout: &std::io::PipeReader,
+    stderr: &std::io::PipeReader,
+    capture: &mut Capture,
+    child: &mut tokio::process::Child,
+    deadline: &mut DrainDeadline,
+) -> Result<(), ProcessError> {
+    let mut stdout = crate::stdio_cancel::CancelablePipeReader::snapshot(
+        stdout.try_clone().map_err(io_error)?,
+        "child stdout snapshot",
+    )
+    .map_err(io_error)?;
+    let mut stderr = crate::stdio_cancel::CancelablePipeReader::snapshot(
+        stderr.try_clone().map_err(io_error)?,
+        "child stderr snapshot",
+    )
+    .map_err(io_error)?;
+    drain_capture_readers(&mut stdout, &mut stderr, capture, child, deadline, false).await
+}
+
 pub(super) async fn run(
     cmd: &SandboxedCommand,
     limit: Option<usize>,
     explicit: bool,
 ) -> Result<ForegroundRunResult, ProcessError> {
     let mut command = WindowsProcess::build_command(cmd);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    command.stdin(Stdio::piped()).kill_on_drop(true);
+    #[cfg(windows)]
+    let (mut stdout, mut stderr, stdout_handoff, stderr_handoff) = {
+        let (stdout_read, stdout_write) = std::io::pipe().map_err(io_error)?;
+        let (stderr_read, stderr_write) = std::io::pipe().map_err(io_error)?;
+        // Keep independent read handles alive while the foreground readers
+        // stop and their bounded tail is captured. A detached writer must not
+        // see a broken pipe during that handoff.
+        let stdout_handoff = stdout_read.try_clone().map_err(io_error)?;
+        let stderr_handoff = stderr_read.try_clone().map_err(io_error)?;
+        let stdout = crate::stdio_cancel::CancelablePipeReader::new(stdout_read, "child stdout")
+            .map_err(io_error)?;
+        let stderr = crate::stdio_cancel::CancelablePipeReader::new(stderr_read, "child stderr")
+            .map_err(io_error)?;
+        command.stdout(Stdio::from(stdout_write));
+        command.stderr(Stdio::from(stderr_write));
+        (stdout, stderr, stdout_handoff, stderr_handoff)
+    };
+    #[cfg(not(windows))]
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(0x0000_0004); // CREATE_SUSPENDED until payload job ownership is installed.
     let mut child = command.spawn().map_err(io_error)?;
+    // Stdio::from(PipeWriter) remains owned by Command after spawn. Close the
+    // parent's copies so EOF reflects only writers in the child process tree.
+    drop(command);
     let pid = child
         .id()
         .ok_or_else(|| ProcessError::Io("spawned child has no pid".into()))?;
@@ -975,10 +1240,12 @@ pub(super) async fn run(
             Some(pid),
             cmd.requires_group_cleanup_on_exit(),
         );
+    #[cfg(not(windows))]
     let mut stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => fail_foreground!(ProcessError::Io("no stdout".into())),
     };
+    #[cfg(not(windows))]
     let mut stderr = match child.stderr.take() {
         Some(stderr) => stderr,
         None => fail_foreground!(ProcessError::Io("no stderr".into())),
@@ -1038,6 +1305,7 @@ pub(super) async fn run(
         let mut err = [0; 8192];
         let mut control = DrainControl::default();
         let mut stopped = false;
+        let mut finished_status = None;
         loop {
             tokio::select! {
                 biased;
@@ -1047,11 +1315,10 @@ pub(super) async fn run(
                 }
                 () = &mut requested => break,
                 () = &mut foreground_wait => { timed_out = true; break; }
-                result = child.wait(), if eof.iter().all(|eof| *eof) => {
+                result = child.wait() => {
                     let status = match result { Ok(status) => status, Err(error) => fail_foreground!(io_error(error)) };
-                    guard.0 = None;
-                    if let Err(error) = finish_foreground(&mut capture, &mut child, &mut guard, &mut deadline, &stop).await { fail_foreground!(error); }
-                    return Ok(ForegroundRunResult {output_file: capture.metadata(), outcome: ForegroundOutcome::Completed(ProcessOutput {stdout: capture.stdout, stderr: capture.stderr, exit_code: status.code().unwrap_or(-1), timed_out: false})});
+                    finished_status = Some(status);
+                    break;
                 }
                 result = stdout.read(&mut out), if !eof[0] => {
                     let n = match result { Ok(n) => n, Err(error) => fail_foreground!(io_error(error)) };
@@ -1113,6 +1380,15 @@ pub(super) async fn run(
                 true,
             )
             .await?;
+            #[cfg(windows)]
+            stop_capture_readers(
+                &mut stdout,
+                &mut stderr,
+                &mut capture,
+                &mut child,
+                &mut deadline,
+            )
+            .await?;
             flush_capture(&mut capture, deadline.strict_host).await?;
             finalize_capture(&mut capture, deadline.strict_host).await?;
             return Err(ProcessError::Io("supervisor command cancelled".into()));
@@ -1123,10 +1399,43 @@ pub(super) async fn run(
             if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await {
                 fail_foreground!(error);
             }
-            capture.chunk(&[], false, true).await?;
-            capture.chunk(&[], true, true).await?;
+            deadline.at = None;
+            #[cfg(windows)]
+            {
+                // Job accounting can reach zero before the last writer has
+                // physically exited. Real EOF, bounded by drain's stop grace,
+                // is the output boundary; a snapshot alone is insufficient.
+                drain(
+                    &mut child,
+                    &mut stdout,
+                    &mut stderr,
+                    &mut capture,
+                    eof,
+                    &mut deadline,
+                    true,
+                )
+                .await?;
+                stop_capture_readers(
+                    &mut stdout,
+                    &mut stderr,
+                    &mut capture,
+                    &mut child,
+                    &mut deadline,
+                )
+                .await?;
+            }
+            #[cfg(not(windows))]
+            {
+                capture.chunk(&[], false, true).await?;
+                capture.chunk(&[], true, true).await?;
+            }
             flush_capture(&mut capture, deadline.strict_host).await?;
             finalize_capture(&mut capture, deadline.strict_host).await?;
+            if deadline.requested_stop
+                || !commit_verified_cleanup(capture.binding.on_exit.as_deref())?
+            {
+                return Err(ProcessError::Io("supervisor command cancelled".into()));
+            }
             return Ok(ForegroundRunResult {
                 output_file: capture.metadata(),
                 outcome: ForegroundOutcome::Completed(ProcessOutput {
@@ -1138,12 +1447,16 @@ pub(super) async fn run(
             });
         }
         // A starved deadline/request must not background an already exited PID.
-        let exited_status = match child.try_wait() {
-            Ok(status) => status,
-            Err(error) => fail_foreground!(io_error(error)),
+        let exited_status = match finished_status {
+            Some(status) => Some(status),
+            None => match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => fail_foreground!(io_error(error)),
+            },
         };
         if let Some(status) = exited_status {
             guard.0 = None;
+            #[cfg(not(windows))]
             if let Ok(Err(error)) = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
                 drain(
@@ -1160,11 +1473,117 @@ pub(super) async fn run(
             {
                 fail_foreground!(error);
             }
+            #[cfg(windows)]
+            let eof = match drain_exited_foreground_tail(
+                &mut child,
+                &mut stdout,
+                &mut stderr,
+                &mut capture,
+                eof,
+                &mut deadline,
+            )
+            .await
+            {
+                Ok(eof) => eof,
+                Err(error) => fail_foreground!(error),
+            };
+            #[cfg(windows)]
+            {
+                let mut strict_failure = None;
+                if deadline.strict_host {
+                    // Preserve the accepted flush contract while readers and
+                    // the job are still owned: stop can terminate the tree
+                    // while an already-entered append/flush settles.
+                    deadline.at = None;
+                    let mut control = DrainControl {
+                        deadline_handled: true,
+                        ..DrainControl::default()
+                    };
+                    let result = output_with_stop(
+                        flush_capture(&mut capture, true),
+                        &mut child,
+                        &mut deadline,
+                        &mut control,
+                        &stop,
+                    )
+                    .await;
+                    strict_failure = result.err().or_else(|| {
+                        control
+                            .stop_handled
+                            .then(|| ProcessError::Io("supervisor command cancelled".into()))
+                    });
+                    // Keep the original readers alive while stopping the
+                    // complete owned tree. Then drain to real pipe EOF, so
+                    // writes completed during termination are not discarded.
+                    if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await
+                    {
+                        fail_foreground!(error);
+                    }
+                    if let Err(error) = drain(
+                        &mut child,
+                        &mut stdout,
+                        &mut stderr,
+                        &mut capture,
+                        eof,
+                        &mut deadline,
+                        true,
+                    )
+                    .await
+                    {
+                        fail_foreground!(error);
+                    }
+                }
+                // Retain every completed read, join both workers, then capture
+                // the finite bytes already in the kernel before handing the
+                // still-open streams to their post-foreground owner.
+                if let Err(error) = stop_capture_readers(
+                    &mut stdout,
+                    &mut stderr,
+                    &mut capture,
+                    &mut child,
+                    &mut deadline,
+                )
+                .await
+                {
+                    fail_foreground!(error);
+                }
+                if let Some(error) = strict_failure {
+                    fail_foreground!(error);
+                }
+                if !deadline.strict_host {
+                    if let Err(error) = capture_pipe_snapshots(
+                        &stdout_handoff,
+                        &stderr_handoff,
+                        &mut capture,
+                        &mut child,
+                        &mut deadline,
+                    )
+                    .await
+                    {
+                        fail_foreground!(error);
+                    }
+                }
+                // A stop can arrive while the already-exited leader's output
+                // is being drained. Do not disarm the Job and report ordinary
+                // completion after that stop has begun terminating the tree.
+                if !deadline.strict_host && deadline.terminated {
+                    if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await
+                    {
+                        fail_foreground!(error);
+                    }
+                    return Err(ProcessError::Io("supervisor command cancelled".into()));
+                }
+            }
             if deadline.strict_host && deadline.terminated {
                 if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await {
                     fail_foreground!(error);
                 }
                 if !deadline.expired {
+                    return Err(ProcessError::Io("supervisor command cancelled".into()));
+                }
+                flush_capture(&mut capture, deadline.strict_host).await?;
+                finalize_capture(&mut capture, deadline.strict_host).await?;
+                if !commit_verified_cleanup(capture.binding.on_exit.as_deref())? {
                     return Err(ProcessError::Io("supervisor command cancelled".into()));
                 }
                 return Ok(ForegroundRunResult {
@@ -1177,10 +1596,57 @@ pub(super) async fn run(
                     }),
                 });
             }
-            if let Err(error) =
-                finish_foreground(&mut capture, &mut child, &mut guard, &mut deadline, &stop).await
+            #[cfg(windows)]
+            let output_drainer = if !deadline.strict_host && !eof.iter().all(|value| *value) {
+                if cmd.is_supervisor_request() {
+                    let started = tokio::select! {
+                        biased;
+                        () = wait_for_stop(&stop) => None,
+                        result = super::supervisor::start_output_drainer(&stdout_handoff, &stderr_handoff) => Some(result),
+                    };
+                    match started {
+                        Some(Ok(helper)) => Some(helper),
+                        Some(Err(error)) => fail_foreground!(error),
+                        None => {
+                            deadline.verify_lease |= deadline.verify_supervised_stop;
+                            let cleanup =
+                                terminate_and_reap(&deadline, &mut child, &mut guard).await;
+                            match cleanup {
+                                Ok(_) => {
+                                    return Err(ProcessError::Io(
+                                        "supervisor command cancelled".into(),
+                                    ))
+                                }
+                                Err(error) => fail_foreground!(error),
+                            }
+                        }
+                    }
+                } else {
+                    if let Err(error) =
+                        super::supervisor::drain_in_process(stdout_handoff, stderr_handoff)
+                    {
+                        fail_foreground!(error);
+                    }
+                    None
+                }
+            } else {
+                None
+            };
+            if let Err(error) = finish_foreground(
+                &mut capture,
+                &mut child,
+                &mut guard,
+                &mut deadline,
+                &stop,
+                cmd.is_supervisor_request(),
+            )
+            .await
             {
                 fail_foreground!(error);
+            }
+            #[cfg(windows)]
+            if let Some(helper) = output_drainer {
+                helper.commit();
             }
             return Ok(ForegroundRunResult {
                 output_file: capture.metadata(),
@@ -1193,27 +1659,82 @@ pub(super) async fn run(
             });
         }
         if timed_out && !cmd.auto_background_on_timeout() {
-            let _ = super::kill_tree::kill_tree_windows(pid).await;
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            guard.0 = None;
-            capture.chunk(&[], false, true).await?;
-            capture.chunk(&[], true, true).await?;
-            flush_capture(&mut capture, deadline.strict_host).await?;
-            finalize_capture(&mut capture, deadline.strict_host).await?;
-            return Ok(ForegroundRunResult {
-                output_file: capture.metadata(),
-                outcome: ForegroundOutcome::Completed(ProcessOutput {
-                    stdout: capture.stdout,
-                    stderr: capture.stderr,
-                    exit_code: 143,
-                    timed_out: true,
-                }),
-            });
+            #[cfg(windows)]
+            {
+                // The timeout explicitly ends this payload. Keep the held
+                // Job, wait for cleanup, and consume both streams to EOF so
+                // bytes already read into our queues are not lost.
+                deadline.verify_lease = true;
+                if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await {
+                    fail_foreground!(error);
+                }
+                deadline.at = None;
+                if let Err(error) = drain(
+                    &mut child,
+                    &mut stdout,
+                    &mut stderr,
+                    &mut capture,
+                    eof,
+                    &mut deadline,
+                    true,
+                )
+                .await
+                {
+                    fail_foreground!(error);
+                }
+                if let Err(error) = stop_capture_readers(
+                    &mut stdout,
+                    &mut stderr,
+                    &mut capture,
+                    &mut child,
+                    &mut deadline,
+                )
+                .await
+                {
+                    fail_foreground!(error);
+                }
+                flush_capture(&mut capture, false).await?;
+                finalize_capture(&mut capture, false).await?;
+                if deadline.requested_stop
+                    || !commit_verified_cleanup(capture.binding.on_exit.as_deref())?
+                {
+                    return Err(ProcessError::Io("supervisor command cancelled".into()));
+                }
+                return Ok(ForegroundRunResult {
+                    output_file: capture.metadata(),
+                    outcome: ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: capture.stdout,
+                        stderr: capture.stderr,
+                        exit_code: 143,
+                        timed_out: true,
+                    }),
+                });
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = super::kill_tree::kill_tree_windows(pid).await;
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                guard.0 = None;
+                capture.chunk(&[], false, true).await?;
+                capture.chunk(&[], true, true).await?;
+                flush_capture(&mut capture, deadline.strict_host).await?;
+                finalize_capture(&mut capture, deadline.strict_host).await?;
+                return Ok(ForegroundRunResult {
+                    output_file: capture.metadata(),
+                    outcome: ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: capture.stdout,
+                        stderr: capture.stderr,
+                        exit_code: 143,
+                        timed_out: true,
+                    }),
+                });
+            }
         }
     }
     deadline.at = None;
     let lifetime_guard = cmd.lifetime_guard().cloned();
+    let supervised = cmd.is_supervisor_request();
     deadline.verify_lease = lifetime_guard.is_some();
     if deadline.strict_host || deadline.verify_lease || deadline.verify_supervised_stop {
         let stop = capture
@@ -1279,19 +1800,90 @@ pub(super) async fn run(
                     match terminate_and_reap(&deadline, &mut child, &mut guard).await {
                         Ok(_) => {
                             cleanup_verified = true;
-                            Ok(status)
+                            let accepted = wait_for_background_handoff(
+                                capture.binding.on_exit.as_deref(),
+                                &mut deadline,
+                            )
+                            .await;
+                            match accepted {
+                                Err(error) => {
+                                    Err(format!("background handoff acceptance failed: {error}"))
+                                }
+                                Ok(_) => match commit_verified_cleanup(
+                                    capture.binding.on_exit.as_deref(),
+                                ) {
+                                    Ok(true) => Ok(status),
+                                    Ok(false) => {
+                                        deadline.requested_stop = true;
+                                        Ok(status)
+                                    }
+                                    Err(error) => {
+                                        Err(format!("background terminal commit failed: {error}"))
+                                    }
+                                },
+                            }
                         }
                         Err(error) => Err(format!("background process cleanup failed: {error}")),
                     }
                 } else if deadline.verify_supervised_stop {
-                    // A natural supervisor completion must not terminate
-                    // descendants merely by dropping the payload Job.
-                    match deadline.completed_foreground() {
-                        Ok(()) => {
+                    // A natural leader-only completion must preserve detached
+                    // descendants, but a previously accepted stop must win.
+                    // Commit both Jobs under the same gate as that stop.
+                    let accepted = wait_for_background_handoff(
+                        capture.binding.on_exit.as_deref(),
+                        &mut deadline,
+                    )
+                    .await;
+                    let committed = match accepted {
+                        Ok(true) => commit_foreground_jobs(
+                            &deadline,
+                            capture.binding.on_exit.as_deref(),
+                            supervised,
+                        ),
+                        Ok(false) => Ok(false),
+                        Err(error) => Err(error),
+                    };
+                    match committed {
+                        Ok(true) => {
                             guard.0 = None;
                             Ok(status)
                         }
-                        Err(error) => Err(format!("background job release failed: {error}")),
+                        Ok(false) => {
+                            deadline.verify_lease = true;
+                            deadline.requested_stop |= !deadline.expired;
+                            match terminate_and_reap(&deadline, &mut child, &mut guard).await {
+                                Ok(_) => {
+                                    cleanup_verified = true;
+                                    match commit_verified_cleanup(
+                                        capture.binding.on_exit.as_deref(),
+                                    ) {
+                                        Ok(true) => Ok(status),
+                                        Ok(false) => {
+                                            deadline.requested_stop |= !deadline.expired;
+                                            Ok(status)
+                                        }
+                                        Err(error) => Err(format!(
+                                            "background terminal commit failed: {error}"
+                                        )),
+                                    }
+                                }
+                                Err(error) => {
+                                    Err(format!("background stop cleanup failed: {error}"))
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            deadline.verify_lease = true;
+                            let cleanup =
+                                terminate_and_reap(&deadline, &mut child, &mut guard).await;
+                            cleanup_verified = cleanup.is_ok();
+                            Err(match cleanup {
+                                Ok(_) => format!("background job release failed: {error}"),
+                                Err(cleanup) => format!(
+                                    "background job release failed: {error}; cleanup failed: {cleanup}"
+                                ),
+                            })
+                        }
                     }
                 } else {
                     guard.0 = None;
@@ -1497,6 +2089,7 @@ mod native_background_stop_tests {
     impl Drop for ReleaseOnDrop {
         fn drop(&mut self) {
             let _ = std::fs::write(self.0.join("release"), "release");
+            let _ = std::fs::write(self.0.join("exit"), "exit");
             let _ = std::fs::write(self.0.join("leader.release"), "release");
         }
     }
@@ -1508,6 +2101,11 @@ mod native_background_stop_tests {
         pause_empty: AtomicBool,
         pause_flush: AtomicBool,
         reject_flush: AtomicBool,
+        reject_commit: AtomicBool,
+        defer_handoff: AtomicBool,
+        accept_handoff: AtomicBool,
+        handoff_waiting: Notify,
+        handoff_resume: Notify,
         append_started: Notify,
         append_resume: Notify,
         flush_started: Notify,
@@ -1536,6 +2134,28 @@ mod native_background_stop_tests {
 
         fn requires_verified_supervised_stop(&self) -> bool {
             true
+        }
+
+        async fn wait_for_supervisor_handoff(&self) -> Result<bool, ProcessError> {
+            if self.defer_handoff.load(Ordering::SeqCst) {
+                self.handoff_waiting.notify_one();
+                self.handoff_resume.notified().await;
+                Ok(self.accept_handoff.load(Ordering::SeqCst))
+            } else {
+                Ok(true)
+            }
+        }
+
+        fn commit_foreground(
+            &self,
+            action: &mut dyn FnMut() -> Result<(), ProcessError>,
+        ) -> Result<bool, ProcessError> {
+            if self.reject_commit.load(Ordering::SeqCst) {
+                Ok(false)
+            } else {
+                action()?;
+                Ok(true)
+            }
         }
 
         fn manages_output(&self) -> bool {
@@ -2012,6 +2632,130 @@ mod native_background_stop_tests {
         }
     }
 
+    #[tokio::test]
+    async fn rejected_foreground_commit_stops_and_verifies_detached_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(dir.path().to_path_buf());
+        let sink = Arc::new(Sink::default());
+        sink.reject_commit.store(true, Ordering::SeqCst);
+        let command =
+            redirected_descendant_command(dir.path(), sink, false).with_process_owner(None);
+        let task = tokio::spawn(async move { run(&command, None, false).await });
+        let pid = descendant_pid(dir.path()).await;
+        let descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(pid).unwrap();
+        std::fs::write(dir.path().join("leader.release"), "release").unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(ProcessError::Io(message)) if message.contains("supervisor command cancelled"))
+        );
+        held_exited(&descendant).await;
+        assert!(!dir.path().join("descendant.completed").exists());
+    }
+
+    #[tokio::test]
+    async fn rejected_background_commit_reports_verified_stop_not_natural_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(dir.path().to_path_buf());
+        let sink = Arc::new(Sink::default());
+        sink.reject_commit.store(true, Ordering::SeqCst);
+        let command =
+            redirected_descendant_command(dir.path(), sink.clone(), false).with_process_owner(None);
+        let ForegroundOutcome::MovedToBackground(_) =
+            run(&command, None, true).await.unwrap().outcome
+        else {
+            panic!("expected background handoff");
+        };
+        let pid = descendant_pid(dir.path()).await;
+        let descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(pid).unwrap();
+        std::fs::write(dir.path().join("leader.release"), "release").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sink.terminal.notified())
+            .await
+            .expect("background stop did not report");
+        assert_eq!(*sink.proofs.lock().unwrap(), [(Some(0), None, true)]);
+        assert!(sink.failures.lock().unwrap().is_empty());
+        held_exited(&descendant).await;
+        assert!(!dir.path().join("descendant.completed").exists());
+    }
+
+    #[tokio::test]
+    async fn rejected_background_handoff_keeps_job_until_descendant_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(dir.path().to_path_buf());
+        let sink = Arc::new(Sink::default());
+        sink.defer_handoff.store(true, Ordering::SeqCst);
+        let command =
+            redirected_descendant_command(dir.path(), sink.clone(), false).with_process_owner(None);
+        let ForegroundOutcome::MovedToBackground(_) =
+            run(&command, None, true).await.unwrap().outcome
+        else {
+            panic!("expected background handoff");
+        };
+        let pid = descendant_pid(dir.path()).await;
+        let descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(pid).unwrap();
+        std::fs::write(dir.path().join("leader.release"), "release").unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            sink.handoff_waiting.notified(),
+        )
+        .await
+        .expect("background runner did not wait for acceptance");
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&descendant),
+            Some(true)
+        );
+        assert!(sink.proofs.lock().unwrap().is_empty());
+        // The test sink returns false only after this explicit synchronization.
+        sink.handoff_resume.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sink.terminal.notified())
+            .await
+            .expect("rejected handoff did not settle");
+        assert_eq!(*sink.proofs.lock().unwrap(), [(Some(0), None, true)]);
+        assert!(sink.failures.lock().unwrap().is_empty());
+        held_exited(&descendant).await;
+        assert!(!dir.path().join("descendant.completed").exists());
+    }
+
+    #[tokio::test]
+    async fn handoff_acceptance_wait_observes_stop_and_deadline() {
+        for timeout in [false, true] {
+            let sink = Arc::new(Sink::default());
+            sink.defer_handoff.store(true, Ordering::SeqCst);
+            let waiter = sink.clone();
+            let task = tokio::spawn(async move {
+                let mut deadline = DrainDeadline {
+                    at: timeout.then(|| {
+                        tokio::time::Instant::now() + std::time::Duration::from_millis(100)
+                    }),
+                    ..DrainDeadline::default()
+                };
+                let accepted = wait_for_background_handoff(Some(waiter.as_ref()), &mut deadline)
+                    .await
+                    .unwrap();
+                (accepted, deadline.expired, deadline.requested_stop)
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sink.handoff_waiting.notified(),
+            )
+            .await
+            .expect("handoff wait did not start");
+            if !timeout {
+                sink.stop.notify_one();
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result, (false, timeout, !timeout));
+        }
+    }
+
     // The leader must exit before the inherited-pipe child is stopped.
     #[allow(clippy::zombie_processes)]
     #[test]
@@ -2438,6 +3182,155 @@ mod native_background_stop_tests {
             matches!(result, Err(ProcessError::Io(message)) if message == "supervisor command cancelled")
         );
         assert!(!dir.path().join("descendant.completed").exists());
+    }
+
+    #[tokio::test]
+    async fn strict_stop_drains_both_streams_written_during_final_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(dir.path().to_path_buf());
+        let sink = Arc::new(Sink::default());
+        sink.pause_flush.store(true, Ordering::SeqCst);
+        let command = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    "process::supervisor_gate::tests::windows_foreground_detached_helper".into(),
+                    "--exact".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: Some(dir.path().to_path_buf()),
+                env: std::collections::HashMap::from([
+                    (
+                        "LINGXI_DETACHED_JOB_TEST_DIR".into(),
+                        dir.path().to_string_lossy().into_owned(),
+                    ),
+                    ("LINGXI_DETACHED_JOB_HOLD_PIPE".into(), "1".into()),
+                    ("LINGXI_DETACHED_JOB_HOLD_STDERR".into(), "1".into()),
+                    ("LINGXI_DETACHED_JOB_SHORT_OUTPUT".into(), "1".into()),
+                ]),
+                timeout: Some(std::time::Duration::from_secs(60)),
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "strict pipe drain regression".into(),
+            },
+        )
+        .with_require_group_cleanup_on_exit(true)
+        .with_auto_background_on_timeout(false)
+        .with_background_task(BackgroundTaskBinding {
+            task_id: "strict-tail".into(),
+            output_path: dir.path().join("output"),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        });
+        let task = tokio::spawn(async move { run(&command, Some(0), false).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            sink.flush_started.notified(),
+        )
+        .await
+        .expect("foreground flush did not start");
+        let pid: u32 = std::fs::read_to_string(dir.path().join("child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(pid).unwrap();
+        std::fs::write(dir.path().join("release"), "release").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !dir.path().join("written").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant did not write both streams");
+        sink.stop.notify_one();
+        held_exited(&descendant).await;
+        sink.flush_resume.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(ProcessError::Io(message)) if message.contains("supervisor command cancelled"))
+        );
+        let output = sink.output.lock().unwrap();
+        assert_eq!(output.bytes().filter(|byte| *byte == 1).count(), 1024);
+        assert_eq!(output.bytes().filter(|byte| *byte == 2).count(), 1024);
+    }
+
+    #[tokio::test]
+    async fn ordinary_foreground_timeout_drains_output_already_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        sink.pause_append.store(true, Ordering::SeqCst);
+        let command = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    "process::supervisor_gate::tests::windows_job_lifecycle_fixture".into(),
+                    "--exact".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: Some(dir.path().to_path_buf()),
+                env: std::collections::HashMap::from([
+                    ("LINGXI_JOB_LIFECYCLE_ROLE".into(), "timeout_output".into()),
+                    (
+                        "LINGXI_JOB_LIFECYCLE_DIR".into(),
+                        dir.path().to_string_lossy().into_owned(),
+                    ),
+                ]),
+                timeout: Some(std::time::Duration::from_secs(8)),
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "foreground timeout output regression".into(),
+            },
+        )
+        .with_auto_background_on_timeout(false)
+        .with_background_task(BackgroundTaskBinding {
+            task_id: "ordinary-timeout-tail".into(),
+            output_path: dir.path().join("output"),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        });
+        let task = tokio::spawn(async move { run(&command, Some(0), false).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            sink.append_started.notified(),
+        )
+        .await
+        .expect("foreground append did not start");
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !dir.path().join("timeout-output.ready").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child did not finish writing its foreground bytes");
+        tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+        sink.append_resume.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.outcome, ForegroundOutcome::Completed(output) if output.timed_out));
+        assert_eq!(
+            sink.output
+                .lock()
+                .unwrap()
+                .bytes()
+                .filter(|byte| *byte == 3)
+                .count(),
+            32 * 1024
+        );
     }
 
     #[tokio::test]

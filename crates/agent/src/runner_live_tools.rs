@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use lingxi_core::host::tool_invoker::{
-    SubagentInvocationContext, ToolInvocationResult, ToolInvokerError,
+    CleanupUnverifiedReason, SubagentInvocationContext, ToolInvocationResult, ToolInvokerError,
 };
 use lingxi_core::host::tool_use_lifecycle::{ToolUseRemoval, ToolUseRemovalReason};
 use lingxi_core::host::CancellationToken;
@@ -54,9 +54,8 @@ struct CallRecord {
     result: Option<Result<ToolInvocationResult, ToolInvokerError>>,
 }
 
-/// Per-response executor. It cancels every call before dropping in-flight
-/// futures on fallback, returns every registered id (including queued and
-/// completed records), and creates a fresh abort tree for a later hop.
+/// Per-response executor. Fallback cancels and joins every started call before
+/// removing its records, so late cleanup failures remain observable.
 pub(crate) struct LiveAgentToolExecutor {
     calls: Vec<CallRecord>,
     tracked_blocks: Vec<(u32, ToolUseId)>,
@@ -66,6 +65,7 @@ pub(crate) struct LiveAgentToolExecutor {
     abort: CancellationToken,
     max_safe_concurrency: usize,
     completed_normally: bool,
+    cleanup_unverified: Option<CleanupUnverifiedReason>,
 }
 
 impl LiveAgentToolExecutor {
@@ -77,6 +77,7 @@ impl LiveAgentToolExecutor {
             abort: CancellationToken::new(),
             max_safe_concurrency: max_safe_concurrency.max(1),
             completed_normally: false,
+            cleanup_unverified: None,
         }
     }
 
@@ -159,6 +160,10 @@ impl LiveAgentToolExecutor {
         !self.inflight.is_empty()
     }
 
+    pub(crate) fn cancellation_requested(&self) -> bool {
+        self.abort.is_cancelled()
+    }
+
     pub(crate) fn has_pending_calls(&self) -> bool {
         self.calls
             .iter()
@@ -167,6 +172,10 @@ impl LiveAgentToolExecutor {
 
     pub(crate) fn call(&self, index: usize) -> Option<&LiveAgentToolCall> {
         self.calls.get(index).map(|record| &record.call)
+    }
+
+    pub(crate) fn cleanup_unverified(&self) -> Option<&CleanupUnverifiedReason> {
+        self.cleanup_unverified.as_ref()
     }
 
     pub(crate) async fn next_completion(
@@ -181,6 +190,10 @@ impl LiveAgentToolExecutor {
         result: Result<ToolInvocationResult, ToolInvokerError>,
         dispatch: &LiveAgentToolDispatch,
     ) {
+        if self.abort.is_cancelled() {
+            self.record_cancelled_completion(index, result);
+            return;
+        }
         let update_queued_context = self
             .calls
             .get(index)
@@ -212,6 +225,24 @@ impl LiveAgentToolExecutor {
         index: usize,
         result: Result<ToolInvocationResult, ToolInvokerError>,
     ) {
+        if let Err(ToolInvokerError::CleanupUnverified(reason)) = &result {
+            self.cleanup_unverified = Some(match self.cleanup_unverified.take() {
+                None => reason.clone(),
+                Some(CleanupUnverifiedReason::Multiple(mut reasons)) => {
+                    reasons.push(reason.clone());
+                    CleanupUnverifiedReason::Multiple(reasons)
+                }
+                Some(previous) => CleanupUnverifiedReason::Multiple(vec![previous, reason.clone()]),
+            });
+            // No queued tool may begin after this terminal failure. Already
+            // running siblings receive cancellation and are still drained.
+            self.abort.cancel();
+            for record in &mut self.calls {
+                if record.state == CallState::Queued {
+                    record.state = CallState::LocalOnly;
+                }
+            }
+        }
         if let Some(record) = self.calls.get_mut(index) {
             record.result = Some(result);
             record.state = CallState::Completed;
@@ -225,9 +256,36 @@ impl LiveAgentToolExecutor {
         self.completed_normally = true;
     }
 
-    /// Preserve tool futures that have completed by the time the provider
-    /// stream error is observed, then cancel and drop the remaining futures.
-    /// This matches the query finalizer's drain-finished-then-abort ordering.
+    fn record_cancelled_completion(
+        &mut self,
+        index: usize,
+        result: Result<ToolInvocationResult, ToolInvokerError>,
+    ) {
+        use lingxi_core::host::tool_invoker::PriorFailureContext;
+
+        let result = match result {
+            Err(error @ ToolInvokerError::CleanupUnverified(_)) => Err(error),
+            other => {
+                // ToolInvoker does not currently return a trusted no-spawn or
+                // verified-reaping receipt. An ordinary result after a cancel
+                // therefore cannot establish that external work has stopped.
+                let mut reason = CleanupUnverifiedReason::Message(
+                    "cancelled tool did not provide a verified cleanup receipt".into(),
+                );
+                if let Err(error) = &other {
+                    if let Some(context) = PriorFailureContext::from_tool_error(error) {
+                        reason = reason.with_context(context);
+                    }
+                }
+                Err(ToolInvokerError::CleanupUnverified(reason))
+            }
+        };
+        self.record_completion_without_scheduling(index, result);
+    }
+
+    /// Preserve results ready at the provider-error boundary for publication,
+    /// then cancel and join the remaining calls. Late ordinary results are not
+    /// published, but a late cleanup failure is retained as terminal evidence.
     pub(crate) async fn abort_inflight_and_collect_ready(
         &mut self,
     ) -> Vec<(usize, Result<ToolInvocationResult, ToolInvokerError>)> {
@@ -239,23 +297,34 @@ impl LiveAgentToolExecutor {
             }
         }
         self.abort.cancel();
-        self.inflight = FuturesUnordered::new();
+        while let Some((index, result)) = self.inflight.next().await {
+            self.record_cancelled_completion(index, result);
+        }
         completed
     }
 
     /// Remove all live executor records before continuing after a server hop.
     /// `reason` is present only for the accepted visible tombstoned-tool branch;
     /// declined fallback removal intentionally has no reason.
-    pub(crate) fn reset_for_server_fallback(
+    pub(crate) async fn reset_for_server_fallback(
         &mut self,
         reason: Option<ToolUseRemovalReason>,
     ) -> Option<ToolUseRemoval> {
+        while let Some(Some((index, result))) = self.inflight.next().now_or_never() {
+            if self.abort.is_cancelled() {
+                self.record_cancelled_completion(index, result);
+            } else {
+                self.record_completion_without_scheduling(index, result);
+            }
+        }
+        self.abort.cancel();
+        while let Some((index, result)) = self.inflight.next().await {
+            self.record_cancelled_completion(index, result);
+        }
         let ids = std::mem::take(&mut self.tracked_blocks)
             .into_iter()
             .map(|(_, id)| id)
             .collect::<Vec<_>>();
-        self.abort.cancel();
-        self.inflight = FuturesUnordered::new();
         self.calls.clear();
         self.tracked_blocks.clear();
         self.abort = CancellationToken::new();
@@ -283,6 +352,9 @@ impl LiveAgentToolExecutor {
     }
 
     fn start_queued(&mut self, dispatch: &LiveAgentToolDispatch) {
+        if self.cleanup_unverified.is_some() {
+            return;
+        }
         loop {
             let executing_safe = self
                 .calls
@@ -420,7 +492,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_sweep_cancels_started_tool_before_dropping_its_future() {
+    async fn incomplete_results_stop_queued_calls_and_preserve_running_failures() {
+        let started = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = started.clone();
+        let both_started = Arc::new(tokio::sync::Barrier::new(2));
+        let dispatch: LiveAgentToolDispatch = Arc::new(move |call| {
+            seen.lock().unwrap().push(call.id.to_string());
+            let both_started = both_started.clone();
+            Box::pin(async move {
+                both_started.wait().await;
+                Err(ToolInvokerError::CleanupUnverified(
+                    CleanupUnverifiedReason::Message(call.id.to_string()),
+                ))
+            })
+        });
+        let mut executor = LiveAgentToolExecutor::new(2);
+        executor.add_call(live_call("first", true), true, &dispatch);
+        executor.add_call(live_call("second", true), true, &dispatch);
+        executor.add_call(live_call("queued", false), true, &dispatch);
+        while executor.has_inflight() {
+            let (index, result) = executor.next_completion().await.unwrap();
+            executor.record_completion(index, result, &dispatch);
+        }
+        let Some(CleanupUnverifiedReason::Multiple(reasons)) = executor.cleanup_unverified() else {
+            panic!("both running failures must be retained");
+        };
+        let mut messages: Vec<_> = reasons.iter().map(|reason| reason.detail()).collect();
+        messages.sort_unstable();
+        assert_eq!(messages, ["first", "second"]);
+        let started = started.lock().unwrap();
+        assert_eq!(started.len(), 2);
+        assert!(!started.iter().any(|name| name == "queued"));
+    }
+
+    #[tokio::test]
+    async fn stream_error_waits_for_late_cleanup_failure() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancelled_tx, mut cancelled_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let dispatch: LiveAgentToolDispatch = Arc::new(move |call| {
+            let release = release.lock().unwrap().take().unwrap();
+            let _ = started_tx.send(());
+            let cancelled_tx = cancelled_tx.clone();
+            Box::pin(async move {
+                call.context.cancellation_token.cancelled().await;
+                let _ = cancelled_tx.send(());
+                let _ = release.await;
+                Err(ToolInvokerError::CleanupUnverified(
+                    CleanupUnverifiedReason::Message("late cleanup evidence".into()),
+                ))
+            })
+        });
+        let mut executor = LiveAgentToolExecutor::new(1);
+        executor.add_call(live_call("running", true), true, &dispatch);
+        let mut initial = Box::pin(executor.next_completion());
+        assert!(futures::poll!(initial.as_mut()).is_pending());
+        drop(initial);
+        started_rx.recv().await.unwrap();
+
+        {
+            let drain = executor.abort_inflight_and_collect_ready();
+            tokio::pin!(drain);
+            assert!(futures::poll!(drain.as_mut()).is_pending());
+            cancelled_rx.recv().await.unwrap();
+            release_tx.send(()).unwrap();
+            assert!(drain.await.is_empty(), "late results must not be published");
+        }
+        assert!(matches!(
+            executor.cleanup_unverified(),
+            Some(CleanupUnverifiedReason::Message(message)) if message == "late cleanup evidence"
+        ));
+    }
+
+    #[tokio::test]
+    async fn fallback_waits_for_late_cleanup_failure_before_reset() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let dispatch: LiveAgentToolDispatch = Arc::new(move |call| {
+            let release = release.lock().unwrap().take().unwrap();
+            let _ = started_tx.send(());
+            Box::pin(async move {
+                call.context.cancellation_token.cancelled().await;
+                let _ = release.await;
+                Err(ToolInvokerError::CleanupUnverified(
+                    CleanupUnverifiedReason::Message("fallback cleanup evidence".into()),
+                ))
+            })
+        });
+        let id = ToolUseId::from("fallback-tool".to_string());
+        let mut executor = LiveAgentToolExecutor::new(1);
+        executor.track_tool_use(0, id.clone());
+        executor.add_call(live_call("running", true), true, &dispatch);
+        let mut initial = Box::pin(executor.next_completion());
+        assert!(futures::poll!(initial.as_mut()).is_pending());
+        drop(initial);
+        started_rx.recv().await.unwrap();
+
+        {
+            let reset = executor.reset_for_server_fallback(None);
+            tokio::pin!(reset);
+            assert!(futures::poll!(reset.as_mut()).is_pending());
+            release_tx.send(()).unwrap();
+            assert_eq!(reset.await.unwrap().ids, [id]);
+        }
+        assert!(matches!(
+            executor.cleanup_unverified(),
+            Some(CleanupUnverifiedReason::Message(message)) if message == "fallback cleanup evidence"
+        ));
+    }
+
+    #[tokio::test]
+    async fn fallback_sweep_does_not_treat_abort_as_cleanup_receipt() {
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (cancel_seen_tx, mut cancel_seen_rx) = tokio::sync::mpsc::unbounded_channel();
         let dispatch: LiveAgentToolDispatch = Arc::new(move |call| {
@@ -461,10 +645,17 @@ mod tests {
 
         let removal = executor
             .reset_for_server_fallback(None)
+            .await
             .expect("the in-flight ToolUseId is removed");
         assert_eq!(removal.ids, [id]);
         assert_eq!(removal.reason, None);
         assert!(token.is_cancelled(), "the tool's token is cancelled first");
+        assert!(matches!(
+            executor.cleanup_unverified(),
+            Some(CleanupUnverifiedReason::WithContext { reason, .. })
+                if matches!(reason.as_ref(), CleanupUnverifiedReason::Message(message)
+                    if message == "cancelled tool did not provide a verified cleanup receipt")
+        ));
         drop(executor);
         cancel_seen_rx
             .recv()
@@ -477,7 +668,10 @@ mod tests {
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
         let dispatch: LiveAgentToolDispatch = Arc::new(move |call| {
             let _ = started_tx.send(call.context.cancellation_token.clone());
-            Box::pin(std::future::pending())
+            Box::pin(async move {
+                call.context.cancellation_token.cancelled().await;
+                Err(ToolInvokerError::Abort("cancelled".into()))
+            })
         });
         let mut executor = LiveAgentToolExecutor::new(1);
         let id = ToolUseId::from("toolu-not-in-discard-list".to_string());
@@ -503,6 +697,7 @@ mod tests {
         assert!(!executor.contains_discarded_tool(&[]));
         let removal = executor
             .reset_for_server_fallback(None)
+            .await
             .expect("decline sweeps all tracked ids, independently of blocks");
         assert_eq!(removal.ids, [id]);
         assert_eq!(removal.reason, None);

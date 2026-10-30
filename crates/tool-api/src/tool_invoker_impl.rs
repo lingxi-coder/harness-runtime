@@ -166,7 +166,7 @@ impl ToolInvoker for RegistryToolInvoker {
         };
         tool.cleanup_computer_inputs(&ctx)
             .await
-            .map_err(|error| ToolInvokerError::Internal(error.model_facing_message()))
+            .map_err(map_tool_error)
     }
 
     fn permission_mode(&self) -> Option<String> {
@@ -204,7 +204,7 @@ impl ToolInvoker for RegistryToolInvoker {
                 crate::tool_trait::ToolError::InvalidInput(detail) => {
                     ToolInvokerError::Validation(detail)
                 }
-                other => ToolInvokerError::Internal(other.model_facing_message()),
+                other => map_tool_error(other),
             })
     }
 
@@ -653,10 +653,7 @@ impl RegistryToolInvoker {
         let result = tool
             .call(input, tool_use_ctx, progress_tx)
             .await
-            .map_err(|e| match e {
-                crate::tool_trait::ToolError::InvalidInput(s) => ToolInvokerError::InvalidInput(s),
-                other => ToolInvokerError::Internal(other.model_facing_message()),
-            })?;
+            .map_err(map_tool_error)?;
 
         let turn_end = crate::tool_trait::tool_result_turn_end(
             tool.result_ends_turn(&result),
@@ -676,6 +673,25 @@ impl RegistryToolInvoker {
             context: Utf16JsonProjection::parse("[]").expect("empty JSON array is valid"),
             context_state: Some(context_state),
         })
+    }
+}
+
+fn map_tool_error(error: crate::tool_trait::ToolError) -> ToolInvokerError {
+    use crate::tool_trait::ToolError;
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+
+    match error {
+        ToolError::InvalidInput(message) => ToolInvokerError::InvalidInput(message),
+        ToolError::CleanupUnverified(message) => {
+            ToolInvokerError::CleanupUnverified(CleanupUnverifiedReason::Message(message))
+        }
+        ToolError::CleanupUnverifiedOutput(output) => {
+            ToolInvokerError::CleanupUnverified(output.into())
+        }
+        ToolError::CleanupUnverifiedBatch(reasons) => {
+            ToolInvokerError::CleanupUnverified(CleanupUnverifiedReason::Multiple(reasons))
+        }
+        other => ToolInvokerError::Internal(other.model_facing_message()),
     }
 }
 
@@ -1077,6 +1093,104 @@ mod tests {
             assert_eq!(result.is_error, failed);
             assert_eq!(result.data, json!({"echo": {"fail": failed}}));
         }
+    }
+
+    struct IncompleteProcessTool;
+
+    #[async_trait]
+    impl Tool for IncompleteProcessTool {
+        fn name(&self) -> &str {
+            "IncompleteProcess"
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            &ECHO_INPUT_SCHEMA
+        }
+        fn input_repair_metadata(&self) -> crate::tool_trait::ToolInputRepairMetadata {
+            builtin_input_repair_metadata()
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
+            false
+        }
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
+            false
+        }
+        async fn check_permissions(
+            &self,
+            _: &Utf16JsonProjection,
+            _: &ToolUseContext,
+        ) -> PermissionResult {
+            allow_for_tests()
+        }
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+            "".into()
+        }
+        async fn call(
+            &self,
+            _: Utf16JsonProjection,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            use crate::tool_trait::{
+                ProcessTreeStatus, UnverifiedCleanupOutput, UnverifiedCleanupOutputParts,
+            };
+            Err(ToolError::CleanupUnverifiedOutput(Box::new(
+                UnverifiedCleanupOutput::new(UnverifiedCleanupOutputParts {
+                    session_id: Some("session-child".into()),
+                    stdout: "partial stdout".into(),
+                    stderr: "partial stderr".into(),
+                    stdout_truncated: false,
+                    stderr_truncated: true,
+                    stdout_eof: false,
+                    stderr_eof: true,
+                    exit_code: None,
+                    timed_out: true,
+                    termination_requested: Some(true),
+                    tree_status: ProcessTreeStatus::Unverified,
+                    cleanup_detail: "tree exit unknown".into(),
+                    original_error: Some("original read failure".into()),
+                }),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_invoker_retains_incomplete_process_evidence() {
+        use lingxi_core::host::tool_invoker::{CleanupUnverifiedReason, ProcessTreeStatus};
+
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(IncompleteProcessTool));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+        let error = invoker
+            .invoke_detailed("IncompleteProcess", json!({}), no_ctx())
+            .await
+            .expect_err("an incomplete process is not a successful tool result");
+        let ToolInvokerError::CleanupUnverified(CleanupUnverifiedReason::Output(output)) = error
+        else {
+            panic!("the structured cleanup error must survive registry dispatch");
+        };
+        let parts = output.parts();
+        assert_eq!(parts.session_id.as_deref(), Some("session-child"));
+        assert_eq!(parts.stdout, "partial stdout");
+        assert_eq!(parts.stderr, "partial stderr");
+        assert!(!parts.stdout_eof && parts.stderr_eof && parts.stderr_truncated);
+        assert_eq!(parts.exit_code, None);
+        assert!(parts.timed_out);
+        assert_eq!(parts.termination_requested, Some(true));
+        assert_eq!(parts.tree_status, ProcessTreeStatus::Unverified);
+        assert_eq!(parts.cleanup_detail, "tree exit unknown");
+        assert_eq!(
+            parts.original_error.as_deref(),
+            Some("original read failure")
+        );
     }
 
     /// Trusted outcome markers are configured by the host-side fixture; model

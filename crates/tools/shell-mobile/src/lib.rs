@@ -30,6 +30,7 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -42,7 +43,9 @@ use tool_api::tool_trait::{
 use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
-use lingxi_core::host::sandbox::{ProcessCommand, SandboxError, SandboxPolicy};
+use lingxi_core::host::sandbox::{
+    ProcessCleanupReceipt, ProcessCleanupStatus, ProcessCommand, SandboxError, SandboxPolicy,
+};
 use mobile_linux_api::ProcessError;
 use mobile_linux_api::{NetworkPolicy, ResourceLimits};
 
@@ -56,7 +59,36 @@ const SHELL_MAX_TIMEOUT_MS: u64 = 600_000;
 /// Bash 2-minute default so an unspecified-timeout command is always bounded
 /// by the runner watchdog, never left to run to the runner's own ceiling.
 const SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// Wait for a cooperative cancellation without holding the turn indefinitely.
+/// An owned runner continues cleanup independently after this deadline.
+const SHELL_CLEANUP_WAIT: Duration = Duration::from_secs(5);
 static NEXT_SHELL_PROCESS_OWNER: AtomicU64 = AtomicU64::new(1);
+
+fn require_verified_cleanup(receipt: &ProcessCleanupReceipt) -> Result<(), ToolError> {
+    let snapshot = receipt.snapshot();
+    if let Some(output) = snapshot.observation {
+        return Err(ToolError::CleanupUnverifiedOutput(Box::new(
+            (*output).clone(),
+        )));
+    }
+    match snapshot.status {
+        ProcessCleanupStatus::Unverified(detail) => Err(ToolError::CleanupUnverified(detail)),
+        _ if snapshot.wait_expired => Err(ToolError::CleanupUnverified(
+            "shell cleanup was still pending when its wait expired".into(),
+        )),
+        ProcessCleanupStatus::Verified => Ok(()),
+        ProcessCleanupStatus::Pending => Err(ToolError::CleanupUnverified(
+            "shell cleanup has no final acknowledgement".into(),
+        )),
+    }
+}
+
+fn incomplete_observation(receipt: &ProcessCleanupReceipt) -> Option<ToolError> {
+    receipt
+        .snapshot()
+        .observation
+        .map(|output| ToolError::CleanupUnverifiedOutput(Box::new((*output).clone())))
+}
 
 /// `ShellMobileTool` — run a deny-net shell command through the P2 runner.
 #[derive(Clone)]
@@ -73,6 +105,16 @@ impl ShellMobileTool {
             ctx,
             precommit_latch: Default::default(),
         }
+    }
+
+    fn verify_cleanup(&self, receipt: &ProcessCleanupReceipt) -> Result<(), ToolError> {
+        let result = require_verified_cleanup(receipt);
+        if self.ctx.side_chat {
+            if let Err(error) = &result {
+                self.ctx.note_side_chat_cleanup_failure(&error.to_string());
+            }
+        }
+        result
     }
 }
 
@@ -167,6 +209,21 @@ impl Tool for ShellMobileTool {
         // Conservative: a shell mutates cwd / filesystem, so never run it
         // concurrently with other tools.
         false
+    }
+
+    fn interrupt_behavior(
+        &self,
+        _input: &Utf16JsonProjection,
+    ) -> tool_api::tool_trait::InterruptBehavior {
+        if self.ctx.process.supports_owned_foreground_cleanup_receipt() {
+            tool_api::tool_trait::InterruptBehavior::Cancel
+        } else {
+            tool_api::tool_trait::InterruptBehavior::Block
+        }
+    }
+
+    fn await_cleanup_on_interrupt(&self) -> bool {
+        self.ctx.process.supports_owned_foreground_cleanup_receipt()
     }
 
     fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
@@ -516,11 +573,25 @@ impl Tool for ShellMobileTool {
             "{agent_owner}/mobile-shell-{}",
             NEXT_SHELL_PROCESS_OWNER.fetch_add(1, Ordering::Relaxed)
         );
-        let sandboxed = sandboxed.with_process_owner(Some(process_owner.clone()));
+        let lease = tool_api::context::process_execution_lease();
+        let owned_cleanup = lease.is_some();
+        let supports_owned_cleanup = self.ctx.process.supports_owned_foreground_cleanup_receipt();
+        if owned_cleanup && !supports_owned_cleanup {
+            return Err(ToolError::Internal(
+                "mobile Shell runner cannot retain the turn owner through process cleanup".into(),
+            ));
+        }
+        let receipt = Arc::new(ProcessCleanupReceipt::default());
+        let sandboxed = sandboxed
+            .with_process_owner(Some(process_owner.clone()))
+            .with_cleanup_receipt(Arc::clone(&receipt));
+        let sandboxed = match lease {
+            Some(lease) => sandboxed.with_lifetime_guard(lease),
+            None => sandboxed,
+        };
 
-        // 6. Keep the process future alive until the runtime confirms that its
-        // raw stdio session is closed and the guest process tree is reaped.
-        // Dropping this future would abandon the runtime-owned session.
+        // 6. An owned runner retains the lease and independently completes
+        // cleanup if this invocation or its runtime is dropped.
         let output_limit_bytes = Some(self.max_result_size_chars().saturating_mul(4));
         let run = self
             .ctx
@@ -546,8 +617,33 @@ impl Tool for ShellMobileTool {
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => {
-                        self.ctx.process.kill_owner_processes(&process_owner).await;
-                        if let Err(error) = run.await {
+                        let cleanup = async {
+                            self.ctx.process.kill_owner_processes(&process_owner).await;
+                            run.await
+                        };
+                        let result = if supports_owned_cleanup {
+                            match tokio::time::timeout(SHELL_CLEANUP_WAIT, cleanup).await {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    let error = incomplete_observation(&receipt).unwrap_or_else(|| ToolError::CleanupUnverified("shell cleanup is still pending".into()));
+                                    if self.ctx.side_chat {
+                                        self.ctx.note_side_chat_cleanup_failure(&error.to_string());
+                                    }
+                                    return Err(error);
+                                }
+                            }
+                        } else {
+                            cleanup.await
+                        };
+                        if supports_owned_cleanup {
+                            self.verify_cleanup(&receipt)?;
+                        } else if let Some(error) = incomplete_observation(&receipt) {
+                            if self.ctx.side_chat {
+                                self.ctx.note_side_chat_cleanup_failure(&error.to_string());
+                            }
+                            return Err(error);
+                        }
+                        if let Err(error) = result {
                             if self.ctx.side_chat {
                                 self.ctx.note_side_chat_cleanup_failure(&error.to_string());
                                 if error.to_string().contains(
@@ -564,8 +660,16 @@ impl Tool for ShellMobileTool {
             }
         } else {
             run.await
+        };
+        if supports_owned_cleanup {
+            self.verify_cleanup(&receipt)?;
+        } else if let Some(error) = incomplete_observation(&receipt) {
+            if self.ctx.side_chat {
+                self.ctx.note_side_chat_cleanup_failure(&error.to_string());
+            }
+            return Err(error);
         }
-        .map_err(|e| {
+        let foreground = foreground.map_err(|e| {
             if self.ctx.side_chat {
                 self.ctx.note_side_chat_cleanup_failure(&e.to_string());
             }
@@ -580,36 +684,61 @@ impl Tool for ShellMobileTool {
             }
         };
 
-        // 7. Build the result. Honor `timed_out` -> timeout error.
-        if out.timed_out {
-            return Err(ToolError::Internal(format!(
-                "Shell command timed out after {effective_timeout}ms"
-            )));
-        }
+        // 7. Build the result. A completed timeout can include useful partial
+        // output; keep it and report the timeout as a structured failure.
         let limit = self.max_result_size_chars();
-        let (stdout, truncated_out) = truncate_shell_output(out.stdout, limit);
-        let (stderr, truncated_err) = truncate_shell_output(out.stderr, limit);
+        let producer_truncation = receipt.snapshot().output_truncation;
+        let (stdout, mut truncated_out) = truncate_shell_output(out.stdout, limit);
+        let (mut stderr, mut truncated_err) = truncate_shell_output(out.stderr, limit);
+        if let Some(truncation) = producer_truncation {
+            truncated_out |= truncation.stdout_truncated;
+            truncated_err |= truncation.stderr_truncated;
+        }
+        if out.timed_out {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!(
+                "Shell command timed out after {effective_timeout}ms"
+            ));
+        }
+        let model_content = out
+            .timed_out
+            .then(|| timeout_model_content(&stdout, &stderr).into());
 
         let permission_denied = output_reports_permission_denial(&stdout, &stderr);
-        let command_failed = out.exit_code != 0 || permission_denied;
+        let command_failed = out.timed_out || out.exit_code != 0 || permission_denied;
         Ok(ToolCallResult {
             data: tool_api::tool_trait::generated_builtin_result(&json!({
                 "exit_code": out.exit_code,
                 "stdout":    stdout,
                 "stderr":    stderr,
                 "is_error":  command_failed,
-                "timed_out": false,
+                "timed_out": out.timed_out,
                 "truncated": truncated_out || truncated_err,
             })),
-            model_content: None,
+            model_content,
             new_messages: vec![],
             context_modifier: None,
-            // A command that masks Android/SELinux denial with `|| true` still
-            // reports failure to the model and Android timeline.
-            is_error: permission_denied,
+            // A timeout or a command that masks Android/SELinux denial with
+            // `|| true` still reports failure to the model and Android timeline.
+            is_error: out.timed_out || permission_denied,
             mcp_meta: None,
             subagent_hooks_fired: false,
         })
+    }
+}
+
+// A persisted tool result uses model text, whereas the live Shell body uses
+// structured data. Join the streams and bypass the generic JSON projection,
+// which can cut off stderr after 50,000 UTF-16 units. Keep whitespace-only
+// streams as output; each stream already passed the normal shell limit.
+fn timeout_model_content(stdout: &str, stderr: &str) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout.to_owned(),
+        (true, false) => stderr.to_owned(),
+        (false, false) => format!("{stdout}\n{stderr}"),
     }
 }
 
@@ -723,6 +852,306 @@ mod tests {
         }
         fn is_available(&self) -> bool {
             true
+        }
+    }
+
+    /// Receipt plumbing fixture only: it creates no native process and does
+    /// not purport to validate a platform runner's cleanup guarantees.
+    struct ReceiptRunner {
+        calls: Arc<AtomicUsize>,
+        unverified: bool,
+    }
+
+    #[test]
+    fn expired_wait_remains_unknown_even_if_cleanup_later_succeeds() {
+        let receipt = ProcessCleanupReceipt::default();
+        receipt.mark_wait_expired();
+        receipt.mark_verified();
+        assert!(matches!(
+            require_verified_cleanup(&receipt),
+            Err(ToolError::CleanupUnverified(_))
+        ));
+        assert_eq!(receipt.status(), ProcessCleanupStatus::Verified);
+
+        let failed = ProcessCleanupReceipt::default();
+        failed.mark_wait_expired();
+        failed.mark_unverified("native close failed".into());
+        assert!(
+            matches!(require_verified_cleanup(&failed), Err(ToolError::CleanupUnverified(detail)) if detail == "native close failed")
+        );
+    }
+
+    struct IncompleteReceiptRunner {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        wait_for_cancel: bool,
+        tree_reaped: bool,
+    }
+
+    struct CompletedTruncatedRunner;
+
+    #[async_trait]
+    impl ProcessRunner for CompletedTruncatedRunner {
+        fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+            true
+        }
+        async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            use lingxi_core::host::sandbox::ProcessCleanupOutputTruncation;
+            let receipt = command.cleanup_receipt().unwrap();
+            let owner = receipt.claim_owner().unwrap();
+            receipt.bind_session(&owner, "session-1").unwrap();
+            receipt
+                .finish_owned_complete(
+                    &owner,
+                    ProcessCleanupOutputTruncation {
+                        stdout_truncated: true,
+                        stderr_truncated: false,
+                    },
+                )
+                .unwrap();
+            Ok(ok_output("bounded prefix"))
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            unreachable!()
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_producer_truncation_is_reported_without_fabricated_output() {
+        let (mut ctx, _, _) = mobile_linux_ctx(ok_output(""));
+        ctx.process = Arc::new(CompletedTruncatedRunner);
+        let result = ShellMobileTool::new(ctx)
+            .call(
+                source_input(&json!({"command":"printf test"})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data.string_at("/stdout"), Some("bounded prefix"));
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/truncated")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[async_trait]
+    impl ProcessRunner for IncompleteReceiptRunner {
+        fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            use lingxi_core::host::sandbox::ProcessCleanupOwnerOutcome;
+            use tool_api::tool_trait::{
+                ProcessTreeStatus, UnverifiedCleanupOutput, UnverifiedCleanupOutputParts,
+            };
+            let receipt = command.cleanup_receipt().unwrap();
+            let owner = receipt.claim_owner().unwrap();
+            receipt.bind_session(&owner, "session-1").unwrap();
+            self.started.notify_one();
+            if self.wait_for_cancel {
+                self.release.notified().await;
+            }
+            let tree_status = if self.tree_reaped {
+                ProcessTreeStatus::VerifiedReaped
+            } else {
+                ProcessTreeStatus::Unverified
+            };
+            let outcome = if self.tree_reaped {
+                ProcessCleanupOwnerOutcome::TreeReaped
+            } else {
+                ProcessCleanupOwnerOutcome::Unverified("tree unverified".into())
+            };
+            let output = UnverifiedCleanupOutput::new(UnverifiedCleanupOutputParts {
+                session_id: Some("session-1".into()),
+                stdout: "partial stdout".into(),
+                stderr: "late stderr".into(),
+                stdout_truncated: false,
+                stderr_truncated: true,
+                stdout_eof: true,
+                stderr_eof: false,
+                exit_code: None,
+                timed_out: true,
+                termination_requested: Some(true),
+                tree_status,
+                cleanup_detail: "cleanup detail".into(),
+                original_error: Some("original read failure".into()),
+            });
+            receipt
+                .finish_owned(&owner, outcome, Some(Arc::new(output)))
+                .unwrap();
+            Err(ProcessError::Io("generic runner error".into()))
+        }
+
+        async fn kill_owner_processes(&self, _: &str) -> Vec<u32> {
+            self.release.notify_one();
+            Vec::new()
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            unreachable!()
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_observation_precedes_generic_failure_and_cancellation() {
+        use tool_api::tool_trait::ProcessTreeStatus;
+        for (cancelled, tree_reaped) in [(false, false), (false, true), (true, false)] {
+            let (mut ctx, _, _) = mobile_linux_ctx(ok_output(""));
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            ctx.process = Arc::new(IncompleteReceiptRunner {
+                started: started.clone(),
+                release,
+                wait_for_cancel: cancelled,
+                tree_reaped,
+            });
+            let cancel = CancellationToken::new();
+            let mut tool_ctx = fresh_ctx();
+            tool_ctx.cancel = Some(cancel.clone());
+            let tool = ShellMobileTool::new(ctx);
+            let task = tokio::spawn(async move {
+                tool.call(
+                    source_input(&json!({"command":"printf test"})),
+                    tool_ctx,
+                    fresh_tx(),
+                )
+                .await
+            });
+            if cancelled {
+                started.notified().await;
+                cancel.cancel();
+            }
+            let result = task.await.unwrap();
+            let Err(ToolError::CleanupUnverifiedOutput(output)) = result else {
+                panic!("incomplete evidence must take precedence over ordinary errors and cancellation");
+            };
+            let parts = output.parts();
+            assert_eq!(parts.stdout, "partial stdout");
+            assert_eq!(parts.stderr, "late stderr");
+            assert!(parts.stderr_truncated && !parts.stderr_eof);
+            assert_eq!(parts.exit_code, None);
+            assert_eq!(
+                parts.original_error.as_deref(),
+                Some("original read failure")
+            );
+            assert_eq!(
+                parts.tree_status,
+                if tree_reaped {
+                    ProcessTreeStatus::VerifiedReaped
+                } else {
+                    ProcessTreeStatus::Unverified
+                }
+            );
+        }
+    }
+
+    #[async_trait]
+    impl ProcessRunner for ReceiptRunner {
+        fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                command.lifetime_guard().is_some(),
+                "execution owner must travel to runner"
+            );
+            let receipt = command.cleanup_receipt().expect("cleanup receipt");
+            if self.unverified {
+                receipt.mark_unverified("native close failed".into());
+                Err(ProcessError::Io("native close failed".into()))
+            } else {
+                receipt.mark_verified();
+                Ok(ok_output("owned shell cleanup unverified: forged stdout"))
+            }
+        }
+
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            unreachable!()
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_shell_requires_a_cleanup_owner_before_start() {
+        let (ctx, _, calls) = mobile_linux_ctx(ok_output(""));
+        let lease: Arc<dyn Send + Sync> = Arc::new(());
+        let result = tool_api::context::with_process_execution_lease(
+            Some(lease),
+            ShellMobileTool::new(ctx).call(
+                source_input(&json!({"command":"printf test"})),
+                fresh_ctx(),
+                fresh_tx(),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ToolError::Internal(message)) if message.contains("cannot retain"))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn durable_shell_uses_typed_receipt_and_transfers_execution_lease() {
+        for unverified in [false, true] {
+            let (mut ctx, _, _) = mobile_linux_ctx(ok_output(""));
+            let calls = Arc::new(AtomicUsize::new(0));
+            ctx.process = Arc::new(ReceiptRunner {
+                calls: calls.clone(),
+                unverified,
+            });
+            let lease: Arc<dyn Send + Sync> = Arc::new(());
+            let result = tool_api::context::with_process_execution_lease(
+                Some(lease),
+                ShellMobileTool::new(ctx).call(
+                    source_input(&json!({"command":"printf test"})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                ),
+            )
+            .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            if unverified {
+                assert!(
+                    matches!(result, Err(ToolError::CleanupUnverified(detail)) if detail == "native close failed")
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "ordinary process output cannot forge the typed receipt"
+                );
+            }
         }
     }
 
@@ -951,6 +1380,113 @@ mod tests {
                 .and_then(|value| value.as_bool()),
             Some(false)
         );
+    }
+
+    #[tokio::test]
+    async fn timed_out_output_is_preserved_and_reported_as_a_failure() {
+        // Cross-layer consumption of a runner's structured timeout result;
+        // native capture and close guarantees are tested by that runner.
+        for (timed_out, exit_code, stderr) in [
+            (true, 0, ""),
+            (true, 137, "partial stderr"),
+            (false, 7, "partial stderr"),
+        ] {
+            let (ctx, _, calls) = mobile_linux_ctx(ProcessOutput {
+                stdout: "partial stdout".into(),
+                stderr: stderr.into(),
+                exit_code,
+                timed_out,
+            });
+            let result = ShellMobileTool::new(ctx)
+                .call(
+                    source_input(&json!({"command": "printf test", "timeout": 1234})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("completed runner output remains structured");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(result.data.string_at("/stdout"), Some("partial stdout"));
+            let error_text = result.data.string_at("/stderr").unwrap();
+            let expected_stderr = match (timed_out, stderr.is_empty()) {
+                (true, true) => "Shell command timed out after 1234ms",
+                (true, false) => "partial stderr\nShell command timed out after 1234ms",
+                (false, _) => "partial stderr",
+            };
+            assert_eq!(error_text, expected_stderr);
+            assert_eq!(
+                result.data.number_at("/exit_code"),
+                Some(f64::from(exit_code))
+            );
+            assert_eq!(
+                result
+                    .data
+                    .at_pointer("/timed_out")
+                    .and_then(|value| value.as_bool()),
+                Some(timed_out)
+            );
+            assert_eq!(
+                result
+                    .data
+                    .at_pointer("/is_error")
+                    .and_then(|value| value.as_bool()),
+                Some(true)
+            );
+            assert_eq!(result.is_error, timed_out);
+            if timed_out {
+                let model = result.model_content.expect("timeout model text");
+                let model = model.string_at("").expect("model content is text");
+                assert!(model.contains("Shell command timed out after 1234ms"));
+                assert!(model.contains("partial stdout"));
+                assert!(model.contains(stderr));
+                assert_eq!(model, format!("partial stdout\n{expected_stderr}"));
+            } else {
+                assert!(result.model_content.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_model_stream_join_preserves_whitespace_output() {
+        assert_eq!(timeout_model_content("", "timeout"), "timeout");
+        assert_eq!(timeout_model_content(" \n", "timeout"), " \n\ntimeout");
+        assert_eq!(timeout_model_content("out\n", "timeout"), "out\n\ntimeout");
+        assert_eq!(timeout_model_content("out", ""), "out");
+    }
+
+    #[tokio::test]
+    async fn timeout_model_result_retains_both_large_unicode_streams() {
+        let (ctx, _, _) = mobile_linux_ctx(ProcessOutput {
+            stdout: format!("out:{}", "😀\"\\\n".repeat(12_000)),
+            stderr: format!("err:{}", "界🚀".repeat(20_000)),
+            exit_code: 137,
+            timed_out: true,
+        });
+        let result = ShellMobileTool::new(ctx)
+            .call(
+                source_input(&json!({"command": "printf test", "timeout": 10})),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("timeout remains a structured result");
+        let model = result.model_content.expect("timeout model text");
+        let text = model.string_at("").expect("model content is text");
+        let stdout = result.data.string_at("/stdout").unwrap();
+        let stderr = result.data.string_at("/stderr").unwrap();
+        assert!(stdout.starts_with("out:"));
+        assert!(stderr.starts_with("err:"));
+        assert!(stderr.ends_with("Shell command timed out after 10ms"));
+        assert_eq!(text, format!("{stdout}\n{stderr}"));
+        assert!(text.encode_utf16().count() > 50_000);
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/truncated")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(result.is_error);
     }
 
     #[tokio::test]

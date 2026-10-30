@@ -64,6 +64,31 @@ pub struct RecoveryHookProcessLeases {
 /// pipeline has already been consulted.
 #[async_trait]
 pub trait ProcessRunner: Send + Sync {
+    /// Whether foreground work can retain the command's lifetime guard and
+    /// finish its cleanup independently of the caller's runtime. The runner
+    /// must also publish the command's cleanup receipt and retain its guard on
+    /// an unverified outcome.
+    fn supports_owned_foreground_cleanup_receipt(&self) -> bool {
+        false
+    }
+
+    /// Whether this command's supervisor runner participates in the shared
+    /// completion/stop gate and the background handoff acceptance protocol.
+    /// This capability alone does not establish a cleanup receipt or prove
+    /// that any process tree has stopped.
+    fn supports_supervisor_commit_gate(&self, _command: &SandboxedCommand) -> bool {
+        false
+    }
+
+    /// Whether this supervisor runner can distinguish a proven no-child start
+    /// failure from an unverified cleanup, and retain the exact process owner
+    /// across a stop, error, or dropped runner future until its cleanup is
+    /// verified or an actionable unverified state is preserved for retry.
+    /// The completion/stop gate alone does not provide this guarantee.
+    fn supports_supervisor_cleanup_receipt(&self, _command: &SandboxedCommand) -> bool {
+        false
+    }
+
     /// Export a supervised shell without changing its current owner.
     async fn export_shell(
         &self,
@@ -442,6 +467,29 @@ impl std::fmt::Debug for BackgroundTaskBinding {
 /// Receives the one-shot exit report for a backgrounded child.
 #[async_trait]
 pub trait BackgroundExitSink: Send + Sync {
+    /// Wait before a background runner releases natural-completion ownership.
+    /// `Ok(false)` means stop won; the runner must retain its process identity
+    /// and terminate it with the required proof. An error leaves the outcome
+    /// unverified. The wait must remain cancellable by the runner's deadline.
+    /// Sinks outside the supervisor have no handoff handshake to wait for.
+    async fn wait_for_supervisor_handoff(&self) -> Result<bool, ProcessError> {
+        Ok(true)
+    }
+
+    /// Commit natural foreground completion while the owner still holds the
+    /// process identity needed to stop it. The synchronous action releases
+    /// that ownership only if completion wins over an accepted stop request.
+    /// `Ok(false)` means stop won and the action was not run; the runner must
+    /// retain ownership and verify cleanup. An error leaves cleanup unknown.
+    /// Sinks without coordinated supervision retain their previous behavior.
+    fn commit_foreground(
+        &self,
+        action: &mut dyn FnMut() -> Result<(), ProcessError>,
+    ) -> Result<bool, ProcessError> {
+        action()?;
+        Ok(true)
+    }
+
     /// Report the live OS child before waiting for output or completion.
     async fn on_spawn(&self, _task_id: &str, _pid: u32) -> Result<(), ProcessError> {
         Ok(())

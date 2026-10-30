@@ -580,6 +580,7 @@ async fn failed_full_load_aborts_before_startup_and_releases_restore_gate() {
                 agent_id: failed_id,
                 error,
                 cumulative_usage,
+                ..
             } = &events[0]
             else {
                 panic!("initial Gv rejection must fail the child: {events:?}");

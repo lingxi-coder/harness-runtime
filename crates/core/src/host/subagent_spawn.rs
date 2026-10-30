@@ -973,6 +973,15 @@ pub enum SubagentSpawnError {
     /// and only one of them is a bug.
     #[error("SubagentSpawner: spawn denied by an agent.spawn hook")]
     DeniedByHook(Utf16JsonProjection),
+    /// A started child's tool returned an incomplete process outcome. The
+    /// error is terminal and retains the original structured evidence.
+    #[error("{reason}")]
+    CleanupUnverified {
+        /// Identity of the started child whose tool could not be verified.
+        agent_id: crate::types::AgentId,
+        /// The original failure, including any partial output observation.
+        reason: crate::host::tool_invoker::CleanupUnverifiedReason,
+    },
     /// Any other internal failure.
     #[error("SubagentSpawner: internal error: {0}")]
     Internal(String),

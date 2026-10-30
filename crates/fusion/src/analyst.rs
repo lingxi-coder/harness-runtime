@@ -36,6 +36,8 @@ pub enum AnalystError {
     /// Transport / timeout / provider-error. Carries a sanitized-safe category
     /// (never a raw provider body) — see [`lingxi_core::host::FusionResult::analysis_failure`].
     Failed(String),
+    /// A nested tool did not prove that its process was cleaned up.
+    CleanupUnverified(lingxi_core::host::tool_invoker::CleanupUnverifiedReason),
 }
 
 /// Usage accumulated by [`analyze`], returned on EVERY exit — success or
@@ -82,6 +84,7 @@ impl From<AnalystError> for FusionError {
         match err {
             AnalystError::Unsupported => Self::StructuredOutputUnsupported,
             AnalystError::ParseFailed | AnalystError::Failed(_) => Self::Internal,
+            AnalystError::CleanupUnverified(reason) => Self::CleanupUnverified(reason),
         }
     }
 }
@@ -362,7 +365,21 @@ where
     let result = match outcome {
         Err(_) => {
             observe(&acc, true);
-            return Err((AnalystError::Failed("timeout".into()), acc));
+            return Err((
+                AnalystError::CleanupUnverified(
+                    "tool analyst timed out before its cleanup outcome was observed".into(),
+                ),
+                acc,
+            ));
+        }
+        Ok(Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::CleanupUnverified {
+            reason,
+            ..
+        })) => {
+            // The child was started; do not treat this as a zero-spend spawn refusal.
+            acc.incomplete = true;
+            observe(&acc, true);
+            return Err((AnalystError::CleanupUnverified(reason), acc));
         }
         Ok(Err(_)) => {
             // Refused before any provider call, so nothing was billed.

@@ -4146,6 +4146,7 @@ fn build_mobile_engine_on_worker(
                     let scheduler = loop_scheduler.clone();
                     let reason = cancel_reason.clone();
                     let recovery_guard = task_turn.tool_recovery_guard(durable_turns.clone());
+                    let task_durable_turns = durable_turns.clone();
                     let scope_orch = orch.clone();
                     let origin = Arc::downgrade(&task_turn);
                     // The turn task embeds the streaming + Mod lifecycle state
@@ -4211,7 +4212,7 @@ fn build_mobile_engine_on_worker(
                             }
                         };
                         if let Err(error) = result {
-                            report_owned_turn_error(&orch, &task_turn, &sink, &message_output, &error).await;
+                            report_owned_turn_error(&orch, &task_turn, &task_durable_turns, &sink, &message_output, &error).await;
                         }
                         settle_mobile_loop_turn(
                             &orch,

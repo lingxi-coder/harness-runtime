@@ -852,6 +852,156 @@ impl lingxi_core::host::ToolInvoker for FallbackCancellationProbeInvoker {
 }
 
 #[derive(Default)]
+struct LateCleanupProbeInvoker {
+    started: tokio::sync::Notify,
+    cancelled: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for LateCleanupProbeInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: Utf16JsonProjection,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        ctx.cancellation_token.cancelled().await;
+        self.cancelled.notify_one();
+        self.release.notified().await;
+        Err(
+            lingxi_core::host::tool_invoker::ToolInvokerError::CleanupUnverified(
+                lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Message(
+                    "private late cleanup evidence".into(),
+                ),
+            ),
+        )
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn accepted_fallback_does_not_continue_while_cleanup_is_unsettled() {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+
+    let api = GatedFallbackApiClient::new(vec![0], Vec::new());
+    let invoker = Arc::new(LateCleanupProbeInvoker::default());
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(&["fallback-model"]));
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(64);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    tokio::time::timeout(Duration::from_secs(2), invoker.started.notified())
+        .await
+        .unwrap();
+    api.fallback_gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), invoker.cancelled.notified())
+        .await
+        .unwrap();
+    assert!(!runner.is_finished());
+    assert_eq!(api.tail_polls.load(Ordering::SeqCst), 0);
+    invoker.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), runner)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let events = drain(out_rx).await;
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(api.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(api.tail_polls.load(Ordering::SeqCst), 0);
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Failed {
+            cleanup_unverified: Some(CleanupUnverifiedReason::Message(message)), ..
+        } if message == "private late cleanup evidence"
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+}
+
+#[tokio::test]
+async fn stream_error_waits_for_late_cleanup_failure_instead_of_salvaging() {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+
+    let invoker = Arc::new(LateCleanupProbeInvoker::default());
+    let ctx = loop_ctx(Arc::new(ToolThenStreamErrorApi), Some(invoker.clone()), 3);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(Duration::from_secs(2), invoker.cancelled.notified())
+        .await
+        .unwrap();
+    assert!(!runner.is_finished());
+    invoker.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), runner)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = drain(out_rx).await;
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Failed { cleanup_unverified: Some(reason), .. }
+            if matches!(reason, CleanupUnverifiedReason::WithContext { reason, .. }
+                if matches!(reason.as_ref(), CleanupUnverifiedReason::Message(message)
+                    if message == "private late cleanup evidence"))
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+}
+
+#[tokio::test]
+async fn interrupt_waits_for_tool_cleanup_and_reports_its_late_failure() {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+
+    let api = GatedFallbackApiClient::new(vec![0], Vec::new());
+    let invoker = Arc::new(LateCleanupProbeInvoker::default());
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(1);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(64);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(Duration::from_secs(2), invoker.started.notified())
+        .await
+        .unwrap();
+    event_tx
+        .send(lingxi_core::Event::UserInterrupt)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), invoker.cancelled.notified())
+        .await
+        .unwrap();
+    assert!(!runner.is_finished());
+    invoker.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), runner)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = drain(out_rx).await;
+    assert_eq!(api.calls.load(Ordering::SeqCst), 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::Failed {
+            cleanup_unverified: Some(CleanupUnverifiedReason::Message(message)), ..
+        } if message == "private late cleanup evidence"
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+}
+
+#[derive(Default)]
 struct IdleFactCaptureRegistry {
     updates: Mutex<Vec<bool>>,
 }
@@ -1009,8 +1159,11 @@ async fn run_gated_fallback_case(
                     if projection_contains(message, "toolu-after-hop")
                         && projection_contains(message, "tool_result")
             );
+            let terminal = matches!(&event, SubagentEvent::Failed { .. });
             events.push(event);
-            if reached_post_hop_tool_result {
+            if terminal {
+                break;
+            } else if reached_post_hop_tool_result {
                 while !api.terminal_waiting.load(Ordering::SeqCst) {
                     tokio::task::yield_now().await;
                 }
@@ -1049,8 +1202,7 @@ async fn declined_fallback_sweeps_started_tool_before_consuming_target_body() {
 }
 
 #[tokio::test]
-async fn declined_fallback_sweeps_even_when_discard_indexes_are_not_tools_and_admitted_hop_continues(
-) {
+async fn fallback_stops_when_cancelled_tool_has_no_cleanup_receipt() {
     let denied = run_gated_fallback_case(vec![99], &["primary-model"], Vec::new()).await;
     assert!(denied.3.is_cancelled());
     assert_eq!(denied.0.tail_polls.load(Ordering::SeqCst), 0);
@@ -1063,20 +1215,20 @@ async fn declined_fallback_sweeps_even_when_discard_indexes_are_not_tools_and_ad
     )
     .await;
     assert!(accepted.3.is_cancelled());
-    assert_eq!(accepted.1.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(accepted.1.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         accepted.0.models.lock().unwrap().as_slice(),
-        ["primary-model", "fallback-model"]
+        ["primary-model"]
     );
-    assert!(accepted.0.tail_polls.load(Ordering::SeqCst) > 0);
-    assert_eq!(
-        *accepted.2.updates.lock().unwrap(),
-        [true, false, true, false]
-    );
-    assert!(accepted
-        .4
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert_eq!(accepted.0.tail_polls.load(Ordering::SeqCst), 0);
+    assert_eq!(*accepted.2.updates.lock().unwrap(), [true, false]);
+    assert!(accepted.4.iter().any(|event| matches!(
+        event,
+        SubagentEvent::Failed {
+            cleanup_unverified: Some(_),
+            ..
+        }
+    )));
     assert!(!accepted.4.iter().any(|event| match event {
         SubagentEvent::Message { message, .. } =>
             projection_contains(message, "toolu-before-hop")
@@ -1086,7 +1238,7 @@ async fn declined_fallback_sweeps_even_when_discard_indexes_are_not_tools_and_ad
 }
 
 #[tokio::test]
-async fn stream_error_drains_live_tool_use_and_emits_native_cancellation_result() {
+async fn stream_error_does_not_treat_cancellation_as_a_cleanup_receipt() {
     let (invoker, started_rx) = FallbackCancellationProbeInvoker::new();
     let registry = Arc::new(IdleFactCaptureRegistry::default());
     let mut ctx = loop_ctx(
@@ -1107,7 +1259,7 @@ async fn stream_error_drains_live_tool_use_and_emits_native_cancellation_result(
     runner.await.expect("subagent runner task");
 
     assert!(token.is_cancelled());
-    assert_eq!(*registry.updates.lock().unwrap(), [true, false]);
+    assert_eq!(*registry.updates.lock().unwrap(), [true]);
     let events = drain(out_rx).await;
     let messages = events
         .iter()
@@ -1120,19 +1272,16 @@ async fn stream_error_drains_live_tool_use_and_emits_native_cancellation_result(
         message.string_at("/content/0/id") == Some("toolu-before-error")
             && message.string_at("/content/0/type") == Some("tool_use")
     }));
-    assert!(messages.iter().any(|message| {
-        message.string_at("/content/0/tool_use_id") == Some("toolu-before-error")
-            && message.string_at("/content/0/type") == Some("tool_result")
-            && message
-                .at_pointer("/content/0/is_error")
-                .and_then(|value| value.as_bool())
-                == Some(true)
-            && message.string_at("/content/0/content")
-                == Some("The turn ended on an error, so this tool call was cancelled. If it had already started, some of its effects may have happened. Error: provider stream broke")
-    }));
-    assert!(events
+    assert!(!messages
         .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+        .any(|message| { message.string_at("/content/0/type") == Some("tool_result") }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::Failed {
+            cleanup_unverified: Some(_),
+            ..
+        }
+    )));
 }
 
 #[tokio::test]
@@ -1872,6 +2021,61 @@ impl lingxi_core::host::ToolInvoker for AbortInvoker {
         Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(
             "Agent aborted: too many classifier denials in headless mode".into(),
         ))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+struct IncompleteInvoker(lingxi_core::host::tool_invoker::CleanupUnverifiedReason);
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for IncompleteInvoker {
+    async fn invoke(
+        &self,
+        _: &str,
+        _: Utf16JsonProjection,
+        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Err(lingxi_core::host::tool_invoker::ToolInvokerError::CleanupUnverified(self.0.clone()))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+struct IncompleteWithCleanupInvoker {
+    invocation: lingxi_core::host::tool_invoker::CleanupUnverifiedReason,
+    cleanup: lingxi_core::host::tool_invoker::CleanupUnverifiedReason,
+}
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for IncompleteWithCleanupInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        _: AgentId,
+        _: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Err(
+            lingxi_core::host::tool_invoker::ToolInvokerError::CleanupUnverified(
+                self.cleanup.clone(),
+            ),
+        )
+    }
+
+    async fn invoke(
+        &self,
+        _: &str,
+        _: Utf16JsonProjection,
+        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Err(
+            lingxi_core::host::tool_invoker::ToolInvokerError::CleanupUnverified(
+                self.invocation.clone(),
+            ),
+        )
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -7341,6 +7545,110 @@ async fn permission_abort_fails_subagent_without_recoverable_tool_result() {
         )),
         "a terminal permission abort must not be fed back to the model: {events:?}"
     );
+}
+
+#[tokio::test]
+async fn incomplete_tool_output_stops_subagent_and_preserves_evidence() {
+    use lingxi_core::host::tool_invoker::{
+        CleanupUnverifiedReason, ProcessTreeStatus, UnverifiedCleanupOutput,
+        UnverifiedCleanupOutputParts,
+    };
+
+    for tree_status in [
+        ProcessTreeStatus::Unverified,
+        ProcessTreeStatus::VerifiedReaped,
+    ] {
+        let reason = CleanupUnverifiedReason::Output(Arc::new(UnverifiedCleanupOutput::new(
+            UnverifiedCleanupOutputParts {
+                session_id: Some("child-session".into()),
+                stdout: "stdout before error".into(),
+                stderr: "stderr before error".into(),
+                stdout_truncated: false,
+                stderr_truncated: true,
+                stdout_eof: false,
+                stderr_eof: true,
+                exit_code: None,
+                timed_out: true,
+                termination_requested: Some(true),
+                tree_status,
+                cleanup_detail: "no exit receipt".into(),
+                original_error: Some("read failed first".into()),
+            },
+        )));
+        let api = MockSubagentApiClient::new(vec![
+            Ok(tool_use_response("Bash", Some("tool_use"))),
+            Ok(text_response("must not run", Some("end_turn"))),
+        ]);
+        let ctx = loop_ctx(
+            api.clone(),
+            Some(Arc::new(IncompleteInvoker(reason.clone()))),
+            4,
+        );
+        let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let events = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 1, "the model must not be called again");
+        let failed = events.iter().find(|event| matches!(
+            event,
+            SubagentEvent::Failed { cleanup_unverified: Some(actual), .. } if actual == &reason
+        )).expect("the terminal event retains the complete typed observation");
+        let encoded = serde_json::to_string(failed).unwrap();
+        assert!(!encoded.contains("stdout before error"));
+        assert!(!encoded.contains("stderr before error"));
+        assert!(!encoded.contains("no exit receipt"));
+        assert!(!encoded.contains("read failed first"));
+        let mut invalid_marker: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        invalid_marker["Failed"]["cleanup_unverified"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<SubagentEvent>(invalid_marker).is_err());
+        let decoded: SubagentEvent = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            SubagentEvent::Failed {
+                cleanup_unverified: Some(CleanupUnverifiedReason::Message(message)),
+                ..
+            } if message == "cleanup evidence is unavailable after event serialization"
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            SubagentEvent::Message { message, .. } if projection_contains(message, "tool_result")
+        )), "the failure must not become a recoverable tool result");
+    }
+}
+
+#[tokio::test]
+async fn incomplete_tool_and_terminal_cleanup_both_survive() {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+
+    let invocation = CleanupUnverifiedReason::Message("tool observation".into());
+    let cleanup = CleanupUnverifiedReason::Message("input cleanup observation".into());
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("Bash", Some("tool_use"))),
+        Ok(text_response("must not run", Some("end_turn"))),
+    ]);
+    let invoker = IncompleteWithCleanupInvoker {
+        invocation: invocation.clone(),
+        cleanup: cleanup.clone(),
+    };
+    let ctx = loop_ctx(api.clone(), Some(Arc::new(invoker)), 4);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert_eq!(api.call_count(), 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::Failed {
+            cleanup_unverified: Some(CleanupUnverifiedReason::Multiple(reasons)), ..
+        } if reasons.as_slice() == [invocation.clone(), cleanup.clone()]
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
 }
 
 #[tokio::test]

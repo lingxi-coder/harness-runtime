@@ -230,6 +230,7 @@ struct Record {
 pub(crate) enum SchedulerStopped {
     Unavailable,
     ModelResolution(String),
+    CleanupUnverified(tool_api::CleanupUnverifiedReason),
 }
 
 enum Command {
@@ -339,6 +340,7 @@ impl ToolScheduler {
             model_context_changed: false,
             model_context_resolver,
             model_context_error: None,
+            cleanup_unverified: None,
             waiters: Vec::new(),
             #[cfg(test)]
             completed_count_waiters: Vec::new(),
@@ -620,6 +622,7 @@ struct Actor {
     model_context_changed: bool,
     model_context_resolver: Option<ModelContextResolver>,
     model_context_error: Option<String>,
+    cleanup_unverified: Option<tool_api::CleanupUnverifiedReason>,
     waiters: Vec<oneshot::Sender<Result<(), SchedulerStopped>>>,
     #[cfg(test)]
     completed_count_waiters: Vec<(usize, oneshot::Sender<Result<(), SchedulerStopped>>)>,
@@ -674,13 +677,14 @@ impl Actor {
                     match command {
                         Command::Add(call, reply) => {
                             let meta = ReadyToolMeta::from(&call);
+                            let failure = self.cleanup_unverified.clone();
                             self.records.push(Record {
                                 generation: self.generation,
                                 context_state: call.tool_context_state.clone(),
                                 meta,
-                                queued_call: Some(call),
-                                status: Status::Queued,
-                                outcome: None,
+                                queued_call: if failure.is_none() { Some(call) } else { None },
+                                status: if failure.is_none() { Status::Queued } else { Status::Completed },
+                                outcome: failure.map(|detail| Err(OrchestratorError::CleanupUnverified(detail))),
                                 pending_context_modifiers: Vec::new(),
                                 call_cancellation: None,
                             });
@@ -770,7 +774,9 @@ impl Actor {
                             }
                         }
                         Command::FinishNormal(reply) => {
-                            let result = if self.is_idle() {
+                            let result = if let Some(detail) = self.cleanup_unverified.as_ref() {
+                                Err(SchedulerStopped::CleanupUnverified(detail.clone()))
+                            } else if self.is_idle() {
                                 self.apply_safe_context_layers().and_then(|()| {
                                     if let Some(reason) = self.model_context_error.as_ref() {
                                         return Err(SchedulerStopped::ModelResolution(reason.clone()));
@@ -794,7 +800,21 @@ impl Actor {
                             }
                         }
                         Command::Reset(reason, reply) => {
-                            let _ = reply.send(Ok(self.reset(reason)));
+                            let pending_cleanup = self.records.iter().any(|record| {
+                                record.generation == self.generation
+                                    && record.status == Status::Executing
+                                    && record.meta.resolved_tool.as_ref().is_some_and(|tool| tool.await_cleanup_on_interrupt())
+                            });
+                            if pending_cleanup {
+                                self.cleanup_unverified.get_or_insert_with(||
+                                    "an interrupted tool was still cleaning up when its generation ended".into());
+                            }
+                            let removal = self.reset(reason);
+                            let result = match self.cleanup_unverified.as_ref() {
+                                Some(detail) => Err(SchedulerStopped::CleanupUnverified(detail.clone())),
+                                None => Ok(removal),
+                            };
+                            let _ = reply.send(result);
                         }
                         Command::Shutdown => {
                             if !self.normal_finished.load(Ordering::Acquire) {
@@ -1014,7 +1034,10 @@ impl Actor {
                 .iter()
                 .any(|publication| publication.permission_denial.is_some())
         });
-        if user_abort_wins && !retain_permission_denial {
+        if user_abort_wins
+            && !retain_permission_denial
+            && !matches!(&outcome, Err(OrchestratorError::CleanupUnverified(_)))
+        {
             outcome = Err(OrchestratorError::StreamingProtocol(
                 "tool interrupted before its result was accepted".into(),
             ));
@@ -1068,6 +1091,10 @@ impl Actor {
                 "tool model preference could not be resolved: {reason}"
             )));
         }
+        let cleanup_failure = match &outcome {
+            Err(OrchestratorError::CleanupUnverified(detail)) => Some(detail.clone()),
+            _ => None,
+        };
         let current_state = self.tool_context_state.clone();
         if let Some(record) = self.records.get_mut(index) {
             record.pending_context_modifiers = pending_safe_modifiers;
@@ -1075,6 +1102,21 @@ impl Actor {
             record.outcome = Some(outcome);
             record.status = Status::Completed;
             record.call_cancellation = None;
+        }
+        if let Some(detail) = cleanup_failure {
+            self.cleanup_unverified
+                .get_or_insert_with(|| detail.clone());
+            self.stop_scheduling_requested
+                .store(true, Ordering::Release);
+            for queued in self
+                .records
+                .iter_mut()
+                .filter(|queued| queued.generation == generation && queued.status == Status::Queued)
+            {
+                queued.queued_call = None;
+                queued.status = Status::Completed;
+                queued.outcome = Some(Err(OrchestratorError::CleanupUnverified(detail.clone())));
+            }
         }
         if !concurrency_safe {
             if let Some(state) = current_state {
@@ -1298,7 +1340,7 @@ impl Actor {
         self.generation = self.generation.saturating_add(1);
         self.reset_cancel_requested.store(false, Ordering::Release);
         self.stop_scheduling_requested
-            .store(false, Ordering::Release);
+            .store(self.cleanup_unverified.is_some(), Ordering::Release);
         self.user_cancel_applied = false;
         self.normal_finished.store(false, Ordering::Release);
         self.tool_context_state = self.base_tool_context_state.clone();
@@ -1392,6 +1434,7 @@ mod tests {
 
     struct ProbeTool {
         interrupt_behavior: tool_api::tool_trait::InterruptBehavior,
+        await_cleanup: bool,
     }
 
     #[async_trait]
@@ -1473,6 +1516,10 @@ mod tests {
             self.interrupt_behavior
         }
 
+        fn await_cleanup_on_interrupt(&self) -> bool {
+            self.await_cleanup
+        }
+
         async fn call(
             &self,
             _: Utf16JsonProjection,
@@ -1516,6 +1563,7 @@ mod tests {
             },
             resolved_tool: Arc::new(ProbeTool {
                 interrupt_behavior: tool_api::tool_trait::InterruptBehavior::Block,
+                await_cleanup: false,
             }),
             concurrency_safe: false,
             cancellation: CancellationToken::new(),
@@ -1799,6 +1847,7 @@ mod tests {
         let mut call = call_with_safety(id, concurrency_safe);
         call.resolved_tool = Arc::new(ProbeTool {
             interrupt_behavior: tool_api::tool_trait::InterruptBehavior::Cancel,
+            await_cleanup: false,
         });
         call
     }
@@ -1881,6 +1930,131 @@ mod tests {
         let _ = release_senders.remove(&first).unwrap().send(());
         assert_eq!(bounded(started_rx.recv()).await, Some(second));
         // No TakeReady/Tn request was made between A's completion and B's W1.
+    }
+
+    #[tokio::test]
+    async fn cleanup_unverified_stops_queued_tools_even_when_cancelled() {
+        for cancelled in [false, true] {
+            let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let release = Arc::new(Mutex::new(Some(release_rx)));
+            let dispatch: ToolDispatch = Arc::new(move |call| {
+                let started_tx = started_tx.clone();
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    let _ = started_tx.send(call.id.clone());
+                    let receiver = release.lock().unwrap().take();
+                    if let Some(receiver) = receiver {
+                        let _ = receiver.await;
+                    }
+                    Err(OrchestratorError::CleanupUnverified("close failed".into()))
+                })
+            });
+            let token = CancellationToken::new();
+            let (session_root, publication_lock) = test_session_generation();
+            let mut scheduler = ToolScheduler::spawn(
+                dispatch,
+                1,
+                Some(token.clone()),
+                None,
+                session_root,
+                publication_lock,
+                None,
+            );
+            bounded(scheduler.add(cancel_call_with_safety("first", false)))
+                .await
+                .unwrap();
+            assert_eq!(
+                bounded(started_rx.recv()).await,
+                Some(ToolUseId::from("first"))
+            );
+            bounded(scheduler.add(call_with_safety("queued", false)))
+                .await
+                .unwrap();
+            if cancelled {
+                token.cancel();
+            }
+            release_tx.send(()).unwrap();
+            bounded(scheduler.wait_for_completed_count(2))
+                .await
+                .unwrap();
+            let ready = bounded(scheduler.take_ready()).await.unwrap();
+            assert_eq!(ready.len(), 2);
+            assert!(ready.iter().all(|entry| matches!(
+                &entry.outcome, Err(OrchestratorError::CleanupUnverified(detail)) if detail.detail() == "close failed"
+            )));
+            assert!(
+                started_rx.try_recv().is_err(),
+                "the queued tool never started"
+            );
+            bounded(scheduler.add(call_with_safety("later", false)))
+                .await
+                .unwrap();
+            let later = bounded(scheduler.take_ready()).await.unwrap();
+            assert!(matches!(
+                &later[0].outcome,
+                Err(OrchestratorError::CleanupUnverified(_))
+            ));
+            assert!(started_rx.try_recv().is_err());
+            assert!(matches!(bounded(scheduler.finish_normal()).await,
+                Err(SchedulerStopped::CleanupUnverified(detail)) if detail.detail() == "close failed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_fences_a_still_running_cleanup_owned_tool() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let release = Arc::new(Mutex::new(Some(release_rx)));
+        let dispatch: ToolDispatch = Arc::new(move |call| {
+            let started = started_tx.clone();
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                let _ = started.send(call.id.clone());
+                let receiver = release.lock().unwrap().take();
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
+                }
+                result(&call.id)
+            })
+        });
+        let (session_root, publication_lock) = test_session_generation();
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            1,
+            None,
+            None,
+            session_root,
+            publication_lock,
+            None,
+        );
+        let mut call = cancel_call_with_safety("owned", false);
+        call.resolved_tool = Arc::new(ProbeTool {
+            interrupt_behavior: tool_api::tool_trait::InterruptBehavior::Cancel,
+            await_cleanup: true,
+        });
+        bounded(scheduler.add(call)).await.unwrap();
+        assert_eq!(
+            bounded(started_rx.recv()).await,
+            Some(ToolUseId::from("owned"))
+        );
+        assert!(matches!(
+            bounded(scheduler.reset_after_server_fallback(None)).await,
+            Err(SchedulerStopped::CleanupUnverified(_))
+        ));
+        bounded(scheduler.add(call_with_safety("next-generation", false)))
+            .await
+            .unwrap();
+        let ready = bounded(scheduler.take_ready()).await.unwrap();
+        assert!(matches!(
+            &ready[0].outcome,
+            Err(OrchestratorError::CleanupUnverified(_))
+        ));
+        assert!(
+            started_rx.try_recv().is_err(),
+            "new generation must not start a side effect"
+        );
+        let _ = release_tx.send(());
     }
 
     #[tokio::test]

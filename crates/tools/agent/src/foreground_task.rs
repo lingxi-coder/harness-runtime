@@ -510,8 +510,14 @@ pub(super) async fn run(
                 firer.fire(agent_id, &agent_type, status).await;
             }
         }
-        let worktree_result = match (worktree, retains_owned_work) {
-            (Some(handle), false) => {
+        let cleanup_unverified =
+            matches!(&outcome, Err(SubagentSpawnError::CleanupUnverified { .. }));
+        let worktree_result = match (worktree, retains_owned_work, cleanup_unverified) {
+            (Some(handle), _, true) => Some((
+                handle.path.to_string_lossy().into_owned(),
+                handle.branch_name.clone(),
+            )),
+            (Some(handle), false, false) => {
                 lingxi_core::host::worktree::agent_worktree_result(ctx.worktree.as_ref(), &handle)
                     .await
             }

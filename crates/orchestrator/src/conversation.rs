@@ -991,7 +991,9 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         }
         // Lifecycle admission cancellation is not a provider error. Normal
         // turn paths propagate it before reaching model-error presentation.
-        OrchestratorError::RecoveryInterrupted => (None, None),
+        OrchestratorError::RecoveryInterrupted | OrchestratorError::CleanupUnverified(_) => {
+            (None, None)
+        }
         // Generic-Error fallthrough (`Flp`: `if(e instanceof $o)→"unknown"`;
         // generic Error → "unknown"). These orchestrator-internal variants never
         // carry a status. Turn/budget/structured-output retry limits are handled

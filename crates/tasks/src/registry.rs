@@ -6188,6 +6188,16 @@ impl TaskRegistry {
             } else {
                 handler.kill(task_id_ref, ctx).await?;
             }
+            if matches!(task_type, TaskType::LocalFusion | TaskType::LocalWorkflow)
+                && handler.has_live_worker(task_id_ref).await
+            {
+                // These handlers retain the worker while finalization owns
+                // the result. A successful return from kill can mean that
+                // cancellation lost that race; it is not a stop receipt.
+                return Err(TaskError::Internal(
+                    "task is still finalizing; its terminal outcome is pending".into(),
+                ));
+            }
             // Commit the routing teardown only after the owner confirms the
             // process is stopped. A concurrent terminal transition is harmless:
             // removals are idempotent and the status guard below preserves it.

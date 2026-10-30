@@ -1176,6 +1176,7 @@ struct FakeSpawner {
 
 enum FakePanel {
     Report(PanelReport),
+    CleanupUnverified(lingxi_core::host::tool_invoker::CleanupUnverifiedReason),
     /// Provider call succeeds (real usage is spent and reported), but the
     /// response body does not decode as a `PanelReport` — mirrors
     /// `finish_panel`'s `Err(category)` arm for `parse_and_sanitize`, which
@@ -1328,6 +1329,12 @@ impl FakeSpawner {
             Self::emit_allocated(&observer, &request).await;
         }
         match script {
+            Some(FakePanel::CleanupUnverified(reason)) => {
+                Err(SubagentSpawnError::CleanupUnverified {
+                    agent_id: AgentId::new(),
+                    reason,
+                })
+            }
             Some(FakePanel::SlowSpawnErr) => {
                 // Parked inside the spawner call with no allocation behind
                 // it: the panel bar's `abort_all()` kills this task long
@@ -7615,6 +7622,26 @@ fn implement_request() -> FusionRequest {
 }
 
 #[tokio::test]
+async fn unverified_panel_cleanup_keeps_implement_worktrees() {
+    let (_dir, host) = implement_fixture(vec![], None);
+    let mut map = three_ok();
+    map.insert(
+        "claude-sonnet-5".into(),
+        FakePanel::CleanupUnverified("process may still be running".into()),
+    );
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(FakeSpawner::new(map), side.clone()).with_implement_host(host.clone());
+    assert!(matches!(
+        orch.run(implement_request(), inherit(), None).await,
+        Err(FusionError::CleanupUnverified(_))
+    ));
+    tokio::task::yield_now().await;
+    assert_eq!(host.worktrees.created.lock().unwrap().len(), 3);
+    assert!(host.worktrees.discarded.lock().unwrap().is_empty());
+    assert_eq!(side.analyst_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
     let (_dir, host) = implement_fixture(vec!["-p3"], None);
     let spawner = FakeSpawner::new(three_ok());
@@ -8021,6 +8048,129 @@ async fn a_failed_tool_analyst_degrades_to_material_without_a_retry() {
         analyst_spawns, 1,
         "a second run would pay for every turn again"
     );
+    assert_eq!(side.analyst_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn unverified_tool_analyst_is_terminal_and_preserves_its_reason() {
+    use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+    let reason =
+        CleanupUnverifiedReason::Multiple(vec!["first output".into(), "second output".into()]);
+    let mut map = three_ok();
+    map.insert(
+        ANALYST_SCRIPT.into(),
+        FakePanel::CleanupUnverified(reason.clone()),
+    );
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = FusionOrchestrator::new(
+        spawner.clone(),
+        side.clone(),
+        Arc::new(tool_analyst_config()),
+        Arc::new(catalog()),
+    );
+    let error = orch
+        .run(request("task"), inherit(), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FusionError::CleanupUnverified(actual) if actual == reason));
+    assert_eq!(side.analyst_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        spawner
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.subagent_type == lingxi_core::host::FUSION_ANALYST_TYPE)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn timed_out_tool_analyst_is_not_published_as_unanalyzed_success() {
+    let mut map = three_ok();
+    map.insert(ANALYST_SCRIPT.into(), FakePanel::Hang);
+    let mut config = tool_analyst_config();
+    config.analyst_timeout_ms = 100;
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(map),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(config),
+        Arc::new(catalog()),
+    );
+    assert!(matches!(
+        orch.run(request("task"), inherit(), None).await,
+        Err(FusionError::CleanupUnverified(_))
+    ));
+}
+
+#[tokio::test]
+async fn timed_out_allocated_panel_does_not_degrade_to_partial_success() {
+    let mut map = three_ok();
+    map.insert("deepseek-v4-pro".into(), FakePanel::Hang);
+    let mut config = test_config();
+    config.panel_total_timeout_ms = 100;
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(map),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(config),
+        Arc::new(catalog()),
+    );
+    assert!(matches!(
+        orch.run(request("task"), inherit(), None).await,
+        Err(FusionError::CleanupUnverified(_))
+    ));
+}
+
+struct UnverifiedEvidenceInvoker(lingxi_core::host::tool_invoker::CleanupUnverifiedReason);
+
+#[async_trait]
+impl ToolInvoker for UnverifiedEvidenceInvoker {
+    async fn invoke(
+        &self,
+        _: &str,
+        _: Utf16JsonProjection,
+        _: SubagentInvocationContext,
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+        Err(ToolInvokerError::CleanupUnverified(self.0.clone()))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn unverified_evidence_stops_before_analyst_and_keeps_reported_payload() {
+    use lingxi_core::host::tool_invoker::{
+        CleanupUnverifiedReason, ReportedExitCode, ReportedShellPayload, ReportedShellPayloadParts,
+        ReportedShellStream,
+    };
+    let reason = CleanupUnverifiedReason::ReportedPayload(Arc::new(ReportedShellPayload::new(
+        ReportedShellPayloadParts {
+            stdout: ReportedShellStream::Present {
+                utf16: vec![0xd800, 65],
+                host_truncated: false,
+            },
+            stderr: ReportedShellStream::Missing,
+            exit_code: ReportedExitCode::Missing,
+            combined_truncated: None,
+            timed_out: None,
+            tool_result_is_error: false,
+            payload_is_error: None,
+            interrupted: None,
+        },
+    )));
+    let mut context = inherit();
+    context.subagent.tool_invoker = Arc::new(UnverifiedEvidenceInvoker(reason.clone()));
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(FakeSpawner::new(three_ok()), side.clone());
+    let error = orch.run(request("task"), context, None).await.unwrap_err();
+    fn contains(actual: &CleanupUnverifiedReason, expected: &CleanupUnverifiedReason) -> bool {
+        actual == expected
+            || matches!(actual, CleanupUnverifiedReason::Multiple(items) if items.iter().any(|item| contains(item, expected)))
+    }
+    assert!(matches!(error, FusionError::CleanupUnverified(actual) if contains(&actual, &reason)));
     assert_eq!(side.analyst_calls.load(Ordering::SeqCst), 0);
 }
 

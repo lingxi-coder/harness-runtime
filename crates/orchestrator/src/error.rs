@@ -88,6 +88,10 @@ pub enum OrchestratorError {
     #[error("turn was interrupted before side-effect admission")]
     RecoveryInterrupted,
 
+    /// An owned process has an incomplete result or unverified cleanup.
+    #[error("{0}")]
+    CleanupUnverified(tool_api::CleanupUnverifiedReason),
+
     /// Mid-stream byte-level error from the streaming transport. Surfaced
     /// when the SSE chunk fails to decode or the HTTP body is cut.
     ///

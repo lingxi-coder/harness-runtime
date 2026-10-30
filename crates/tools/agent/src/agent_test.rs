@@ -1039,6 +1039,84 @@ mod tests {
         ));
     }
 
+    struct CleanupFailureSpawner {
+        agent_id: lingxi_core::types::AgentId,
+        reason: lingxi_core::host::tool_invoker::CleanupUnverifiedReason,
+    }
+
+    #[async_trait]
+    impl SubagentSpawner for CleanupFailureSpawner {
+        async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+            arc_mock_spawner().agent_listing().await
+        }
+
+        async fn resolve_selection(
+            &self,
+            subagent_type: &str,
+            model: Option<&str>,
+            model_profile: Option<&str>,
+        ) -> lingxi_core::host::subagent_spawn::SelectedAgentMeta {
+            arc_mock_spawner()
+                .resolve_selection(subagent_type, model, model_profile)
+                .await
+        }
+
+        async fn spawn(
+            &self,
+            _: SubagentSpawnRequest,
+            _: SubagentInheritance,
+        ) -> Result<SubagentResult, lingxi_core::host::subagent_spawn::SubagentSpawnError> {
+            Err(
+                lingxi_core::host::subagent_spawn::SubagentSpawnError::CleanupUnverified {
+                    agent_id: self.agent_id,
+                    reason: self.reason.clone(),
+                },
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_propagates_child_process_evidence_as_terminal_error() {
+        use lingxi_core::host::tool_invoker::{
+            CleanupUnverifiedReason, ProcessTreeStatus, UnverifiedCleanupOutput,
+            UnverifiedCleanupOutputParts,
+        };
+        let output = UnverifiedCleanupOutput::new(UnverifiedCleanupOutputParts {
+            session_id: Some("child-command".into()),
+            stdout: "child stdout".into(),
+            stderr: "child stderr".into(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_eof: false,
+            stderr_eof: true,
+            exit_code: None,
+            timed_out: true,
+            termination_requested: Some(true),
+            tree_status: ProcessTreeStatus::Unverified,
+            cleanup_detail: "child tree unverified".into(),
+            original_error: Some("child read failed".into()),
+        });
+        let mut bctx = wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.subagent_spawner = Some(Arc::new(CleanupFailureSpawner {
+            agent_id: lingxi_core::types::AgentId::new(),
+            reason: CleanupUnverifiedReason::Output(Arc::new(output.clone())),
+        }));
+        let error = AgentTool::new(bctx)
+            .call(
+                json!({"description":"inspect", "subagent_type":"general-purpose", "prompt":"inspect", "run_in_background":false}),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("unverified cleanup must not become a completed Agent result");
+        assert!(matches!(error, ToolError::CleanupUnverifiedOutput(actual) if *actual == output));
+    }
+
     /// `tengu_agent_tool_terminated` — the metric that counts runs which were
     /// STOPPED rather than finished. It had an emitter and no caller, so it
     /// never fired: a killed subagent was invisible to it.
@@ -3215,6 +3293,57 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             matches!(err, ToolError::Aborted),
             "Cancelled must map to Aborted: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn fusion_incomplete_panel_results_remain_structured_fatal_errors() {
+        use lingxi_core::host::tool_invoker::{
+            CleanupUnverifiedReason, ReportedExitCode, ReportedShellPayload,
+            ReportedShellPayloadParts, ReportedShellStream,
+        };
+
+        let reasons = vec![
+            CleanupUnverifiedReason::Message("panel cleanup unknown".into()),
+            CleanupUnverifiedReason::ReportedPayload(Arc::new(ReportedShellPayload::new(
+                ReportedShellPayloadParts {
+                    stdout: ReportedShellStream::Present {
+                        utf16: vec![0xd800, b'x' as u16],
+                        host_truncated: false,
+                    },
+                    stderr: ReportedShellStream::Missing,
+                    exit_code: ReportedExitCode::Null,
+                    combined_truncated: None,
+                    timed_out: None,
+                    tool_result_is_error: false,
+                    payload_is_error: None,
+                    interrupted: None,
+                },
+            ))),
+        ];
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ErroringFusion {
+            error: lingxi_core::host::FusionError::CleanupUnverified(
+                CleanupUnverifiedReason::Multiple(reasons.clone()),
+            ),
+        }));
+        let error = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("incomplete panel evidence must not become a model result");
+        assert!(matches!(error, ToolError::CleanupUnverifiedBatch(actual) if actual == reasons));
     }
 
     /// F008: a `Cancelled` that lands AFTER at least one panel genuinely

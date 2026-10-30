@@ -1707,6 +1707,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Pump the slot until terminal. The runner emits Progress/Message
         // events as it streams turns; we ignore those here and surface only
         // the terminal Completed/Failed/Killed.
+        let mut cleanup_unverified = None;
         let result = loop {
             match rx.recv().await {
                 Some(SubagentEvent::Completed {
@@ -1769,6 +1770,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 Some(SubagentEvent::Failed {
                     agent_id: child_id,
                     error,
+                    cleanup_unverified: evidence,
                     cumulative_usage,
                 }) => {
                     // Finding [9]/[11]: carry whatever the run already
@@ -1778,6 +1780,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     // here, so a panel/subagent that made several real,
                     // billed provider round-trips before failing settled at
                     // $0 no matter how much it actually spent.
+                    cleanup_unverified = evidence.map(|reason| (child_id, reason));
                     break SubagentResult::Failed {
                         agent_id: child_id,
                         reason: error,
@@ -2029,7 +2032,12 @@ impl SubagentSpawner for PoolSubagentSpawner {
         )
         .await;
 
-        Ok(result)
+        match cleanup_unverified {
+            Some((agent_id, reason)) => {
+                Err(SubagentSpawnError::CleanupUnverified { agent_id, reason })
+            }
+            None => Ok(result),
+        }
     }
 
     async fn spawn_workflow_with_observer(
@@ -2486,9 +2494,10 @@ impl PoolSubagentSpawner {
                         SubagentEvent::Completed { .. } => {
                             Some(lingxi_core::host::subagent_spawn::SubagentStopStatus::Completed)
                         }
-                        SubagentEvent::Failed { .. } => {
-                            Some(lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed)
-                        }
+                        SubagentEvent::Failed {
+                            cleanup_unverified: None,
+                            ..
+                        } => Some(lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed),
                         _ => None,
                     };
                     if let Some(status) = status {

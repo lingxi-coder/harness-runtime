@@ -9,8 +9,9 @@ use crate::snapshot::CatalogSnapshot;
 use async_trait::async_trait;
 use lingxi_core::host::subagent_output_guard::sanitize_blocks;
 use lingxi_core::host::subagent_spawn::{
-    StructuredOutputMode, SubagentObservation, SubagentResult, SubagentSpawnObserver,
-    SubagentSpawnRequest, SubagentSpawner, SubagentUsage, SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
+    StructuredOutputMode, SubagentObservation, SubagentResult, SubagentSpawnError,
+    SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
+    SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
 use lingxi_core::host::{
     validate_panel_report, EvidenceCheckStatus, FusionError, FusionInheritance, FusionProgress,
@@ -917,8 +918,10 @@ fn spawn_panel_tasks(
                     // task ever called the spawner made no provider call, so it
                     // must NOT be settled with the in-flight estimate the
                     // mid-flight cancel below legitimately gets.
-                    () = cancel.cancelled() => PanelFinish::Cancelled {
-                        dispatched: dispatch.reached_spawner(index),
+                    () = cancel.cancelled() => if dispatch.allocated(index) {
+                        PanelFinish::CleanupUnverified("panel cancellation ended before its cleanup outcome was observed".into())
+                    } else {
+                        PanelFinish::Cancelled { dispatched: dispatch.reached_spawner(index) }
                     },
                     result = tokio::time::timeout_at(
                         panel_deadline,
@@ -966,10 +969,15 @@ fn spawn_panel_tasks(
                     ) => {
                         match result {
                             Ok(Ok(terminal)) => PanelFinish::Done(terminal),
+                            Ok(Err(SubagentSpawnError::CleanupUnverified { reason, .. })) =>
+                                PanelFinish::CleanupUnverified(reason),
                             Ok(Err(err)) => PanelFinish::Failed {
                                 category: "spawn".into(),
                                 detail: Some(sanitize_detail(&err.to_string())),
                             },
+                            Err(_) if dispatch.allocated(index) => PanelFinish::CleanupUnverified(
+                                "panel timed out before its cleanup outcome was observed".into(),
+                            ),
                             Err(_) => PanelFinish::TotalTimedOut,
                         }
                     }
@@ -1146,6 +1154,7 @@ pub(crate) async fn run_panels_supervised(
     let mut failed = 0usize;
     let mut bar_aborted = false;
     let mut quorum_deadline: Option<Instant> = None;
+    let mut cleanup_reasons = Vec::new();
     // `allocated_count` can advance after the first dispatch notification:
     // the panel task enters the spawner before its allocation receipt runs.
     // Keep the last published count so a cancellation path can publish the
@@ -1191,12 +1200,21 @@ pub(crate) async fn run_panels_supervised(
                 // `in_flight_panels`' deliberate `reached_spawner`
                 // predicate).
                 while let Some(joined) = join_set.join_next_with_id().await {
-                    if let Ok((_id, (index, panel, spawn_prompt, elapsed, outcome))) = joined {
-                        let internal =
-                            finish_panel(index, panel, spawn_prompt, elapsed, outcome);
-                        collected.push((index, internal));
-                        if let Some(sink) = sink {
-                            sink.update(&collected, panels, &generic_prompt, &dispatch);
+                    match joined {
+                        Ok((_id, (index, panel, spawn_prompt, elapsed, outcome))) => {
+                            if let PanelFinish::CleanupUnverified(reason) = &outcome {
+                                cleanup_reasons.push(reason.clone());
+                            }
+                            let internal = finish_panel(index, panel, spawn_prompt, elapsed, outcome);
+                            collected.push((index, internal));
+                            if let Some(sink) = sink {
+                                sink.update(&collected, panels, &generic_prompt, &dispatch);
+                            }
+                        }
+                        Err(error) => {
+                            if task_index.get(&error.id()).is_some_and(|index| dispatch.allocated(*index)) {
+                                cleanup_reasons.push("panel cancellation ended before its cleanup outcome was observed".into());
+                            }
                         }
                     }
                 }
@@ -1225,7 +1243,11 @@ pub(crate) async fn run_panels_supervised(
                 if let Some(sink) = sink {
                     sink.update(&collected, panels, &generic_prompt, &dispatch);
                 }
-                return Err(FusionError::Cancelled);
+                return if cleanup_reasons.is_empty() {
+                    Err(FusionError::Cancelled)
+                } else {
+                    Err(FusionError::CleanupUnverified(crate::evidence::collapse_cleanup_reasons(cleanup_reasons)))
+                };
             }
             // [round-3 review, findings 11/19; round-5 review item 12] A
             // panel task has reached the spawner — real provider calls are,
@@ -1250,6 +1272,9 @@ pub(crate) async fn run_panels_supervised(
             next = join_set.join_next_with_id() => {
                 match next {
                     Some(Ok((_id, (index, panel, spawn_prompt, elapsed, outcome)))) => {
+                        if let PanelFinish::CleanupUnverified(reason) = &outcome {
+                            cleanup_reasons.push(reason.clone());
+                        }
                         let internal = finish_panel(index, panel, spawn_prompt, elapsed, outcome);
                         if internal.status == PanelRunStatus::Completed {
                             succeeded += 1;
@@ -1274,6 +1299,9 @@ pub(crate) async fn run_panels_supervised(
                         emit_running_panels(progress, index, collected.len(), total, dispatch.allocated_count());
                     }
                     Some(Err(join_err)) => {
+                        if task_index.get(&join_err.id()).is_some_and(|index| dispatch.allocated(*index)) {
+                            cleanup_reasons.push("panel stopped before its cleanup outcome was observed".into());
+                        }
                         if let Some((index, internal)) = panel_from_join_error(
                             &join_err,
                             &task_index,
@@ -1296,6 +1324,13 @@ pub(crate) async fn run_panels_supervised(
                     None => break,
                 }
             }
+            // Drain every already-ready sibling before aborting unfinished
+            // panels so concurrent cleanup evidence is not discarded.
+            () = std::future::ready(()), if !bar_aborted && !cleanup_reasons.is_empty() => {
+                task_barrier.close_panel_admission();
+                join_set.abort_all();
+                bar_aborted = true;
+            }
             // Biased AFTER join_next: drain every already-ready payload before
             // aborting the unfinished siblings, retaining their real usage.
             () = async {
@@ -1312,7 +1347,7 @@ pub(crate) async fn run_panels_supervised(
         if quorum_enabled && quorum_deadline.is_none() && succeeded >= min_successful {
             quorum_deadline = Some(Instant::now() + Duration::from_secs(10));
         }
-        if !bar_aborted {
+        if !bar_aborted && cleanup_reasons.is_empty() {
             let remaining = total.saturating_sub(collected.len());
             let cannot_reach_min = succeeded.saturating_add(remaining) < min_successful;
             let any_failure_requires_all = !partial_ok && failed > 0;
@@ -1325,6 +1360,11 @@ pub(crate) async fn run_panels_supervised(
     }
 
     task_barrier.close_panel_admission();
+    if !cleanup_reasons.is_empty() {
+        return Err(FusionError::CleanupUnverified(
+            crate::evidence::collapse_cleanup_reasons(cleanup_reasons),
+        ));
+    }
     collected.sort_by_key(|(index, _)| *index);
     Ok(collected
         .into_iter()
@@ -1481,6 +1521,7 @@ fn emit_running_panels(
 
 enum PanelFinish {
     Done(SubagentResult),
+    CleanupUnverified(lingxi_core::host::tool_invoker::CleanupUnverifiedReason),
     /// Sanitized category label plus an optional sanitized, length-capped
     /// one-line detail of the source error (G011) — never a raw provider
     /// body. `detail` is `None` only when there was nothing to attach.
@@ -1608,6 +1649,10 @@ fn finish_panel(
         implement: Default::default(),
     };
     match outcome {
+        PanelFinish::CleanupUnverified(_) => {
+            internal.error_category = Some("cleanup_unverified".into());
+            internal.usage = Some(estimate_in_flight_usage(&internal.spawn_prompt));
+        }
         PanelFinish::TotalTimedOut => {
             internal.status = PanelRunStatus::TimedOut;
             internal.error_category = Some("timeout".into());
@@ -2821,6 +2866,56 @@ mod panels_dispatched_emission_tests {
                 model: "gpt-5.6-terra".into(),
             },
         ]
+    }
+
+    struct FatalPanelSpawner;
+    #[async_trait]
+    impl SubagentSpawner for FatalPanelSpawner {
+        async fn spawn(
+            &self,
+            request: SubagentSpawnRequest,
+            _: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            if request.model.as_deref() != Some("claude-sonnet-5") {
+                return std::future::pending().await;
+            }
+            Err(SubagentSpawnError::CleanupUnverified {
+                agent_id: lingxi_core::types::AgentId::new(),
+                reason: lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Multiple(vec![
+                    "first incomplete output".into(),
+                    "second incomplete output".into(),
+                ]),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn panel_cleanup_failure_is_fatal_even_when_partial_results_are_allowed() {
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                session_origin: None,
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            CancellationToken::new(),
+        );
+        let error = run_panels(
+            Arc::new(FatalPanelSpawner),
+            &inherit,
+            &FusionRuntimeConfig::defaults(),
+            true,
+            "task",
+            &two_panels(),
+            "run-id",
+            Duration::from_secs(5),
+            &None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, FusionError::CleanupUnverified(
+            lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Multiple(reasons)
+        ) if reasons == vec!["first incomplete output".into(), "second incomplete output".into()]));
     }
 
     /// The defect this fixes: before the branch, the whole window between

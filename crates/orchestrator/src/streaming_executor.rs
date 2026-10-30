@@ -207,6 +207,9 @@ fn scheduler_error(error: SchedulerStopped, operation: &str) -> crate::error::Or
                 "tool model preference could not be resolved: {reason}"
             ))
         }
+        SchedulerStopped::CleanupUnverified(reason) => {
+            crate::error::OrchestratorError::CleanupUnverified(reason)
+        }
     }
 }
 
@@ -236,6 +239,7 @@ pub(crate) struct StreamingToolExecutor<'a> {
     /// Completed-only suffix yielded by the terminal Tn(false) drain.
     actor_terminal_ready_indices: VecDeque<usize>,
     scheduler_failed: AtomicBool,
+    cleanup_unverified: Option<tool_api::CleanupUnverifiedReason>,
     /// User-interrupt token. The actor cancels only Cancel-behavior calls and
     /// synthesizes queued Cancel results; Block calls keep running.
     user_cancel: Option<tokio_util::sync::CancellationToken>,
@@ -413,6 +417,7 @@ impl<'a> StreamingToolExecutor<'a> {
             actor_ready_indices: VecDeque::new(),
             actor_terminal_ready_indices: VecDeque::new(),
             scheduler_failed: AtomicBool::new(false),
+            cleanup_unverified: None,
             user_cancel,
             tool_use_lifecycle: ToolUseLifecycleTracker::default(),
             recovery_leases: Vec::new(),
@@ -671,6 +676,11 @@ impl<'a> StreamingToolExecutor<'a> {
     pub(crate) async fn finish_context_layers(
         &mut self,
     ) -> Result<(), crate::error::OrchestratorError> {
+        if let Some(detail) = self.cleanup_unverified.as_ref() {
+            return Err(crate::error::OrchestratorError::CleanupUnverified(
+                detail.clone(),
+            ));
+        }
         if self.scheduler_failed.load(Ordering::Acquire) {
             return Err(scheduler_stopped(
                 "finishing context layers after an actor failure",
@@ -990,6 +1000,12 @@ impl<'a> StreamingToolExecutor<'a> {
     }
 
     async fn record_completion(&mut self, i: usize, outcome: DispatchOutcome) {
+        if let Err(crate::error::OrchestratorError::CleanupUnverified(detail)) = &outcome {
+            self.cleanup_unverified
+                .get_or_insert_with(|| detail.clone());
+            self.tools[i].status = ToolStatus::Yielded;
+            return;
+        }
         // Compute the abort reason from PRIOR state (discard / user-interrupt). A
         // cancelled in-flight tool's real outcome is discarded for the synthetic.
         let mut abort_reason = self.abort_reason_for(i);
@@ -1133,9 +1149,9 @@ impl<'a> StreamingToolExecutor<'a> {
             .scheduler
             .reset_after_server_fallback(reason)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
                 self.scheduler_failed.store(true, Ordering::Release);
-                scheduler_stopped("resetting after server fallback")
+                scheduler_error(error, "resetting after server fallback")
             })?;
         self.publication_fence = self.scheduler.current_publication_fence();
         self.tools.clear();
@@ -1152,7 +1168,7 @@ impl<'a> StreamingToolExecutor<'a> {
     pub(crate) async fn abandon_after_model_error(
         &mut self,
         error: &str,
-    ) -> (Vec<DrainedResult>, ToolUseRemoval) {
+    ) -> Result<(Vec<DrainedResult>, ToolUseRemoval), crate::error::OrchestratorError> {
         if self.scheduler.stop_scheduling().await.is_err() {
             tracing::error!("autonomous scheduler stopped while entering model-error drain");
         }
@@ -1199,24 +1215,24 @@ impl<'a> StreamingToolExecutor<'a> {
             ids: self.tools.iter().map(|tool| tool.id.clone()).collect(),
             reason: None,
         };
-        match self.scheduler.reset_after_server_fallback(None).await {
-            Ok(actor_removal) => {
-                self.tool_use_lifecycle.apply_removal(&actor_removal);
-            }
-            Err(_) => {
-                tracing::error!("autonomous scheduler stopped while abandoning model-error work")
-            }
-        }
+        let actor_removal = self
+            .scheduler
+            .reset_after_server_fallback(None)
+            .await
+            .map_err(|error| scheduler_error(error, "abandoning model-error work"))?;
+        self.tool_use_lifecycle.apply_removal(&actor_removal);
         self.tools.clear();
         self.actor_ready_indices.clear();
         self.actor_terminal_ready_indices.clear();
-        (unmatched, removal)
+        Ok((unmatched, removal))
     }
 
     /// Cancel and drop the rest of a failed/abandoned attempt without creating
     /// user-facing tool-result synthetics. Used for host failures and chain
     /// advancement, whose Native paths discard the attempt instead.
-    pub(crate) async fn abandon_without_synthetics(&mut self) -> ToolUseRemoval {
+    pub(crate) async fn abandon_without_synthetics(
+        &mut self,
+    ) -> Result<ToolUseRemoval, crate::error::OrchestratorError> {
         if self.scheduler.stop_scheduling().await.is_err() {
             tracing::error!("autonomous scheduler stopped while abandoning tool work");
         }
@@ -1233,18 +1249,16 @@ impl<'a> StreamingToolExecutor<'a> {
         for id in discarded_ids {
             self.orch.clear_discarded_tool_result_metadata(&id).await;
         }
-        match self.scheduler.reset_after_server_fallback(None).await {
-            Ok(actor_removal) => {
-                self.tool_use_lifecycle.apply_removal(&actor_removal);
-            }
-            Err(_) => {
-                tracing::error!("autonomous scheduler stopped while abandoning tool work")
-            }
-        }
+        let actor_removal = self
+            .scheduler
+            .reset_after_server_fallback(None)
+            .await
+            .map_err(|error| scheduler_error(error, "abandoning tool work"))?;
+        self.tool_use_lifecycle.apply_removal(&actor_removal);
         self.tools.clear();
         self.actor_ready_indices.clear();
         self.actor_terminal_ready_indices.clear();
-        removal
+        Ok(removal)
     }
 
     #[cfg(test)]

@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use hooks::mods::ModError;
 use hooks::HookRegistry;
 use lingxi_core::host::tool_invoker::{
-    tool_call_ref_index, SubagentInvocationContext, ToolInvocationResult, ToolInvoker,
-    ToolInvokerError,
+    tool_call_ref_index, CleanupUnverifiedReason, PriorFailureContext, PriorFailureOrigin,
+    SubagentInvocationContext, ToolInvocationResult, ToolInvoker, ToolInvokerError,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::{Mutex, RwLock};
@@ -26,6 +26,68 @@ pub(super) struct ModSubagentToolInvoker {
 impl ModSubagentToolInvoker {
     pub(super) fn new(inner: Arc<dyn ToolInvoker>, hooks: Arc<RwLock<HookRegistry>>) -> Self {
         Self { inner, hooks }
+    }
+}
+
+// ModHost awaits each core `next` serially. The state lock protects recording,
+// and is deliberately not held across a tool invocation.
+const MAX_PRIOR_MOD_ERRORS: usize = 16;
+
+#[derive(Default)]
+struct ModCoreErrorState {
+    last_error: Option<ToolInvokerError>,
+    prior: Vec<PriorFailureContext>,
+    admission_closed: bool,
+}
+
+impl ModCoreErrorState {
+    fn add_contexts(&mut self, mut reason: CleanupUnverifiedReason) -> CleanupUnverifiedReason {
+        for context in self.prior.drain(..) {
+            reason = reason.with_context(context);
+        }
+        reason
+    }
+}
+
+async fn invoke_core_with_fatal_guard<T, F, Fut>(
+    state: &Mutex<ModCoreErrorState>,
+    invoke: F,
+) -> Result<T, ModError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ToolInvokerError>>,
+{
+    {
+        let stored = state.lock().await;
+        if let Some(error @ ToolInvokerError::CleanupUnverified(_)) = stored.last_error.as_ref() {
+            return Err(ModError::HookSource(error.model_facing_message()));
+        }
+        if stored.admission_closed {
+            return Err(ModError::Hook(
+                "nested tool error observation limit reached".into(),
+            ));
+        }
+    }
+    match invoke().await {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let mut stored = state.lock().await;
+            let source = error.model_facing_message();
+            match error {
+                ToolInvokerError::CleanupUnverified(reason) => {
+                    let reason = stored.add_contexts(reason);
+                    stored.last_error = Some(ToolInvokerError::CleanupUnverified(reason));
+                }
+                other => {
+                    if let Some(context) = PriorFailureContext::from_tool_error(&other) {
+                        stored.prior.push(context);
+                    }
+                    stored.admission_closed = stored.prior.len() >= MAX_PRIOR_MOD_ERRORS;
+                    stored.last_error = Some(other);
+                }
+            }
+            Err(ModError::HookSource(source))
+        }
     }
 }
 
@@ -238,7 +300,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
         let event = tool_call_event(name, &tool_use_id, &agent_id, &input)?;
         let original_input = input.clone();
         let completed = Arc::new(Mutex::new(Vec::<ToolInvocationResult>::new()));
-        let core_error = Arc::new(Mutex::new(None::<ToolInvokerError>));
+        let core_error = Arc::new(Mutex::new(ModCoreErrorState::default()));
         let core_inner = self.inner.clone();
         let core_name = name.to_owned();
         let core_id = tool_use_id.clone();
@@ -286,14 +348,10 @@ impl ToolInvoker for ModSubagentToolInvoker {
                             ));
                         }
                         let args = tool_call_arguments(&forwarded)?;
-                        let result = match inner.invoke_detailed(&name, args, ctx).await {
-                            Ok(result) => result,
-                            Err(error) => {
-                                let source = error.model_facing_message();
-                                *core_error.lock().await = Some(error);
-                                return Err(ModError::HookSource(source));
-                            }
-                        };
+                        let result = invoke_core_with_fatal_guard(&core_error, || {
+                            inner.invoke_detailed(&name, args, ctx)
+                        })
+                        .await?;
                         let text = result
                             .model_content
                             .clone()
@@ -336,10 +394,36 @@ impl ToolInvoker for ModSubagentToolInvoker {
                 },
             )
             .await;
+        {
+            let mut stored = core_error.lock().await;
+            if matches!(
+                stored.last_error.as_ref(),
+                Some(ToolInvokerError::CleanupUnverified(_))
+            ) {
+                let Some(ToolInvokerError::CleanupUnverified(mut reason)) =
+                    stored.last_error.take()
+                else {
+                    unreachable!("terminal error was present");
+                };
+                if let Err(error) = &answer {
+                    reason = reason.with_context(PriorFailureContext::from_text(
+                        PriorFailureOrigin::Mod,
+                        &error.to_string(),
+                    ));
+                }
+                return Err(ToolInvokerError::CleanupUnverified(reason));
+            }
+            if stored.admission_closed {
+                return Err(stored
+                    .last_error
+                    .take()
+                    .expect("an observed error closed admission"));
+            }
+        }
         let answer = match answer {
             Ok(answer) => answer.result_projection,
             Err(error) => {
-                if let Some(core_error) = core_error.lock().await.take() {
+                if let Some(core_error) = core_error.lock().await.last_error.take() {
                     return Err(core_error);
                 }
                 if let Some(core) = completed.lock().await.last().cloned() {
@@ -373,6 +457,10 @@ impl ToolInvoker for ModSubagentToolInvoker {
                 let raw = replacement.as_ref().expect("changed result is present");
                 let parsed = match self.inner.parse_output(name, raw).await {
                     Ok(parsed) => parsed,
+                    Err(ToolInvokerError::CleanupUnverified(reason)) => {
+                        let reason = core_error.lock().await.add_contexts(reason);
+                        return Err(ToolInvokerError::CleanupUnverified(reason));
+                    }
                     Err(error) => return Ok(wrap_tool_call_error(name, &error)),
                 };
                 core.data = parsed;
@@ -397,6 +485,10 @@ impl ToolInvoker for ModSubagentToolInvoker {
         if let Some(raw) = replacement {
             let parsed = match self.inner.parse_output(name, &raw).await {
                 Ok(parsed) => parsed,
+                Err(ToolInvokerError::CleanupUnverified(reason)) => {
+                    let reason = core_error.lock().await.add_contexts(reason);
+                    return Err(ToolInvokerError::CleanupUnverified(reason));
+                }
                 Err(error) => return Ok(wrap_tool_call_error(name, &error)),
             };
             return Ok(ToolInvocationResult {
@@ -811,6 +903,88 @@ mod tests {
             matches!(error, ToolInvokerError::Validation(reason) if reason.string_at("") == Some("blocked by Mod"))
         );
         assert!(core.calls.lock().unwrap().is_empty());
+    }
+
+    struct IncompleteCore {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[tokio::test]
+    async fn later_next_cannot_start_after_fatal_is_recorded() {
+        use lingxi_core::host::tool_invoker::CleanupUnverifiedReason;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gate = Arc::new(Mutex::new(ModCoreErrorState::default()));
+        let first = invoke_core_with_fatal_guard(&gate, || async {
+            Err::<(), _>(ToolInvokerError::CleanupUnverified(
+                CleanupUnverifiedReason::Message("first incomplete".into()),
+            ))
+        })
+        .await;
+        assert!(first.is_err());
+        let starts = Arc::new(AtomicUsize::new(0));
+        let starts_for_next = starts.clone();
+        let second = invoke_core_with_fatal_guard(&gate, || async move {
+            starts_for_next.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(second.is_err());
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[async_trait]
+    impl ToolInvoker for IncompleteCore {
+        async fn invoke(
+            &self,
+            _: &str,
+            _: Utf16JsonProjection,
+            _: SubagentInvocationContext,
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ToolInvokerError::CleanupUnverified(
+                lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Message(
+                    "child process remains unverified".into(),
+                ),
+            ))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn child_tool_call_mod_cannot_hide_or_retry_unverified_cleanup() {
+        let (mut invoker, _, _session) = setup(
+            r#"export function register(on) {
+              on('tool.call', { tool: 'Read' }, async ($, e, next) => {
+                try { await next(e); } catch (_) {}
+                try { await next(e); } catch (_) {}
+                return { result: { fake: 'success' }, text: 'success', isError: false };
+              });
+            }"#,
+        )
+        .await;
+        let core = Arc::new(IncompleteCore {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        invoker.inner = core.clone();
+        let error = invoker
+            .invoke_detailed(
+                "Read",
+                source(&json!({"file_path":"read.txt"})),
+                child_context(AgentId::new()),
+            )
+            .await
+            .expect_err("a caught cleanup failure cannot become a successful Mod result");
+        assert!(matches!(
+            error,
+            ToolInvokerError::CleanupUnverified(
+                lingxi_core::host::tool_invoker::CleanupUnverifiedReason::Message(message)
+            ) if message == "child process remains unverified"
+        ));
+        assert_eq!(core.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
