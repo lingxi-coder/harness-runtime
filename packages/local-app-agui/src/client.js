@@ -188,9 +188,10 @@ function terminalTask(task) {
   return ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task?.state);
 }
 
-function eventStream({input, transport, start, knownMessageIds, persistentChat, pollIntervalMs, onAccepted}) {
+function eventStream({input, transport, start, knownMessageIds, persistentChat, pollIntervalMs, onAccepted, onSubscribe}) {
   return new Observable(subscriber => {
     const controller = new AbortController();
+    const onUnsubscribe = onSubscribe?.();
     let active = true;
 
     const poll = async () => {
@@ -268,6 +269,7 @@ function eventStream({input, transport, start, knownMessageIds, persistentChat, 
     void poll();
     return () => {
       active = false;
+      onUnsubscribe?.();
       controller.abort();
     };
   });
@@ -290,6 +292,7 @@ export class LocalAppAgent extends AbstractAgent {
     this.persistentChat = persistentChat === true;
     this.sentMessageIds = new Set((agentConfig.initialMessages || []).map(message => message.id));
     this.lastRunId = undefined;
+    this.activeRun = undefined;
     this.pendingInput = undefined;
     this.readonlyConnecting = false;
   }
@@ -328,10 +331,19 @@ export class LocalAppAgent extends AbstractAgent {
     super.setState(state);
   }
 
+  trackActiveRun(runId) {
+    const activeRun = {runId};
+    this.activeRun = activeRun;
+    this.lastRunId = runId;
+    return () => {
+      // An older stream may detach after a new connection has taken ownership.
+      if (this.activeRun === activeRun) this.activeRun = undefined;
+    };
+  }
+
   run(input) {
     const knownMessageIds = new Set(this.sentMessageIds);
     const acceptedInput = localAppInput(input, {persistentChat: this.persistentChat, knownMessageIds});
-    this.lastRunId = acceptedInput.runId;
     return eventStream({
       input: acceptedInput,
       transport: this.transport,
@@ -339,6 +351,7 @@ export class LocalAppAgent extends AbstractAgent {
       knownMessageIds,
       pollIntervalMs: this.pollIntervalMs,
       persistentChat: this.persistentChat,
+      onSubscribe: () => this.trackActiveRun(acceptedInput.runId),
       onAccepted: () => {
         for (const message of acceptedInput.messages) this.sentMessageIds.add(message.id);
       },
@@ -411,30 +424,34 @@ export class LocalAppAgent extends AbstractAgent {
   async connectAgent(parameters, subscriber) {
     const runId = parameters?.runId ?? this.lastRunId;
     if (!runId) return {result: undefined, newMessages: []};
+    const clearActiveRun = this.trackActiveRun(runId);
     this.readonlyConnecting = true;
     try {
       const result = await super.connectAgent({...parameters, runId}, subscriber);
       for (const message of this.messages) this.sentMessageIds.add(message.id);
       return result;
     } finally {
+      clearActiveRun();
       this.readonlyConnecting = false;
     }
   }
 
   connect(input) {
     if (!input?.runId) return EMPTY;
+    const acceptedInput = validateRunAgentInput(input);
     return eventStream({
-      input: validateRunAgentInput(input),
+      input: acceptedInput,
       transport: this.transport,
       start: false,
       knownMessageIds: this.sentMessageIds,
       persistentChat: this.persistentChat,
       pollIntervalMs: this.pollIntervalMs,
+      onSubscribe: () => this.trackActiveRun(acceptedInput.runId),
     });
   }
 
   abortRun() {
-    const runId = this.lastRunId;
+    const runId = this.activeRun?.runId;
     if (runId && typeof this.transport.cancel === 'function') {
       void this.transport.cancel({runId});
     }

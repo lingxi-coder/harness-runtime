@@ -55,8 +55,29 @@ function transportFor(pages, {state = 'running'} = {}) {
 
 function deferred() {
   let resolve;
-  const promise = new Promise(done => { resolve = done; });
-  return {promise, resolve};
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return {promise, resolve, reject};
+}
+
+function gatedRunTransport(threadId, runId) {
+  const entered = deferred();
+  const page = deferred();
+  const cancellations = [];
+  const transport = transportFor([]);
+  transport.events = async (request, {signal}) => {
+    transport.eventRequests.push(request);
+    if (request.runId !== runId) {
+      return {events: [started(threadId, request.runId), finished(threadId, request.runId)], sequence: 2};
+    }
+    entered.resolve(signal);
+    return await page.promise;
+  };
+  transport.cancel = async request => { cancellations.push(request); };
+  const finish = (outcome = {type: 'success'}) => page.resolve({
+    events: [started(threadId, runId), finished(threadId, runId, outcome)], sequence: 2,
+  });
+  return {transport, entered, page, cancellations, finish};
 }
 
 function journalTransport(log, {pageSize = 128, state = 'succeeded'} = {}) {
@@ -235,12 +256,156 @@ test('cold connectAgent is read-only and replays an existing run with no initial
   const threadId = 'existing-thread';
   const runId = 'existing-run';
   const transport = transportFor([{events: [started(threadId, runId), finished(threadId, runId)], sequence: 2}]);
+  const cancellations = [];
+  transport.cancel = async request => { cancellations.push(request); };
   const client = createLocalAppAgent({transport, threadId, pollIntervalMs: 10});
   const result = await client.connectAgent({runId});
 
   assert.deepEqual(result, {result: 'done', newMessages: []});
   assert.equal(transport.starts.length, 0);
   assert.deepEqual(transport.eventRequests, [{runId}]);
+  client.abortRun();
+  assert.deepEqual(cancellations, [], 'successful reconnect completion must clear its cancel target');
+});
+
+test('abortRun cancels the connected run and clears its target after completion', async t => {
+  for (const previousRun of [false, true]) {
+    await t.test(previousRun ? 'run A then connect B' : 'fresh connect B', async () => {
+      const threadId = 'existing-thread';
+      const runId = 'connected-run-b';
+      const {transport, entered, cancellations, finish} = gatedRunTransport(threadId, runId);
+      const client = createLocalAppAgent({transport, threadId, pollIntervalMs: 10});
+      if (previousRun) {
+        await client.runInput(runInput({threadId, runId: 'started-run-a'}));
+        client.abortRun();
+        assert.deepEqual(cancellations, [], 'a completed run is no longer cancellable');
+      }
+      const pending = client.connectAgent({runId});
+      await entered.promise;
+      try {
+        assert.equal(transport.starts.length, previousRun ? 1 : 0);
+        assert.deepEqual(cancellations, [], 'connecting only reads the existing run');
+        client.abortRun();
+        assert.deepEqual(cancellations, [{runId}]);
+      } finally {
+        finish({type: 'cancelled'});
+        await pending;
+      }
+      client.abortRun();
+      assert.deepEqual(cancellations, [{runId}], 'completion must clear the connected cancel target');
+    });
+  }
+});
+
+test('abortRun targets connectAgent while onRunInitialized is still awaiting', async () => {
+  const threadId = 'existing-thread';
+  const runId = 'initializing-run';
+  const {transport, cancellations, finish} = gatedRunTransport(threadId, runId);
+  const initializing = deferred();
+  const releaseInitialization = deferred();
+  const client = createLocalAppAgent({transport, threadId});
+  const pending = client.connectAgent({runId}, {
+    async onRunInitialized() {
+      initializing.resolve();
+      await releaseInitialization.promise;
+    },
+  });
+  await initializing.promise;
+  try {
+    assert.deepEqual(transport.eventRequests, []);
+    client.abortRun();
+    assert.deepEqual(cancellations, [{runId}]);
+  } finally {
+    finish({type: 'cancelled'});
+    releaseInitialization.resolve();
+    await pending;
+  }
+  client.abortRun();
+  assert.deepEqual(cancellations, [{runId}]);
+  assert.equal(transport.starts.length, 0);
+});
+
+test('failed connects clear their cancel target without falling back to an earlier run', async t => {
+  for (const phase of ['input validation', 'polling']) {
+    await t.test(phase, async () => {
+      const threadId = 'existing-thread';
+      const runId = 'failed-run-b';
+      const {transport, entered, page, cancellations} = gatedRunTransport(threadId, runId);
+      const client = createLocalAppAgent({transport, threadId});
+      await client.runInput(runInput({threadId, runId: 'started-run-a'}));
+      const failure = new Error('reconnect failed');
+      if (phase === 'input validation') {
+        await assert.rejects(client.connectAgent({runId, tools: [null]}));
+      } else {
+        let observedFailure;
+        const pending = client.connectAgent({runId}, {
+          onRunFailed({error}) {
+            observedFailure = error;
+            return {stopPropagation: true};
+          },
+        });
+        await entered.promise;
+        page.reject(failure);
+        await pending;
+        assert.equal(observedFailure, failure);
+      }
+      client.abortRun();
+      assert.deepEqual(cancellations, []);
+      assert.equal(transport.starts.length, 1, 'a failed reconnect must not start another run');
+    });
+  }
+});
+
+test('detachActiveRun only stops reading and clears the connected cancel target', async () => {
+  const threadId = 'existing-thread';
+  const runId = 'detached-run';
+  const {transport, entered, cancellations, finish} = gatedRunTransport(threadId, runId);
+  const client = createLocalAppAgent({transport, threadId});
+  const pending = client.connectAgent({runId});
+  const signal = await entered.promise;
+  try {
+    await client.detachActiveRun();
+    await pending;
+    assert.equal(signal.aborted, true);
+    client.abortRun();
+    assert.deepEqual(cancellations, [], 'detaching must never cancel host execution');
+    assert.equal(transport.starts.length, 0);
+  } finally {
+    finish();
+  }
+});
+
+test('unsubscribing an older stream cannot clear a newer stream cancel target', () => {
+  const threadId = 'existing-thread';
+  const cancellations = [];
+  const signals = [];
+  const pages = [];
+  const transport = {
+    async start() { throw new Error('connect must remain read-only'); },
+    async events(request, {signal}) {
+      const page = deferred();
+      pages.push(page);
+      signals.push(signal);
+      return await page.promise;
+    },
+    async cancel(request) { cancellations.push(request); },
+  };
+  const client = createLocalAppAgent({transport, threadId});
+  const first = client.connect(runInput({threadId, runId: 'connected-a', messages: []})).subscribe();
+  const second = client.connect(runInput({threadId, runId: 'connected-b', messages: []})).subscribe();
+  try {
+    first.unsubscribe();
+    client.abortRun();
+    assert.deepEqual(cancellations, [{runId: 'connected-b'}]);
+    second.unsubscribe();
+    client.abortRun();
+    assert.deepEqual(cancellations, [{runId: 'connected-b'}]);
+    assert(signals.every(signal => signal.aborted));
+  } finally {
+    first.unsubscribe();
+    second.unsubscribe();
+    for (const page of pages) page.resolve({events: [], sequence: 0});
+  }
 });
 
 test('the convenience result path rejects cancelled, interrupted and failed runs', async t => {

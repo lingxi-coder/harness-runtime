@@ -373,7 +373,7 @@ mod tests {
         let session_id = SessionId::from_uuid(
             uuid::Uuid::parse_str(&state.chats.session_id(chat_id).unwrap()).unwrap(),
         );
-        let orch = Arc::new(
+        let orch = ConversationOrchestrator::into_shared(
             ConversationOrchestrator::new_side_chat(
                 OrchestratorConfig::default(),
                 api.clone(),
@@ -386,8 +386,10 @@ mod tests {
                 host.apps_root.clone(),
             )
             .with_session_id(session_id)
+            .with_persistent_app_chat()
             .with_jsonl_writer(writer.clone()),
         );
+        assert!(orch.is_persistent_app_chat());
         if previous.is_some() {
             let captured = writer
                 .capture_persistent_chat_snapshot(false)
