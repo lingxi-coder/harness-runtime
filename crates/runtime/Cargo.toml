@@ -186,7 +186,7 @@ collaboration = [
 ]
 
 [dependencies]
-jsonschema = { version = "=0.46.10", default-features = false, optional = true }
+jsonschema = { version = "=0.58.6", default-features = false, optional = true }
 media-runtime = { path = "../media-runtime" }
 media-api.workspace = true
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }

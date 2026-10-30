@@ -1,4 +1,4 @@
-//! The `with_sctp_receive_buffer_size` builder knob plumbs the SCTP receive
+//! The `set_sctp_receive_buffer_size` builder knob plumbs the SCTP receive
 //! window (a_rwnd) end-to-end, and a sub-RFC-4960-floor value is clamped up so it
 //! doesn't silently break the handshake.
 //!
@@ -8,10 +8,10 @@
 //! chains `TransportConfig::with_max_receive_buffer_size`.
 use anyhow::Result;
 use bytes::BytesMut;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler};
 use webrtc::peer_connection::{RTCIceGatheringState, RTCPeerConnectionState};
@@ -78,6 +78,10 @@ async fn exchange_one_message(recv_buf: u32, msg: &[u8]) -> Result<()> {
     let (rcv_gather_tx, mut rcv_gather_rx) = channel::<()>(1);
     let received = Arc::new(AtomicUsize::new(0));
 
+    let setting_engine = SettingEngineBuilder::new()
+        .with_sctp_max_receive_buffer_size(recv_buf)
+        .build();
+
     let sender_pc = PeerConnectionBuilder::new()
         .with_handler(Arc::new(SenderHandler {
             gather_tx: snd_gather_tx,
@@ -85,7 +89,7 @@ async fn exchange_one_message(recv_buf: u32, msg: &[u8]) -> Result<()> {
         }))
         .with_runtime(runtime.clone())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
-        .with_sctp_receive_buffer_size(recv_buf)
+        .with_setting_engine(setting_engine)
         .build()
         .await?;
 
@@ -113,6 +117,10 @@ async fn exchange_one_message(recv_buf: u32, msg: &[u8]) -> Result<()> {
     let _ = timeout(Duration::from_secs(5), snd_gather_rx.recv()).await;
     let offer_sdp = sender_pc.local_description().await.expect("offer");
 
+    let setting_engine = SettingEngineBuilder::new()
+        .with_sctp_max_receive_buffer_size(recv_buf)
+        .build();
+
     let receiver_pc = PeerConnectionBuilder::new()
         .with_handler(Arc::new(ReceiverHandler {
             gather_tx: rcv_gather_tx,
@@ -121,7 +129,7 @@ async fn exchange_one_message(recv_buf: u32, msg: &[u8]) -> Result<()> {
         }))
         .with_runtime(runtime.clone())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
-        .with_sctp_receive_buffer_size(recv_buf)
+        .with_setting_engine(setting_engine)
         .build()
         .await?;
 

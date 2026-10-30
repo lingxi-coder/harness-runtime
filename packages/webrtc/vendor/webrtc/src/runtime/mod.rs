@@ -52,7 +52,10 @@
 
 use std::io::IoSliceMut;
 use std::task::{Context, Poll};
-use std::{fmt::Debug, future::Future, io, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    fmt::Debug, future::Future, io, net::SocketAddr, pin::Pin, sync::Arc, time::Duration,
+    time::Instant,
+};
 
 pub mod primitives;
 
@@ -157,6 +160,29 @@ pub trait Runtime: Send + Sync + Debug + 'static {
         &'a self,
         host: &'a str,
     ) -> Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'a>>;
+
+    /// The current instant, as this runtime measures it.
+    ///
+    /// **This is the clock the sans-I/O core sees.** The core is *told* the time — through
+    /// `handle_timeout(now)` and the timestamps on inbound messages — and never reads one
+    /// itself, so whatever the driver passes down is the only clock protocol logic has. Routing
+    /// that through the runtime is what makes the `runtime-mock` feature's `MockRuntime`
+    /// virtual clock reach ICE timeouts, DTLS retransmits and SCTP RTO.
+    ///
+    /// (Named rather than linked: `mock` is behind the `runtime-mock` feature, so an
+    /// intra-doc link to it does not resolve in a default-feature doc build.)
+    ///
+    /// Defaulted to the wall clock, so existing `Runtime` implementations keep working
+    /// unchanged. A runtime with a controllable clock should override it and return that
+    /// clock's instant; one that does not will simply behave as before.
+    ///
+    /// Implementations must be consistent with [`sleep`](Self::sleep) and
+    /// [`interval`](Self::interval): if those are driven by a virtual clock, this must read the
+    /// same clock, or the driver will arm timers against one time base and stamp packets with
+    /// another.
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 
     /// Complete after `duration` has elapsed.
     ///
@@ -452,19 +478,16 @@ pub trait AsyncTcpStream: Send + Sync + Debug + 'static {
 /// [`with_runtime`](crate::peer_connection::PeerConnectionBuilder::with_runtime); that
 /// also allows different connections in one process to use different runtimes.
 pub fn default_runtime() -> Option<Arc<dyn Runtime>> {
-    #[cfg(all(
-        feature = "runtime-tokio",
-        not(feature = "runtime-smol"),
-        not(feature = "runtime-mock")
-    ))]
+    // The arms below are a *priority order*, not a mutual exclusion: the runtime features are
+    // additive, so Cargo feature unification can switch several on at once and every
+    // combination must still select exactly one arm. Requiring `not(...)` of the other
+    // features on every arm — as this once did — leaves no arm active whenever two are
+    // enabled, and the function then falls off the end and fails to compile.
+    #[cfg(feature = "runtime-tokio")]
     {
         Some(Arc::new(TokioRuntime))
     }
-    #[cfg(all(
-        not(feature = "runtime-tokio"),
-        feature = "runtime-smol",
-        not(feature = "runtime-mock")
-    ))]
+    #[cfg(all(not(feature = "runtime-tokio"), feature = "runtime-smol"))]
     {
         Some(Arc::new(SmolRuntime))
     }
@@ -504,7 +527,7 @@ pub use smol::SmolRuntime;
 #[cfg(feature = "runtime-mock")]
 pub mod mock;
 #[cfg(feature = "runtime-mock")]
-pub use mock::MockRuntime;
+pub use mock::{MockRuntime, MockUDPNetwork};
 
 #[cfg(test)]
 mod default_impl_tests {

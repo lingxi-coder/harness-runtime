@@ -21,7 +21,7 @@ use webrtc::peer_connection::{
 };
 use webrtc::runtime::{Sender, channel};
 
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::shared::ifaces::ifaces;
 
 mod common;
@@ -38,15 +38,6 @@ impl PeerConnectionEventHandler for Handler {
             let _ = self.gather_tx.try_send(());
         }
     }
-}
-
-/// A [`SettingEngine`] that opts into replacing the transport on an ICE restart.
-///
-/// 0.20 configures the engine through setters rather than 0.21's `SettingEngineBuilder`.
-fn rebinding_setting_engine() -> SettingEngine {
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_discard_local_candidates_during_ice_restart(true);
-    setting_engine
 }
 
 /// The IPv4 addresses a `0.0.0.0` bind is expected to expand into on this machine.
@@ -109,7 +100,7 @@ async fn gather_on(udp_addr: &str) -> Result<BTreeSet<IpAddr>> {
     let pc = PeerConnectionBuilder::new()
         .with_handler(Arc::new(Handler { gather_tx }))
         .with_runtime(runtime())
-        .with_setting_engine(SettingEngine::default())
+        .with_setting_engine(SettingEngineBuilder::new().build())
         .with_udp_addrs(vec![udp_addr.to_string()])
         .build()
         .await?;
@@ -171,7 +162,11 @@ async fn ice_restart_re_enumerates_interfaces() -> Result<()> {
     let pc = PeerConnectionBuilder::new()
         .with_handler(Arc::new(Handler { gather_tx }))
         .with_runtime(runtime())
-        .with_setting_engine(rebinding_setting_engine())
+        .with_setting_engine(
+            SettingEngineBuilder::new()
+                .with_discard_local_candidates_during_ice_restart(true)
+                .build(),
+        )
         .with_udp_addrs(vec!["0.0.0.0:0".to_string()])
         .build()
         .await?;
@@ -186,15 +181,23 @@ async fn ice_restart_re_enumerates_interfaces() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("gathering did not complete"))?;
     let first = pc.local_description().await.expect("offer").sdp;
 
+    // Drain first: a `Complete` left unread by the first generation would satisfy the wait below
+    // before the rebind had gathered anything, and the assertions would then describe a moment
+    // that has nothing to do with the restart.
+    while gather_rx.try_recv().is_ok() {}
+
     pc.restart_ice().await?;
     let restart_offer = pc.create_offer(None).await?;
     // A rebind that failed takes the driver with it, and this is where that shows up.
     pc.set_local_description(restart_offer)
         .await
         .map_err(|err| anyhow::anyhow!("driver died rebinding a wildcard: {err}"))?;
-    timeout(Duration::from_secs(10), gather_rx.recv())
-        .await
-        .map_err(|_| anyhow::anyhow!("no re-gather after the restart: the rebind failed"))?;
+    match timeout(Duration::from_secs(10), gather_rx.recv()).await {
+        Ok(Some(())) => {}
+        // The sender lives in the handler, which the driver drops when it exits.
+        Ok(None) => anyhow::bail!("the driver exited while rebinding the wildcard"),
+        Err(_) => anyhow::bail!("no re-gather after the restart: the rebind failed"),
+    }
     let second = pc.local_description().await.expect("restart offer").sdp;
 
     assert_eq!(

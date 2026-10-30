@@ -2,17 +2,17 @@
 //!
 //! Follows the rtc EventLoop pattern with async select
 
-use super::transports::stun_gatherer::{
+use super::transport::stun_gatherer::{
     RTCStunGatherEventIn, RTCStunGatherEventOut, RTCStunGatherer,
 };
-use super::transports::turn_relayer::{RTCTurnRelayEventIn, RTCTurnRelayEventOut, RTCTurnRelayer};
+use super::transport::turn_relayer::{RTCTurnRelayEventIn, RTCTurnRelayEventOut, RTCTurnRelayer};
 use crate::data_channel::{DataChannelEvent, DataChannelImpl, RTCDataChannelId};
 use crate::media_stream::track_local::TrackLocalEvent;
 use crate::media_stream::track_remote::static_rtp::TrackRemoteStaticRTP;
 use crate::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use crate::peer_connection::PeerConnectionRef;
-use crate::peer_connection::transports::tcp_transport::RTCTcpTransport;
-use crate::peer_connection::transports::{
+use crate::peer_connection::transport::tcp_transport::RTCTcpTransport;
+use crate::peer_connection::transport::{
     MAX_GSO_BATCH_BYTES, MAX_GSO_SEGMENTS, MIN_GSO_RUN, SocketRecvResult, UDP_RECV_BUF_LEN,
     gro_recv_buf_len, is_retryable_socket_recv_error,
 };
@@ -29,12 +29,11 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use log::{debug, error, trace, warn};
 use rtc::ice::candidate::Candidate;
 use rtc::ice::mdns::MulticastDnsMode;
-use rtc::interceptor::{Interceptor, NoopInterceptor};
 use rtc::mdns::{MDNS_PORT, MulticastSocket};
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::{RTCIceServer, RTCIceTransportPolicy};
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCIceGatheringState;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
@@ -43,23 +42,77 @@ use rtc::shared::error::{Error, Result};
 use rtc::shared::ifaces::ifaces;
 use rtc::shared::{FourTuple, TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::{rtcp, rtp};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Capacity of the internal driver event channel (WriteNotify, IceGathering, Close, …).
-pub(crate) const PEER_CONNECTION_DRIVER_EVENT_CHANNEL_CAPACITY: usize = 256;
+// ---------------------------------------------------------------------------------------
+// Internal channel overflow policy
+//
+// Four bounded channels connect the application to this driver. When one is full the send
+// site must do one of five things, and **every** send site on them is tagged with which,
+// in a `overflow:` comment. Grep `overflow:` to enumerate them; an untagged send site on
+// one of these channels is unreviewed, not "fine by default".
+//
+//   overflow: awaited   the producer is the application, which blocks. Nothing is lost.
+//   overflow: nudge     a flag-backed notification. The durable state is an `AtomicBool`
+//                       this loop polls unconditionally, so dropping the wake loses
+//                       nothing. Do NOT "fix" these into awaits — see `wake_writes`.
+//   overflow: detached  the producer is a spawned task with nothing else to do; it blocks,
+//                       parking itself and never this loop.
+//   overflow: DROPS     currently discards on `Full`. A bug where the payload has a
+//                       delivery guarantee (data channel — webrtc#858), inherent loss
+//                       where it does not (media). Tagged with the task that resolves it.
+//
+// The one rule that constrains the fix: **this loop must never block on a send.** It also
+// drives ICE consent, DTLS retransmits and SCTP timers, so awaiting a slow consumer here
+// would expire consent and drop the connection. Back-pressure on a driver → application
+// channel means *stop pulling from the core*, never *wait here*.
+// ---------------------------------------------------------------------------------------
 
-/// Capacity of each data-channel event channel (OnOpen, OnMessage, OnClose, …).
-pub(crate) const DATA_CHANNEL_EVENT_CHANNEL_CAPACITY: usize = 256;
+/// Capacity of the **application → driver** event channel (WriteNotify, IceGathering, Close, …).
+///
+/// Producers block (`send().await`) rather than dropping, except for two flag-backed nudges —
+/// `WriteNotify` and `Close` from `Drop` — whose real signal is an `AtomicBool` this loop polls
+/// every iteration, so a dropped nudge loses nothing.
+pub(crate) const APPLICATION_TO_DRIVER_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// Capacity of each track-remote event channel (OnMute, OnUnmute, OnEnded, OnRtpPacket, OnRtcpPacket, …).
-pub(crate) const TRACK_REMOTE_EVENT_CHANNEL_CAPACITY: usize = 256;
-pub(crate) const TRACK_LOCAL_EVENT_CHANNEL_CAPACITY: usize = 256;
+/// Capacity of each **driver → data-channel** event channel (OnOpen, OnMessage, OnClose, …).
+///
+/// Every variant on this queue carries a delivery guarantee: `OnMessage` because a reliable
+/// channel promises it, the lifecycle events because losing one leaves the application's view
+/// of the channel permanently wrong. Overflow here is [webrtc#858](https://github.com/webrtc-rs/webrtc/issues/858).
+pub(crate) const DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// How many events may stay retained for a channel that has no registered receiver.
+///
+/// Retention covers a registration that is still in flight, which is resolved by the very
+/// next `poll_events` — one `poll_reads` pass of events, far below this. The cap exists for
+/// the state that never resolves: an application that dropped its `DataChannel` without
+/// closing the stream, whose events would otherwise accumulate for the life of the
+/// connection. See [`Driver::flush_pending_data_channel_events`].
+const MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS: usize =
+    DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY;
+
+/// Capacity of each **driver → track-remote** event channel
+/// (OnOpen, OnEnding, OnEnded, OnError, OnRtpPacket, OnRtcpPacket).
+///
+/// Mixed contracts: media may be dropped (there is no flow control upstream of RTP to push
+/// back to), lifecycle may not. Splitting the queue was considered and rejected; the residual
+/// is accepted and made observable instead.
+pub(crate) const DRIVER_TO_TRACK_REMOTE_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Capacity of each **driver → track-local** event channel.
+///
+/// `TrackLocalEvent::OnRtcpPacket` is its only variant and only producer — this queue carries
+/// no lifecycle traffic at all, so unlike track-remote it has nothing that must not be dropped.
+pub(crate) const DRIVER_TO_TRACK_LOCAL_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day duration
 
@@ -83,6 +136,67 @@ const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day 
 /// by elapsed time catches every shape.
 const MIN_IMMEDIATE_TIMEOUT_INTERVAL: Duration = Duration::from_millis(1);
 
+thread_local! {
+    /// The connection whose driver task this thread is polling at this moment, or `0`.
+    static POLLING_DRIVER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Identifies a connection for [`POLLING_DRIVER`].
+fn driver_id(inner: &Arc<PeerConnectionRef>) -> usize {
+    Arc::as_ptr(inner) as usize
+}
+
+/// Whether the caller is running inside `inner`'s own driver task.
+///
+/// Application callbacks are awaited on the driver task, so this is true for a `close()`
+/// called from one of them. Waiting there for the driver to finish can never succeed (it cannot
+/// make progress until the callback returns), and aborting it would cut off the TURN releases it
+/// sends on its way out.
+pub(crate) fn is_polling_driver(inner: &Arc<PeerConnectionRef>) -> bool {
+    POLLING_DRIVER.with(|polling| polling.get()) == driver_id(inner)
+}
+
+/// Runs a connection's driver future, recording on the polling thread for the duration of every
+/// poll which connection it belongs to, so [`is_polling_driver`] can answer from inside it.
+///
+/// Recorded per poll rather than per task because a multi-threaded runtime may poll the task on a
+/// different thread each time; everything the driver awaits, callbacks included, runs within one
+/// of those polls.
+pub(crate) struct DriverTask {
+    id: usize,
+    future: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl DriverTask {
+    pub(crate) fn new(
+        inner: &Arc<PeerConnectionRef>,
+        future: impl Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        Self {
+            id: driver_id(inner),
+            future: Box::pin(future),
+        }
+    }
+}
+
+impl Future for DriverTask {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        /// Restores the previous marker even if the poll panics.
+        struct Restore(usize);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                POLLING_DRIVER.with(|polling| polling.set(self.0));
+            }
+        }
+
+        let this = self.get_mut();
+        let _restore = Restore(POLLING_DRIVER.with(|polling| polling.replace(this.id)));
+        this.future.as_mut().poll(cx)
+    }
+}
+
 /// Insert `sender` for `channel_id`, returning `true` if the channel should be announced.
 pub(crate) fn insert_data_channel_event_sender(
     data_channels: &mut HashMap<RTCDataChannelId, Sender<DataChannelEvent>>,
@@ -100,6 +214,125 @@ pub(crate) fn insert_data_channel_event_sender(
         }
         Entry::Occupied(_) => false,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageOutcome {
+    Delivered,
+    /// Kept in `pending` for a later `flush_pending_data_channel_events` pass.
+    Retained,
+    /// The application dropped its receiver; the event is gone for good.
+    NoLiveReceiver,
+}
+
+/// Hand `event` to `channel_id`'s consumer, retaining it in `pending` when it cannot
+/// be delivered right now.
+///
+/// Two cases retain rather than deliver:
+///
+/// - the consumer's queue is full (back-pressure), or
+/// - the channel has no registered sender: either its `OnOpen` is still queued behind
+///   the event, or the application has dropped its `DataChannel`. TURN-relay ingest
+///   feeds the core and drains data-channel messages in the same `poll_reads` pass,
+///   while the `OnOpen` those messages' channel produced waits for the next
+///   `poll_events` — so a channel's first message can reach here before its
+///   registration does. A reliable ordered channel promises delivery, and SCTP has
+///   already acknowledged the bytes, so dropping here loses the message with no way for
+///   the peer to tell. The flush after registration delivers it; the `OnOpen` path
+///   lifts retained events out first so the open still precedes them.
+///
+///   Those two states are indistinguishable from here — `DataChannelImpl::drop`
+///   unregisters the sender without closing the SCTP stream, so a dropped channel looks
+///   exactly like one whose registration is still in flight. They are told apart by
+///   consequence rather than by prediction: see
+///   [`Driver::flush_pending_data_channel_events`], where an unregistered channel is
+///   bounded and never reports back-pressure.
+///
+/// Anything already retained for the channel goes first, or a later event would
+/// overtake an earlier one — W3C queues `message` and `close` as tasks on the same
+/// event loop, so a close must never arrive before data that preceded it.
+fn stage_data_channel_event(
+    senders: &HashMap<RTCDataChannelId, Sender<DataChannelEvent>>,
+    pending: &mut HashMap<RTCDataChannelId, VecDeque<DataChannelEvent>>,
+    channel_id: RTCDataChannelId,
+    event: DataChannelEvent,
+) -> StageOutcome {
+    if let Some(queued) = pending.get_mut(&channel_id) {
+        queued.push_back(event);
+        return StageOutcome::Retained;
+    }
+
+    let Some(evt_tx) = senders.get(&channel_id) else {
+        pending.entry(channel_id).or_default().push_back(event);
+        return StageOutcome::Retained;
+    };
+
+    // overflow: retained — `Full` hands the event back and it is kept, not dropped.
+    match evt_tx.try_send(event) {
+        Ok(()) => StageOutcome::Delivered,
+        Err(TrySendError::Full(event)) => {
+            pending.entry(channel_id).or_default().push_back(event);
+            StageOutcome::Retained
+        }
+        Err(TrySendError::Disconnected(_)) => StageOutcome::NoLiveReceiver,
+    }
+}
+
+/// Retry everything retained in `pending`, and report whether a *registered* consumer is
+/// still behind. See [`Driver::flush_pending_data_channel_events`] for why only a
+/// registered consumer may report back-pressure.
+fn flush_staged_data_channel_events(
+    senders: &HashMap<RTCDataChannelId, Sender<DataChannelEvent>>,
+    pending: &mut HashMap<RTCDataChannelId, VecDeque<DataChannelEvent>>,
+) -> bool {
+    let mut blocked = false;
+    for (channel_id, queued) in pending.iter_mut() {
+        let Some(evt_tx) = senders.get(channel_id) else {
+            // Registration in flight, or the channel is gone. Keep what fits: a
+            // registration that is coming lands on the very next `poll_events`, so the
+            // cap is only ever reached by a channel nobody will register again. Either
+            // way this channel does not hold the drain.
+            if queued.len() > MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS {
+                let dropped = queued.len() - MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS;
+                queued.truncate(MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS);
+                warn!(
+                    "data channel {}: dropped {} event(s) with no registered receiver",
+                    channel_id, dropped
+                );
+            }
+            continue;
+        };
+        while let Some(event) = queued.pop_front() {
+            // overflow: retained — on `Full` it goes back on the front and delivery
+            // stops for this channel, so order holds.
+            match evt_tx.try_send(event) {
+                Ok(()) => {}
+                Err(TrySendError::Full(event)) => {
+                    queued.push_front(event);
+                    break;
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    queued.clear();
+                    break;
+                }
+            }
+        }
+        blocked |= !queued.is_empty();
+    }
+
+    pending.retain(|_, queued| !queued.is_empty());
+    blocked
+}
+
+/// Re-queue `retained` behind anything already pending for `channel_id`. Used after an
+/// `OnOpen` delivery, whose own send may itself have been retained on a full queue —
+/// appending keeps arrival order either way.
+fn restage_retained_data_channel_events(
+    pending: &mut HashMap<RTCDataChannelId, VecDeque<DataChannelEvent>>,
+    channel_id: RTCDataChannelId,
+    mut retained: VecDeque<DataChannelEvent>,
+) {
+    pending.entry(channel_id).or_default().append(&mut retained);
 }
 
 /// Send `buf` to `target` without allocating.
@@ -262,11 +495,8 @@ pub(crate) enum PeerConnectionDriverEvent {
 /// The driver for a peer connection
 ///
 /// Runs the event loop following rtc's EventLoop pattern with select!
-pub(crate) struct PeerConnectionDriver<I = NoopInterceptor, A = SocketAddr>
-where
-    I: Interceptor,
-{
-    inner: Arc<PeerConnectionRef<I>>,
+pub(crate) struct PeerConnectionDriver<A = SocketAddr> {
+    inner: Arc<PeerConnectionRef>,
     stun_gatherer: RTCStunGatherer,
     turn_relayer: RTCTurnRelayer,
     tcp_transport: RTCTcpTransport,
@@ -279,6 +509,18 @@ where
     stun_gathering_complete: bool,
     turn_gathering_complete: bool,
     pending_ice_configuration: Option<(Vec<RTCIceServer>, RTCIceTransportPolicy)>,
+    /// Data-channel events that did not fit in their channel's queue, kept in arrival order.
+    ///
+    /// This is the retain half of the #858 fix. `TrySendError::Full(value)` hands the payload
+    /// back; keeping it here — instead of logging and dropping it — is what makes a reliable
+    /// channel actually reliable. While any entry exists the driver stops pulling reads from
+    /// the core, which is what lets the backlog build in `pipeline_context.read_outs`, where
+    /// the SCTP handler sees it and stops draining its reassembly queues, which shrinks
+    /// `a_rwnd` and finally throttles the peer.
+    ///
+    /// Every variant goes in here, not just `OnMessage`: lifecycle events share the queue, so
+    /// retaining uniformly is what preserves their order relative to the data around them.
+    pending_data_channel_events: HashMap<RTCDataChannelId, VecDeque<DataChannelEvent>>,
     /// The addresses as the application configured them, held **unresolved** and re-resolved on
     /// every bind by [`resolve_bind_addrs`].
     ///
@@ -292,16 +534,73 @@ where
     mdns_mode: MulticastDnsMode,
     ice_servers: Vec<RTCIceServer>,
     ice_gather_policy: RTCIceTransportPolicy,
+    crypto_provider: Arc<dyn rtc::crypto::RTCCryptoProvider>,
     /// Mirrors `SettingEngine::discard_local_candidates_during_ice_restart`, because discarding the
     /// old candidates and replacing the transports they name are the same decision (webrtc#868).
     discard_local_candidates_during_ice_restart: bool,
+    turn_allocation_refresh_interval_cap: Option<Duration>,
 }
 
-impl<I, A> PeerConnectionDriver<I, A>
+impl<A> PeerConnectionDriver<A>
 where
-    I: Interceptor + 'static,
     A: ToSocketAddrs,
 {
+    /// Create a new driver for the given peer connection.
+    ///
+    /// Records configuration only; every transport is built by
+    /// [`bind_transports`](Self::bind_transports) once the event loop starts, on the runtime that
+    /// will poll it. The addresses are taken as configured and are not resolved here — see
+    /// [`udp_addrs`](Self::udp_addrs).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        inner: Arc<PeerConnectionRef>,
+        udp_addrs: Vec<A>,
+        tcp_addrs: Vec<A>,
+        mdns_mode: MulticastDnsMode,
+        ice_servers: Vec<RTCIceServer>,
+        ice_gather_policy: RTCIceTransportPolicy,
+        crypto_provider: Arc<dyn rtc::crypto::RTCCryptoProvider>,
+        discard_local_candidates_during_ice_restart: bool,
+        turn_allocation_refresh_interval_cap: Option<Duration>,
+    ) -> Self {
+        let runtime = Arc::clone(&inner.runtime);
+        Self {
+            inner,
+            // Placeholders until `bind_transports` runs; constructing them costs no I/O.
+            stun_gatherer: RTCStunGatherer::new(
+                Vec::new(),
+                ice_servers.clone(),
+                ice_gather_policy,
+                Arc::clone(&runtime),
+            ),
+            turn_relayer: RTCTurnRelayer::new(
+                Vec::new(),
+                ice_servers.clone(),
+                ice_gather_policy,
+                turn_allocation_refresh_interval_cap,
+                runtime,
+                Arc::clone(&crypto_provider),
+            ),
+            mdns_socket: None,
+            udp_sockets: HashMap::new(),
+            gso_scratch: Vec::new(),
+            tcp_transport: RTCTcpTransport::new(HashMap::new()),
+            ice_gathering_active: false,
+            stun_gathering_complete: false,
+            turn_gathering_complete: false,
+            pending_ice_configuration: None,
+            pending_data_channel_events: HashMap::new(),
+            udp_addrs,
+            tcp_addrs,
+            mdns_mode,
+            ice_servers,
+            ice_gather_policy,
+            crypto_provider,
+            discard_local_candidates_during_ice_restart,
+            turn_allocation_refresh_interval_cap,
+        }
+    }
+
     /// Builds every transport the driver owns, replacing whatever it had.
     ///
     /// The one place sockets, listeners and gatherers come into existence — called once at the
@@ -326,6 +625,15 @@ where
     /// interface that is still there — the ones the restart exists to move onto.
     async fn bind_transports(&mut self) -> Result<()> {
         let runtime = Arc::clone(&self.inner.runtime);
+
+        // Release TURN allocations while the old UDP sockets still exist. Rebinding drops them
+        // below, and a Refresh(0) sent from a new socket would not match the allocation's
+        // 5-tuple, leaving it on the server until it expires. The initial bind has no previous
+        // generation to release.
+        if !self.udp_sockets.is_empty() {
+            self.turn_relayer.close()?;
+            self.poll_writes().await?;
+        }
 
         // Drop before binding — see above. Also drops every accepted TCP stream, which is
         // correct: they belong to the generation being replaced.
@@ -395,59 +703,12 @@ where
             local_addrs,
             self.ice_servers.clone(),
             self.ice_gather_policy,
+            self.turn_allocation_refresh_interval_cap,
             runtime,
+            Arc::clone(&self.crypto_provider),
         );
 
         Ok(())
-    }
-
-    /// Create a new driver for the given peer connection.
-    ///
-    /// Records configuration only; every transport is built by
-    /// [`bind_transports`](Self::bind_transports) once the event loop starts, on the runtime that
-    /// will poll it. The addresses are taken as configured and are not resolved here — see
-    /// [`udp_addrs`](Self::udp_addrs).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        inner: Arc<PeerConnectionRef<I>>,
-        udp_addrs: Vec<A>,
-        tcp_addrs: Vec<A>,
-        mdns_mode: MulticastDnsMode,
-        ice_servers: Vec<RTCIceServer>,
-        ice_gather_policy: RTCIceTransportPolicy,
-        discard_local_candidates_during_ice_restart: bool,
-    ) -> Self {
-        let runtime = Arc::clone(&inner.runtime);
-        Self {
-            inner,
-            // Placeholders until `bind_transports` runs; constructing them costs no I/O.
-            stun_gatherer: RTCStunGatherer::new(
-                Vec::new(),
-                ice_servers.clone(),
-                ice_gather_policy,
-                Arc::clone(&runtime),
-            ),
-            turn_relayer: RTCTurnRelayer::new(
-                Vec::new(),
-                ice_servers.clone(),
-                ice_gather_policy,
-                runtime,
-            ),
-            mdns_socket: None,
-            udp_sockets: HashMap::new(),
-            gso_scratch: Vec::new(),
-            tcp_transport: RTCTcpTransport::new(HashMap::new()),
-            ice_gathering_active: false,
-            stun_gathering_complete: false,
-            turn_gathering_complete: false,
-            pending_ice_configuration: None,
-            udp_addrs,
-            tcp_addrs,
-            mdns_mode,
-            ice_servers,
-            ice_gather_policy,
-            discard_local_candidates_during_ice_restart,
-        }
     }
 
     /// Mark the connection closing and wake any sender parked in send back-pressure.
@@ -577,12 +838,7 @@ where
             // momentarily full channel), this check still guarantees the loop —
             // and thus a dedicated reactor thread — terminates instead of leaking.
             if self.inner.closing.load(Ordering::Acquire) {
-                if let Err(err) = self.turn_relayer.close() {
-                    error!("Failed to close turn_relayer: {}", err);
-                }
-                // close() queued authenticated allocation releases. Flush them
-                // while UDP sockets are still alive, before ending this driver.
-                let _ = self.poll_writes().await;
+                self.release_turn_allocations().await;
                 return Ok(());
             }
 
@@ -607,7 +863,9 @@ where
 
             // 4.a poll next timeout
             let timeout = self.poll_timeout().await;
-            let now = Instant::now();
+            // The runtime's clock, not the wall clock: this instant is what reaches
+            // `core.handle_timeout(now)`, so under a `MockRuntime` it is the virtual one.
+            let now = self.inner.runtime.now();
             let delay_from_now = timeout.saturating_duration_since(now);
 
             // 4.b handle immediate timeout
@@ -639,6 +897,34 @@ where
                 delay_from_now
             };
 
+            // Wake as soon as a blocked consumer frees a slot. `Notify` stores no permit, so
+            // a naive "check, then wait" drops any wake published in between and the loop
+            // sleeps on a condition that already changed — which is why this needs the
+            // register-then-recheck order: subscribe first, then retry delivery. A wake
+            // published before the retry is caught by the retry; one published after it is
+            // caught by the listener. Neither can be lost, so no timer backstop is needed.
+            //
+            // Registering allocates, so it happens only when something is actually retained
+            // — the healthy path pays one `is_empty` check. Deliberately an async block
+            // rather than an `OptionFuture`: the latter's `None` reports `Ready` immediately,
+            // which would fire this arm every iteration and spin the loop.
+            let consumed_listener = (!self.pending_data_channel_events.is_empty())
+                .then(|| self.inner.data_channel_consumed.listen());
+            let delivery_blocked = match consumed_listener {
+                Some(listener) => self
+                    .flush_pending_data_channel_events()
+                    .await
+                    .then_some(listener),
+                None => None,
+            };
+            let consumed = async move {
+                match delivery_blocked {
+                    Some(listener) => listener.await,
+                    None => futures::future::pending::<()>().await,
+                }
+            };
+            futures::pin_mut!(consumed);
+
             let timer = self.inner.runtime.sleep(delay_from_now);
             futures::pin_mut!(timer);
 
@@ -669,9 +955,12 @@ where
 
             // Runtime-agnostic select!
             futures::select! {
+                // A blocked consumer freed a slot: hand over what was retained, now.
+                _ = consumed.fuse() => {}
+
                 // Timer expired
                 _ = timer.fuse() => {
-                    self.handle_timeout(Instant::now()).await?;
+                    self.handle_timeout(self.inner.runtime.now()).await?;
                 }
 
                 // Driver events (RTP, RTCP, or ICE candidate)
@@ -838,7 +1127,7 @@ where
                 // Incoming TCP frame data from any tcp stream
                 tcp_read_result = tcp_read_future => {
                     if let Some(Some(res) ) = tcp_read_result {
-                        let packets = self.tcp_transport.on_read(res);
+                        let packets = self.tcp_transport.on_read(self.inner.runtime.now(), res);
                         for packet in packets {
                             if let Err(err) = self.handle_read(packet).await {
                                 error!("handle_read error on TCP: {}", err);
@@ -907,7 +1196,7 @@ where
             let end = (off + step).min(n);
             if let Err(err) = self
                 .handle_read(TaggedBytesMut {
-                    now: Instant::now(),
+                    now: self.inner.runtime.now(),
                     transport: TransportContext {
                         local_addr,
                         peer_addr,
@@ -1018,8 +1307,16 @@ where
                     RTCDataChannelEvent::OnClose(id) => id,
                     RTCDataChannelEvent::OnBufferedAmountLow(id) => id,
                     RTCDataChannelEvent::OnBufferedAmountHigh(id) => id,
+                    _ => {
+                        warn!("Ignoring unknown RTCDataChannelEvent variant");
+                        return;
+                    }
                 };
 
+                // Events retained while this channel had no registered receiver yet
+                // (see `deliver_data_channel_event`). Lifted out at `OnOpen` so the
+                // open is delivered first, then re-queued behind it below.
+                let mut retained_before_open: Option<VecDeque<DataChannelEvent>> = None;
                 if let RTCDataChannelEvent::OnOpen(_) = &evt {
                     let data_channel_exist = {
                         let mut core = self.inner.core.lock().await;
@@ -1027,11 +1324,18 @@ where
                     };
 
                     if data_channel_exist {
-                        let (evt_tx, evt_rx) = channel(DATA_CHANNEL_EVENT_CHANNEL_CAPACITY);
+                        let (evt_tx, evt_rx) =
+                            channel(DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY);
 
                         let should_announce = {
                             let mut data_channels = self.inner.data_channel_events_tx.lock().await;
-                            insert_data_channel_event_sender(&mut data_channels, channel_id, evt_tx)
+                            // Checked under the map's lock; see `end_event_streams`.
+                            !self.inner.is_closing()
+                                && insert_data_channel_event_sender(
+                                    &mut data_channels,
+                                    channel_id,
+                                    evt_tx,
+                                )
                         };
 
                         if should_announce {
@@ -1043,38 +1347,44 @@ where
                             self.inner.handler.on_data_channel(data_channel).await;
                         }
                     }
+
+                    // Outside the `data_channel_exist` guard on purpose: if the core no
+                    // longer has the channel, nothing registers a sender, and leaving the
+                    // retained events in place would put this `OnOpen` behind them —
+                    // inverting the open-before-message order this lift exists to keep.
+                    retained_before_open = self.pending_data_channel_events.remove(&channel_id);
                 }
 
-                let data_channels = self.inner.data_channel_events_tx.lock().await;
-                if let Some(evt_tx) = data_channels.get(&channel_id) {
-                    let result = match evt {
-                        RTCDataChannelEvent::OnOpen(_) => evt_tx.try_send(DataChannelEvent::OnOpen),
-                        RTCDataChannelEvent::OnError(_) => {
-                            evt_tx.try_send(DataChannelEvent::OnError)
-                        }
-                        RTCDataChannelEvent::OnClosing(_) => {
-                            evt_tx.try_send(DataChannelEvent::OnClosing)
-                        }
-                        RTCDataChannelEvent::OnClose(_) => {
-                            evt_tx.try_send(DataChannelEvent::OnClose)
-                        }
-                        RTCDataChannelEvent::OnBufferedAmountLow(_) => {
-                            evt_tx.try_send(DataChannelEvent::OnBufferedAmountLow)
-                        }
-                        RTCDataChannelEvent::OnBufferedAmountHigh(_) => {
-                            evt_tx.try_send(DataChannelEvent::OnBufferedAmountHigh)
-                        }
-                    };
-                    if let Err(err) = result {
-                        error!(
-                            "Failed to send RTCDataChannelEvent to data channel {}: {:?}",
-                            channel_id, err
-                        );
+                // overflow: retained — six lifecycle sends. They share the queue with
+                // `OnMessage` (see `handle_rtc_message`), so they go through the same
+                // retain-and-retry path and in the same order: a retained `OnClose` must not
+                // overtake messages that preceded it, which W3C's task-queue ordering
+                // requires.
+                let event = match evt {
+                    RTCDataChannelEvent::OnOpen(_) => DataChannelEvent::OnOpen,
+                    RTCDataChannelEvent::OnError(_) => DataChannelEvent::OnError,
+                    RTCDataChannelEvent::OnClosing(_) => DataChannelEvent::OnClosing,
+                    RTCDataChannelEvent::OnClose(_) => DataChannelEvent::OnClose,
+                    RTCDataChannelEvent::OnBufferedAmountLow(_) => {
+                        DataChannelEvent::OnBufferedAmountLow
                     }
-                } else {
-                    error!(
-                        "Failed to get data_channel: {} for RTCDataChannelEvent",
-                        channel_id
+                    RTCDataChannelEvent::OnBufferedAmountHigh(_) => {
+                        DataChannelEvent::OnBufferedAmountHigh
+                    }
+                    _ => {
+                        warn!("Ignoring unknown RTCDataChannelEvent variant");
+                        return;
+                    }
+                };
+                self.deliver_data_channel_event(channel_id, event).await;
+                if let Some(retained) = retained_before_open {
+                    // Goes behind whatever the `OnOpen` delivery left pending (the
+                    // open itself, if its send bounced on a full queue), so arrival
+                    // order holds either way.
+                    restage_retained_data_channel_events(
+                        &mut self.pending_data_channel_events,
+                        channel_id,
+                        retained,
                     );
                 }
             }
@@ -1084,6 +1394,10 @@ where
                     RTCTrackEvent::OnError(id) => id,
                     RTCTrackEvent::OnClosing(id) => id,
                     RTCTrackEvent::OnClose(id) => id,
+                    _ => {
+                        warn!("Ignoring unknown RTCTrackEvent variant");
+                        return;
+                    }
                 };
 
                 let mut pending_on_track = None;
@@ -1118,7 +1432,8 @@ where
                             .contains_key(track_id);
 
                         if !already_open {
-                            let (evt_tx, evt_rx) = channel(TRACK_REMOTE_EVENT_CHANNEL_CAPACITY);
+                            let (evt_tx, evt_rx) =
+                                channel(DRIVER_TO_TRACK_REMOTE_EVENT_CHANNEL_CAPACITY);
                             let track_remote: Arc<dyn TrackRemote> =
                                 Arc::new(TrackRemoteStaticRTP::new(
                                     track,
@@ -1144,13 +1459,18 @@ where
                                 rtp_transceiver.set_receiver(Some(receiver)).await;
                             }
 
-                            self.inner
-                                .track_remote_events_tx
-                                .lock()
-                                .await
-                                .insert(track_id.clone(), (evt_tx, Arc::clone(&track_remote)));
-
-                            pending_on_track = Some(track_remote);
+                            {
+                                let mut track_remotes =
+                                    self.inner.track_remote_events_tx.lock().await;
+                                // Checked under the map's lock; see `end_event_streams`.
+                                if !self.inner.is_closing() {
+                                    track_remotes.insert(
+                                        track_id.clone(),
+                                        (evt_tx, Arc::clone(&track_remote)),
+                                    );
+                                    pending_on_track = Some(track_remote);
+                                }
+                            }
                         }
                     }
                 }
@@ -1164,7 +1484,15 @@ where
                     .map(|(evt_tx, track_remote)| (evt_tx.clone(), Arc::clone(track_remote)));
 
                 if let Some((evt_tx, track_remote)) = track_remote_entry {
-                    let (track_id, result) = match evt {
+                    // overflow: DROPS — four lifecycle sends. This is the *accepted residual*:
+                    // the queue is shared with bulk RTP (`handle_rtc_message`), and since RTP
+                    // has no upstream absorber it cannot be made never-drop the way the data
+                    // channel can. A flood can therefore starve `OnEnded`, leaking a track on
+                    // the application side. Splitting the queue was rejected as not worth its
+                    // cost; E1-01 makes the loss counted and distinctly logged instead, and
+                    // the jitter buffer (#846) shrinks the window by pacing media on playout
+                    // time rather than arrival.
+                    let (track_id, event_name, result) = match evt {
                         RTCTrackEvent::OnOpen(init) => {
                             Self::populate_track_remote_codings(
                                 self.inner.clone(),
@@ -1175,23 +1503,43 @@ where
                             .await;
                             (
                                 init.track_id.clone(),
+                                "OnOpen",
                                 evt_tx.try_send(TrackRemoteEvent::OnOpen(init)),
                             )
                         }
-                        RTCTrackEvent::OnError(track_id) => {
-                            (track_id, evt_tx.try_send(TrackRemoteEvent::OnError))
-                        }
-                        RTCTrackEvent::OnClosing(track_id) => {
-                            (track_id, evt_tx.try_send(TrackRemoteEvent::OnEnding))
-                        }
-                        RTCTrackEvent::OnClose(track_id) => {
-                            (track_id, evt_tx.try_send(TrackRemoteEvent::OnEnded))
+                        // overflow: DROPS — accepted residual, as above.
+                        RTCTrackEvent::OnError(track_id) => (
+                            track_id,
+                            "OnError",
+                            evt_tx.try_send(TrackRemoteEvent::OnError),
+                        ),
+                        RTCTrackEvent::OnClosing(track_id) => (
+                            track_id,
+                            "OnEnding",
+                            evt_tx.try_send(TrackRemoteEvent::OnEnding),
+                        ),
+                        RTCTrackEvent::OnClose(track_id) => (
+                            track_id,
+                            "OnEnded",
+                            evt_tx.try_send(TrackRemoteEvent::OnEnded),
+                        ),
+                        _ => {
+                            warn!("Ignoring unknown RTCTrackEvent variant");
+                            return;
                         }
                     };
                     if let Err(err) = result {
+                        let err_msg = match err {
+                            TrySendError::Full(_) => "Full",
+                            TrySendError::Disconnected(_) => "Disconnected",
+                        };
+                        // Naming the event matters here: on `Full` this is in practice a
+                        // simulcast layer's `OnOpen` losing its slot to media from a layer
+                        // already flowing, and that layer then stays invisible for the life
+                        // of the connection.
                         error!(
-                            "Failed to send RTCTrackEvent to track remote {}: {:?}",
-                            track_id, err
+                            "Failed to send RTCTrackEvent {} to track remote {}: {}",
+                            event_name, track_id, err_msg,
                         );
                     }
                 } else {
@@ -1202,34 +1550,40 @@ where
                     self.inner.handler.on_track(track_remote).await;
                 }
             }
+            _ => {
+                warn!("Ignoring unknown RTCPeerConnectionEvent variant");
+            }
         }
     }
 
-    async fn handle_rtc_message(&mut self, message: RTCMessage) {
+    async fn handle_rtc_message(&mut self, message: TaggedRTCMessage) {
+        // The core reports when the packet was observed at the socket; the async layer above
+        // does not need it yet, but discarding it here would be the wrong default.
+        let TaggedRTCMessage { now: _, message } = message;
         match message {
             RTCMessage::DataChannelMessage(channel_id, dc_message) => {
-                let data_channels = self.inner.data_channel_events_tx.lock().await;
-                if let Some(evt_tx) = data_channels.get(&channel_id) {
-                    if let Err(err) = evt_tx.try_send(DataChannelEvent::OnMessage(dc_message)) {
-                        let err_msg = match err {
-                            TrySendError::Full(_) => "Full",
-                            TrySendError::Disconnected(_) => "Disconnected",
-                        };
-                        error!(
-                            "Failed to send DataChannelMessage to data channel {}: {}",
-                            channel_id, err_msg,
-                        );
-                    }
-                } else {
-                    error!(
-                        "Failed to get data_channel: {} for DataChannelMessage",
-                        channel_id
-                    );
-                }
+                // overflow: retained — **this was webrtc#858**. A reliable ordered channel
+                // promises delivery; this used to discard it on a full queue. Now the
+                // message is kept and the driver stops pulling reads from the core until the
+                // consumer drains, so back-pressure reaches SCTP's receive window and the
+                // peer throttles.
+                self.deliver_data_channel_event(
+                    channel_id,
+                    DataChannelEvent::OnMessage(dc_message),
+                )
+                .await;
             }
             RTCMessage::RtpPacket(track_id, packet) => {
                 let track_remotes = self.inner.track_remote_events_tx.lock().await;
                 if let Some(evt_tx) = track_remotes.get(&track_id) {
+                    // overflow: DROPS — inherent, not a bug. UDP has no flow control, so
+                    // there is nothing upstream to push back to; refusing to drop would
+                    // mean buffering until the process dies. E3-01 makes the loss *counted*
+                    // (`RTCInboundRtpStreamStats::packets_discarded`) rather than merely
+                    // logged, and E3-02 rate-limits the log. The eviction *policy* — which
+                    // packet to shed — belongs in the jitter buffer (#846), which knows
+                    // playout deadlines; deciding it here would discard packets NACK had
+                    // just recovered.
                     if let Err(err) = evt_tx.0.try_send(TrackRemoteEvent::OnRtpPacket(packet)) {
                         error!(
                             "Failed to send RtpPacket to track remote {}: {:?}",
@@ -1252,6 +1606,7 @@ where
                     .get(&track_id)
                     .map(|(evt_tx, _)| evt_tx.clone());
                 if let Some(evt_tx) = remote_tx {
+                    // overflow: DROPS — inherent, as for RTP above; counted by E3-01.
                     if let Err(err) = evt_tx.try_send(TrackRemoteEvent::OnRtcpPacket(packets)) {
                         error!(
                             "Failed to send RtcpPacket to track remote {}: {:?}",
@@ -1269,6 +1624,9 @@ where
                     .get(&track_id)
                     .cloned();
                 if let Some(evt_tx) = local_tx {
+                    // overflow: DROPS — inherent; counted by E3-01. The only send site on
+                    // the track-local channel, and `OnRtcpPacket` is that event type's only
+                    // variant, so this queue has no lifecycle traffic to starve.
                     if let Err(err) = evt_tx.try_send(TrackLocalEvent::OnRtcpPacket(packets)) {
                         error!(
                             "Failed to send RtcpPacket to track local {}: {:?}",
@@ -1279,15 +1637,20 @@ where
                     error!("Failed to route RtcpPacket: no track for {}", track_id);
                 }
             }
+            _ => {
+                warn!("Ignoring unknown RTCMessage variant");
+            }
         }
     }
 
     async fn handle_driver_event(&mut self, evt: PeerConnectionDriverEvent) -> bool {
+        // One instant for the whole event: everything this dispatches is caused by it.
+        let now = self.inner.runtime.now();
         match evt {
             PeerConnectionDriverEvent::SenderRtp(sender_id, packet) => {
                 let mut core = self.inner.core.lock().await;
                 if let Some(mut sender) = core.rtp_sender(sender_id) {
-                    if let Err(err) = sender.write_rtp(packet) {
+                    if let Err(err) = sender.write_rtp(now, packet) {
                         error!("Failed to send RTP: {}", err);
                     }
                 } else {
@@ -1300,7 +1663,7 @@ where
             PeerConnectionDriverEvent::SenderRtcp(sender_id, rtcp_packets) => {
                 let mut core = self.inner.core.lock().await;
                 if let Some(mut sender) = core.rtp_sender(sender_id) {
-                    if let Err(err) = sender.write_rtcp(rtcp_packets) {
+                    if let Err(err) = sender.write_rtcp(now, rtcp_packets) {
                         error!("Failed to send RTCP: {}", err);
                     }
                 } else {
@@ -1313,7 +1676,7 @@ where
             PeerConnectionDriverEvent::ReceiverRtcp(receiver_id, rtcp_packets) => {
                 let mut core = self.inner.core.lock().await;
                 if let Some(mut receiver) = core.rtp_receiver(receiver_id) {
-                    if let Err(err) = receiver.write_rtcp(rtcp_packets) {
+                    if let Err(err) = receiver.write_rtcp(now, rtcp_packets) {
                         error!("Failed to send RTCP feedback: {}", err);
                     }
                 } else {
@@ -1396,12 +1759,7 @@ where
                 self.tcp_transport.register_stream(four_tuple, stream);
             }
             PeerConnectionDriverEvent::Close => {
-                if let Err(err) = self.turn_relayer.close() {
-                    error!("Failed to close turn_relayer: {}", err);
-                }
-                // close() queued authenticated allocation releases. Flush them
-                // while UDP sockets are still alive, before ending this driver.
-                let _ = self.poll_writes().await;
+                self.release_turn_allocations().await;
                 return true;
             }
         }
@@ -1410,7 +1768,7 @@ where
     }
 
     async fn populate_track_remote_codings(
-        inner: Arc<PeerConnectionRef<I>>,
+        inner: Arc<PeerConnectionRef>,
         receiver_id: RTCRtpReceiverId,
         ssrc: u32,
         track_remote: &Arc<dyn TrackRemote>,
@@ -1447,7 +1805,7 @@ where
         }
     }
 
-    async fn drain_core_writes(inner: Arc<PeerConnectionRef<I>>) -> Vec<TaggedBytesMut> {
+    async fn drain_core_writes(inner: Arc<PeerConnectionRef>) -> Vec<TaggedBytesMut> {
         let mut writes = Vec::new();
         let mut core = inner.core.lock().await;
         while let Some(msg) = core.poll_write() {
@@ -1456,7 +1814,7 @@ where
         writes
     }
 
-    async fn drain_core_events(inner: Arc<PeerConnectionRef<I>>) -> Vec<RTCPeerConnectionEvent> {
+    async fn drain_core_events(inner: Arc<PeerConnectionRef>) -> Vec<RTCPeerConnectionEvent> {
         let mut events = Vec::new();
         let mut core = inner.core.lock().await;
         while let Some(event) = core.poll_event() {
@@ -1465,13 +1823,109 @@ where
         events
     }
 
-    async fn drain_core_reads(inner: Arc<PeerConnectionRef<I>>) -> Vec<RTCMessage> {
+    /// Hand `event` to `channel_id`, retaining it if the application is behind.
+    ///
+    /// Never awaits *the send*. This runs on the loop that also drives ICE consent, DTLS
+    /// retransmits and SCTP timers, so blocking on a slow consumer would expire consent and
+    /// drop the connection — a worse outcome than the drop this replaces. Back-pressure on
+    /// this channel means *stop pulling from the core*, which is what `poll_reads` does while
+    /// anything is retained.
+    async fn deliver_data_channel_event(
+        &mut self,
+        channel_id: RTCDataChannelId,
+        event: DataChannelEvent,
+    ) {
+        let outcome = {
+            let data_channels = self.inner.data_channel_events_tx.lock().await;
+            stage_data_channel_event(
+                &data_channels,
+                &mut self.pending_data_channel_events,
+                channel_id,
+                event,
+            )
+        };
+        match outcome {
+            StageOutcome::Delivered => {}
+            StageOutcome::Retained => {
+                self.inner
+                    .data_channel_delivery_blocked
+                    .store(true, Ordering::Release);
+            }
+            StageOutcome::NoLiveReceiver => {
+                // The application dropped its `DataChannel`; there is nobody to deliver to.
+                debug!("data channel {} has no live receiver", channel_id);
+            }
+        }
+    }
+
+    /// Retry retained events. Returns `true` while a *registered* consumer is still
+    /// behind — that is the back-pressure signal `poll_reads` stops draining on.
+    ///
+    /// A channel with no registered sender never gates the drain. Its events are kept,
+    /// so the pre-registration case in [`stage_data_channel_event`] still delivers once
+    /// `OnOpen` registers the channel, but they are bounded and report no back-pressure.
+    /// The reason is that a sender is absent in two states that cannot be told apart
+    /// here: registration still in flight, and the application having dropped its
+    /// `DataChannel` (`DataChannelImpl::drop` unregisters it without closing the SCTP
+    /// stream). Reporting `true` for the second state would stop `poll_reads` from ever
+    /// calling `drain_core_data` again, stalling every data channel on the connection
+    /// and driving `a_rwnd` to zero — so an unregistered channel is bounded instead of
+    /// trusted, and only a registered-but-full consumer can hold the drain.
+    async fn flush_pending_data_channel_events(&mut self) -> bool {
+        if self.pending_data_channel_events.is_empty() {
+            return false;
+        }
+
+        let senders: HashMap<RTCDataChannelId, Sender<DataChannelEvent>> =
+            self.inner.data_channel_events_tx.lock().await.clone();
+
+        let blocked =
+            flush_staged_data_channel_events(&senders, &mut self.pending_data_channel_events);
+
+        self.inner
+            .data_channel_delivery_blocked
+            .store(blocked, Ordering::Release);
+        blocked
+    }
+
+    /// Drain media (RTP/RTCP) from the core.
+    ///
+    /// Always safe to call: media arrives over SRTP and is subject to none of SCTP's flow
+    /// control, so nothing about data-channel back-pressure may gate it.
+    async fn drain_core_media(inner: Arc<PeerConnectionRef>) -> Vec<TaggedRTCMessage> {
         let mut messages = Vec::new();
         let mut core = inner.core.lock().await;
-        while let Some(message) = core.poll_read() {
+        while let Some(message) = core.poll_media_read() {
             messages.push(message);
         }
         messages
+    }
+
+    /// Drain data-channel messages from the core.
+    ///
+    /// Called only while the application can take them. **Not** calling it is how
+    /// back-pressure is applied: the messages stay in the core, its data-channel queue grows,
+    /// the SCTP handler bounds its drain against that, bytes stay in the reassembly queue,
+    /// `a_rwnd` falls and the peer slows down.
+    async fn drain_core_data(inner: Arc<PeerConnectionRef>) -> Vec<TaggedRTCMessage> {
+        let mut messages = Vec::new();
+        let mut core = inner.core.lock().await;
+        while let Some(message) = core.poll_data_read() {
+            messages.push(message);
+        }
+        messages
+    }
+
+    /// Releases every TURN allocation (Refresh with LIFETIME=0) and sends the releases before
+    /// the driver stops, so the server frees them now rather than when their lifetime expires
+    /// (webrtc#903). The sockets are about to go, so this is the last chance to send them.
+    async fn release_turn_allocations(&mut self) {
+        if let Err(err) = self.turn_relayer.close() {
+            error!("Failed to close turn_relayer: {}", err);
+        }
+        if let Err(err) = self.poll_writes().await {
+            error!("Failed to send TURN allocation releases: {}", err);
+        }
     }
 
     async fn poll_writes(&mut self) -> Result<()> {
@@ -1684,8 +2138,24 @@ where
             }
         }
 
-        // 3.b peer_connection poll_read() - Process incoming messages
-        for message in Self::drain_core_reads(self.inner.clone()).await {
+        // 3.b Media, unconditionally. It shares nothing with data-channel flow control, and
+        // gating it on that was a real defect: a slow signalling consumer froze video on the
+        // same connection for as long as it stalled.
+        for message in Self::drain_core_media(self.inner.clone()).await {
+            self.handle_rtc_message(message).await;
+        }
+
+        // 3.c Retry anything the application was too slow to take last iteration. While a
+        // retained event remains, do NOT pull more data-channel messages out of the core:
+        // leaving them there is the whole mechanism. The core's data-channel queue grows, the
+        // SCTP handler bounds its drain against it, bytes stay in the reassembly queue,
+        // `a_rwnd` falls, and the peer slows down. Draining regardless would move the backlog
+        // into this process's heap and throttle nobody.
+        if self.flush_pending_data_channel_events().await {
+            return Ok(());
+        }
+
+        for message in Self::drain_core_data(self.inner.clone()).await {
             self.handle_rtc_message(message).await;
         }
 
@@ -1704,7 +2174,7 @@ where
             .into_iter()
             .flatten()
             .min()
-            .unwrap_or_else(|| Instant::now() + DEFAULT_TIMEOUT_DURATION)
+            .unwrap_or_else(|| self.inner.runtime.now() + DEFAULT_TIMEOUT_DURATION)
     }
 
     async fn handle_timeout(&mut self, now: Instant) -> Result<()> {
@@ -1719,6 +2189,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_channel::RTCDataChannelMessage;
     use crate::runtime::channel;
 
     #[test]
@@ -1755,6 +2226,7 @@ mod tests {
         let sender = map.get(&channel_id).cloned().unwrap();
         assert!(!sender.is_closed());
     }
+
     #[test]
     fn resolve_bind_addrs_keeps_concrete_addresses_and_deduplicates() {
         let resolved =
@@ -1862,5 +2334,208 @@ mod tests {
         assert!(!is_link_local(&"169.253.1.2".parse::<IpAddr>().unwrap()));
         assert!(!is_link_local(&"fec0::1".parse::<IpAddr>().unwrap()));
         assert!(!is_link_local(&"2001:db8::1".parse::<IpAddr>().unwrap()));
+    }
+
+    fn test_message(byte: u8) -> DataChannelEvent {
+        DataChannelEvent::OnMessage(RTCDataChannelMessage {
+            is_string: false,
+            data: bytes::BytesMut::from(&[byte][..]),
+        })
+    }
+
+    #[test]
+    fn stage_retains_event_for_unregistered_channel() {
+        let senders = HashMap::new();
+        let mut pending = HashMap::new();
+
+        let outcome = stage_data_channel_event(&senders, &mut pending, 0, test_message(1));
+
+        assert_eq!(outcome, StageOutcome::Retained);
+        assert_eq!(pending.get(&0).map(VecDeque::len), Some(1));
+    }
+
+    #[test]
+    fn stage_appends_behind_already_retained_events() {
+        let (tx, _rx) = channel::<DataChannelEvent>(4);
+        let mut senders = HashMap::new();
+        senders.insert(0, tx);
+        let mut pending = HashMap::new();
+        pending.insert(0, VecDeque::from([test_message(1)]));
+
+        // A live sender does not matter: retained events must stay ahead.
+        let outcome =
+            stage_data_channel_event(&senders, &mut pending, 0, DataChannelEvent::OnClose);
+
+        assert_eq!(outcome, StageOutcome::Retained);
+        let queued = pending.get(&0).unwrap();
+        assert_eq!(queued.len(), 2);
+        assert!(matches!(queued[0], DataChannelEvent::OnMessage(_)));
+        assert!(matches!(queued[1], DataChannelEvent::OnClose));
+    }
+
+    #[test]
+    fn stage_retains_on_full_queue() {
+        let (tx, _rx) = channel::<DataChannelEvent>(1);
+        let mut senders = HashMap::new();
+        senders.insert(0, tx);
+        let mut pending = HashMap::new();
+
+        assert_eq!(
+            stage_data_channel_event(&senders, &mut pending, 0, test_message(1)),
+            StageOutcome::Delivered
+        );
+        assert_eq!(
+            stage_data_channel_event(&senders, &mut pending, 0, test_message(2)),
+            StageOutcome::Retained
+        );
+        assert_eq!(pending.get(&0).map(VecDeque::len), Some(1));
+    }
+
+    #[test]
+    fn stage_drops_when_receiver_is_gone() {
+        let (tx, rx) = channel::<DataChannelEvent>(1);
+        drop(rx);
+        let mut senders = HashMap::new();
+        senders.insert(0, tx);
+        let mut pending = HashMap::new();
+
+        let outcome = stage_data_channel_event(&senders, &mut pending, 0, test_message(1));
+
+        assert_eq!(outcome, StageOutcome::NoLiveReceiver);
+        assert!(pending.is_empty());
+    }
+
+    /// The incident shape: a channel's first message is staged before its `OnOpen`
+    /// has registered a receiver (same-pass TURN-relay ingest). The `OnOpen` path
+    /// must still deliver open-then-message, in that order.
+    #[test]
+    fn preregistration_message_is_delivered_after_on_open() {
+        let channel_id = 0;
+        let mut senders = HashMap::new();
+        let mut pending = HashMap::new();
+
+        // Message arrives first, no receiver yet: retained, not dropped.
+        assert_eq!(
+            stage_data_channel_event(&senders, &mut pending, channel_id, test_message(7)),
+            StageOutcome::Retained
+        );
+
+        // `OnOpen` is processed: registration, lift retained events out, deliver the
+        // open, restage the message behind it — mirroring the `OnDataChannel` arm.
+        let (tx, mut rx) = channel::<DataChannelEvent>(4);
+        senders.insert(channel_id, tx);
+        let retained = pending.remove(&channel_id).unwrap();
+        assert_eq!(
+            stage_data_channel_event(&senders, &mut pending, channel_id, DataChannelEvent::OnOpen),
+            StageOutcome::Delivered
+        );
+        restage_retained_data_channel_events(&mut pending, channel_id, retained);
+
+        // The consumer sees the open first.
+        assert!(matches!(rx.try_recv(), Ok(DataChannelEvent::OnOpen)));
+
+        // A flush delivers the retained message after it.
+        let mut queued = pending.remove(&channel_id).unwrap();
+        let tx = senders.get(&channel_id).unwrap();
+        while let Some(event) = queued.pop_front() {
+            tx.try_send(event).unwrap();
+        }
+        match rx.try_recv() {
+            Ok(DataChannelEvent::OnMessage(msg)) => {
+                assert_eq!(&msg.data[..], &[7]);
+            }
+            other => panic!("expected the retained message after OnOpen, got {other:?}"),
+        }
+    }
+
+    /// The regression this fix exists for: a channel whose sender was removed (the
+    /// application dropped its `DataChannel`; `DataChannelImpl::drop` unregisters it
+    /// without closing the SCTP stream) must not report back-pressure. Reporting it
+    /// would stop `poll_reads` from ever calling `drain_core_data` again, stalling
+    /// every data channel on the connection.
+    #[test]
+    fn unregistered_channel_never_reports_back_pressure() {
+        let mut pending = HashMap::new();
+        pending.insert(
+            0,
+            VecDeque::from(vec![test_message(1), DataChannelEvent::OnClose]),
+        );
+
+        let senders = HashMap::new();
+        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+
+        // Retained for a registration that may still be in flight ...
+        assert_eq!(2, pending.get(&0).map(|q| q.len()).unwrap_or(0));
+        // ... but repeated flushes keep reporting "not blocked", so the drain runs on.
+        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+    }
+
+    /// A registered consumer that is genuinely full still holds the drain — the
+    /// back-pressure behavior webrtc#858 added must survive this fix.
+    #[test]
+    fn registered_full_consumer_still_reports_back_pressure() {
+        let channel_id = 0;
+        let (tx, _rx) = channel::<DataChannelEvent>(1);
+        tx.try_send(test_message(1)).unwrap();
+
+        let mut senders = HashMap::new();
+        senders.insert(channel_id, tx);
+
+        let mut pending = HashMap::new();
+        pending.insert(channel_id, VecDeque::from(vec![test_message(2)]));
+
+        assert!(flush_staged_data_channel_events(&senders, &mut pending));
+        assert_eq!(1, pending.get(&channel_id).map(|q| q.len()).unwrap_or(0));
+    }
+
+    /// Events retained before registration are delivered once the sender appears, and
+    /// the flush then reports unblocked.
+    #[test]
+    fn retained_events_are_delivered_once_the_channel_registers() {
+        let channel_id = 0;
+        let mut pending = HashMap::new();
+        pending.insert(
+            channel_id,
+            VecDeque::from(vec![test_message(1), test_message(2)]),
+        );
+
+        // No sender yet: kept, and not blocking.
+        let mut senders = HashMap::new();
+        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+
+        // Registration lands; the next flush drains them in order.
+        let (tx, mut rx) =
+            channel::<DataChannelEvent>(DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY);
+        senders.insert(channel_id, tx);
+        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(pending.is_empty());
+
+        for expected in [1u8, 2] {
+            match rx.try_recv() {
+                Ok(DataChannelEvent::OnMessage(msg)) => assert_eq!(&msg.data[..], &[expected]),
+                other => panic!("expected retained message {expected}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Retention for a channel nobody will register again is bounded, so a dropped
+    /// handle cannot accumulate events for the life of the connection.
+    #[test]
+    fn unregistered_retention_is_bounded() {
+        let over = MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS + 10;
+        let mut pending = HashMap::new();
+        pending.insert(
+            0,
+            (0..over)
+                .map(|i| test_message(i as u8))
+                .collect::<VecDeque<_>>(),
+        );
+
+        let senders = HashMap::new();
+        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+        assert_eq!(
+            MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS,
+            pending.get(&0).map(|q| q.len()).unwrap_or(0)
+        );
     }
 }

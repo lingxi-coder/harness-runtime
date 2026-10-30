@@ -47,7 +47,6 @@ use crate::peer_connection::PeerConnectionRef;
 use crate::runtime::{Mutex, Receiver};
 use bytes::BytesMut;
 use futures::FutureExt;
-use rtc::interceptor::{Interceptor, NoopInterceptor};
 use rtc::shared::error::{Error, Result};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -62,19 +61,35 @@ pub use rtc::data_channel::{
 /// This allows `on_data_channel` in `PeerConnectionEventHandler` to receive a
 /// `Arc<dyn DataChannel>` without the event handler trait itself needing to
 /// be generic over the interceptor type `I`.
+///
+/// # Why the accessors return `Result`
+///
+/// Unlike the browser API — and unlike the Sans-I/O core, where these are plain field reads —
+/// every `async` method here is a round-trip to the background driver that owns the connection
+/// state. So even a read as simple as [`label`](Self::label) is fallible: it returns
+/// [`Error::ErrDataChannelClosed`] once the channel or its peer connection is gone. That is the
+/// only way these accessors fail, and it is not repeated on each one below.
+///
+/// [`id`](Self::id) is the exception: it is a plain, infallible read, because the handle caches
+/// it. See the module docs for which methods are `async` and why.
 #[async_trait::async_trait]
-pub trait DataChannel: Send + Sync + 'static {
+pub trait DataChannel: crate::sealed::Sealed + Send + Sync + 'static {
     /// Returns the label of this data channel.
+    ///
+    /// Labels are not required to be unique across channels.
     async fn label(&self) -> Result<String>;
     /// Returns whether this data channel guarantees in-order delivery.
     async fn ordered(&self) -> Result<bool>;
-    /// Returns the maximum packet lifetime in milliseconds, if configured.
+    /// Returns the maximum packet lifetime in milliseconds, or `None` if the channel is
+    /// reliable.
     async fn max_packet_life_time(&self) -> Result<Option<u16>>;
-    /// Returns the maximum number of retransmissions, if configured.
+    /// Returns the maximum number of retransmissions, or `None` if the channel is reliable.
     async fn max_retransmits(&self) -> Result<Option<u16>>;
-    /// Returns the subprotocol name configured for this data channel.
+    /// Returns the subprotocol name configured for this data channel, or the empty string if
+    /// none was negotiated.
     async fn protocol(&self) -> Result<String>;
-    /// Returns whether this data channel was negotiated by the application.
+    /// Returns whether this data channel was negotiated out-of-band by the application
+    /// (`true`), or established in-band over DCEP (`false`).
     async fn negotiated(&self) -> Result<bool>;
     /// Returns the identifier for this data channel.
     ///
@@ -108,8 +123,9 @@ pub trait DataChannel: Send + Sync + 'static {
     /// outstanding send-side memory, including bytes still queued in the send
     /// pipeline (unlike `bufferedAmount`, which counts only post-packetization).
     ///
-    /// Defaults to `0` so external implementors of this trait keep compiling; the
+    /// Has a default so that adding it did not have to touch every implementation; the
     /// built-in channel overrides it with the real counter that drives send back-pressure.
+    /// (This trait is sealed, so the only implementations are in-crate — see `docs/semver.md`.)
     async fn outstanding_bytes(&self) -> Result<usize> {
         Ok(0)
     }
@@ -130,7 +146,7 @@ pub trait DataChannel: Send + Sync + 'static {
     ///
     /// [`PeerConnectionBuilder::with_data_channel_send_buffer_limit`]: crate::peer_connection::PeerConnectionBuilder::with_data_channel_send_buffer_limit
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```no_run
     /// # use bytes::BytesMut;
@@ -150,7 +166,7 @@ pub trait DataChannel: Send + Sync + 'static {
     /// returns [`Error::ErrDataChannelClosed`] on a closing/closed channel. Use
     /// [`try_send_text`](Self::try_send_text) for the non-blocking variant.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```no_run
     /// # use webrtc::error::Result;
@@ -174,7 +190,8 @@ pub trait DataChannel: Send + Sync + 'static {
     /// channel the limit is a soft bound (each admitted sender may add one in-flight
     /// message over it) — the same semantics as `bufferedAmount`-based flow control.
     ///
-    /// Defaults to `Ok(())` so external implementors of this trait keep compiling.
+    /// Defaults to `Ok(())`; the built-in channel overrides it. This trait is sealed, so
+    /// the default exists for in-crate implementations, not downstream ones.
     async fn writable(&self) -> Result<()> {
         Ok(())
     }
@@ -197,13 +214,23 @@ pub trait DataChannel: Send + Sync + 'static {
         self.send_text(text).await
     }
     /// Polls for the next event on this data channel.
+    ///
+    /// Resolves when the next [`DataChannelEvent`] is available, and returns `None` once the
+    /// channel is closed and no events remain — so a `while let Some(event) = dc.poll().await`
+    /// loop terminates on its own.
     async fn poll(&self) -> Option<DataChannelEvent>;
     /// Closes the data channel.
+    ///
+    /// Moves the channel to `Closing` and starts the DCEP/SCTP teardown; closing an
+    /// already-closed channel succeeds. Senders blocked in [`send`](Self::send) or
+    /// [`writable`](Self::writable) awaiting capacity are woken with
+    /// [`Error::ErrDataChannelClosed`].
     async fn close(&self) -> Result<()>;
 }
 
 /// Events that can occur on a [`DataChannel`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DataChannelEvent {
     /// Data channel has opened and is ready to send/receive data.
     ///
@@ -256,28 +283,22 @@ pub enum DataChannelEvent {
 /// Concrete async data channel implementation (generic over interceptor type).
 ///
 /// This wraps a data channel and provides async send/receive APIs.
-pub(crate) struct DataChannelImpl<I = NoopInterceptor>
-where
-    I: Interceptor,
-{
+pub(crate) struct DataChannelImpl {
     /// Unique identifier for this data channel
     id: RTCDataChannelId,
 
     /// Inner PeerConnection Reference
-    inner: Arc<PeerConnectionRef<I>>,
+    inner: Arc<PeerConnectionRef>,
 
     /// event receiver
     evt_rx: Mutex<Receiver<DataChannelEvent>>,
 }
 
-impl<I> DataChannelImpl<I>
-where
-    I: Interceptor,
-{
+impl DataChannelImpl {
     /// Create a new data channel wrapper
     pub(crate) fn new(
         id: RTCDataChannelId,
-        inner: Arc<PeerConnectionRef<I>>,
+        inner: Arc<PeerConnectionRef>,
         evt_rx: Receiver<DataChannelEvent>,
     ) -> Self {
         Self {
@@ -305,10 +326,7 @@ where
     }
 }
 
-impl<I> Drop for DataChannelImpl<I>
-where
-    I: Interceptor,
-{
+impl Drop for DataChannelImpl {
     fn drop(&mut self) {
         if let Some(mut data_channels) = self.inner.data_channel_events_tx.try_lock() {
             data_channels.remove(&self.id);
@@ -316,14 +334,11 @@ where
     }
 }
 
+impl crate::sealed::Sealed for DataChannelImpl {}
+
 #[async_trait::async_trait]
-impl<I> DataChannel for DataChannelImpl<I>
-where
-    I: Interceptor + 'static,
-{
-    /// label represents a label that can be used to distinguish this
-    /// DataChannel object from other DataChannel objects. Scripts are
-    /// allowed to create multiple DataChannel objects with the same label.
+impl DataChannel for DataChannelImpl {
+    // Documented on `DataChannel::label`.
     async fn label(&self) -> Result<String> {
         let mut peer_connection = self.inner.core.lock().await;
 
@@ -334,8 +349,7 @@ where
             .to_owned())
     }
 
-    /// Ordered returns true if the DataChannel is ordered, and false if
-    /// out-of-order delivery is allowed.
+    // Documented on `DataChannel::ordered`.
     async fn ordered(&self) -> Result<bool> {
         let mut peer_connection = self.inner.core.lock().await;
         Ok(peer_connection
@@ -344,8 +358,7 @@ where
             .ordered())
     }
 
-    /// max_packet_lifetime represents the length of the time window (msec) during
-    /// which transmissions and retransmissions may occur in unreliable mode.
+    // Documented on `DataChannel::max_packet_life_time`.
     async fn max_packet_life_time(&self) -> Result<Option<u16>> {
         let mut peer_connection = self.inner.core.lock().await;
         Ok(peer_connection
@@ -354,8 +367,7 @@ where
             .max_packet_life_time())
     }
 
-    /// max_retransmits represents the maximum number of retransmissions that are
-    /// attempted in unreliable mode.
+    // Documented on `DataChannel::max_retransmits`.
     async fn max_retransmits(&self) -> Result<Option<u16>> {
         let mut peer_connection = self.inner.core.lock().await;
         Ok(peer_connection
@@ -364,8 +376,7 @@ where
             .max_retransmits())
     }
 
-    /// protocol represents the name of the sub-protocol used with this
-    /// DataChannel.
+    // Documented on `DataChannel::protocol`.
     async fn protocol(&self) -> Result<String> {
         let mut peer_connection = self.inner.core.lock().await;
         Ok(peer_connection
@@ -375,8 +386,7 @@ where
             .to_owned())
     }
 
-    /// negotiated represents whether this DataChannel was negotiated by the
-    /// application (true), or not (false).
+    // Documented on `DataChannel::negotiated`.
     async fn negotiated(&self) -> Result<bool> {
         let mut peer_connection = self.inner.core.lock().await;
         Ok(peer_connection
@@ -390,7 +400,7 @@ where
         self.id
     }
 
-    /// ready_state represents the state of the DataChannel object.
+    // Documented on `DataChannel::ready_state`.
     async fn ready_state(&self) -> Result<RTCDataChannelState> {
         let mut peer_connection = self.inner.core.lock().await;
         Ok(peer_connection
@@ -408,8 +418,7 @@ where
             .buffered_amount_high_threshold())
     }
 
-    /// set_buffered_amount_high_threshold sets the threshold at which the
-    /// bufferedAmount is considered to be high.
+    // Documented on `DataChannel::set_buffered_amount_high_threshold`.
     async fn set_buffered_amount_high_threshold(&self, threshold: u32) -> Result<()> {
         {
             let mut peer_connection = self.inner.core.lock().await;
@@ -440,8 +449,7 @@ where
             .outstanding_bytes())
     }
 
-    /// set_buffered_amount_low_threshold sets the threshold at which the
-    /// bufferedAmount is considered to be low.
+    // Documented on `DataChannel::set_buffered_amount_low_threshold`.
     async fn set_buffered_amount_low_threshold(&self, threshold: u32) -> Result<()> {
         {
             let mut peer_connection = self.inner.core.lock().await;
@@ -468,7 +476,7 @@ where
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
-            dc.send(data)?;
+            dc.send(self.inner.runtime.now(), data)?;
         }
 
         // Wake the driver so it flushes SCTP output (poll_write) and checks
@@ -486,7 +494,7 @@ where
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
-            dc.send_text(text)?;
+            dc.send_text(self.inner.runtime.now(), text)?;
         }
 
         self.inner.wake_writes().await;
@@ -550,7 +558,7 @@ where
             if outstanding != 0 && outstanding.saturating_add(data.len()) > limit {
                 return Err(Error::ErrSendBufferFull);
             }
-            dc.send(data)?;
+            dc.send(self.inner.runtime.now(), data)?;
         }
 
         self.inner.wake_writes().await;
@@ -572,7 +580,7 @@ where
             if outstanding != 0 && outstanding.saturating_add(text.len()) > limit {
                 return Err(Error::ErrSendBufferFull);
             }
-            dc.send_text(text)?;
+            dc.send_text(self.inner.runtime.now(), text)?;
         }
 
         self.inner.wake_writes().await;
@@ -580,7 +588,24 @@ where
     }
 
     async fn poll(&self) -> Option<DataChannelEvent> {
-        self.evt_rx.lock().await.recv().await
+        let event = self.evt_rx.lock().await.recv().await;
+        // Taking an event frees a slot. If the driver is holding something it could not
+        // deliver, say so now — it has no timer to fall back on.
+        //
+        // `Acquire`, pairing with the driver's `Release` store. Observing a stale `false`
+        // means skipping the notify, and the driver then waits on the next inbound packet
+        // instead — which under back-pressure is a throttled peer's zero-window probe, i.e.
+        // a long time. Cheap enough not to trade for that: one load per received message,
+        // and only reached when a message actually arrived.
+        if event.is_some()
+            && self
+                .inner
+                .data_channel_delivery_blocked
+                .load(Ordering::Acquire)
+        {
+            self.inner.data_channel_consumed.notify_waiters();
+        }
+        event
     }
 
     async fn close(&self) -> Result<()> {
@@ -597,7 +622,10 @@ where
     }
 }
 
-#[cfg(test)]
+// A built-in provider is required: these construct real peer connections, and construction
+// resolves a provider. The no-built-in configuration is exercised by the provider tests in
+// `tests/`, which supply their own.
+#[cfg(all(test, any(feature = "crypto-ring", feature = "crypto-aws-lc-rs")))]
 mod tests {
     use super::*;
     use futures::executor::block_on;
@@ -618,6 +646,8 @@ mod tests {
         sends: AtomicUsize,
         text_sends: AtomicUsize,
     }
+
+    impl crate::sealed::Sealed for DefaultDataChannel {}
 
     #[async_trait::async_trait]
     impl DataChannel for DefaultDataChannel {

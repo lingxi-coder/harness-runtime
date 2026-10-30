@@ -43,6 +43,7 @@ use rtc::{rtcp, rtp};
 
 /// Events that can occur on a [`TrackRemote`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TrackRemoteEvent {
     /// Fired when the track is opened and ready to receive packets.
     OnOpen(RTCTrackEventInit),
@@ -60,7 +61,15 @@ pub enum TrackRemoteEvent {
 
     /// Fired when a new RTP packet is received on this track.
     OnRtpPacket(rtp::Packet),
-    /// Fired when new RTCP packets are received on this track.
+    /// Fired when new RTCP packets are received on this track **and an interceptor marked them
+    /// for the application**.
+    ///
+    /// Inbound RTCP is control traffic the interceptors act on — receiver reports feed the sender
+    /// statistics, NACKs are answered, transport-wide feedback drives the bandwidth estimate — so
+    /// it stops at the end of the chain by default and this never fires. To receive it, add an
+    /// interceptor that attaches `Attribute::DeliverToApplication` to the packets you want; the
+    /// `rtcp-processing` example does exactly that. Treat silence here as "nothing vouched for a
+    /// packet", not as "the remote sent none".
     OnRtcpPacket(Vec<Box<dyn rtcp::Packet>>),
 }
 
@@ -71,8 +80,15 @@ pub enum TrackRemoteEvent {
 #[async_trait::async_trait]
 pub trait TrackRemote: Track {
     /// Writes RTCP feedback packets to the remote track sender.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error once the peer connection carrying this track is gone.
     async fn write_rtcp(&self, packets: Vec<Box<dyn rtcp::Packet>>) -> Result<()>;
 
     /// Polls for the next event on the remote track.
+    ///
+    /// Returns `None` once the track has ended and no events remain, so a
+    /// `while let Some(event) = track.poll().await` loop terminates on its own.
     async fn poll(&self) -> Option<TrackRemoteEvent>;
 }
