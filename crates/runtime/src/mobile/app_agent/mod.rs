@@ -723,7 +723,7 @@ mod discovery_tests {
 
         async fn cancel(
             &self,
-            _: media_api::MediaOperationId,
+            _: media_api::MediaOperationContext,
         ) -> Result<(), media_api::MediaError> {
             Ok(())
         }

@@ -82,6 +82,151 @@ fn source(home: &Home, endpoint: &str, platform: CatalogPlatform, version: &str)
     source
 }
 
+// A running mobile engine constructs provider services once. Publish a second
+// validated official definition and inspect the actual SDK view it retained.
+#[tokio::test]
+async fn media_services_follow_the_published_audio_definition() {
+    struct NoTransport;
+    #[async_trait::async_trait]
+    impl lingxi_llm_client::Transport for NoTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            panic!("this test only inspects SDK snapshots")
+        }
+    }
+
+    let home = Home::new();
+    let source = source(
+        &home,
+        "http://unused.invalid",
+        CatalogPlatform::Android,
+        "0.1.0",
+    );
+    let inputs = crate::AssembleInputs {
+        official_catalog: Some((*source.snapshot()).clone()),
+        anthropic_api_base: "https://api.anthropic.com".into(),
+        anthropic_models: Vec::new(),
+        anthropic_has_api_key: false,
+        anthropic_has_oauth: false,
+        user_providers: BTreeMap::new(),
+        routing: None,
+    };
+    let template = llm_runtime::ModelRuntime::from_config(
+        crate::assemble_for_region(inputs.clone(), llm_runtime::Region::International)
+            .client_config,
+    )
+    .unwrap()
+    .with_catalog_source(source.runtime_source(inputs.clone(), llm_runtime::Region::International));
+    let services = template
+        .provider_services(llm_runtime::Region::International, Arc::new(NoTransport))
+        .unwrap();
+    let child_template = llm_runtime::ModelRuntime::from_config(
+        crate::assemble_for_region(inputs.clone(), llm_runtime::Region::International)
+            .client_config,
+    )
+    .unwrap()
+    .with_catalog_source(source.runtime_source(inputs.clone(), llm_runtime::Region::International));
+    let child_services = child_template
+        .provider_services(llm_runtime::Region::International, Arc::new(NoTransport))
+        .unwrap();
+    let other_region_services = child_template
+        .provider_services(llm_runtime::Region::ChinaMainland, Arc::new(NoTransport))
+        .unwrap();
+    let mut different_account =
+        crate::assemble_for_region(inputs.clone(), llm_runtime::Region::International)
+            .client_config;
+    different_account
+        .providers
+        .iter_mut()
+        .find(|provider| provider.profile_name == "openai")
+        .unwrap()
+        .credential = llm_runtime::CredentialConfig::Static {
+        id: "another-account".into(),
+    };
+    let different_account = llm_runtime::ModelRuntime::from_config(different_account)
+        .unwrap()
+        .provider_services(llm_runtime::Region::International, Arc::new(NoTransport))
+        .unwrap();
+    let late_child = llm_runtime::ModelRuntime::from_config(
+        crate::assemble_for_region(inputs.clone(), llm_runtime::Region::International)
+            .client_config,
+    )
+    .unwrap()
+    .with_catalog_source(source.runtime_source(inputs, llm_runtime::Region::International));
+    let late_child_services = late_child
+        .provider_services(llm_runtime::Region::International, Arc::new(NoTransport))
+        .unwrap();
+
+    let mut next: Value =
+        serde_json::from_str(include_str!("../../data/official-catalog.json")).unwrap();
+    let openai = next["providers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|provider| provider["id"] == "openai")
+        .unwrap();
+    let definition = openai["executionDefinition"]["source"].as_str().unwrap();
+    let updated = definition.replace(
+        "https://api.openai.com/v1/audio/",
+        "https://new-audio.example/v1/audio/",
+    );
+    assert_ne!(definition, updated);
+    openai["executionDefinition"]["sha256"] =
+        json!(format!("{:x}", Sha256::digest(updated.as_bytes())));
+    openai["executionDefinition"]["source"] = json!(updated);
+    let published = parsed(&next, CatalogPlatform::Android, "0.1.0").unwrap();
+    llm_runtime::catalog_task::scope(async {
+        // Binding and the model selection both pin their owner before publish.
+        let _ = template.current();
+        let _ = child_template.current();
+        assert!(services.profile_is_current("openai"));
+        assert!(services.profile_matches_current_of(&child_services, "openai"));
+        assert!(!services.profile_is_current("missing"));
+        assert!(!services.profile_matches_current_of(&different_account, "openai"));
+        assert!(!services.profile_matches_current_of(&other_region_services, "openai"));
+        *source.shared.snapshot.write().unwrap() = Some(Arc::new(published.catalog));
+        source
+            .shared
+            .updates
+            .send_modify(|generation| *generation += 1);
+        // An admitted turn can complete with its original route.
+        assert!(services.profile_is_current("openai"));
+        assert!(services.profile_matches_current_of(&child_services, "openai"));
+        // A different owner first resolved after publication must not inherit
+        // the parent's old service merely because the profile string matches.
+        assert!(!services.profile_matches_current_of(&late_child_services, "openai"));
+    })
+    .await;
+
+    let current = template
+        .current()
+        .provider_services(llm_runtime::Region::International, Arc::new(NoTransport))
+        .unwrap();
+    let endpoint = |services: &llm_runtime::services::ProviderServices| {
+        let snapshot = services.snapshot();
+        match &snapshot.profile("openai").unwrap().audio {
+            lingxi_llm_client::protocol::ServiceSetting::Enabled(route) => {
+                route.transcriptions_endpoint.clone()
+            }
+            _ => panic!("the OpenAI audio route is unavailable"),
+        }
+    };
+    assert_eq!(
+        endpoint(&current),
+        "https://new-audio.example/v1/audio/transcriptions"
+    );
+    assert_eq!(
+        endpoint(&services),
+        "https://api.openai.com/v1/audio/transcriptions"
+    );
+    // A subsequent turn is denied instead of silently using the old endpoint.
+    assert!(!services.profile_is_current("openai"));
+    assert!(!services.profile_matches_current_of(&child_services, "openai"));
+}
+
 #[test]
 fn all_four_platforms_project_the_same_complete_executable_snapshot() {
     for platform in [

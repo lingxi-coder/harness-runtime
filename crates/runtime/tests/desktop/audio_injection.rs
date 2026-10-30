@@ -65,7 +65,7 @@ impl MediaService for StubMedia {
         ))
     }
 
-    async fn cancel(&self, _identity: media_api::MediaOperationId) -> Result<(), MediaError> {
+    async fn cancel(&self, _context: media_api::MediaOperationContext) -> Result<(), MediaError> {
         Ok(())
     }
 }
@@ -182,6 +182,14 @@ async fn desktop_build_exposes_the_injected_app_media_service() {
             names.iter().any(|registered| registered == name),
             "{name}: {names:?}"
         );
+    }
+
+    let advertised = runtime.orchestrator.advertised_tool_names().await;
+    for supported in ["media_sources", "media_capture"] {
+        assert!(advertised.iter().any(|name| name == supported));
+    }
+    for unsupported in ["media_record", "media_play", "media_speak"] {
+        assert!(!advertised.iter().any(|name| name == unsupported));
     }
 
     // Dispatch through the assembled orchestrator and its actual registry,

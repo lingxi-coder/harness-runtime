@@ -4372,6 +4372,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .await
     }
 
+    /// Resolve the current session and the exact provider profile selected by
+    /// validated scheduled-turn settings, without changing session defaults.
+    /// Hosts use this to bind child media to the route the scheduled turn will
+    /// actually use rather than guessing from the saved model spelling.
+    pub async fn scheduled_audio_binding(
+        &self,
+        model: &str,
+        reasoning: lingxi_core::host::ReasoningSelection,
+    ) -> Result<(String, String), String> {
+        let settings = self.scheduled_turn_settings(model, reasoning)?;
+        let session = self.session.lock().await;
+        Ok((session.session_id.as_uuid().to_string(), settings.provider))
+    }
+
     /// Pin a scheduled turn to an exact live session. The same gate protects
     /// target validation, the host's durable binding, execution and result capture.
     pub async fn run_scheduled_turn_in_session<F>(

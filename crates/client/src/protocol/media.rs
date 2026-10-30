@@ -48,7 +48,25 @@ impl MediaOperationIdDto {
     }
 }
 
+/// Kind of the logical owner inside a host-issued media attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum MediaOwnerKindDto {
+    /// Conversation session owner.
+    Session,
+    /// App UI owner.
+    Ui,
+    /// Host-owned operation outside a chat.
+    System,
+}
+
 /// Trusted owner of a device or remote media resource.
+///
+/// `Attached` is a flattened bridge representation of the host-issued scope
+/// and its logical owner. Its string and generation fields are transport data,
+/// not an authorization token. Never reconstruct a trusted `MediaOwner` from
+/// this DTO without looking up the ID in the issuing host's registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -59,17 +77,56 @@ pub enum MediaOwnerDto {
     Ui { instance_id: String },
     /// Host-owned operation outside a chat.
     System { instance_id: String },
+    /// Host-issued attachment scope plus its independent logical owner.
+    Attached {
+        /// Stable ID of the issuing media host.
+        attachment_host_id: String,
+        /// Monotonic attachment generation issued by that host.
+        attachment_generation: u64,
+        /// Kind of the owner inside the attachment.
+        logical_kind: MediaOwnerKindDto,
+        /// Stable logical owner ID, separate from attachment identity.
+        logical_owner_id: String,
+    },
 }
 
 impl MediaOwnerDto {
-    /// Bound owner identity strings supplied by a native host adapter.
+    /// Check the shape and bounds of this DTO; this does not authenticate an
+    /// attachment ID or make it safe to reconstruct a trusted owner.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::Session { session_id } => validate_identifier(session_id, "media session owner"),
             Self::Ui { instance_id } => validate_identifier(instance_id, "media UI owner"),
             Self::System { instance_id } => validate_identifier(instance_id, "media system owner"),
+            Self::Attached {
+                attachment_host_id,
+                attachment_generation,
+                logical_owner_id,
+                ..
+            } => {
+                validate_attachment_identity(attachment_host_id, *attachment_generation)?;
+                validate_identifier(logical_owner_id, "media logical owner")
+            }
         }
     }
+}
+
+pub(super) fn validate_attachment_identity(host_id: &str, generation: u64) -> Result<(), String> {
+    let bytes = host_id.as_bytes();
+    let is_canonical_uuid_v4 = bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+        && bytes[14] == b'4'
+        && matches!(bytes[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b');
+    if !is_canonical_uuid_v4 || generation == 0 {
+        return Err("media attachment identity is invalid".into());
+    }
+    Ok(())
 }
 
 /// Per-operation attribution, separate from the stable owner.
@@ -298,7 +355,11 @@ pub enum MediaResourceRefDto {
     /// Stored media item.
     Media { media_ref: String },
     /// In-flight operation.
-    Operation { operation_id: MediaOperationIdDto },
+    Operation {
+        operation_id: MediaOperationIdDto,
+        /// Opaque host-issued incarnation for this operation ID.
+        incarnation: String,
+    },
 }
 
 impl MediaResourceRefDto {
@@ -313,7 +374,13 @@ impl MediaResourceRefDto {
                 validate_identifier(session_id, "media session reference")
             }
             Self::Media { media_ref } => validate_identifier(media_ref, "media reference"),
-            Self::Operation { operation_id } => operation_id.validate(),
+            Self::Operation {
+                operation_id,
+                incarnation,
+            } => {
+                operation_id.validate()?;
+                validate_operation_incarnation(incarnation)
+            }
         }
     }
 }
@@ -574,7 +641,8 @@ pub struct MediaOperationRequestDto {
 }
 
 impl MediaOperationRequestDto {
-    /// Validate trusted operation metadata and the typed operation payload.
+    /// Validate DTO shape, metadata bounds, and the typed operation payload.
+    /// Attachment identity fields are not authenticated by this check.
     pub fn validate(&self) -> Result<(), String> {
         self.identity.validate()?;
         self.owner.validate()?;
@@ -888,7 +956,10 @@ pub enum MediaServiceActionDto {
     /// Read bytes after the host authorizes the owner-scoped reference.
     ReadMedia { media_ref: String },
     /// Cancel an operation after the host verifies its owner.
-    Cancel { operation_id: MediaOperationIdDto },
+    Cancel {
+        operation_id: MediaOperationIdDto,
+        incarnation: String,
+    },
     /// Update host-owned audio settings using opaque JSON.
     ///
     /// The generic client protocol validates JSON syntax and byte size only;
@@ -939,7 +1010,13 @@ impl MediaServiceRequestDto {
             MediaServiceActionDto::ReadMedia { media_ref } => {
                 validate_identifier(media_ref, "media content reference")?
             }
-            MediaServiceActionDto::Cancel { operation_id } => operation_id.validate()?,
+            MediaServiceActionDto::Cancel {
+                operation_id,
+                incarnation,
+            } => {
+                operation_id.validate()?;
+                validate_operation_incarnation(incarnation)?;
+            }
             MediaServiceActionDto::UpdateAudioSettings { configuration_json } => {
                 if configuration_json.len() > MAX_MEDIA_AUDIO_SETTINGS_JSON_BYTES {
                     return Err("audio settings JSON exceeds the byte limit".into());
@@ -1023,6 +1100,8 @@ pub enum MediaServiceResultDto {
     /// Operation result and host-minted identity used for observe/cancel.
     Operation {
         operation_id: MediaOperationIdDto,
+        /// Opaque handle echoed by the host for later cancellation.
+        incarnation: String,
         result: MediaResultDto,
     },
     /// Read owner-scoped media bytes.
@@ -1060,9 +1139,11 @@ impl MediaServiceResponseDto {
         match self.result.as_ref() {
             Some(MediaServiceResultDto::Operation {
                 operation_id,
+                incarnation,
                 result,
             }) => {
                 operation_id.validate()?;
+                validate_operation_incarnation(incarnation)?;
                 result.validate()?;
             }
             Some(MediaServiceResultDto::Content { content }) => content.validate()?,
@@ -1378,7 +1459,7 @@ impl MediaPcmFrameDto {
         if self.sample_rate_hz == 0 || self.channels == 0 {
             return Err("PCM frame requires a sample rate and at least one channel".into());
         }
-        if self.pcm16le.is_empty() || self.pcm16le.len() % 2 != 0 {
+        if self.pcm16le.is_empty() || !self.pcm16le.len().is_multiple_of(2) {
             return Err("PCM16LE frame must contain a non-empty whole number of samples".into());
         }
         validate_frame_bytes(self.pcm16le.len())
@@ -1472,11 +1553,10 @@ impl MediaVideoFrameDto {
                         "I420 frame byte lengths do not match their strides and dimensions".into(),
                     );
                 }
-                let total = y_len
+                y_len
                     .checked_add(u_len)
                     .and_then(|total| total.checked_add(v_len))
-                    .ok_or_else(|| "I420 frame size overflow".to_owned())?;
-                total
+                    .ok_or_else(|| "I420 frame size overflow".to_owned())?
             }
         };
         validate_frame_bytes(payload_len)
@@ -1697,9 +1777,12 @@ impl MediaDeviceResponseDto {
             | MediaDeviceResultDto::Updated { .. }
             | MediaDeviceResultDto::Stopped
             | MediaDeviceResultDto::Error { .. }
+            | MediaDeviceResultDto::OpenFailedWithoutResource { .. }
             | MediaDeviceResultDto::Input { frame: None } => 0,
         };
-        if let MediaDeviceResultDto::Error { error } = &self.result {
+        if let MediaDeviceResultDto::Error { error }
+        | MediaDeviceResultDto::OpenFailedWithoutResource { error } = &self.result
+        {
             error.validate()?;
         }
         if let MediaDeviceResultDto::Updated { status } = &self.result {
@@ -1741,6 +1824,9 @@ pub enum MediaDeviceResultDto {
     Stopped,
     /// Native operation failed.
     Error { error: MediaErrorDto },
+    /// Open failed and the native host confirms no resource remains.
+    /// This receipt is valid only for the correlated Open request.
+    OpenFailedWithoutResource { error: MediaErrorDto },
 }
 
 /// SDP description kind for host-controlled media negotiation.
@@ -2017,6 +2103,15 @@ fn validate_identifier(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_operation_incarnation(value: &str) -> Result<(), String> {
+    let incarnation = uuid::Uuid::parse_str(value)
+        .map_err(|_| "media operation incarnation is invalid".to_owned())?;
+    if incarnation.get_version() != Some(uuid::Version::Random) {
+        return Err("media operation incarnation is invalid".into());
+    }
+    Ok(())
+}
+
 fn validate_text(value: &str, max_bytes: usize, label: &str) -> Result<(), String> {
     if value.len() > max_bytes {
         return Err(format!("{label} exceeds its byte limit"));
@@ -2052,6 +2147,80 @@ fn validate_wire_frame_bytes(bytes: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attached_owner_dto_keeps_host_scope_separate_from_logical_owner() {
+        let owner = MediaOwnerDto::Attached {
+            attachment_host_id: "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f".into(),
+            attachment_generation: 17,
+            logical_kind: MediaOwnerKindDto::Session,
+            logical_owner_id: "session-1".into(),
+        };
+        assert!(owner.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(owner).unwrap(),
+            serde_json::json!({
+                "type": "attached",
+                "attachment_host_id": "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f",
+                "attachment_generation": 17,
+                "logical_kind": "session",
+                "logical_owner_id": "session-1"
+            })
+        );
+    }
+
+    #[test]
+    fn attached_owner_dto_rejects_malformed_identity_but_does_not_claim_authentication() {
+        for (host_id, generation) in [
+            ("not-a-uuid", 1),
+            ("4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f", 0),
+        ] {
+            let owner = MediaOwnerDto::Attached {
+                attachment_host_id: host_id.into(),
+                attachment_generation: generation,
+                logical_kind: MediaOwnerKindDto::Ui,
+                logical_owner_id: "ui-1".into(),
+            };
+            assert!(owner.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn operation_resource_and_cancel_roundtrip_the_opaque_incarnation() {
+        let incarnation = "00000000-0000-4000-8000-000000000001";
+        let operation_id = MediaOperationIdDto {
+            id: "operation-1".into(),
+            generation: 7,
+            service_epoch: 3,
+        };
+        let resource = MediaResourceRefDto::Operation {
+            operation_id: operation_id.clone(),
+            incarnation: incarnation.into(),
+        };
+        resource.validate().unwrap();
+        let encoded = serde_json::to_value(&resource).unwrap();
+        assert_eq!(
+            encoded["incarnation"],
+            serde_json::Value::String(incarnation.into())
+        );
+        assert_eq!(
+            serde_json::from_value::<MediaResourceRefDto>(encoded).unwrap(),
+            resource
+        );
+
+        let cancel = MediaServiceRequestDto {
+            request_id: "request-1".into(),
+            action: MediaServiceActionDto::Cancel {
+                operation_id,
+                incarnation: incarnation.into(),
+            },
+        };
+        cancel.validate().unwrap();
+        let mut invalid = cancel;
+        if let MediaServiceActionDto::Cancel { incarnation, .. } = &mut invalid.action {
+            *incarnation = "not-a-uuid".into();
+        }
+        assert!(invalid.validate().is_err());
+    }
 
     #[test]
     fn i420_requires_exact_bounded_plane_lengths() {

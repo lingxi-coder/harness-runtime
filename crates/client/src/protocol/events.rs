@@ -29,7 +29,7 @@ use crate::protocol::listings::{
 };
 use crate::protocol::media::{
     MediaConnectionRequestDto, MediaControlRequestDto, MediaDeviceRequestEnvelopeDto,
-    MediaServiceResponseDto,
+    MediaOwnerDto, MediaServiceResponseDto,
 };
 use crate::protocol::message::MessageDto;
 use crate::protocol::permission::PermissionResolutionDto;
@@ -117,9 +117,15 @@ define_client_event! {
     },
     /// Authoritative session selection for host-owned, follow-session audio.
     AudioSessionContext {
-        session_id: String,
-        profile_id: String,
-        account_scope: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_owner: Option<MediaOwnerDto>,
     },
     Error {
         kind: ErrorKindDto,
@@ -952,13 +958,17 @@ impl From<ClientEventWire> for ClientEvent {
                 event_json,
             },
             ClientEventWire::AudioSessionContext {
+                request_id,
                 session_id,
                 profile_id,
                 account_scope,
+                media_owner,
             } => Self::AudioSessionContext {
+                request_id,
                 session_id,
                 profile_id,
                 account_scope,
+                media_owner,
             },
             ClientEventWire::Error { kind, message } => Self::Error { kind, message },
             ClientEventWire::TerminalApiError {

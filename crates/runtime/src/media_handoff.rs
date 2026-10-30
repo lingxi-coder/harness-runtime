@@ -101,6 +101,7 @@ pub(crate) async fn stop_media_session(
 /// Stop every active, owner-visible resource for one retired conversation
 /// session. The deadline bounds the entire enumeration and stop sequence, so a
 /// session with many resources cannot hold retarget or disposal indefinitely.
+#[cfg(feature = "mobile")]
 pub(crate) async fn stop_media_owner_resources(
     service: &Arc<dyn media_api::MediaService>,
     owner: media_api::MediaOwner,
@@ -134,7 +135,7 @@ pub(crate) async fn stop_media_owner_resources(
             media_api::MediaResourceState::Active | media_api::MediaResourceState::Stopping
         ) && matches!(
             &resource.resource,
-            media_api::MediaResourceRef::Operation(_)
+            media_api::MediaResourceRef::Operation { .. }
                 | media_api::MediaResourceRef::Recording(_)
                 | media_api::MediaResourceRef::Session(_)
         )
@@ -192,6 +193,11 @@ pub(crate) async fn continue_media_handoff(
             "media conversation handoff lost its app media service".into(),
         ));
     };
+    if service.attachment_id() != pending.capability_context.attachment_id {
+        return Err(OrchestratorError::Internal(
+            "media conversation handoff belongs to a different engine attachment".into(),
+        ));
+    }
     let cleanup = || stop_media_session(&service, &pending.request.session, owner.clone());
     if !ordinary_turn_succeeded {
         cleanup().await;
@@ -277,11 +283,15 @@ pub(crate) async fn continue_media_handoff(
         }
     };
     let prepared = match orchestrator.prepare_realtime_agent().await {
-        Ok(prepared)
+        Ok(mut prepared)
             if prepared.session_id == pending.session_id
                 && prepared.profile_name == pending.capability_context.profile_name
-                && prepared.account_scope == pending.capability_context.account_scope =>
+                && prepared.account_scope == pending.capability_context.account_scope
+                && prepared.attachment_id.as_ref().is_none_or(|id| {
+                    Some(id) == pending.capability_context.attachment_id.as_ref()
+                }) =>
         {
+            prepared.attachment_id = pending.capability_context.attachment_id.clone();
             prepared
         }
         Ok(_) => {

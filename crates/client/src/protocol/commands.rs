@@ -276,8 +276,8 @@ define_client_command! {
     },
     /// Stop capture, provider generation, and native realtime tools.
     StopRealtimeAudio,
-    /// Read the current session's exact, non-secret audio provider binding.
-    GetAudioSessionContext,
+    /// Read the current session's exact, non-secret audio/media binding.
+    GetAudioSessionContext { request_id: String },
     // ── Turn driving ──────────────────────────────────────────────────────
     // Submit a user prompt to drive a turn. Carries the text, an optional
     // [`PromptModeDto`], inline image bytes (decision §0.8), and an optional
@@ -968,7 +968,9 @@ impl From<ClientCommandWire> for ClientCommand {
                 Self::RealtimeAudioInput { input_json }
             }
             ClientCommandWire::StopRealtimeAudio => Self::StopRealtimeAudio,
-            ClientCommandWire::GetAudioSessionContext => Self::GetAudioSessionContext,
+            ClientCommandWire::GetAudioSessionContext { request_id } => {
+                Self::GetAudioSessionContext { request_id }
+            }
             ClientCommandWire::SendPrompt {
                 text,
                 prompt_mode,
@@ -1411,7 +1413,9 @@ impl<'de> Deserialize<'de> for ClientCommand {
         match tag.as_str() {
             // Unit variants have no raw payload to decode.
             "stop_realtime_audio" => Ok(Self::StopRealtimeAudio),
-            "get_audio_session_context" => Ok(Self::GetAudioSessionContext),
+            "get_audio_session_context" => Ok(Self::GetAudioSessionContext {
+                request_id: command_raw_required(&mut fields, "request_id")?,
+            }),
             "list_models" => Ok(Self::ListModels),
             "list_session_agents" => Ok(Self::ListSessionAgents),
             "login" => Ok(Self::Login),

@@ -692,7 +692,7 @@ mod tests {
 
         async fn cancel(
             &self,
-            _: media_api::MediaOperationId,
+            _: media_api::MediaOperationContext,
         ) -> Result<(), media_api::MediaError> {
             Ok(())
         }
@@ -813,17 +813,13 @@ mod tests {
         let captured = registry.find_by_name("media_capture").unwrap();
         registry.set_session_tool_policy(lease.clone());
         assert!(registry.find_by_name("media_capture").is_none());
-        assert!(
-            registry
-                .check_session_tool_access(captured.as_ref())
-                .is_err()
-        );
-        assert!(
-            registry
-                .available_tools(&tool_api::ToolStaticContext::default())
-                .iter()
-                .all(|tool| tool.name() != "media_capture")
-        );
+        assert!(registry
+            .check_session_tool_access(captured.as_ref())
+            .is_err());
+        assert!(registry
+            .available_tools(&tool_api::ToolStaticContext::default())
+            .iter()
+            .all(|tool| tool.name() != "media_capture"));
 
         // Assembly re-enforces isolation without replacing the revocable lease.
         isolated.media_service = Some(media);
@@ -834,13 +830,11 @@ mod tests {
         assert!(isolated.media_conversation_attachment.is_none());
         assert!(isolated.media_agent_handoffs.is_none());
         lease.revoke();
-        assert!(
-            isolated
-                .session_tool_grant_lease
-                .as_ref()
-                .unwrap()
-                .is_revoked()
-        );
+        assert!(isolated
+            .session_tool_grant_lease
+            .as_ref()
+            .unwrap()
+            .is_revoked());
     }
 
     #[test]
@@ -856,13 +850,11 @@ mod tests {
         assert!(!lease.allows_builtin("Bash"));
         lease.revoke();
         enforce_app_config(&mut config).unwrap();
-        assert!(
-            config
-                .session_tool_grant_lease
-                .as_ref()
-                .unwrap()
-                .is_revoked()
-        );
+        assert!(config
+            .session_tool_grant_lease
+            .as_ref()
+            .unwrap()
+            .is_revoked());
     }
 
     #[test]
@@ -1064,24 +1056,20 @@ mod tests {
             runtime.orchestrator.tool_names(),
             vec!["StructuredOutput".to_string()]
         );
-        assert!(
-            runtime
-                .structured_output_slot
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .is_none()
-        );
+        assert!(runtime
+            .structured_output_slot
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_none());
         assert!(runtime.plugin_runtime.is_none());
         assert!(!runtime.coordinator_mode.is_enabled());
-        assert!(
-            runtime
-                .orchestrator
-                .conversation_transcript()
-                .await
-                .is_empty()
-        );
+        assert!(runtime
+            .orchestrator
+            .conversation_transcript()
+            .await
+            .is_empty());
         assert_eq!(runtime.orchestrator.snapshot_cost().await.api_calls, 0);
         let context = runtime
             .orchestrator

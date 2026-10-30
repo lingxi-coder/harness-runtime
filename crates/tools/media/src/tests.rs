@@ -5,9 +5,9 @@ use image::GenericImageView;
 use image::{DynamicImage, Rgb, RgbImage};
 use media_api::stt::SttTranscript;
 use media_api::{
-    MediaCapabilities, MediaEvent, MediaMetadata, MediaOperationReadiness, MediaResourceRef,
-    MediaSessionState, MediaSessionStatus, MediaSource, MediaSourceId, MediaSourceKind,
-    MediaSourceRef, MediaSourceUsage, RecordingId,
+    MediaCapabilities, MediaEvent, MediaMetadata, MediaOperationId, MediaOperationReadiness,
+    MediaResourceRef, MediaSessionState, MediaSessionStatus, MediaSource, MediaSourceId,
+    MediaSourceKind, MediaSourceRef, MediaSourceUsage, RecordingId,
 };
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -221,7 +221,7 @@ impl media_api::MediaService for FakeMedia {
         })
     }
 
-    async fn cancel(&self, _identity: MediaOperationId) -> Result<(), MediaError> {
+    async fn cancel(&self, _context: MediaOperationContext) -> Result<(), MediaError> {
         Ok(())
     }
 }
@@ -283,7 +283,7 @@ impl media_api::MediaService for MutableCapabilityMedia {
         ))
     }
 
-    async fn cancel(&self, _identity: MediaOperationId) -> Result<(), MediaError> {
+    async fn cancel(&self, _context: MediaOperationContext) -> Result<(), MediaError> {
         Ok(())
     }
 }
@@ -1243,7 +1243,7 @@ fn malformed_operation_target_requires_host_minted_generation_and_epoch() {
     }));
     assert!(parse_operation(MediaOperationKind::Stop, &missing_identity).is_err());
 
-    let typed_target = generated_projection(&json!({
+    let missing_incarnation = generated_projection(&json!({
         "target":{
             "kind":"operation",
             "ref":"operation-id",
@@ -1251,12 +1251,39 @@ fn malformed_operation_target_requires_host_minted_generation_and_epoch() {
             "service_epoch":7
         }
     }));
+    assert!(parse_operation(MediaOperationKind::Stop, &missing_incarnation).is_err());
+
+    let incarnation = media_api::MediaOperationIncarnation::new();
+    let typed_target = generated_projection(&json!({
+        "target":{
+            "kind":"operation",
+            "ref":"operation-id",
+            "generation":42,
+            "service_epoch":7,
+            "incarnation":incarnation.as_string()
+        }
+    }));
     let MediaOperation::Stop {
-        target: MediaResourceRef::Operation(identity),
+        target:
+            MediaResourceRef::Operation {
+                identity,
+                incarnation: parsed_incarnation,
+            },
     } = parse_operation(MediaOperationKind::Stop, &typed_target).unwrap()
     else {
         panic!("expected operation stop target")
     };
     assert_eq!(identity.generation, 42);
     assert_eq!(identity.service_epoch, 7);
+    assert_eq!(parsed_incarnation, incarnation);
+}
+
+#[test]
+fn operation_resource_reference_roundtrips_opaque_incarnation() {
+    let resource = MediaResourceRef::Operation {
+        identity: MediaOperationId::new(43, 7),
+        incarnation: media_api::MediaOperationIncarnation::new(),
+    };
+    let projection = generated_projection(&resource_json(&resource));
+    assert_eq!(parse_media_target(&projection).unwrap(), resource);
 }

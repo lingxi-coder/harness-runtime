@@ -1748,9 +1748,7 @@ mod tests {
                 format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").into_bytes(),
             )
             .await;
-            assert!(
-                String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}"))
-            );
+            assert!(String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}")));
         }
         cancel.cancel();
         task.await.unwrap().unwrap();
@@ -2663,14 +2661,12 @@ mod agent_json_tests {
         assert_eq!(std::fs::read_dir(spool_dir).unwrap().count(), 0);
 
         let (mut hanging, _sink) = tokio::io::duplex(1);
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(5),
-                spool_fixed_body(&mut hanging, b"prefix:", 1024, spool_dir)
-            )
-            .await
-            .is_err()
-        );
+        assert!(tokio::time::timeout(
+            Duration::from_millis(5),
+            spool_fixed_body(&mut hanging, b"prefix:", 1024, spool_dir)
+        )
+        .await
+        .is_err());
         assert_eq!(std::fs::read_dir(spool_dir).unwrap().count(), 0);
 
         let (mut truncated, mut sink) = tokio::io::duplex(1);
@@ -2788,7 +2784,8 @@ mod agent_json_tests {
         let args = serde_json::from_str::<serde_json::Value>(request.args.get()).unwrap();
         assert_eq!(args["input"], expected_input);
         assert_eq!(
-            args["input"]["messages"][0]["content"][1]["metadata"]["com.lingxi.localApp"]["filename"],
+            args["input"]["messages"][0]["content"][1]["metadata"]["com.lingxi.localApp"]
+                ["filename"],
             "sample.bin"
         );
     }

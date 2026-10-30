@@ -4767,6 +4767,7 @@ dependencies = [
  "llm-runtime",
  "mcp",
  "media-api",
+ "media-runtime",
  "memory",
  "migrations",
  "mobile-linux-api",

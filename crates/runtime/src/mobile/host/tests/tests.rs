@@ -2849,8 +2849,8 @@ use client::protocol::error::ClientError;
 use client::protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
 use client::protocol::permission::PermissionResponseDto;
 use lingxi_core::host::audio::{
-    AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext, AudioOperationId,
-    AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioService,
+    AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext, AudioOperationKind,
+    AudioOperationSuccess, AudioOwner, AudioService,
 };
 
 /// Build a real, fully-wired [`MobileEngineHandle`] off-device (host fake
@@ -3018,7 +3018,7 @@ impl AudioService for AudioOwnerTeardownProbe {
         }
     }
 
-    async fn cancel(&self, _identity: AudioOperationId) -> Result<(), AudioError> {
+    async fn cancel(&self, _context: AudioOperationContext) -> Result<(), AudioError> {
         Ok(())
     }
 }
@@ -3064,7 +3064,7 @@ impl AudioService for AudioDropGateService {
         Ok(AudioOperationSuccess::OwnerEnded)
     }
 
-    async fn cancel(&self, _identity: AudioOperationId) -> Result<(), AudioError> {
+    async fn cancel(&self, _context: AudioOperationContext) -> Result<(), AudioError> {
         Ok(())
     }
 }
@@ -9413,6 +9413,7 @@ fn media_handoff_capability_context(
         model: "test-model".into(),
         profile_name: None,
         account_scope: None,
+        attachment_id: None,
     }
 }
 
@@ -9683,7 +9684,10 @@ impl media_api::MediaService for CancelledHandoffMediaService {
         ))
     }
 
-    async fn cancel(&self, _: media_api::MediaOperationId) -> Result<(), media_api::MediaError> {
+    async fn cancel(
+        &self,
+        _: media_api::MediaOperationContext,
+    ) -> Result<(), media_api::MediaError> {
         Ok(())
     }
 
@@ -9888,7 +9892,10 @@ impl media_api::MediaService for SuccessfulHandoffMediaService {
         ))
     }
 
-    async fn cancel(&self, _: media_api::MediaOperationId) -> Result<(), media_api::MediaError> {
+    async fn cancel(
+        &self,
+        _: media_api::MediaOperationContext,
+    ) -> Result<(), media_api::MediaError> {
         Ok(())
     }
 
@@ -10192,6 +10199,7 @@ async fn media_conversation_attachment_receives_the_existing_service_channel() {
         session_id: "session-1".into(),
         profile_name: Some("profile".into()),
         account_scope: Some("profile:profile".into()),
+        attachment_id: None,
         instructions: String::new(),
         history: Vec::new(),
         tools: Vec::new(),

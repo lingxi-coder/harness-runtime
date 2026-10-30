@@ -178,7 +178,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
         ("event/side_chat_submitted.json", ClientEvent::SideChatSubmitted {side_id:"side-1".into(),request_id:"submit-1".into()}),
         ("event/side_chat_ended.json", ClientEvent::SideChatEnded {side_id:"side-1".into()}),
         ("event/side_chat_error.json", ClientEvent::SideChatError {request_id:None,side_id:Some("side-1".into()),message:"side chat is closing".into()}),
-        ("event/audio_session_context.json", ClientEvent::AudioSessionContext {session_id:"session-1".into(),profile_id:"profile-1".into(),account_scope:"profile:profile-1".into()}),
+        ("event/audio_session_context.json", ClientEvent::AudioSessionContext {request_id:"context-1".into(),session_id:Some("session-1".into()),profile_id:Some("profile-1".into()),account_scope:Some("profile:profile-1".into()),media_owner:Some(MediaOwnerDto::Attached { attachment_host_id:"21eb56b5-2f6c-43d5-b23e-f98766a91f02".into(), attachment_generation:1, logical_kind:MediaOwnerKindDto::Session, logical_owner_id:"session-1".into() })}),
         ("event/realtime_audio_event.json", ClientEvent::RealtimeAudioEvent {session_id:"session-1".into(),event_json:r#"{"type":"closed","reason":"Cancelled"}"#.into()}),
         ("event/cron_run_bound.json", ClientEvent::CronRunBound {run_id: "run-1".into(), error: None}),
         ("event/scheduled_run_finished.json", ClientEvent::ScheduledRunFinished {run_id: "run-1".into(), summary: Some("Completed".into()), error: None}),
@@ -653,6 +653,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::ProviderModelCatalog {
                 providers: vec![client::protocol::listings::ProviderModelCatalogEntryDto {
                     provider_id: "anthropic".to_string(),
+                    definition: Some(client::protocol::listings::ProviderDirectoryDefinitionDto {
+                        base_url: "https://api.anthropic.com".to_string(),
+                        protocol: "anthropic_messages".to_string(),
+                        auth: "api_key".to_string(),
+                        credential_env: Some("ANTHROPIC_API_KEY".to_string()),
+                        default_model_id: "claude-opus-4-8".to_string(),
+                        description: "Official provider".to_string(),
+                    }),
                     provider_label: "Anthropic".to_string(),
                     models: vec![client::protocol::listings::ModelDetailsDto {
                         context_budget: None,
@@ -1315,6 +1323,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                             generation: 1,
                             service_epoch: 2,
                         },
+                        incarnation: "00000000-0000-4000-8000-000000000001".into(),
                         result: MediaResultDto::Sources { sources: Vec::new() },
                     }),
                     error: None,
@@ -1388,7 +1397,8 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ("command/side_chat_get.json",ClientCommand::SideChatGet {side_id:"side-1".into()}),
         ("command/side_chat_end.json",ClientCommand::SideChatEnd {side_id:"side-1".into()}),
         ("command/side_chat_submit.json",ClientCommand::SideChatSubmit {side_id:"side-1".into(),request_id:"submit-1".into(),command_json:r#"{"type":"cancel"}"#.into()}),
-        ("command/get_audio_session_context.json", ClientCommand::GetAudioSessionContext),
+        ("command/get_audio_session_context.json", ClientCommand::GetAudioSessionContext { request_id: "context-1".into() }),
+        ("command/refresh_provider_catalog.json", ClientCommand::RefreshProviderCatalog { trigger: "network_restored".into() }),
         ("command/start_realtime_audio.json", ClientCommand::StartRealtimeAudio {request_json:r#"{"operationId":"audio-1"}"#.into()}),
         ("command/realtime_audio_input.json", ClientCommand::RealtimeAudioInput {input_json:r#"{"type":"commit_input"}"#.into()}),
         ("command/stop_realtime_audio.json", ClientCommand::StopRealtimeAudio),
@@ -1927,6 +1937,20 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
+            "command/media_device_open_failed_without_resource.json",
+            ClientCommand::MediaDeviceResponse {
+                response: MediaDeviceResponseDto {
+                    request_id: "device-2".into(),
+                    result: MediaDeviceResultDto::OpenFailedWithoutResource {
+                        error: MediaErrorDto {
+                            kind: MediaErrorKindDto::PermissionDenied,
+                            message: "permission denied before opening the device".into(),
+                        },
+                    },
+                },
+            },
+        ),
+        (
             "command/media_service_execute_request.json",
             ClientCommand::MediaServiceRequest {
                 request: MediaServiceRequestDto {
@@ -1964,6 +1988,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                             generation: 1,
                             service_epoch: 2,
                         },
+                        incarnation: "00000000-0000-4000-8000-000000000001".into(),
                     },
                 },
             },
@@ -2897,4 +2922,27 @@ fn feed_status_table() -> Vec<FeedStatusEntry> {
             "mobile inline image input deferred: needs run_turn_streaming_with_image_sources (§5.12)",
         ),
     ]
+}
+
+#[test]
+fn correlated_audio_context_can_report_no_session_or_media_binding() {
+    let context = ClientEvent::AudioSessionContext {
+        request_id: "unavailable-1".into(),
+        session_id: None,
+        profile_id: None,
+        account_scope: None,
+        media_owner: None,
+    };
+    let json = serde_json::to_value(&context).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"type":"audio_session_context","request_id":"unavailable-1"})
+    );
+    assert_eq!(
+        serde_json::from_value::<ClientEvent>(json).unwrap(),
+        context
+    );
+    assert!(
+        serde_json::from_str::<ClientCommand>(r#"{"type":"get_audio_session_context"}"#).is_err()
+    );
 }

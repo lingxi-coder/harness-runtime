@@ -1,0 +1,13 @@
+{
+  "type": "media_device_response",
+  "response": {
+    "request_id": "device-2",
+    "result": {
+      "type": "open_failed_without_resource",
+      "error": {
+        "kind": "permission_denied",
+        "message": "permission denied before opening the device"
+      }
+    }
+  }
+}

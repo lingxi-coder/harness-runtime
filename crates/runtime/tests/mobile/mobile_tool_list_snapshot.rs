@@ -70,7 +70,7 @@ impl MediaService for SnapshotMedia {
         ))
     }
 
-    async fn cancel(&self, _: media_api::MediaOperationId) -> Result<(), MediaError> {
+    async fn cancel(&self, _: media_api::MediaOperationContext) -> Result<(), MediaError> {
         Ok(())
     }
 }
@@ -120,6 +120,7 @@ fn mobile_tool_list_snapshot() {
     }
     // The production mobile profile registers the complete media catalog.
     // Live capabilities filter which registered tools are advertised.
+    let available = reg.available_tools(&Default::default());
     for required in [
         "media_sources",
         "media_status",
@@ -138,6 +139,10 @@ fn mobile_tool_list_snapshot() {
         assert!(
             names.iter().any(|n| n == required),
             "mobile tool set must include `{required}`"
+        );
+        assert!(
+            available.iter().any(|tool| tool.name() == required),
+            "supported mobile media operation must be enabled: `{required}`"
         );
     }
     for unavailable in [

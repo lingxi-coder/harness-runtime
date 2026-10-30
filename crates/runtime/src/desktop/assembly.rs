@@ -1,5 +1,5 @@
 use super::permission_config::{
-    DesktopComputerPermissionIntegration, append_desktop_computer_permission_rules,
+    append_desktop_computer_permission_rules, DesktopComputerPermissionIntegration,
 };
 use super::platform::{
     DesktopFileSystem, DesktopLspTransport, DesktopProcess, DesktopWorktreeManager,
@@ -19,9 +19,9 @@ use orchestrator::{
 use permission::gate::PermissionGate;
 use platform_posix::{PosixRuntime, PosixSandbox};
 #[cfg(windows)]
-use platform_windows::WindowsMcpTransport;
-#[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
+#[cfg(windows)]
+use platform_windows::WindowsMcpTransport;
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use skill::SkillRegistry;
 use std::sync::Arc;
@@ -33,16 +33,6 @@ use tool_api::{BuiltinToolContext, ToolRegistry};
 #[cfg(test)]
 use super::watcher_test_support;
 use super::{
-    AgentMcpMergeGates, AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
-    CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
-    DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
-    DesktopMcpTransport, DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
-    DesktopWorkflowEvent, DesktopWorkflowEventSink, DesktopWorktreeCommandHandler,
-    FusionCatalogRefreshingChatGptConnect, FusionCatalogRefreshingCopilotConnect,
-    FusionCatalogRefreshingCredentialWriter, FusionCatalogRefreshingOAuthConnect,
-    JsonlWorktreeStatePersister, LlmStack, OrchestratorTeammatePromptRenderer, OutputRetryReporter,
-    PluginRuntime, ProcessSessionActivationObserver, RegistryStopHookSnapshot,
-    SharedCredentialStack, TEAMMATE_POOL_CAP, TaskRegistryWorkflowLauncher, TeammateStatusFanout,
     agent_restore, agent_skill_loader, agent_source_is_trusted, append_mcp_permission_rules,
     append_restricted_builtin_denies, apple_events_override, apply_worktree_launch,
     auto_mode_propose, aws_auth_refresher, background_agent, build_agent_mcp_tool_set,
@@ -73,7 +63,17 @@ use super::{
     sec_default_order_from_raw_tiers, session_agents, session_kind_for_job_tmp,
     session_read_allowances_for_boot, session_state, session_task_output_dir, settings_watch,
     should_enforce_permissions, skill_loader, spawn_cli_plugin_dir_collection_watch,
-    strict_allowlist_override, teammate_backend_selector,
+    strict_allowlist_override, teammate_backend_selector, AgentMcpMergeGates,
+    AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
+    CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
+    DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
+    DesktopMcpTransport, DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
+    DesktopWorkflowEvent, DesktopWorkflowEventSink, DesktopWorktreeCommandHandler,
+    FusionCatalogRefreshingChatGptConnect, FusionCatalogRefreshingCopilotConnect,
+    FusionCatalogRefreshingCredentialWriter, FusionCatalogRefreshingOAuthConnect,
+    JsonlWorktreeStatePersister, LlmStack, OrchestratorTeammatePromptRenderer, OutputRetryReporter,
+    PluginRuntime, ProcessSessionActivationObserver, RegistryStopHookSnapshot,
+    SharedCredentialStack, TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
 };
 
 /// Rebuild the slash-command MCP partition from the same generation-checked

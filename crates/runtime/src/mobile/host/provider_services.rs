@@ -110,8 +110,16 @@ pub(super) fn provider_catalog_from_profiles(
             profile_id: provider.profile_name.clone(),
             display_name,
             base_url: provider.base_url,
-            protocol: serde_json::to_value(provider.protocol).unwrap().as_str().unwrap().into(),
-            auth: serde_json::to_value(provider.auth).unwrap().as_str().unwrap().into(),
+            protocol: serde_json::to_value(provider.protocol)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .into(),
+            auth: serde_json::to_value(provider.auth)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .into(),
             credential_env,
             models: curated
                 .iter()

@@ -4,7 +4,7 @@
 
 use super::{AppChatProfile, AppInvocationProfile};
 use crate::desktop::{BuildError, DesktopConfig};
-use lingxi_core::host::{FileSystem, rooted_fs};
+use lingxi_core::host::{rooted_fs, FileSystem};
 use orchestrator::ConversationOrchestrator;
 use session::jsonl::{CapturedChatTranscript, ChatTranscriptCheckpoint, JsonlWriter};
 use std::path::PathBuf;
@@ -227,12 +227,12 @@ pub(crate) async fn restore(
 mod tests {
     use super::*;
     use crate::desktop::app_invocation::{
-        AppChatGenerationCheckpoint, AppInvocationIdentity, prepare_app_config,
+        prepare_app_config, AppChatGenerationCheckpoint, AppInvocationIdentity,
     };
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
     use orchestrator::test_support::{
-        MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-        StaticMemoryProvider, noop_hook_executor,
+        noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
 
     fn fixture() -> (tempfile::TempDir, DesktopConfig) {

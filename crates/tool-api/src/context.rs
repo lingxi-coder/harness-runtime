@@ -14,7 +14,7 @@ use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, AgentId, McpConnectionId, MessageId, SessionId, ToolUseId,
 };
 use lingxi_core::SessionState;
-use media_api::{MediaOperationId, MediaSessionRef};
+use media_api::{MediaAttachmentId, MediaOperationId, MediaSessionRef};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -193,6 +193,8 @@ pub struct MediaAgentCapabilityContext {
     pub profile_name: Option<String>,
     /// Account scope derived from the pinned profile.
     pub account_scope: Option<String>,
+    /// Host-issued engine attachment from the trusted media service, if scoped.
+    pub attachment_id: Option<MediaAttachmentId>,
 }
 
 /// Narrow callback that asks the current turn owner to continue as an Agent
@@ -244,7 +246,10 @@ impl ToolUseContext {
     /// Snapshot trusted media routing identity from the exact current
     /// conversation state. This awaits the session lock so normal lock
     /// contention does not masquerade as an unsupported provider.
-    pub async fn media_agent_capability_context(&self) -> Option<MediaAgentCapabilityContext> {
+    pub async fn media_agent_capability_context(
+        &self,
+        attachment_id: Option<MediaAttachmentId>,
+    ) -> Option<MediaAgentCapabilityContext> {
         let session = self.session.as_ref()?.lock().await;
         // ToolUseOptions is captured by the owning request builder. Prefer its
         // resolved route profile so a trusted default route remains usable
@@ -261,6 +266,7 @@ impl ToolUseContext {
                 .as_ref()
                 .map(|profile| format!("profile:{profile}")),
             profile_name,
+            attachment_id,
         })
     }
 
@@ -290,14 +296,12 @@ impl ToolUseContext {
             request_id: None,
         };
 
-        Ok(AudioOperationContext {
-            identity,
-            owner: AudioOwner::Session { session_id },
-            initiator: (initiator.agent_id.is_some() || initiator.tool_use_id.is_some())
-                .then_some(initiator),
-            timeout_budget_ms,
-            max_payload_bytes,
-        })
+        let mut context = AudioOperationContext::new(identity, AudioOwner::Session { session_id })
+            .with_max_payload_bytes(max_payload_bytes);
+        context.timeout_budget_ms = timeout_budget_ms;
+        context.initiator =
+            (initiator.agent_id.is_some() || initiator.tool_use_id.is_some()).then_some(initiator);
+        Ok(context)
     }
 
     /// Build a minimal context that carries ONLY `main_loop_model`; every other

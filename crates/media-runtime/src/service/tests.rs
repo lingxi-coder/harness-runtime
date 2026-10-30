@@ -25,6 +25,15 @@ fn context(owner: MediaOwner, generation: u64) -> MediaOperationContext {
         .with_max_payload_bytes(1024)
 }
 
+// Distinct calls may share the public identity but must have distinct admissions.
+fn fresh_context_same_identity(original: &MediaOperationContext) -> MediaOperationContext {
+    let mut fresh = MediaOperationContext::new(original.identity.clone(), original.owner.clone());
+    fresh.initiator = original.initiator.clone();
+    fresh.timeout_budget_ms = original.timeout_budget_ms;
+    fresh.max_payload_bytes = original.max_payload_bytes;
+    fresh
+}
+
 async fn observe_session(
     runtime: &Arc<UnifiedMediaService>,
     owner: MediaOwner,
@@ -139,6 +148,7 @@ struct FakeAudio {
     contexts: std::sync::Mutex<Vec<MediaOperationContext>>,
     calls: std::sync::Mutex<Vec<Option<AudioOperationKind>>>,
     cancellations: AtomicUsize,
+    cancellation_contexts: std::sync::Mutex<Vec<MediaOperationContext>>,
     records: std::sync::Mutex<HashMap<RecordingRef, MediaOwner>>,
     status: std::sync::Mutex<AudioStatus>,
     readiness_overrides: std::sync::Mutex<HashMap<AudioOperationKind, AudioReadinessState>>,
@@ -148,6 +158,16 @@ struct FakeAudio {
     pending_recording_start: AtomicBool,
     recording_started: Semaphore,
     fail_next_recording_start: AtomicBool,
+    fail_next_native_call: AtomicBool,
+    fail_cancel: AtomicBool,
+    fail_status: AtomicBool,
+    hold_cancel: AtomicBool,
+    cancel_entered: Semaphore,
+    cancel_release: Semaphore,
+    fixed_recording_handle: AtomicBool,
+    hold_stop: AtomicBool,
+    stop_entered: Semaphore,
+    stop_release: Semaphore,
     owner_restriction: Option<String>,
 }
 
@@ -173,6 +193,7 @@ impl FakeAudio {
             contexts: std::sync::Mutex::new(Vec::new()),
             calls: std::sync::Mutex::new(Vec::new()),
             cancellations: AtomicUsize::new(0),
+            cancellation_contexts: std::sync::Mutex::new(Vec::new()),
             records: std::sync::Mutex::new(HashMap::new()),
             status: std::sync::Mutex::new(AudioStatus::default()),
             readiness_overrides: std::sync::Mutex::new(HashMap::new()),
@@ -182,6 +203,16 @@ impl FakeAudio {
             pending_recording_start: AtomicBool::new(false),
             recording_started: Semaphore::new(0),
             fail_next_recording_start: AtomicBool::new(false),
+            fail_next_native_call: AtomicBool::new(false),
+            fail_cancel: AtomicBool::new(false),
+            fail_status: AtomicBool::new(false),
+            hold_cancel: AtomicBool::new(false),
+            cancel_entered: Semaphore::new(0),
+            cancel_release: Semaphore::new(0),
+            fixed_recording_handle: AtomicBool::new(false),
+            hold_stop: AtomicBool::new(false),
+            stop_entered: Semaphore::new(0),
+            stop_release: Semaphore::new(0),
             owner_restriction,
         })
     }
@@ -264,6 +295,24 @@ impl AudioService for FakeAudio {
     ) -> Result<AudioOperationSuccess, AudioError> {
         self.contexts.lock().unwrap().push(context.clone());
         self.calls.lock().unwrap().push(operation.kind());
+        if matches!(operation, AudioOperation::Status { .. })
+            && self.fail_status.load(Ordering::SeqCst)
+        {
+            return Err(AudioError::new(
+                AudioErrorKind::Unavailable,
+                "native audio is disconnected",
+            ));
+        }
+        if matches!(
+            operation,
+            AudioOperation::StartRecording { .. } | AudioOperation::Play { .. }
+        ) && self.fail_next_native_call.swap(false, Ordering::SeqCst)
+        {
+            return Err(AudioError::new(
+                AudioErrorKind::NativeFailure,
+                "native result unknown",
+            ));
+        }
         if matches!(&operation, AudioOperation::StartRecording { .. }) {
             if self.fail_next_recording_start.swap(false, Ordering::SeqCst) {
                 return Err(AudioError::new(
@@ -282,6 +331,12 @@ impl AudioService for FakeAudio {
             self.listen_started.notify_one();
             std::future::pending::<()>().await;
         }
+        if matches!(operation, AudioOperation::StopRecording { .. })
+            && self.hold_stop.load(Ordering::SeqCst)
+        {
+            self.stop_entered.add_permits(1);
+            self.stop_release.acquire().await.unwrap().forget();
+        }
         let result = match operation {
             AudioOperation::Capture { .. } => AudioOperationSuccess::Recording {
                 recording: VoiceRecording {
@@ -290,10 +345,13 @@ impl AudioService for FakeAudio {
                 },
             },
             AudioOperation::StartRecording { .. } => {
-                let handle = RecordingRef(RecordingId::from(format!(
-                    "recording-{}",
-                    context.identity.id
-                )));
+                let handle = RecordingRef(RecordingId::from(
+                    if self.fixed_recording_handle.load(Ordering::SeqCst) {
+                        "same-recording".to_owned()
+                    } else {
+                        format!("recording-{}", context.identity.id)
+                    },
+                ));
                 self.records
                     .lock()
                     .unwrap()
@@ -346,9 +404,21 @@ impl AudioService for FakeAudio {
         Ok(result)
     }
 
-    async fn cancel(&self, _identity: MediaOperationId) -> Result<(), AudioError> {
+    async fn cancel(&self, context: MediaOperationContext) -> Result<(), AudioError> {
+        self.cancellation_contexts.lock().unwrap().push(context);
         self.cancellations.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        if self.hold_cancel.load(Ordering::SeqCst) {
+            self.cancel_entered.add_permits(1);
+            self.cancel_release.acquire().await.unwrap().forget();
+        }
+        if self.fail_cancel.load(Ordering::SeqCst) {
+            Err(AudioError::new(
+                AudioErrorKind::NativeFailure,
+                "no exact close receipt",
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -601,7 +671,9 @@ impl MediaSession for FakeSession {
                     .await?;
                 let replacement = self.replacement_on_stop.lock().unwrap().take();
                 if let Some(replacement) = replacement {
-                    service.attach_session(context, replacement).await?;
+                    service
+                        .attach_session(fresh_context_same_identity(&context), replacement)
+                        .await?;
                 }
             }
         }
@@ -780,7 +852,7 @@ fn audio_frame(source: MediaSourceRef, sequence: u64) -> MediaFrame {
 }
 
 fn service(
-    audio: Arc<FakeAudio>,
+    audio: Arc<dyn AudioService>,
     camera: bool,
     connector: Option<Arc<dyn MediaConnector>>,
 ) -> Arc<UnifiedMediaService> {
@@ -801,6 +873,153 @@ fn service(
         );
     }
     builder.build()
+}
+
+#[tokio::test]
+async fn unified_status_records_itself_active_but_attachment_drain_filters_that_exact_id() {
+    let runtime = service(FakeAudio::new(), false, None);
+    let host = crate::attachment::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime.clone()).unwrap();
+    let scoped = attachment.service();
+    let status_context = context(owner("status-owner"), 7_701);
+    let status_identity = status_context.identity.clone();
+    let status_incarnation = status_context.operation_incarnation();
+    let result = scoped
+        .execute(status_context, MediaOperation::Status { target: None })
+        .await
+        .unwrap();
+    let MediaResult::Status { resources } = result else {
+        panic!("status operation should return a status snapshot");
+    };
+    assert!(resources.iter().any(|resource| {
+        matches!(&resource.resource, MediaResourceRef::Operation { identity, incarnation } if identity == &status_identity && *incarnation == status_incarnation)
+            && resource.state == MediaResourceState::Active
+    }));
+
+    assert_eq!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::attachment::MediaAttachmentRevocation::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn cancel_does_not_cross_an_operation_owner_even_when_identity_is_known() {
+    let audio = FakeAudio::new();
+    audio.pending_listen.store(true, Ordering::SeqCst);
+    let runtime = service(audio.clone(), false, None);
+    let active_context = context(owner("owner-b"), 7_702);
+    let task_runtime = runtime.clone();
+    let task_context = active_context.clone();
+    let task = tokio::spawn(async move {
+        task_runtime
+            .execute(
+                task_context,
+                MediaOperation::Transcribe {
+                    input: TranscriptionInput::LiveSource(microphone()),
+                    language: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.listen_started.notified())
+        .await
+        .expect("owner-b's audio operation must start");
+
+    let mut wrong_owner = active_context.clone();
+    wrong_owner.owner = owner("owner-a");
+    runtime.cancel(wrong_owner).await.unwrap();
+    assert!(!task.is_finished());
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 0);
+
+    runtime.cancel(active_context).await.unwrap();
+    let cancelled = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("owner-b's cancelled operation must exit")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(cancelled.kind, MediaErrorKind::Cancelled);
+    assert!(audio.cancellations.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn stop_reference_handle_does_not_bypass_operation_owner_check() {
+    let audio = FakeAudio::new();
+    audio.pending_listen.store(true, Ordering::SeqCst);
+    let runtime = service(audio.clone(), false, None);
+    let active_context = context(owner("operation-owner"), 7_705);
+    let operation_ref = MediaResourceRef::Operation {
+        identity: active_context.identity.clone(),
+        incarnation: active_context.operation_incarnation(),
+    };
+    let task_runtime = runtime.clone();
+    let task_context = active_context.clone();
+    let task = tokio::spawn(async move {
+        task_runtime
+            .execute(
+                task_context,
+                MediaOperation::Transcribe {
+                    input: TranscriptionInput::LiveSource(microphone()),
+                    language: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.listen_started.notified())
+        .await
+        .unwrap();
+
+    let wrong_owner_stop = runtime
+        .execute(
+            context(owner("other-owner"), 7_706),
+            MediaOperation::Stop {
+                target: operation_ref,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_owner_stop.kind, MediaErrorKind::NotFound);
+    assert!(!task.is_finished());
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 0);
+
+    runtime.cancel(active_context).await.unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().kind,
+        MediaErrorKind::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn attachment_drain_cancels_audio_with_the_original_operation_handle() {
+    let audio = FakeAudio::new();
+    audio.pending_listen.store(true, Ordering::SeqCst);
+    let runtime = service(audio.clone(), false, None);
+    let host = crate::attachment::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime).unwrap();
+    let service = attachment.service();
+    let operation_context = context(owner("drain-audio"), 7_704);
+    let task_service = service.clone();
+    let operation = tokio::spawn(async move {
+        task_service
+            .execute(
+                operation_context,
+                MediaOperation::Transcribe {
+                    input: TranscriptionInput::LiveSource(microphone()),
+                    language: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.listen_started.notified())
+        .await
+        .expect("the attached audio operation should be pending before drain");
+
+    assert_eq!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::attachment::MediaAttachmentRevocation::Confirmed
+    );
+    let result = operation.await.unwrap().unwrap_err();
+    assert_eq!(result.kind, MediaErrorKind::Cancelled);
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -1129,6 +1348,592 @@ async fn transcription_readiness_defers_to_the_selected_input_route() {
                 .contains(&Some(AudioOperationKind::Transcribe)));
         }
     }
+}
+
+#[tokio::test]
+async fn scoped_asset_status_does_not_require_disconnected_audio_to_revoke() {
+    for found in [false, true] {
+        let audio = FakeAudio::new();
+        audio.fail_status.store(true, Ordering::SeqCst);
+        let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+            .audio(audio.clone())
+            .service_epoch(EPOCH)
+            .build();
+        let host = crate::MediaAttachmentHost::new();
+        let attachment = host.attach(runtime.clone()).unwrap();
+        let reference = media_store_ref("test-asset");
+        if found {
+            let existing_owner = owner("alpha").in_attachment(attachment.id().clone());
+            runtime
+                .remember_asset(
+                    &context(existing_owner, 149),
+                    &MediaAsset {
+                        reference: reference.clone(),
+                        metadata: MediaMetadata {
+                            kind: MediaKind::Audio,
+                            mime_type: "audio/wav".into(),
+                            byte_len: 4,
+                            captured_at_unix_ms: None,
+                            duration_ms: Some(1),
+                            width_px: None,
+                            height_px: None,
+                            sample_rate_hz: Some(24_000),
+                            channels: Some(1),
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        let result = attachment
+            .service()
+            .execute(
+                context(owner("alpha"), 150),
+                MediaOperation::Status {
+                    target: Some(MediaResourceRef::Media(reference)),
+                },
+            )
+            .await;
+        if found {
+            assert!(
+                matches!(result, Ok(MediaResult::Status { resources }) if resources.len() == 1 && resources[0].state == MediaResourceState::Completed)
+            );
+        } else {
+            assert_eq!(result.unwrap_err().kind, MediaErrorKind::NotFound);
+        }
+        assert!(
+            audio.operations().is_empty(),
+            "the asset lookup does not dispatch native audio"
+        );
+        assert_eq!(
+            attachment.revoke(Duration::from_secs(1)).await,
+            crate::MediaAttachmentRevocation::Confirmed
+        );
+        assert!(
+            audio.operations().is_empty(),
+            "read-only asset status must not require a later audio status"
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_asset_status_does_not_erase_a_prior_unknown_native_origin() {
+    let audio = FakeAudio::new();
+    audio.fail_status.store(true, Ordering::SeqCst);
+    audio.fail_next_native_call.store(true, Ordering::SeqCst);
+    audio.fail_cancel.store(true, Ordering::SeqCst);
+    let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+        .audio(audio.clone())
+        .service_epoch(EPOCH)
+        .build();
+    let host = crate::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime).unwrap();
+    let scoped = attachment.service();
+    let recording = context(owner("alpha"), 151);
+    assert!(scoped
+        .execute(
+            recording.clone(),
+            MediaOperation::Record {
+                source: microphone(),
+                options: RecordOptions::default(),
+            }
+        )
+        .await
+        .is_err());
+    let error = scoped
+        .execute(
+            context(owner("alpha"), 152),
+            MediaOperation::Status {
+                target: Some(MediaResourceRef::Media(media_store_ref("missing-asset"))),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, MediaErrorKind::NotFound);
+    assert!(audio
+        .operations()
+        .contains(&Some(AudioOperationKind::Record)));
+    assert_ne!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::MediaAttachmentRevocation::Confirmed
+    );
+    assert_ne!(
+        attachment.operation_cleanup(&recording),
+        crate::MediaOperationCleanup::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn scoped_media_audio_failure_requires_its_exact_close_receipt() {
+    for play in [false, true] {
+        for cancel_confirmed in [false, true] {
+            let audio = FakeAudio::new();
+            let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+                .audio(audio.clone())
+                .service_epoch(EPOCH)
+                .build();
+            let host = crate::MediaAttachmentHost::new();
+            let attachment = host.attach(runtime).unwrap();
+            let scoped = attachment.service();
+            let operation = if play {
+                let MediaResult::Synthesized { asset } = scoped
+                    .execute(
+                        context(owner("alpha"), 160),
+                        MediaOperation::Synthesize {
+                            text: "hello".to_owned(),
+                            language: None,
+                            rate: None,
+                            voice: None,
+                        },
+                    )
+                    .await
+                    .unwrap()
+                else {
+                    panic!("synthesized asset");
+                };
+                MediaOperation::Play {
+                    media: asset.reference,
+                    source: None,
+                }
+            } else {
+                MediaOperation::Record {
+                    source: microphone(),
+                    options: RecordOptions::default(),
+                }
+            };
+            audio.fail_next_native_call.store(true, Ordering::SeqCst);
+            audio.fail_cancel.store(!cancel_confirmed, Ordering::SeqCst);
+            let call = context(owner("alpha"), 161);
+            let error = scoped.execute(call.clone(), operation).await.unwrap_err();
+            assert_eq!(error.kind, MediaErrorKind::NativeFailure);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while audio.cancellations.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("exact original audio cancellation was dispatched");
+            let result = attachment.revoke(Duration::from_secs(1)).await;
+            if cancel_confirmed {
+                assert_eq!(result, crate::MediaAttachmentRevocation::Confirmed);
+                assert_eq!(
+                    attachment.operation_cleanup(&call),
+                    crate::MediaOperationCleanup::Confirmed
+                );
+            } else {
+                assert_ne!(result, crate::MediaAttachmentRevocation::Confirmed);
+                assert_ne!(
+                    attachment.operation_cleanup(&call),
+                    crate::MediaOperationCleanup::Confirmed
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn scoped_media_audio_cleanup_waits_for_inflight_exact_cancel() {
+    let audio = FakeAudio::new();
+    audio.fail_next_native_call.store(true, Ordering::SeqCst);
+    audio.hold_cancel.store(true, Ordering::SeqCst);
+    let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+        .audio(audio.clone())
+        .service_epoch(EPOCH)
+        .build();
+    let host = crate::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime).unwrap();
+    let call = context(owner("alpha"), 165);
+    assert!(attachment
+        .service()
+        .execute(
+            call.clone(),
+            MediaOperation::Record {
+                source: microphone(),
+                options: RecordOptions::default(),
+            },
+        )
+        .await
+        .is_err());
+    tokio::time::timeout(Duration::from_secs(1), audio.cancel_entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    assert_eq!(
+        attachment.operation_cleanup(&call),
+        crate::MediaOperationCleanup::Pending
+    );
+    let draining = attachment.clone();
+    let mut drain = tokio::spawn(async move { draining.revoke(Duration::from_secs(2)).await });
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut drain)
+        .await
+        .is_err());
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 1);
+    audio.cancel_release.add_permits(1);
+    assert_eq!(
+        drain.await.unwrap(),
+        crate::MediaAttachmentRevocation::Confirmed
+    );
+    assert_eq!(
+        attachment.operation_cleanup(&call),
+        crate::MediaOperationCleanup::Confirmed
+    );
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn scoped_media_audio_late_exact_receipt_can_be_rechecked_before_revoke() {
+    let audio = FakeAudio::new();
+    audio.fail_next_native_call.store(true, Ordering::SeqCst);
+    audio.fail_cancel.store(true, Ordering::SeqCst);
+    let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+        .audio(audio.clone())
+        .service_epoch(EPOCH)
+        .build();
+    let host = crate::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime).unwrap();
+    let scoped = attachment.service();
+    let call = context(owner("alpha"), 166);
+    assert!(scoped
+        .execute(
+            call.clone(),
+            MediaOperation::Record {
+                source: microphone(),
+                options: RecordOptions::default(),
+            }
+        )
+        .await
+        .is_err());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while audio.cancellations.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(scoped.cancel(call.clone()).await.is_err());
+    let count = audio.cancellations.load(Ordering::SeqCst);
+    audio.fail_cancel.store(false, Ordering::SeqCst); // exact late no-resource proof is now available
+    let mut wrong_owner = call.clone();
+    wrong_owner.owner = owner("other");
+    scoped.cancel(wrong_owner).await.unwrap();
+    scoped
+        .cancel(fresh_context_same_identity(&call))
+        .await
+        .unwrap();
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), count);
+    assert_eq!(
+        attachment.operation_cleanup(&call),
+        crate::MediaOperationCleanup::Pending
+    );
+    scoped.cancel(call.clone()).await.unwrap();
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), count + 1);
+    assert_eq!(
+        attachment.operation_cleanup(&call),
+        crate::MediaOperationCleanup::Confirmed
+    );
+    assert_eq!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::MediaAttachmentRevocation::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn scoped_direct_audio_late_receipt_releases_only_its_original_lease() {
+    let audio = FakeAudio::new();
+    audio.fail_next_native_call.store(true, Ordering::SeqCst);
+    audio.fail_cancel.store(true, Ordering::SeqCst);
+    let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+        .audio(audio.clone())
+        .service_epoch(EPOCH)
+        .build();
+    let router = runtime.audio_router.clone();
+    let host = crate::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime).unwrap();
+    let scoped = attachment.audio_service(router).unwrap();
+    let call = context(owner("alpha"), 168);
+    assert!(scoped
+        .execute(
+            call.clone(),
+            AudioOperation::StartRecording {
+                sample_rate_hz: 24_000,
+                format: "wav".into(),
+            }
+        )
+        .await
+        .is_err());
+    while audio.cancellations.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    assert!(scoped.cancel(call.clone()).await.is_err());
+    let count = audio.cancellations.load(Ordering::SeqCst);
+    audio.fail_cancel.store(false, Ordering::SeqCst);
+    let mut wrong_owner = call.clone();
+    wrong_owner.owner = owner("other");
+    scoped.cancel(wrong_owner).await.unwrap();
+    scoped
+        .cancel(fresh_context_same_identity(&call))
+        .await
+        .unwrap();
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), count);
+    scoped.cancel(call.clone()).await.unwrap();
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), count + 1);
+    let cancellations = audio.cancellation_contexts.lock().unwrap();
+    let last = cancellations.last().unwrap();
+    assert_eq!(last.identity, call.identity);
+    assert_eq!(last.operation_incarnation(), call.operation_incarnation());
+    assert_eq!(
+        last.owner,
+        call.owner.clone().in_attachment(attachment.id().clone())
+    );
+    drop(cancellations);
+    assert_eq!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::MediaAttachmentRevocation::Confirmed
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_audio_receipt_does_not_reopen_a_terminal_unknown_attachment() {
+    let audio = FakeAudio::new();
+    audio.fail_next_native_call.store(true, Ordering::SeqCst);
+    audio.fail_cancel.store(true, Ordering::SeqCst);
+    let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+        .audio(audio.clone())
+        .service_epoch(EPOCH)
+        .build();
+    let host = crate::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime.clone()).unwrap();
+    let call = context(owner("alpha"), 167);
+    assert!(attachment
+        .service()
+        .execute(
+            call.clone(),
+            MediaOperation::Record {
+                source: microphone(),
+                options: RecordOptions::default(),
+            }
+        )
+        .await
+        .is_err());
+    while audio.cancellations.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let handle = attachment.clone();
+    let drain = tokio::spawn(async move { handle.revoke(Duration::from_secs(40)).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert!(matches!(
+        drain.await.unwrap(),
+        crate::MediaAttachmentRevocation::Unknown { .. }
+    ));
+    assert_eq!(attachment.phase(), crate::MediaAttachmentPhase::Unknown);
+    audio.fail_cancel.store(false, Ordering::SeqCst);
+    runtime
+        .audio_router
+        .cancel_for_incarnation(
+            &call.identity,
+            &call.owner.clone().in_attachment(attachment.id().clone()),
+            &call.operation_incarnation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        attachment.operation_cleanup(&call),
+        crate::MediaOperationCleanup::Confirmed
+    );
+    assert!(matches!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::MediaAttachmentRevocation::Unknown { .. }
+    ));
+}
+
+#[tokio::test]
+async fn scoped_media_recording_origin_requires_its_own_close_receipt_on_revoke() {
+    for cancel_confirmed in [false, true] {
+        let audio = FakeAudio::new();
+        let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+            .audio(audio.clone())
+            .service_epoch(EPOCH)
+            .build();
+        let host = crate::MediaAttachmentHost::new();
+        let attachment = host.attach(runtime).unwrap();
+        let call = context(owner("alpha"), 169);
+        assert!(matches!(
+            attachment
+                .service()
+                .execute(
+                    call.clone(),
+                    MediaOperation::Record {
+                        source: microphone(),
+                        options: RecordOptions::default(),
+                    }
+                )
+                .await
+                .unwrap(),
+            MediaResult::RecordingStarted { .. }
+        ));
+        assert_eq!(
+            attachment.operation_cleanup(&call),
+            crate::MediaOperationCleanup::Pending
+        );
+        assert_eq!(audio.cancellations.load(Ordering::SeqCst), 0);
+        audio.fail_cancel.store(!cancel_confirmed, Ordering::SeqCst);
+        let outcome = attachment.revoke(Duration::from_secs(1)).await;
+        let cancellations = audio.cancellation_contexts.lock().unwrap();
+        assert!(!cancellations.is_empty());
+        if cancel_confirmed {
+            assert_eq!(cancellations.len(), 1);
+        }
+        assert!(cancellations.iter().all(|cancel| {
+            cancel.identity == call.identity
+                && cancel.operation_incarnation() == call.operation_incarnation()
+                && cancel.owner == call.owner.clone().in_attachment(attachment.id().clone())
+        }));
+        drop(cancellations);
+        if cancel_confirmed {
+            assert_eq!(outcome, crate::MediaAttachmentRevocation::Confirmed);
+            assert_eq!(
+                attachment.operation_cleanup(&call),
+                crate::MediaOperationCleanup::Confirmed
+            );
+        } else {
+            assert_ne!(outcome, crate::MediaAttachmentRevocation::Confirmed);
+            assert_ne!(
+                attachment.operation_cleanup(&call),
+                crate::MediaOperationCleanup::Confirmed
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn scoped_audio_stop_does_not_cancel_a_later_start_with_the_same_handle() {
+    let audio = FakeAudio::new();
+    audio.fixed_recording_handle.store(true, Ordering::SeqCst);
+    audio.hold_stop.store(true, Ordering::SeqCst);
+    let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+        .audio(audio.clone())
+        .service_epoch(EPOCH)
+        .build();
+    let router = runtime.audio_router.clone();
+    let host = crate::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime).unwrap();
+    let scoped = attachment.audio_service(router).unwrap();
+    let start_a = context(owner("alpha"), 180);
+    let AudioOperationSuccess::RecordingStarted { handle } = scoped
+        .execute(
+            start_a.clone(),
+            AudioOperation::StartRecording {
+                sample_rate_hz: 24_000,
+                format: "wav".into(),
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("first recording")
+    };
+    let stopping = scoped.clone();
+    let stop = tokio::spawn(async move {
+        stopping
+            .execute(
+                context(owner("alpha"), 181),
+                AudioOperation::StopRecording { handle },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.stop_entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let start_b = context(owner("alpha"), 182);
+    assert!(matches!(
+        scoped
+            .execute(
+                start_b.clone(),
+                AudioOperation::StartRecording {
+                    sample_rate_hz: 24_000,
+                    format: "wav".into(),
+                }
+            )
+            .await
+            .unwrap(),
+        AudioOperationSuccess::RecordingStarted { .. }
+    ));
+    audio.stop_release.add_permits(1);
+    assert!(matches!(
+        stop.await.unwrap().unwrap(),
+        AudioOperationSuccess::Recording { .. }
+    ));
+    let cancels = audio.cancellation_contexts.lock().unwrap().clone();
+    assert_eq!(cancels.len(), 1);
+    assert_eq!(cancels[0].identity, start_a.identity);
+    assert_eq!(
+        cancels[0].operation_incarnation(),
+        start_a.operation_incarnation()
+    );
+    scoped.cancel(start_b.clone()).await.unwrap();
+    let cancels = audio.cancellation_contexts.lock().unwrap().clone();
+    assert_eq!(cancels.len(), 2);
+    assert_eq!(cancels[1].identity, start_b.identity);
+    assert_eq!(
+        cancels[1].operation_incarnation(),
+        start_b.operation_incarnation()
+    );
+    assert_eq!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::MediaAttachmentRevocation::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn scoped_media_record_stop_retires_its_exact_audio_origin() {
+    let audio = FakeAudio::new();
+    let runtime = MediaRuntimeBuilder::new(Arc::new(MemoryStore::default()))
+        .audio(audio.clone())
+        .service_epoch(EPOCH)
+        .build();
+    let host = crate::MediaAttachmentHost::new();
+    let attachment = host.attach(runtime).unwrap();
+    let scoped = attachment.service();
+    for index in 0..2 {
+        let started = scoped
+            .execute(
+                context(owner("alpha"), 170 + index * 2),
+                MediaOperation::Record {
+                    source: microphone(),
+                    options: RecordOptions::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let MediaResult::RecordingStarted { recording } = started else {
+            panic!("recording start");
+        };
+        assert_eq!(audio.cancellations.load(Ordering::SeqCst), index as usize);
+        assert!(matches!(
+            scoped
+                .execute(
+                    context(owner("alpha"), 171 + index * 2),
+                    MediaOperation::Stop {
+                        target: MediaResourceRef::Recording(recording),
+                    },
+                )
+                .await
+                .unwrap(),
+            MediaResult::RecordingStopped { .. }
+        ));
+        assert_eq!(
+            audio.cancellations.load(Ordering::SeqCst),
+            (index + 1) as usize
+        );
+    }
+    assert_eq!(
+        attachment.revoke(Duration::from_secs(1)).await,
+        crate::MediaAttachmentRevocation::Confirmed
+    );
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -1630,6 +2435,172 @@ async fn attached_session_audio_bridge_projects_declared_input_audio_sources() {
 }
 
 #[tokio::test]
+async fn attach_session_and_session_audio_consume_the_context_admission_once() {
+    let runtime = service(FakeAudio::new(), false, None);
+    let logical_owner = owner("one-shot-session-context");
+    let attached = FakeSession::new(MediaSessionRef(MediaSessionId::from("one-shot-attached")));
+    let attach_context = context(logical_owner.clone(), 29);
+    let reference = runtime
+        .attach_session(attach_context.clone(), Box::new(attached))
+        .await
+        .unwrap();
+
+    let attach_replay = runtime
+        .execute(
+            attach_context,
+            MediaOperation::Status {
+                target: Some(MediaResourceRef::Session(reference.clone())),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(attach_replay.kind, MediaErrorKind::InvalidRequest);
+
+    let audio_context = context(logical_owner, 30);
+    runtime
+        .session_audio(audio_context.clone(), reference.clone())
+        .await
+        .expect("a fresh context may open the attached session's audio bridge");
+    let audio_replay = runtime
+        .execute(
+            audio_context,
+            MediaOperation::Status {
+                target: Some(MediaResourceRef::Session(reference)),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(audio_replay.kind, MediaErrorKind::InvalidRequest);
+}
+
+#[tokio::test]
+async fn parent_revoke_waits_for_child_session_and_audio_channel_to_close() {
+    let runtime = service(FakeAudio::new(), false, None);
+    let host = crate::attachment::MediaAttachmentHost::new();
+    let parent = host.attach(runtime).unwrap();
+    let child = parent.fork_child().unwrap();
+    let child_service = child.service();
+    let session = FakeSession::new(MediaSessionRef(MediaSessionId::from(
+        "scheduled-child-session",
+    )));
+    session.pending_stop.store(true, Ordering::SeqCst);
+    let reference = child_service
+        .attach_session(
+            context(owner("scheduled-child"), 31),
+            Box::new(session.clone()),
+        )
+        .await
+        .unwrap();
+    let channel = child_service
+        .session_audio(context(owner("scheduled-child"), 32), reference)
+        .await
+        .unwrap();
+
+    let first = parent.revoke(Duration::from_millis(10)).await;
+    assert!(matches!(
+        first,
+        crate::attachment::MediaAttachmentRevocation::Unknown { .. }
+    ));
+    let stop_gate = tokio::time::timeout(Duration::from_secs(1), session.stop_started.acquire())
+        .await
+        .expect("parent drain reaches the real child session stop")
+        .expect("session stop gate remains open");
+    stop_gate.forget();
+    assert_eq!(
+        parent.phase(),
+        crate::attachment::MediaAttachmentPhase::Revoking
+    );
+    assert_eq!(
+        child.phase(),
+        crate::attachment::MediaAttachmentPhase::Revoking
+    );
+    assert_eq!(host.attachments().len(), 2);
+    assert_eq!(
+        child_service
+            .execute(
+                context(owner("scheduled-child"), 33),
+                MediaOperation::Status { target: None },
+            )
+            .await
+            .unwrap_err()
+            .kind,
+        MediaErrorKind::Cancelled
+    );
+
+    session.stop_release.add_permits(1);
+    assert_eq!(
+        parent.revoke(Duration::from_secs(1)).await,
+        crate::attachment::MediaAttachmentRevocation::Confirmed
+    );
+    assert_eq!(
+        parent.phase(),
+        crate::attachment::MediaAttachmentPhase::Revoked
+    );
+    assert_eq!(
+        child.phase(),
+        crate::attachment::MediaAttachmentPhase::Revoked
+    );
+    assert!(host.attachments().is_empty());
+    assert_eq!(
+        channel.read().await.unwrap_err().kind,
+        MediaErrorKind::Cancelled
+    );
+    assert_eq!(session.stop_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn unknown_child_session_keeps_parent_attachment_fenced_and_retained() {
+    let runtime = service(FakeAudio::new(), false, None);
+    let host = crate::attachment::MediaAttachmentHost::new();
+    let parent = host.attach(runtime).unwrap();
+    let child = parent.fork_child().unwrap();
+    let child_service = child.service();
+    let session = FakeSession::new(MediaSessionRef(MediaSessionId::from(
+        "scheduled-child-unknown-session",
+    )));
+    session.nonterminal_stop.store(true, Ordering::SeqCst);
+    let reference = child_service
+        .attach_session(
+            context(owner("scheduled-child-unknown"), 34),
+            Box::new(session.clone()),
+        )
+        .await
+        .unwrap();
+    let channel = child_service
+        .session_audio(context(owner("scheduled-child-unknown"), 35), reference)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        parent.revoke(Duration::from_secs(1)).await,
+        crate::attachment::MediaAttachmentRevocation::Unknown { .. }
+    ));
+    assert_eq!(
+        parent.phase(),
+        crate::attachment::MediaAttachmentPhase::Unknown
+    );
+    assert_eq!(
+        child.phase(),
+        crate::attachment::MediaAttachmentPhase::Unknown
+    );
+    assert_eq!(host.attachments().len(), 2);
+    assert_eq!(session.stop_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        channel.read().await.unwrap_err().kind,
+        MediaErrorKind::Cancelled
+    );
+
+    // Unknown is a retained fence: a later revoke observation does not retry
+    // an unconfirmed native session stop or claim successful cleanup.
+    assert!(matches!(
+        parent.revoke(Duration::from_secs(1)).await,
+        crate::attachment::MediaAttachmentRevocation::Unknown { .. }
+    ));
+    assert_eq!(session.stop_count.load(Ordering::SeqCst), 1);
+    assert_eq!(host.attachments().len(), 2);
+}
+
+#[tokio::test]
 async fn replayed_start_preserves_the_live_idempotent_lease_after_history_eviction() {
     let connector = Arc::new(IdempotentConnector::default());
     let runtime = service(FakeAudio::new(), false, Some(connector.clone()));
@@ -1652,7 +2623,7 @@ async fn replayed_start_preserves_the_live_idempotent_lease_after_history_evicti
 
     let replay = runtime
         .execute(
-            start_context.clone(),
+            MediaOperationContext::new(start_context.identity.clone(), session_owner.clone()),
             MediaOperation::SessionStart {
                 request: request.clone(),
             },
@@ -1667,7 +2638,7 @@ async fn replayed_start_preserves_the_live_idempotent_lease_after_history_evicti
     // The start identity is still valid as the context of an unrelated call.
     let status = runtime
         .execute(
-            start_context.clone(),
+            MediaOperationContext::new(start_context.identity.clone(), session_owner.clone()),
             MediaOperation::Status {
                 target: Some(MediaResourceRef::Session(session.clone())),
             },
@@ -1714,8 +2685,8 @@ async fn replayed_start_preserves_the_live_idempotent_lease_after_history_evicti
         .operation_status
         .contains_key(&start_context.identity));
 
-    let mut replay_context = start_context.clone();
-    replay_context.owner = owner("other-owner");
+    let replay_context =
+        MediaOperationContext::new(start_context.identity.clone(), owner("other-owner"));
     let replay = runtime
         .execute(replay_context, MediaOperation::SessionStart { request })
         .await
@@ -1741,7 +2712,7 @@ async fn start_rejects_an_attached_sessions_origin_identity_before_open() {
 
     let replay = runtime
         .execute(
-            attach_context,
+            fresh_context_same_identity(&attach_context),
             MediaOperation::SessionStart {
                 request: session_request(MediaSessionMode::Audio, MediaSessionIntent::Conversation),
             },
@@ -1777,7 +2748,7 @@ async fn stopped_session_releases_its_origin_identity_for_a_later_start() {
     // Reusing the identity for Stop is valid, and removes the live session.
     runtime
         .execute(
-            start_context.clone(),
+            MediaOperationContext::new(start_context.identity.clone(), start_context.owner.clone()),
             MediaOperation::Stop {
                 target: MediaResourceRef::Session(session.clone()),
             },
@@ -1786,7 +2757,10 @@ async fn stopped_session_releases_its_origin_identity_for_a_later_start() {
         .unwrap();
     assert_eq!(original.stop_count.load(Ordering::SeqCst), 1);
     let restarted = runtime
-        .execute(start_context, MediaOperation::SessionStart { request })
+        .execute(
+            MediaOperationContext::new(start_context.identity.clone(), start_context.owner.clone()),
+            MediaOperation::SessionStart { request },
+        )
         .await
         .unwrap();
     assert!(
@@ -1821,7 +2795,7 @@ async fn overlap_attach_first_blocks_same_identity_start_until_cleanup() {
     let duplicate = tokio::time::timeout(
         Duration::from_secs(1),
         runtime.execute(
-            attach_context.clone(),
+            fresh_context_same_identity(&attach_context),
             MediaOperation::SessionStart {
                 request: request.clone(),
             },
@@ -1835,7 +2809,10 @@ async fn overlap_attach_first_blocks_same_identity_start_until_cleanup() {
     let second_incoming =
         FakeSession::new(MediaSessionRef(MediaSessionId::from("attach-duplicate")));
     let duplicate_attach = runtime
-        .attach_session(attach_context.clone(), Box::new(second_incoming.clone()))
+        .attach_session(
+            fresh_context_same_identity(&attach_context),
+            Box::new(second_incoming.clone()),
+        )
         .await
         .unwrap_err();
     assert_eq!(duplicate_attach.kind, MediaErrorKind::InvalidRequest);
@@ -1863,7 +2840,7 @@ async fn overlap_attach_first_blocks_same_identity_start_until_cleanup() {
     stop_gate.forget();
     let duplicate = runtime
         .execute(
-            attach_context.clone(),
+            fresh_context_same_identity(&attach_context),
             MediaOperation::SessionStart {
                 request: request.clone(),
             },
@@ -1886,7 +2863,10 @@ async fn overlap_attach_first_blocks_same_identity_start_until_cleanup() {
     .expect("attach reservation is released after cleanup");
     assert!(matches!(
         runtime
-            .execute(attach_context, MediaOperation::SessionStart { request })
+            .execute(
+                fresh_context_same_identity(&attach_context),
+                MediaOperation::SessionStart { request }
+            )
             .await
             .unwrap(),
         MediaResult::SessionStarted { .. }
@@ -1914,7 +2894,10 @@ async fn attach_rejects_the_origin_identity_of_an_existing_session() {
         "registered-duplicate",
     )));
     let error = runtime
-        .attach_session(attach_context, Box::new(duplicate.clone()))
+        .attach_session(
+            fresh_context_same_identity(&attach_context),
+            Box::new(duplicate.clone()),
+        )
         .await
         .unwrap_err();
     assert_eq!(error.kind, MediaErrorKind::InvalidRequest);
@@ -1953,7 +2936,10 @@ async fn overlap_start_first_blocks_same_identity_attach_before_reservation() {
     let incoming = FakeSession::new(MediaSessionRef(MediaSessionId::from("duplicate-incoming")));
     let duplicate = tokio::time::timeout(
         Duration::from_secs(1),
-        runtime.attach_session(start_context.clone(), Box::new(incoming.clone())),
+        runtime.attach_session(
+            fresh_context_same_identity(&start_context),
+            Box::new(incoming.clone()),
+        ),
     )
     .await
     .expect("duplicate attach is rejected before querying the connector")
@@ -1974,7 +2960,10 @@ async fn overlap_start_first_blocks_same_identity_attach_before_reservation() {
     assert!(matches!(
         runtime
             .execute(
-                start_context,
+                MediaOperationContext::new(
+                    start_context.identity.clone(),
+                    start_context.owner.clone()
+                ),
                 MediaOperation::SessionStart {
                     request: session_request(
                         MediaSessionMode::Audio,
@@ -2179,7 +3168,7 @@ async fn cancelled_started_session_validation_keeps_slot_until_cleanup_finishes(
     assert_eq!(runtime.inner.lock().unwrap().session_reservations.len(), 1);
     let duplicate_start = runtime
         .execute(
-            start_context.clone(),
+            fresh_context_same_identity(&start_context),
             MediaOperation::SessionStart {
                 request: session_request(MediaSessionMode::Audio, MediaSessionIntent::Conversation),
             },
@@ -2191,7 +3180,10 @@ async fn cancelled_started_session_validation_keeps_slot_until_cleanup_finishes(
     let duplicate_session =
         FakeSession::new(MediaSessionRef(MediaSessionId::from("cleanup-duplicate")));
     let duplicate_attach = runtime
-        .attach_session(start_context, Box::new(duplicate_session.clone()))
+        .attach_session(
+            fresh_context_same_identity(&start_context),
+            Box::new(duplicate_session.clone()),
+        )
         .await
         .unwrap_err();
     assert_eq!(duplicate_attach.kind, MediaErrorKind::InvalidRequest);
@@ -2223,6 +3215,7 @@ async fn cancel_waits_for_operation_exit_and_deadlines_cancel_audio_work() {
     let runtime = service(audio.clone(), false, Some(connector));
     let operation_context = context(owner("alpha"), 30);
     let identity = operation_context.identity.clone();
+    let incarnation = operation_context.operation_incarnation();
     let task_runtime = runtime.clone();
     let task = tokio::spawn(async move {
         task_runtime
@@ -2242,13 +3235,16 @@ async fn cancel_waits_for_operation_exit_and_deadlines_cancel_audio_work() {
         .execute(
             context(owner("alpha"), 31),
             MediaOperation::Stop {
-                target: MediaResourceRef::Operation(identity.clone()),
+                target: MediaResourceRef::Operation {
+                    identity: identity.clone(),
+                    incarnation,
+                },
             },
         )
         .await
         .unwrap();
     assert!(
-        matches!(stopped, MediaResult::Stopped { resource: MediaResourceRef::Operation(id) } if id == identity)
+        matches!(stopped, MediaResult::Stopped { resource: MediaResourceRef::Operation { identity: id, incarnation: stopped_incarnation } } if id == identity && stopped_incarnation == incarnation)
     );
     let cancelled = task.await.unwrap().unwrap_err();
     assert_eq!(cancelled.kind, MediaErrorKind::Cancelled);
@@ -2827,4 +3823,243 @@ async fn support_revisions_are_stable_per_owner_when_routes_differ() {
     assert!(!beta_caps.supports(MediaOperationKind::Synthesize));
     assert!(catalog.supports(MediaOperationKind::Synthesize));
     assert_eq!(first_alpha.support_revision, second_alpha.support_revision);
+}
+
+struct DelayedFirstCancelAudio {
+    inner: Arc<dyn AudioService>,
+    calls: AtomicUsize,
+    first_started: Notify,
+    first_release: Notify,
+}
+
+#[async_trait]
+impl AudioService for DelayedFirstCancelAudio {
+    fn capabilities(&self) -> AudioCapabilitySnapshot {
+        self.inner.capabilities()
+    }
+    fn capabilities_for(&self, owner: &MediaOwner) -> AudioCapabilitySnapshot {
+        self.inner.capabilities_for(owner)
+    }
+    async fn execute(
+        &self,
+        context: MediaOperationContext,
+        operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        self.inner.execute(context, operation).await
+    }
+    async fn cancel(&self, context: MediaOperationContext) -> Result<(), AudioError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first_started.notify_one();
+            self.first_release.notified().await;
+        }
+        self.inner.cancel(context).await
+    }
+}
+
+#[tokio::test]
+async fn delayed_cancel_fences_identity_until_receipt_then_same_id_reuse_is_safe() {
+    let audio = FakeAudio::new();
+    audio.pending_listen.store(true, Ordering::SeqCst);
+    let delayed = Arc::new(DelayedFirstCancelAudio {
+        inner: audio.clone(),
+        calls: AtomicUsize::new(0),
+        first_started: Notify::new(),
+        first_release: Notify::new(),
+    });
+    let runtime = service(delayed.clone(), false, None);
+    let host = crate::attachment::MediaAttachmentHost::new();
+    let attachment_a = host.attach(runtime.clone()).unwrap();
+    let attachment_b = host.attach(runtime).unwrap();
+    let context_a = context(owner("shared"), 8_001);
+    let mut context_b = context(owner("shared"), 8_001);
+    context_b.identity = context_a.identity.clone();
+    let service_a = attachment_a.service();
+    let service_b = attachment_b.service();
+
+    let first_service = service_a.clone();
+    let first_context = context_a.clone();
+    let first = tokio::spawn(async move {
+        first_service
+            .execute(
+                first_context,
+                MediaOperation::Transcribe {
+                    input: TranscriptionInput::LiveSource(microphone()),
+                    language: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.listen_started.notified())
+        .await
+        .unwrap();
+    let cancel = tokio::spawn(async move { service_a.cancel(context_a).await });
+    tokio::time::timeout(Duration::from_secs(1), delayed.first_started.notified())
+        .await
+        .unwrap();
+
+    let duplicate = tokio::time::timeout(
+        Duration::from_secs(1),
+        service_b.execute(
+            context_b.clone(),
+            MediaOperation::Transcribe {
+                input: TranscriptionInput::LiveSource(microphone()),
+                language: None,
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(duplicate.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 0);
+
+    delayed.first_release.notify_one();
+    cancel.await.unwrap().unwrap();
+    let first_result = tokio::time::timeout(Duration::from_secs(1), first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_result.unwrap_err().kind, MediaErrorKind::Cancelled);
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 1);
+
+    let second_service = service_b.clone();
+    let second_context = context_b.clone();
+    let second = tokio::spawn(async move {
+        second_service
+            .execute(
+                second_context,
+                MediaOperation::Transcribe {
+                    input: TranscriptionInput::LiveSource(microphone()),
+                    language: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.listen_started.notified())
+        .await
+        .unwrap();
+    assert!(!second.is_finished());
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 1);
+
+    service_b.cancel(context_b.clone()).await.unwrap();
+    let second_result = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(second_result.kind, MediaErrorKind::Cancelled);
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unpolled_cancel_cannot_retarget_a_new_same_owner_operation() {
+    let audio = FakeAudio::new();
+    let runtime = service(audio.clone(), false, None);
+    let original_context = context(owner("same-owner"), 8_003);
+    let completed = runtime
+        .execute(
+            original_context.clone(),
+            MediaOperation::Transcribe {
+                input: TranscriptionInput::LiveSource(microphone()),
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(completed, MediaResult::Transcript { .. }));
+
+    let stale_cancel = runtime.cancel(original_context.clone());
+    let mut reused_context = context(owner("same-owner"), 8_003);
+    reused_context.identity = original_context.identity.clone();
+    audio.pending_listen.store(true, Ordering::SeqCst);
+    let task_runtime = runtime.clone();
+    let task_context = reused_context.clone();
+    let second = tokio::spawn(async move {
+        task_runtime
+            .execute(
+                task_context,
+                MediaOperation::Transcribe {
+                    input: TranscriptionInput::LiveSource(microphone()),
+                    language: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.listen_started.notified())
+        .await
+        .unwrap();
+    stale_cancel.await.unwrap();
+    assert!(!second.is_finished());
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 0);
+
+    runtime.cancel(reused_context).await.unwrap();
+    let cancelled = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(cancelled.kind, MediaErrorKind::Cancelled);
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn unpolled_stop_reference_cannot_retarget_a_reused_operation_id() {
+    let audio = FakeAudio::new();
+    let runtime = service(audio.clone(), false, None);
+    let original_context = context(owner("same-owner"), 8_004);
+    let operation_reference = MediaResourceRef::Operation {
+        identity: original_context.identity.clone(),
+        incarnation: original_context.operation_incarnation(),
+    };
+    let completed = runtime
+        .execute(
+            original_context.clone(),
+            MediaOperation::Transcribe {
+                input: TranscriptionInput::LiveSource(microphone()),
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(completed, MediaResult::Transcript { .. }));
+
+    let old_stop = runtime.execute(
+        context(owner("same-owner"), 8_005),
+        MediaOperation::Stop {
+            target: operation_reference,
+        },
+    );
+    let mut reused_context = context(owner("same-owner"), 8_004);
+    reused_context.identity = original_context.identity.clone();
+    audio.pending_listen.store(true, Ordering::SeqCst);
+    let task_runtime = runtime.clone();
+    let task_context = reused_context.clone();
+    let second = tokio::spawn(async move {
+        task_runtime
+            .execute(
+                task_context,
+                MediaOperation::Transcribe {
+                    input: TranscriptionInput::LiveSource(microphone()),
+                    language: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), audio.listen_started.notified())
+        .await
+        .unwrap();
+
+    let stop_error = old_stop.await.unwrap_err();
+    assert_eq!(stop_error.kind, MediaErrorKind::NotFound);
+    assert!(!second.is_finished());
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 0);
+
+    runtime.cancel(reused_context).await.unwrap();
+    let cancelled = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(cancelled.kind, MediaErrorKind::Cancelled);
+    assert_eq!(audio.cancellations.load(Ordering::SeqCst), 1);
 }

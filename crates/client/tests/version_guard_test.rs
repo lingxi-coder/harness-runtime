@@ -876,6 +876,11 @@ fn current_contract_index() -> ContractIndex {
     put("AudioOwnerDto::Ui.instance_id", "String");
     put("AudioOwnerDto::System", "system");
     put("AudioOwnerDto::System.instance_id", "String");
+    put("AudioOwnerDto::Attached", "attached");
+    put("AudioOwnerDto::Attached.attachment_host_id", "String");
+    put("AudioOwnerDto::Attached.attachment_generation", "u64");
+    put("AudioOwnerDto::Attached.logical_kind", "MediaOwnerKindDto");
+    put("AudioOwnerDto::Attached.logical_owner_id", "String");
     put("AudioInitiatorDto.agent_id", "Option<String>");
     put("AudioInitiatorDto.tool_use_id", "Option<String>");
     put("AudioInitiatorDto.request_id", "Option<String>");
@@ -1103,6 +1108,11 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::ListModels", "list_models");
     put(
+        "ClientCommand::RefreshProviderCatalog",
+        "refresh_provider_catalog",
+    );
+    put("ClientCommand::RefreshProviderCatalog.trigger", "String");
+    put(
         "ClientCommand::GetConversationControls",
         "get_conversation_controls",
     );
@@ -1308,10 +1318,25 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::GetAudioSessionContext",
         "get_audio_session_context",
     );
+    put("ClientCommand::GetAudioSessionContext.request_id", "String");
     put("ClientEvent::AudioSessionContext", "audio_session_context");
-    put("ClientEvent::AudioSessionContext.session_id", "String");
-    put("ClientEvent::AudioSessionContext.profile_id", "String");
-    put("ClientEvent::AudioSessionContext.account_scope", "String");
+    put("ClientEvent::AudioSessionContext.request_id", "String");
+    put(
+        "ClientEvent::AudioSessionContext.session_id",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::AudioSessionContext.profile_id",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::AudioSessionContext.account_scope",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::AudioSessionContext.media_owner",
+        "Option<MediaOwnerDto>",
+    );
     put("ClientCommand::StartRealtimeAudio", "start_realtime_audio");
     put("ClientCommand::StartRealtimeAudio.request_json", "String");
     put("ClientCommand::RealtimeAudioInput", "realtime_audio_input");
@@ -1399,6 +1424,14 @@ fn current_contract_index() -> ContractIndex {
     put("AudioOperationResultDto::OwnerEnded", "owner_ended");
     put("AudioOperationResultDto::Failed", "failed");
     put("AudioOperationResultDto::Failed.error", "AudioErrorDto");
+    put(
+        "AudioOperationResultDto::FailedWithoutResource",
+        "failed_without_resource",
+    );
+    put(
+        "AudioOperationResultDto::FailedWithoutResource.error",
+        "AudioErrorDto",
+    );
 
     put("AudioOperationKindDto::Capture", "capture");
     put("AudioOperationKindDto::Play", "play");
@@ -1818,6 +1851,10 @@ fn current_contract_index() -> ContractIndex {
     put("ModelDetailsDto.fusion_analyst_capable", "bool");
 
     put("ProviderModelCatalogEntryDto.provider_id", "String");
+    put(
+        "ProviderModelCatalogEntryDto.definition",
+        "Option<ProviderDirectoryDefinitionDto>",
+    );
     put("ProviderModelCatalogEntryDto.provider_label", "String");
     put(
         "ProviderModelCatalogEntryDto.models",
@@ -1828,6 +1865,15 @@ fn current_contract_index() -> ContractIndex {
         "ProviderModelCatalogEntryDto.connection_id",
         "Option<String>",
     );
+    put("ProviderDirectoryDefinitionDto.base_url", "String");
+    put("ProviderDirectoryDefinitionDto.protocol", "String");
+    put("ProviderDirectoryDefinitionDto.auth", "String");
+    put(
+        "ProviderDirectoryDefinitionDto.credential_env",
+        "Option<String>",
+    );
+    put("ProviderDirectoryDefinitionDto.default_model_id", "String");
+    put("ProviderDirectoryDefinitionDto.description", "String");
 
     put("PermissionModeOptionDto.mode", "String");
     put("PermissionModeOptionDto.available", "bool");
@@ -2095,6 +2141,14 @@ fn current_contract_index() -> ContractIndex {
     put("MediaOwnerDto::Ui.instance_id", "String");
     put("MediaOwnerDto::System", "system");
     put("MediaOwnerDto::System.instance_id", "String");
+    put("MediaOwnerDto::Attached", "attached");
+    put("MediaOwnerDto::Attached.attachment_host_id", "String");
+    put("MediaOwnerDto::Attached.attachment_generation", "u64");
+    put("MediaOwnerDto::Attached.logical_kind", "MediaOwnerKindDto");
+    put("MediaOwnerDto::Attached.logical_owner_id", "String");
+    put("MediaOwnerKindDto::Session", "session");
+    put("MediaOwnerKindDto::Ui", "ui");
+    put("MediaOwnerKindDto::System", "system");
     put("MediaInitiatorDto.agent_id", "Option<String>");
     put("MediaInitiatorDto.tool_use_id", "Option<String>");
     put("MediaInitiatorDto.request_id", "Option<String>");
@@ -2183,6 +2237,7 @@ fn current_contract_index() -> ContractIndex {
         "MediaResourceRefDto::Operation.operation_id",
         "MediaOperationIdDto",
     );
+    put("MediaResourceRefDto::Operation.incarnation", "String");
     put("MediaSourceDto.reference", "MediaSourceRefDto");
     put("MediaSourceDto.kind", "MediaSourceKindDto");
     put("MediaSourceDto.media_kind", "Option<MediaKindDto>");
@@ -2397,6 +2452,7 @@ fn current_contract_index() -> ContractIndex {
         "MediaServiceActionDto::Cancel.operation_id",
         "MediaOperationIdDto",
     );
+    put("MediaServiceActionDto::Cancel.incarnation", "String");
     put(
         "MediaServiceActionDto::UpdateAudioSettings",
         "update_audio_settings",
@@ -2437,6 +2493,7 @@ fn current_contract_index() -> ContractIndex {
         "MediaServiceResultDto::Operation.operation_id",
         "MediaOperationIdDto",
     );
+    put("MediaServiceResultDto::Operation.incarnation", "String");
     put("MediaServiceResultDto::Operation.result", "MediaResultDto");
     put("MediaServiceResultDto::Content", "content");
     put("MediaServiceResultDto::Content.content", "MediaContentDto");
@@ -2646,6 +2703,14 @@ fn current_contract_index() -> ContractIndex {
     put("MediaDeviceResultDto::Stopped", "stopped");
     put("MediaDeviceResultDto::Error", "error");
     put("MediaDeviceResultDto::Error.error", "MediaErrorDto");
+    put(
+        "MediaDeviceResultDto::OpenFailedWithoutResource",
+        "open_failed_without_resource",
+    );
+    put(
+        "MediaDeviceResultDto::OpenFailedWithoutResource.error",
+        "MediaErrorDto",
+    );
     put("MediaSessionDescriptionTypeDto::Offer", "offer");
     put("MediaSessionDescriptionTypeDto::Answer", "answer");
     put(
@@ -3090,7 +3155,8 @@ fn contract_index_covers_every_dto() {
     use client::protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, ModelContextBudgetDto, SessionAgentMessageRowDto, SessionAgentSummaryDto,
+        MemoryTierDto, ModelContextBudgetDto, ProviderDirectoryDefinitionDto,
+        ProviderModelCatalogEntryDto, SessionAgentMessageRowDto, SessionAgentSummaryDto,
         SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client::protocol::media::*;
@@ -3116,6 +3182,21 @@ fn contract_index_covers_every_dto() {
         standard_price_input_tokens: None,
         recommendation_input_tokens: None,
         recommendation_source: None,
+    };
+    let _provider_catalog_entry = ProviderModelCatalogEntryDto {
+        provider_id: String::new(),
+        definition: Some(ProviderDirectoryDefinitionDto {
+            base_url: String::new(),
+            protocol: String::new(),
+            auth: String::new(),
+            credential_env: None,
+            default_model_id: String::new(),
+            description: String::new(),
+        }),
+        provider_label: String::new(),
+        models: Vec::new(),
+        group: None,
+        connection_id: None,
     };
     let _ev: Vec<ClientEvent> = vec![
         ClientEvent::WorkspaceChanged {
@@ -3251,9 +3332,11 @@ fn contract_index_covers_every_dto() {
             event_json: String::new(),
         },
         ClientEvent::AudioSessionContext {
-            session_id: String::new(),
-            profile_id: String::new(),
-            account_scope: String::new(),
+            request_id: String::new(),
+            session_id: None,
+            profile_id: None,
+            account_scope: None,
+            media_owner: None,
         },
         ClientEvent::RealtimeAudioEvent {
             session_id: String::new(),
@@ -3593,7 +3676,9 @@ fn contract_index_covers_every_dto() {
             scope: WritableScopeDto::Project,
             name: String::new(),
         },
-        ClientCommand::GetAudioSessionContext,
+        ClientCommand::GetAudioSessionContext {
+            request_id: String::new(),
+        },
         ClientCommand::StartRealtimeAudio {
             request_json: String::new(),
         },
@@ -3709,6 +3794,9 @@ fn contract_index_covers_every_dto() {
             operation_json: String::new(),
         },
         ClientCommand::UpdateMediaSessionModes { modes: Vec::new() },
+        ClientCommand::RefreshProviderCatalog {
+            trigger: String::new(),
+        },
     ];
     // Every operation result and error variant must remain constructible.
     let _audio_results: Vec<AudioOperationResultDto> = vec![
@@ -3736,6 +3824,12 @@ fn contract_index_covers_every_dto() {
             },
         },
         AudioOperationResultDto::OwnerEnded,
+        AudioOperationResultDto::FailedWithoutResource {
+            error: AudioErrorDto {
+                kind: AudioErrorKindDto::Cancelled,
+                message: String::new(),
+            },
+        },
         AudioOperationResultDto::Failed {
             error: AudioErrorDto {
                 kind: AudioErrorKindDto::NativeFailure,
@@ -3770,6 +3864,12 @@ fn contract_index_covers_every_dto() {
         AudioOwnerDto::System {
             instance_id: String::new(),
         },
+        AudioOwnerDto::Attached {
+            attachment_host_id: "00000000-0000-4000-8000-000000000001".into(),
+            attachment_generation: 1,
+            logical_kind: MediaOwnerKindDto::Session,
+            logical_owner_id: "session".into(),
+        },
     ];
     let _audio_initiator = AudioInitiatorDto {
         agent_id: None,
@@ -3801,6 +3901,7 @@ fn contract_index_covers_every_dto() {
         generation: 1,
         service_epoch: 1,
     };
+    let media_operation_incarnation = "00000000-0000-4000-8000-000000000001".to_owned();
     let media_source_ref = MediaSourceRefDto {
         id: "source".into(),
     };
@@ -3810,6 +3911,17 @@ fn contract_index_covers_every_dto() {
     let media_owner = MediaOwnerDto::Session {
         session_id: "session".into(),
     };
+    let _attached_media_owner = MediaOwnerDto::Attached {
+        attachment_host_id: "00000000-0000-4000-8000-000000000001".into(),
+        attachment_generation: 1,
+        logical_kind: MediaOwnerKindDto::Ui,
+        logical_owner_id: "ui".into(),
+    };
+    let _media_owner_kinds = [
+        MediaOwnerKindDto::Session,
+        MediaOwnerKindDto::Ui,
+        MediaOwnerKindDto::System,
+    ];
     let media_metadata = MediaMetadataDto {
         kind: MediaKindDto::Audio,
         mime_type: "audio/wav".into(),
@@ -4103,6 +4215,7 @@ fn contract_index_covers_every_dto() {
         },
         MediaServiceActionDto::Cancel {
             operation_id: media_operation_id.clone(),
+            incarnation: media_operation_incarnation.clone(),
         },
     ];
     let _media_service_request = MediaServiceRequestDto {
@@ -4114,6 +4227,7 @@ fn contract_index_covers_every_dto() {
     let _media_service_results = [
         MediaServiceResultDto::Operation {
             operation_id: media_operation_id.clone(),
+            incarnation: media_operation_incarnation.clone(),
             result: MediaResultDto::Stopped {
                 resource: media_target.clone(),
             },
@@ -4362,6 +4476,9 @@ fn contract_index_covers_every_dto() {
         },
         MediaDeviceResultDto::Stopped,
         MediaDeviceResultDto::Error {
+            error: media_error.clone(),
+        },
+        MediaDeviceResultDto::OpenFailedWithoutResource {
             error: media_error.clone(),
         },
     ];

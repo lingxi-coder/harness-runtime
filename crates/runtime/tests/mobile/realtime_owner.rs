@@ -93,13 +93,14 @@ fn native_audio_uses_mobile_listener_owner_and_drains_permissions_before_release
         let expected_session = prepared.session_id.clone();
         let expected_profile = prepared.profile_name.as_ref().unwrap();
         engine
-            .submit(ClientCommand::GetAudioSessionContext)
+            .submit(ClientCommand::GetAudioSessionContext { request_id: "mobile-context-1".into() })
             .await
             .unwrap();
         assert!(listener.received.lock().await.iter().any(|event| {
             matches!(event, ClientEvent::AudioSessionContext {
-                session_id, profile_id, account_scope,
-            } if session_id == &expected_session
+                request_id, session_id: Some(session_id), profile_id: Some(profile_id), account_scope: Some(account_scope), media_owner: None,
+            } if request_id == "mobile-context-1"
+                && session_id == &expected_session
                 && profile_id == expected_profile
                 && account_scope == &format!("profile:{expected_profile}"))
         }));

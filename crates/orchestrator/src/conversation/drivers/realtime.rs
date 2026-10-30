@@ -22,6 +22,8 @@ pub struct RealtimeAgentContext {
     pub profile_name: Option<String>,
     /// Trusted profile/account namespace pinned for this realtime session.
     pub account_scope: Option<String>,
+    /// Host-issued engine attachment selected by media handoff admission.
+    pub attachment_id: Option<media_api::MediaAttachmentId>,
     /// Current Agent system instructions.
     pub instructions: String,
     /// Normalized text and tool history; connector imports it without a response.
@@ -57,6 +59,39 @@ pub struct RealtimeAgentSessionIo {
     pub image_input_supported: bool,
 }
 
+/// A host-created child attachment and its private provider-route lifecycle.
+/// Only trusted host assembly receives this value; media tools receive the
+/// child's scoped MediaService, not this attachment capability.
+pub struct ScheduledMediaChild {
+    /// Independent attachment minted by the current parent attachment.
+    pub attachment: media_runtime::MediaAttachmentHandle,
+    /// Host-specific binding and cleanup of this child's provider route.
+    pub route: std::sync::Arc<dyn ScheduledMediaChildRoute>,
+}
+
+/// Nonblocking check that a parent engine still owns its selected session and
+/// profile. A busy or closed parent returns false, leaving child media unavailable.
+pub type ScheduledMediaParentCheck = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Host-only provider route for a short-lived scheduled child attachment.
+/// Registration must validate both attachment lifecycles and the exact trusted
+/// parent/child session and profile context. Cleanup is valid only after the
+/// child MediaService drain has been confirmed.
+pub trait ScheduledMediaChildRoute: Send + Sync {
+    /// Bind the child's current session to an already authorized parent route.
+    fn bind_session(
+        &self,
+        parent_session_id: &str,
+        child_session_id: &str,
+        profile_name: &str,
+        account_scope: &str,
+        parent_is_current: ScheduledMediaParentCheck,
+    ) -> Result<(), String>;
+
+    /// Remove only this child's route after its media drain is confirmed.
+    fn release_after_media_drain(&self) -> Result<(), String>;
+}
+
 /// Host adapter that opens realtime IO for a trusted Conversation media session.
 ///
 /// Harness calls this only after the current tool result has been committed and
@@ -64,6 +99,16 @@ pub struct RealtimeAgentSessionIo {
 /// config and credentials from trusted host state, never the tool request.
 #[async_trait::async_trait]
 pub trait MediaConversationAttachment: Send + Sync {
+    /// Create an independent scheduled child and host-only route binding.
+    /// Implementations must fork from the supplied current parent handle.
+    /// Hosts without a scheduled route factory leave child cloud audio unavailable.
+    fn fork_scheduled_child(
+        &self,
+        _parent: &media_runtime::MediaAttachmentHandle,
+    ) -> Result<Option<ScheduledMediaChild>, String> {
+        Ok(None)
+    }
+
     /// Structural mode union used when the tool catalog is built. Current
     /// session/profile support is checked dynamically by `supports_mode`.
     fn supported_modes(&self) -> Vec<media_api::MediaSessionMode> {
@@ -646,6 +691,17 @@ impl ConversationOrchestrator {
         let profile = self.resolve_audio_profile(&session.model, session.model_profile.clone())?;
         Ok((session.session_id.as_uuid().to_string(), profile))
     }
+    /// Fail-closed, nonblocking snapshot for host-owned scheduled media routes.
+    /// This never waits behind a session transition or provider update.
+    pub fn try_current_audio_binding(&self) -> Result<(String, String), OrchestratorError> {
+        let session = self
+            .session
+            .try_lock()
+            .map_err(|_| failure("current audio binding is busy"))?;
+        let profile = self.resolve_audio_profile(&session.model, session.model_profile.clone())?;
+        Ok((session.session_id.as_uuid().to_string(), profile))
+    }
+
     fn resolve_audio_profile(
         &self,
         model: &str,
@@ -700,6 +756,7 @@ impl ConversationOrchestrator {
             session_id,
             profile_name: Some(profile_name),
             account_scope: Some(account_scope),
+            attachment_id: None,
             instructions: self.effective_system_prompt().await?,
             history: realtime_history(&history)?,
             tools,

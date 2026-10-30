@@ -26,7 +26,7 @@ pub struct ModelRuntime {
     credentials: Option<Arc<dyn CredentialProvider>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RouteEntry {
     profile: lingxi_llm_client::protocol::ProviderProfile,
     protocol: ProtocolFamily,
@@ -801,6 +801,13 @@ impl ModelRuntime {
                 profile
             })
             .collect()
+    }
+
+    pub(crate) fn same_service_profile(&self, other: &Self, profile: &str) -> bool {
+        self.routes
+            .get(profile)
+            .zip(other.routes.get(profile))
+            .is_some_and(|(bound, current)| bound == current)
     }
 
     #[must_use]

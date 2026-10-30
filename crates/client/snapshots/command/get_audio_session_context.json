@@ -1,3 +1,4 @@
 {
-  "type": "get_audio_session_context"
+  "type": "get_audio_session_context",
+  "request_id": "context-1"
 }

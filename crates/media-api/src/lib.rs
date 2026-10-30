@@ -10,8 +10,10 @@
 
 use async_trait::async_trait;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
+use uuid::Uuid;
 
 pub mod audio;
 pub mod camera;
@@ -51,6 +53,122 @@ impl MediaOperationId {
     }
 }
 
+/// Opaque incarnation for one admitted media operation.
+///
+/// This token is cloned with an operation context and is also carried by
+/// owner-visible operation resource references. Its parseable shape is not an
+/// authorization decision: services must match it with the trusted owner and
+/// current operation registry entry.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MediaOperationIncarnation(Uuid);
+
+impl MediaOperationIncarnation {
+    /// Mint a new runtime operation incarnation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Check whether two cloned opaque values name the same operation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn same_instance(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    /// Encode the opaque handle for a host-owned resource reference.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_string(&self) -> String {
+        self.0.to_string()
+    }
+
+    /// Parse a handle copied from a host-owned resource reference.
+    #[doc(hidden)]
+    pub fn from_string(value: &str) -> Option<Self> {
+        let value = Uuid::parse_str(value).ok()?;
+        (value.get_version() == Some(uuid::Version::Random)).then_some(Self(value))
+    }
+}
+
+/// Opaque host-issued identity for one engine's attachment to an app media host.
+///
+/// The identity is intentionally not serializable and has no public raw-value
+/// constructor. Hosts issue it and attach it to the trusted operation context;
+/// model-controlled request data must never contain or select one.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct MediaAttachmentId {
+    host_id: Uuid,
+    generation: u64,
+}
+
+impl MediaAttachmentId {
+    /// Stable identifier of the issuing host instance. A host may forward this
+    /// value through trusted native/provider route DTOs; it is not a token
+    /// constructor and is not part of any model-facing schema.
+    #[must_use]
+    pub fn host_id(&self) -> String {
+        self.host_id.to_string()
+    }
+
+    /// Monotonic generation within the issuing host. This is for diagnostics;
+    /// equality also includes an opaque per-host random identity.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl fmt::Debug for MediaAttachmentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MediaAttachmentId")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Capability held by a trusted host composition root to issue engine
+/// attachments. The ID itself cannot be reconstructed from a session ID or
+/// model parameter.
+pub struct MediaAttachmentIssuer {
+    host_id: Uuid,
+    next_generation: AtomicU64,
+}
+
+impl Default for MediaAttachmentIssuer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MediaAttachmentIssuer {
+    /// Start a process-local attachment authority for one host instance.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            host_id: Uuid::new_v4(),
+            next_generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Issue a distinct attachment generation. Exhaustion fails closed.
+    pub fn issue(&self) -> Option<MediaAttachmentId> {
+        let generation = self
+            .next_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .ok()?
+            .checked_add(1)?;
+        Some(MediaAttachmentId {
+            host_id: self.host_id,
+            generation,
+        })
+    }
+}
+
 /// Trusted owner of a long-lived device or remote media resource.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MediaOwner {
@@ -69,6 +187,43 @@ pub enum MediaOwner {
         /// Stable host service instance identifier.
         instance_id: String,
     },
+    /// Host-scoped owner. The wrapper preserves the logical owner while
+    /// making all resource and route equality attachment-specific.
+    Attachment {
+        /// Identity issued by the host composition root.
+        attachment_id: MediaAttachmentId,
+        /// Logical owner within this engine attachment.
+        owner: Box<MediaOwner>,
+    },
+}
+
+impl MediaOwner {
+    /// Put a logical owner in a host-issued attachment namespace.
+    #[must_use]
+    pub fn in_attachment(self, attachment_id: MediaAttachmentId) -> Self {
+        Self::Attachment {
+            attachment_id,
+            owner: Box::new(self),
+        }
+    }
+
+    /// Return this owner's attachment, if it is directly host-scoped.
+    #[must_use]
+    pub fn attachment_id(&self) -> Option<&MediaAttachmentId> {
+        match self {
+            Self::Attachment { attachment_id, .. } => Some(attachment_id),
+            _ => None,
+        }
+    }
+
+    /// Return the logical owner inside one host scope.
+    #[must_use]
+    pub fn logical_owner(&self) -> &MediaOwner {
+        match self {
+            Self::Attachment { owner, .. } => owner,
+            owner => owner,
+        }
+    }
 }
 
 /// Per-call attribution, separate from the stable resource owner.
@@ -83,7 +238,7 @@ pub struct MediaInitiator {
 }
 
 /// Trusted operation context minted by the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MediaOperationContext {
     /// Operation identity.
     pub identity: MediaOperationId,
@@ -95,7 +250,49 @@ pub struct MediaOperationContext {
     pub timeout_budget_ms: Option<u64>,
     /// Maximum media bytes that may be collected or returned by this call.
     pub max_payload_bytes: u64,
+    /// Opaque identity for this operation context.
+    #[doc(hidden)]
+    operation_handle: MediaOperationIncarnation,
+    /// Shared one-shot admission bit. Clones share this state.
+    #[doc(hidden)]
+    admission_claimed: Arc<AtomicBool>,
+    /// Set once the attachment has accepted this context for dispatch.
+    #[doc(hidden)]
+    attachment_admitted: Arc<AtomicBool>,
+    /// Marks an internal clone authorized for downstream calls.
+    #[doc(hidden)]
+    runtime_admitted: bool,
+    /// Host-owned witness for native work that can outlive this call.
+    #[doc(hidden)]
+    native_work_tracker: Option<Arc<dyn MediaNativeWorkTracker>>,
 }
+
+/// A host-owned witness for one native operation that may outlive its caller.
+/// Dropping without confirmation records an unknown outcome.
+pub trait MediaNativeWork: Send {
+    /// Confirm that the native work has no remaining resource or callback.
+    fn confirm(self: Box<Self>);
+}
+
+/// Attachment-owned factory for native work witnesses.
+pub trait MediaNativeWorkTracker: std::fmt::Debug + Send + Sync {
+    /// Register work before it is dispatched to a native executor.
+    fn begin(&self) -> Result<Box<dyn MediaNativeWork>, MediaError>;
+}
+
+impl PartialEq for MediaOperationContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.owner == other.owner
+            && self.initiator == other.initiator
+            && self.timeout_budget_ms == other.timeout_budget_ms
+            && self.max_payload_bytes == other.max_payload_bytes
+            && self.operation_handle == other.operation_handle
+            && self.runtime_admitted == other.runtime_admitted
+    }
+}
+
+impl Eq for MediaOperationContext {}
 
 impl MediaOperationContext {
     /// Create a context using host-issued identity and ownership.
@@ -107,6 +304,94 @@ impl MediaOperationContext {
             initiator: None,
             timeout_budget_ms: None,
             max_payload_bytes: DEFAULT_MAX_MEDIA_PAYLOAD_BYTES,
+            operation_handle: MediaOperationIncarnation::new(),
+            admission_claimed: Arc::new(AtomicBool::new(false)),
+            attachment_admitted: Arc::new(AtomicBool::new(false)),
+            runtime_admitted: false,
+            native_work_tracker: None,
+        }
+    }
+
+    /// Return the opaque incarnation associated with this context.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn operation_incarnation(&self) -> MediaOperationIncarnation {
+        self.operation_handle
+    }
+
+    /// Whether the runtime marked this context clone for downstream dispatch.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn runtime_admitted(&self) -> bool {
+        self.runtime_admitted
+    }
+
+    /// Claim this context once for a top-level media or direct audio execute.
+    #[doc(hidden)]
+    pub fn claim_operation_admission(&self) -> bool {
+        self.admission_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Mark attachment admission before invoking the underlying service.
+    #[doc(hidden)]
+    pub fn mark_attachment_admitted(&self) {
+        self.attachment_admitted.store(true, Ordering::Release);
+    }
+
+    /// Whether this exact context crossed attachment admission.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn attachment_admitted(&self) -> bool {
+        self.attachment_admitted.load(Ordering::Acquire)
+    }
+
+    /// Bind this context clone to an already-issued operation handle.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_operation_incarnation(
+        mut self,
+        operation_incarnation: MediaOperationIncarnation,
+    ) -> Self {
+        self.operation_handle = operation_incarnation;
+        self.runtime_admitted = true;
+        self
+    }
+
+    /// Reconstruct a trusted cancellation context using an issued handle.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_operation_handle(mut self, operation_handle: MediaOperationIncarnation) -> Self {
+        self.operation_handle = operation_handle;
+        self.admission_claimed.store(true, Ordering::Release);
+        self
+    }
+
+    /// Host-issued attachment carried by this operation's owner, when scoped.
+    #[must_use]
+    pub fn attachment_id(&self) -> Option<&MediaAttachmentId> {
+        self.owner.attachment_id()
+    }
+
+    /// Install the host-issued native work tracker on a scoped operation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_native_work_tracker(mut self, tracker: Arc<dyn MediaNativeWorkTracker>) -> Self {
+        self.native_work_tracker = Some(tracker);
+        self
+    }
+
+    /// Register native work before dispatch. Scoped work must carry a tracker.
+    #[doc(hidden)]
+    pub fn begin_native_work(&self) -> Result<Option<Box<dyn MediaNativeWork>>, MediaError> {
+        match &self.native_work_tracker {
+            Some(tracker) => tracker.begin().map(Some),
+            None if self.attachment_id().is_none() => Ok(None),
+            None => Err(MediaError::new(
+                MediaErrorKind::Unavailable,
+                "scoped native media work has no lifecycle tracker",
+            )),
         }
     }
 
@@ -357,7 +642,13 @@ impl MediaCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MediaResourceRef {
     /// In-flight operation that may be observed or stopped.
-    Operation(MediaOperationId),
+    Operation {
+        /// Public operation ID.
+        identity: MediaOperationId,
+        /// Opaque handle for this exact operation incarnation. Services validate
+        /// it against the active owner and operation registry before stopping.
+        incarnation: MediaOperationIncarnation,
+    },
     /// Discovered source.
     Source(MediaSourceRef),
     /// Recording in progress or completed.
@@ -1315,6 +1606,14 @@ pub trait MediaService: Send + Sync {
     /// Current support and transient readiness. Must not request permission.
     fn capabilities(&self) -> MediaCapabilities;
 
+    /// Host-issued identity for services scoped to one engine attachment.
+    ///
+    /// Unscoped services return `None`. The value is trusted host metadata,
+    /// not model- or tool-selected routing data.
+    fn attachment_id(&self) -> Option<MediaAttachmentId> {
+        None
+    }
+
     /// Owner-specific capability projection, including trusted routing.
     fn capabilities_for(&self, _owner: &MediaOwner) -> MediaCapabilities {
         self.capabilities()
@@ -1366,8 +1665,11 @@ pub trait MediaService: Send + Sync {
         media: MediaRef,
     ) -> Result<MediaContent, MediaError>;
 
-    /// Cancel only the matching in-flight operation.
-    async fn cancel(&self, identity: MediaOperationId) -> Result<(), MediaError>;
+    /// Cancel only the matching in-flight operation owned by this context.
+    ///
+    /// Implementations must verify `context.owner` against the active
+    /// operation before forwarding cancellation to a lower-level service.
+    async fn cancel(&self, context: MediaOperationContext) -> Result<(), MediaError>;
 }
 
 /// Host-provided store for owner-scoped encoded media bytes.
@@ -1769,5 +2071,29 @@ mod tests {
         let identity: audio::AudioOperationId = MediaOperationId::new(1, 2);
         let context = audio::AudioOperationContext::new(identity, owner);
         assert_eq!(context.max_payload_bytes, DEFAULT_MAX_MEDIA_PAYLOAD_BYTES);
+    }
+
+    #[test]
+    fn host_attachments_distinguish_identical_logical_owners() {
+        let issuer = MediaAttachmentIssuer::new();
+        let first = issuer.issue().unwrap();
+        let second = issuer.issue().unwrap();
+        let owner = MediaOwner::Session {
+            session_id: "same-session".into(),
+        };
+        let first_owner = owner.clone().in_attachment(first.clone());
+        let second_owner = owner.in_attachment(second.clone());
+
+        assert_ne!(first, second);
+        assert_ne!(first_owner, second_owner);
+        assert_eq!(first_owner.attachment_id(), Some(&first));
+        assert_eq!(
+            first_owner.logical_owner(),
+            &MediaOwner::Session {
+                session_id: "same-session".into(),
+            }
+        );
+        assert_eq!(first.generation(), 1);
+        assert_eq!(second.generation(), 2);
     }
 }

@@ -156,17 +156,27 @@ pub(super) fn mobile_cron_session_gate(cwd: &str, id: &str) -> Arc<Mutex<()>> {
 /// persistence in an owned task, while cancellation drops the actual execution
 /// before marking that same occurrence terminal.
 pub(super) fn mobile_automation_runtime() -> &'static tokio::runtime::Runtime {
-    // Foreign engine objects own disposable runtimes. Cancellation persistence
-    // must survive their destruction, including Android's withEngine finally.
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
+    try_mobile_automation_runtime().unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Process-lifetime executor for teardown/recovery tasks that must survive an
+/// engine runtime's destruction. The construction error is cached so hosts can
+/// refuse to create an attachment before exposing an engine that could not be
+/// torn down safely.
+pub(super) fn try_mobile_automation_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    match RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("mobile-cron")
             .enable_all()
             .build()
-            .expect("build mobile scheduled execution runtime")
-    })
+            .map_err(|error| format!("build mobile scheduled execution runtime: {error}"))
+    }) {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => Err(error.clone()),
+    }
 }
 
 pub(super) async fn supervise_mobile_automation<F>(
@@ -290,6 +300,103 @@ impl<T: Send + Sync + 'static> Drop for MobileCronBorrow<T> {
 pub(super) struct MobileCronTurnCleanup {
     pub(super) readers: Vec<MobileCronBorrow<MobileEngineHandle>>,
     pub(super) deny_requests: Option<tokio::task::JoinHandle<()>>,
+    media_attachment: Option<ScheduledChildMedia>,
+}
+
+/// Keep host-side provider cleanup fenced behind the exact child's media drain.
+pub(super) struct ScheduledChildMedia {
+    state: Option<ScheduledChildMediaState>,
+}
+
+struct ScheduledChildMediaState {
+    attachment: media_runtime::MediaAttachmentHandle,
+    route: Option<Arc<dyn orchestrator::ScheduledMediaChildRoute>>,
+    fence: Option<media_runtime::MediaAttachmentCleanupFence>,
+}
+
+impl ScheduledChildMediaState {
+    async fn finish(&mut self, budget: std::time::Duration) -> Result<(), String> {
+        self.attachment.begin_revoke();
+        match self.attachment.drain_media(budget).await {
+            media_runtime::MediaAttachmentRevocation::Confirmed => {}
+            media_runtime::MediaAttachmentRevocation::Unknown { reason } => {
+                return Err(format!(
+                    "scheduled media child drain is unconfirmed: {reason}"
+                ));
+            }
+        }
+        if let Some(route) = &self.route {
+            route.release_after_media_drain()?;
+        }
+        if let Some(fence) = &mut self.fence {
+            fence.confirm().map_err(|error| error.to_string())?;
+        }
+        match self.attachment.revoke(budget).await {
+            media_runtime::MediaAttachmentRevocation::Confirmed => Ok(()),
+            media_runtime::MediaAttachmentRevocation::Unknown { reason } => Err(format!(
+                "scheduled media child cleanup is unconfirmed: {reason}"
+            )),
+        }
+    }
+}
+
+impl ScheduledChildMedia {
+    fn new(
+        attachment: media_runtime::MediaAttachmentHandle,
+        route: Option<Arc<dyn orchestrator::ScheduledMediaChildRoute>>,
+    ) -> Result<Self, String> {
+        let fence = if route.is_some() {
+            match attachment.retain_for_host_cleanup() {
+                Ok(fence) => Some(fence),
+                Err(error) => {
+                    attachment.begin_revoke();
+                    let retained = attachment.clone();
+                    if let Err(spawn_error) = super::spawn_mobile_lifecycle_task(async move {
+                        super::revoke_mobile_attachment(retained, None).await;
+                    }) {
+                        tracing::warn!(%spawn_error, "scheduled child cleanup could not start");
+                    }
+                    return Err(format!(
+                        "scheduled media cleanup fence unavailable: {error}"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            state: Some(ScheduledChildMediaState {
+                attachment,
+                route,
+                fence,
+            }),
+        })
+    }
+
+    async fn finish(&mut self) -> Result<(), String> {
+        if let Some(state) = &mut self.state {
+            state.finish(crate::media_handoff::CLEANUP_BUDGET).await?;
+        }
+        self.state = None;
+        Ok(())
+    }
+}
+
+impl Drop for ScheduledChildMedia {
+    fn drop(&mut self) {
+        if let Some(mut state) = self.state.take() {
+            state.attachment.begin_revoke();
+            if let Err(error) = super::spawn_mobile_lifecycle_task(async move {
+                // The shared drain has its own 30s deadline. A caller timeout
+                // must not discard a late receipt or release an Unknown route.
+                if let Err(error) = state.finish(std::time::Duration::from_secs(35)).await {
+                    tracing::warn!(%error, "scheduled child media cleanup remains unconfirmed");
+                }
+            }) {
+                tracing::warn!(%error, "scheduled child media cleanup could not start");
+            }
+        }
+    }
 }
 
 impl Drop for MobileCronTurnCleanup {
@@ -302,6 +409,9 @@ impl Drop for MobileCronTurnCleanup {
                 .scheduled_reload
                 .store(true, std::sync::atomic::Ordering::Release);
         }
+        // Dropping the child guard closes admission immediately and retains
+        // its exact route until a confirmed drain receipt is observed.
+        drop(self.media_attachment.take());
     }
 }
 
@@ -331,8 +441,114 @@ impl cron::CronJobFirer for MobileTurnFirer {
     }
 }
 
+fn scheduled_parent_context_check(
+    parent: &MobileCronBorrow<MobileEngineHandle>,
+    parent_id: media_api::MediaAttachmentId,
+    expected_session: String,
+    expected_profile: String,
+) -> orchestrator::ScheduledMediaParentCheck {
+    let parent_weak = Arc::downgrade(parent.0.as_ref().expect("live parent"));
+    Arc::new(move || {
+        let Some(parent) = parent_weak.upgrade() else {
+            return false;
+        };
+        // Dropping the final engine handle can block on its runtime. Keep that
+        // destruction on the host's existing blocking lifecycle executor.
+        let parent = MobileCronBorrow(Some(parent));
+        let active = parent
+            .inner
+            .media_attachment_handle
+            .as_ref()
+            .is_some_and(|attachment| {
+                attachment.id() == &parent_id && attachment.admission_is_open()
+            });
+        active
+            && parent.inner.orchestrator.try_current_audio_binding().ok()
+                == Some((expected_session.clone(), expected_profile.clone()))
+    })
+}
+
 impl MobileTurnFirer {
+    /// Build a transient scheduled runtime with its own host-issued media
+    /// attachment. The child cannot borrow the parent's owner namespace or
+    /// conversation adapter, and parent revocation cascades through the
+    /// attachment lifecycle.
+    pub(super) fn scheduled_runtime_config(
+        &self,
+    ) -> Result<(MobileConfig, Option<ScheduledChildMedia>), String> {
+        let mut config = self.cfg.clone();
+        config.media_attachment_confirmed_callback = None;
+        // Realtime IO is engine-specific; only the separate host route factory
+        // participates in scheduled child assembly.
+        config.media_conversation_attachment = None;
+        config.media_service = None;
+        let mut cleanup = None;
+        config.media_attachment_handle = match self.cfg.media_attachment_handle.as_ref() {
+            Some(parent) => {
+                let scheduled = self
+                    .cfg
+                    .media_conversation_attachment
+                    .as_ref()
+                    .map(|adapter| adapter.fork_scheduled_child(parent))
+                    .transpose()?;
+                let (child, route) = match scheduled.flatten() {
+                    Some(scheduled) => (scheduled.attachment, Some(scheduled.route)),
+                    None => (
+                        parent.fork_child().map_err(|error| {
+                            format!("scheduled media attachment unavailable: {error}")
+                        })?,
+                        None,
+                    ),
+                };
+                cleanup = Some(ScheduledChildMedia::new(child.clone(), route)?);
+                config.media_service = Some(child.service());
+                Some(child)
+            }
+            // A raw facade has no trusted issuer/lifecycle. Keep legacy and
+            // non-native scheduled runtimes fail-closed rather than sharing it.
+            None => None,
+        };
+        Ok((config, cleanup))
+    }
+
+    /// Find the live engine issuing this exact parent attachment. Do not guess
+    /// from a workspace, model name or a different engine's selected session.
+    fn parent_engine(&self) -> Option<MobileCronBorrow<MobileEngineHandle>> {
+        let parent_id = self.cfg.media_attachment_handle.as_ref()?.id();
+        let handles: Vec<_> = MOBILE_CRON_HANDLES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .map(|handle| MobileCronBorrow(Some(handle)))
+            .collect();
+        let mut matching = handles.into_iter().filter(|handle| {
+            handle
+                .inner
+                .media_attachment_handle
+                .as_ref()
+                .is_some_and(|attachment| attachment.id() == parent_id)
+        });
+        let parent = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        drop(matching);
+        Some(parent)
+    }
+
     pub(super) async fn fire_session(
+        &self,
+        prompt: Utf16JsonProjection,
+        automation: Option<&cron::CronAutomation>,
+        request: Option<&cron::AutomationRunRequest>,
+    ) -> Result<cron::AutomationRunResult, String> {
+        llm_runtime::catalog_task::scope(self.fire_session_scoped(prompt, automation, request))
+            .await
+    }
+
+    async fn fire_session_scoped(
         &self,
         prompt: Utf16JsonProjection,
         automation: Option<&cron::CronAutomation>,
@@ -393,6 +609,7 @@ impl MobileTurnFirer {
         let mut cleanup = MobileCronTurnCleanup {
             readers,
             deny_requests: None,
+            media_attachment: None,
         };
         let captured = Arc::new(Mutex::new(String::new()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(CapturingListener {
@@ -402,7 +619,8 @@ impl MobileTurnFirer {
         let sink: Arc<dyn PermissionRequestSink> = Arc::new(ImmediateDenyPermissionSink {
             sender: permission_tx,
         });
-        let mut config = self.cfg.clone();
+        let (mut config, child_media) = self.scheduled_runtime_config()?;
+        cleanup.media_attachment = child_media;
         // Session transcripts and the scheduler store are host-owned paths,
         // not model-supplied guest paths, even if their spelling overlaps a
         // guest root such as /tmp.
@@ -417,7 +635,7 @@ impl MobileTurnFirer {
         if let Some(automation) = automation {
             config.default_model = automation.model.clone();
         }
-        let rt = build_mobile_inner(config, self.platform.clone(), listener, sink, None)
+        let mut rt = build_mobile_inner(config, self.platform.clone(), listener, sink, None)
             .await
             .map_err(|e| {
                 if automation.is_some() {
@@ -426,6 +644,10 @@ impl MobileTurnFirer {
                     e.to_string()
                 }
             })?;
+        // The guard was installed before assembly to cover build failures and
+        // is the sole cleanup owner for this short-lived scheduled runtime.
+        debug_assert!(rt.media_attachment_confirmed_callback.is_none());
+        drop(rt.media_attachment_handle.take());
 
         let handle: Arc<dyn OrchestratorHandle> = rt.orchestrator.clone();
         if let Some(uuid) = target_uuid {
@@ -489,6 +711,78 @@ impl MobileTurnFirer {
             )
             .await?;
         }
+        if let Some(route) = cleanup
+            .media_attachment
+            .as_ref()
+            .and_then(|child| child.state.as_ref())
+            .and_then(|child| child.route.as_ref())
+        {
+            // Use the actual parent engine's current binding and the restored
+            // child's current session/profile. A missing or mismatched context
+            // leaves media unavailable without blocking a text-only task.
+            let parent = self.parent_engine();
+            let child_binding = if let Some(automation) = automation {
+                let reasoning = if automation.reasoning.is_null() {
+                    Some(lingxi_core::host::ReasoningSelection::Automatic)
+                } else {
+                    serde_json::from_value(automation.reasoning.clone()).ok()
+                };
+                match reasoning {
+                    Some(reasoning) => rt
+                        .orchestrator
+                        .scheduled_audio_binding(&automation.model, reasoning)
+                        .await
+                        .ok(),
+                    None => None,
+                }
+            } else {
+                rt.orchestrator.current_audio_binding().await.ok()
+            };
+            if let (Some(parent), Some((child_session, child_profile))) = (parent, child_binding) {
+                if let Ok((parent_session, parent_profile)) =
+                    parent.inner.orchestrator.current_audio_binding().await
+                {
+                    let same_context =
+                        child_session == session_id && parent_profile == child_profile;
+                    let same_snapshot = same_context
+                        && parent
+                            .inner
+                            .audio_services
+                            .profile_matches_current_of(&rt.audio_services, &child_profile);
+                    if same_context && !same_snapshot {
+                        tracing::warn!(
+                            profile = %child_profile,
+                            "scheduled media provider changed; rebuild or restart the parent engine before using cloud audio"
+                        );
+                    }
+                    if same_snapshot {
+                        let parent_id = self
+                            .cfg
+                            .media_attachment_handle
+                            .as_ref()
+                            .expect("child route requires parent attachment")
+                            .id()
+                            .clone();
+                        let parent_is_current = scheduled_parent_context_check(
+                            &parent,
+                            parent_id,
+                            parent_session.clone(),
+                            parent_profile.clone(),
+                        );
+                        let account_scope = format!("profile:{child_profile}");
+                        if let Err(error) = route.bind_session(
+                            &parent_session,
+                            &child_session,
+                            &child_profile,
+                            &account_scope,
+                            parent_is_current,
+                        ) {
+                            tracing::warn!(%error, "scheduled media provider binding unavailable");
+                        }
+                    }
+                }
+            }
+        }
         let gate = rt.permission_gate.clone();
         cleanup.deny_requests = Some(tokio::spawn(async move {
             while let Some(request) = permission_rx.recv().await {
@@ -535,14 +829,26 @@ impl MobileTurnFirer {
             }
         };
 
-        match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
+        let result = match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
             Ok(Ok(_outcome)) => Ok(cron::AutomationRunResult {
                 session_id,
                 summary: captured.lock().await.clone(),
             }),
             Ok(Err(e)) => Err(e.to_string()),
             Err(_) => Err("cron turn timed out".to_string()),
+        };
+        cleanup.revoke_media_attachment().await?;
+        result
+    }
+}
+
+impl MobileCronTurnCleanup {
+    async fn revoke_media_attachment(&mut self) -> Result<(), String> {
+        if let Some(child) = &mut self.media_attachment {
+            child.finish().await?;
         }
+        self.media_attachment = None;
+        Ok(())
     }
 }
 
@@ -615,6 +921,429 @@ pub(super) fn cron_scheduled_turn_outcome(
         orchestrator::conversation::TurnOutcome::MaxTurns => {
             Err("Scheduled run did not complete: maximum turns reached".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod media_attachment_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use media_api::{
+        MediaCapabilities, MediaError, MediaErrorKind, MediaOperation, MediaOperationContext,
+        MediaOperationId, MediaOwner, MediaResourceStatus, MediaResult, MediaService,
+    };
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct RecordingMediaService {
+        owners: StdMutex<Vec<MediaOwner>>,
+        fail_status: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl MediaService for RecordingMediaService {
+        fn capabilities(&self) -> MediaCapabilities {
+            MediaCapabilities {
+                service_epoch: 17,
+                support_revision: 1,
+                supported_operations: vec![media_api::MediaOperationKind::Status],
+                supported_media_kinds: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            context: MediaOperationContext,
+            operation: MediaOperation,
+        ) -> Result<MediaResult, MediaError> {
+            self.owners.lock().unwrap().push(context.owner);
+            match operation {
+                MediaOperation::Status { .. }
+                    if self.fail_status.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
+                    Err(MediaError::new(
+                        MediaErrorKind::Unavailable,
+                        "status unavailable",
+                    ))
+                }
+                MediaOperation::Status { .. } => Ok(MediaResult::Status {
+                    resources: Vec::<MediaResourceStatus>::new(),
+                }),
+                _ => Err(MediaError::new(
+                    MediaErrorKind::Unsupported,
+                    "recording fixture only supports status",
+                )),
+            }
+        }
+
+        async fn read_media(
+            &self,
+            _context: MediaOperationContext,
+            _media: media_api::MediaRef,
+        ) -> Result<media_api::MediaContent, MediaError> {
+            Err(MediaError::new(
+                MediaErrorKind::NotFound,
+                "recording fixture has no media",
+            ))
+        }
+
+        async fn cancel(&self, _context: MediaOperationContext) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+
+    struct TestScheduledRoute {
+        child: media_runtime::MediaAttachmentHandle,
+        released: Arc<std::sync::atomic::AtomicUsize>,
+        released_notify: Arc<tokio::sync::Notify>,
+    }
+
+    impl orchestrator::ScheduledMediaChildRoute for TestScheduledRoute {
+        fn bind_session(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: orchestrator::ScheduledMediaParentCheck,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn release_after_media_drain(&self) -> Result<(), String> {
+            if !self.child.media_drain_confirmed() {
+                return Err("media drain not confirmed".into());
+            }
+            self.released
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.released_notify.notify_one();
+            Ok(())
+        }
+    }
+
+    struct TestScheduledFactory {
+        released: Arc<std::sync::atomic::AtomicUsize>,
+        released_notify: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl orchestrator::MediaConversationAttachment for TestScheduledFactory {
+        fn fork_scheduled_child(
+            &self,
+            parent: &media_runtime::MediaAttachmentHandle,
+        ) -> Result<Option<orchestrator::ScheduledMediaChild>, String> {
+            let child = parent.fork_child().map_err(|error| error.to_string())?;
+            Ok(Some(orchestrator::ScheduledMediaChild {
+                attachment: child.clone(),
+                route: Arc::new(TestScheduledRoute {
+                    child,
+                    released: self.released.clone(),
+                    released_notify: self.released_notify.clone(),
+                }),
+            }))
+        }
+        async fn open(
+            &self,
+            _: orchestrator::MediaAgentHandoffRequest,
+            _: orchestrator::RealtimeAgentContext,
+            _: Arc<dyn media_api::MediaAudioChannel>,
+        ) -> Result<orchestrator::RealtimeAgentSessionIo, String> {
+            Err("scheduled tests do not open realtime".into())
+        }
+    }
+
+    #[test]
+    fn scheduled_parent_check_tracks_exact_live_engine_identity() {
+        use crate::mobile::test_support::{
+            new_engine_with_streaming, CollectingPermissionSink, FakeListener, HostFakePlatform,
+        };
+        use orchestrator::test_support_stream::MockStreamingApiClient;
+        let root = tempfile::tempdir().unwrap();
+        let host = media_runtime::MediaAttachmentHost::new();
+        let attachment = host
+            .attach(Arc::new(RecordingMediaService::default()))
+            .unwrap();
+        let mut config = crate::mobile::test_support::test_config(root.path());
+        config.media_service = Some(attachment.service());
+        config.media_attachment_handle = Some(attachment.clone());
+        let platform = Arc::new(HostFakePlatform::new(root.path().to_path_buf()));
+        let engine = new_engine_with_streaming(
+            config.clone(),
+            platform.clone(),
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            Some(Arc::new(MockStreamingApiClient::empty())),
+        )
+        .unwrap();
+        let firer = MobileTurnFirer {
+            cfg: config,
+            platform,
+        };
+        let parent = firer
+            .parent_engine()
+            .expect("find exact host-issued parent");
+        let (session, profile) = engine
+            .runtime()
+            .block_on(parent.inner.orchestrator.current_audio_binding())
+            .expect("parent has an authoritative binding");
+        let check = scheduled_parent_context_check(
+            &parent,
+            attachment.id().clone(),
+            session.clone(),
+            profile.clone(),
+        );
+        let wrong_session = scheduled_parent_context_check(
+            &parent,
+            attachment.id().clone(),
+            "another-session".into(),
+            profile.clone(),
+        );
+        let wrong_profile = scheduled_parent_context_check(
+            &parent,
+            attachment.id().clone(),
+            session,
+            "another-profile".into(),
+        );
+        assert!(check());
+        assert!(!wrong_session());
+        assert!(!wrong_profile());
+        attachment.begin_revoke();
+        assert!(!check());
+    }
+
+    #[tokio::test]
+    async fn scheduled_child_cleanup_waits_for_media_receipt_before_host_route() {
+        use media_runtime::{MediaAttachmentPhase, MediaAttachmentRevocation};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let host = media_runtime::MediaAttachmentHost::new();
+        let parent = host
+            .attach(Arc::new(RecordingMediaService::default()))
+            .unwrap();
+        let released = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let mut config = crate::mobile::test_support::test_config(root.path());
+        config.media_attachment_handle = Some(parent.clone());
+        config.media_conversation_attachment = Some(Arc::new(TestScheduledFactory {
+            released: released.clone(),
+            released_notify: notify,
+        }));
+        let firer = MobileTurnFirer {
+            cfg: config,
+            platform: Arc::new(crate::mobile::test_support::HostFakePlatform::new(
+                root.path().to_path_buf(),
+            )),
+        };
+        let (config, cleanup) = firer.scheduled_runtime_config().unwrap();
+        let child = config.media_attachment_handle.unwrap();
+        let mut cleanup = cleanup.unwrap();
+        assert!(cleanup.state.as_ref().unwrap().fence.is_some());
+        let permit = child.authorize_owner(&logical_owner()).unwrap();
+        assert!(cleanup
+            .state
+            .as_mut()
+            .unwrap()
+            .finish(std::time::Duration::from_millis(20))
+            .await
+            .is_err());
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        assert_eq!(child.phase(), MediaAttachmentPhase::Revoking);
+        assert_eq!(parent.phase(), MediaAttachmentPhase::Active);
+        drop(permit);
+        cleanup.finish().await.unwrap();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert_eq!(child.phase(), MediaAttachmentPhase::Revoked);
+        assert_eq!(
+            parent.revoke(std::time::Duration::from_secs(2)).await,
+            MediaAttachmentRevocation::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_child_unknown_drain_never_releases_host_route() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let host = media_runtime::MediaAttachmentHost::new();
+        let shared = Arc::new(RecordingMediaService::default());
+        shared.fail_status.store(true, Ordering::SeqCst);
+        let parent = host.attach(shared).unwrap();
+        let released = Arc::new(AtomicUsize::new(0));
+        let mut config = crate::mobile::test_support::test_config(root.path());
+        config.media_attachment_handle = Some(parent.clone());
+        config.media_conversation_attachment = Some(Arc::new(TestScheduledFactory {
+            released: released.clone(),
+            released_notify: Arc::new(tokio::sync::Notify::new()),
+        }));
+        let firer = MobileTurnFirer {
+            cfg: config,
+            platform: Arc::new(crate::mobile::test_support::HostFakePlatform::new(
+                root.path().to_path_buf(),
+            )),
+        };
+        let (config, cleanup) = firer.scheduled_runtime_config().unwrap();
+        let child = config.media_attachment_handle.unwrap();
+        let mut cleanup = cleanup.unwrap();
+        assert!(child
+            .service()
+            .execute(
+                MediaOperationContext::new(MediaOperationId::new(1, 17), logical_owner()),
+                MediaOperation::Status { target: None },
+            )
+            .await
+            .is_err());
+        assert!(cleanup.finish().await.is_err());
+        assert_eq!(child.phase(), media_runtime::MediaAttachmentPhase::Unknown);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        assert!(cleanup.state.as_ref().unwrap().fence.is_some());
+        drop(cleanup);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_scheduled_child_guard_releases_only_after_late_receipt() {
+        use media_runtime::MediaAttachmentPhase;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let host = media_runtime::MediaAttachmentHost::new();
+        let parent = host
+            .attach(Arc::new(RecordingMediaService::default()))
+            .unwrap();
+        let released = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let mut config = crate::mobile::test_support::test_config(root.path());
+        config.media_attachment_handle = Some(parent.clone());
+        config.media_conversation_attachment = Some(Arc::new(TestScheduledFactory {
+            released: released.clone(),
+            released_notify: notify.clone(),
+        }));
+        let firer = MobileTurnFirer {
+            cfg: config,
+            platform: Arc::new(crate::mobile::test_support::HostFakePlatform::new(
+                root.path().to_path_buf(),
+            )),
+        };
+        let (config, cleanup) = firer.scheduled_runtime_config().unwrap();
+        let child = config.media_attachment_handle.unwrap();
+        let permit = child.authorize_owner(&logical_owner()).unwrap();
+        drop(cleanup);
+        assert_eq!(child.phase(), MediaAttachmentPhase::Revoking);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        drop(permit);
+        tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+            .await
+            .unwrap();
+        // The route is released before confirming the fence; wait until both finish.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while child.phase() != MediaAttachmentPhase::Revoked {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert_eq!(parent.phase(), MediaAttachmentPhase::Active);
+    }
+
+    fn logical_owner() -> MediaOwner {
+        MediaOwner::Session {
+            session_id: "scheduled-session".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_runtime_uses_child_scope_and_is_fenced_by_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let platform = Arc::new(crate::mobile::test_support::HostFakePlatform::new(
+            root.path().to_path_buf(),
+        ));
+        let shared = Arc::new(RecordingMediaService::default());
+        let host = media_runtime::MediaAttachmentHost::new();
+        let parent = host.attach(shared.clone()).unwrap();
+        let mut parent_config = crate::mobile::test_support::test_config(root.path());
+        parent_config.media_service = Some(parent.service());
+        parent_config.media_attachment_handle = Some(parent.clone());
+        parent_config.media_attachment_confirmed_callback = Some(Arc::new(|| {}));
+
+        let firer = MobileTurnFirer {
+            cfg: parent_config,
+            platform: platform.clone(),
+        };
+        let (child_config, _child_cleanup) = firer.scheduled_runtime_config().unwrap();
+        let child = child_config
+            .media_attachment_handle
+            .as_ref()
+            .expect("scheduled runtime receives its own host-issued attachment")
+            .clone();
+        assert_ne!(parent.id(), child.id());
+        assert_eq!(
+            child_config
+                .media_service
+                .as_ref()
+                .and_then(|service| service.attachment_id()),
+            Some(child.id().clone())
+        );
+        assert!(child_config.media_conversation_attachment.is_none());
+        assert!(child_config.media_attachment_confirmed_callback.is_none());
+
+        let owner = logical_owner();
+        child_config
+            .media_service
+            .as_ref()
+            .unwrap()
+            .execute(
+                MediaOperationContext::new(MediaOperationId::new(1, 17), owner.clone()),
+                MediaOperation::Status { target: None },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *shared.owners.lock().unwrap(),
+            vec![owner.clone().in_attachment(child.id().clone())]
+        );
+
+        // Parent admission closes synchronously, before its async drain has
+        // necessarily scheduled the child drain.
+        parent.begin_revoke();
+        assert!(matches!(firer.scheduled_runtime_config(), Err(_)));
+        assert_eq!(
+            child_config
+                .media_service
+                .as_ref()
+                .unwrap()
+                .execute(
+                    MediaOperationContext::new(MediaOperationId::new(2, 17), owner),
+                    MediaOperation::Status { target: None },
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            MediaErrorKind::Cancelled
+        );
+        assert_eq!(
+            parent.revoke(std::time::Duration::from_secs(1)).await,
+            media_runtime::MediaAttachmentRevocation::Confirmed
+        );
+        assert_eq!(child.phase(), media_runtime::MediaAttachmentPhase::Revoked);
+    }
+
+    #[test]
+    fn scheduled_runtime_does_not_share_an_unscoped_media_facade() {
+        let root = tempfile::tempdir().unwrap();
+        let platform = Arc::new(crate::mobile::test_support::HostFakePlatform::new(
+            root.path().to_path_buf(),
+        ));
+        let shared = Arc::new(RecordingMediaService::default());
+        let mut config = crate::mobile::test_support::test_config(root.path());
+        config.media_service = Some(shared);
+        let firer = MobileTurnFirer {
+            cfg: config,
+            platform,
+        };
+
+        let (scheduled, _child_cleanup) = firer.scheduled_runtime_config().unwrap();
+        assert!(scheduled.media_service.is_none());
+        assert!(scheduled.media_attachment_handle.is_none());
     }
 }
 

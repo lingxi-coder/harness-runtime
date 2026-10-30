@@ -117,7 +117,8 @@ pub use conversation::{
     realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, NativeProactivityRemountState, PendingPromptIdentity,
     QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledLoopFire,
+    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledLoopFire, ScheduledMediaChild,
+    ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,

@@ -26,7 +26,8 @@ mod streaming;
 pub use realtime::{
     realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentSessionIo,
+    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledMediaChild, ScheduledMediaChildRoute,
+    ScheduledMediaParentCheck,
 };
 
 use super::hooks_impl::ModPromptScreen;

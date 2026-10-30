@@ -10,6 +10,7 @@ use media_api::audio::{AudioCapabilitySnapshot, AudioError, AudioErrorKind};
 use media_api::camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts};
 use media_api::tts::TtsAudio;
 use media_api::voice::VoiceRecording;
+use media_api::MediaOperationIncarnation;
 use media_api::{
     CaptureOptions, MediaAsset, MediaAudioChannel, MediaCapabilities, MediaConnector, MediaError,
     MediaErrorKind, MediaEvent, MediaEventBatch, MediaEventCursor, MediaEventKind, MediaFrame,
@@ -217,6 +218,75 @@ struct ActiveOperation {
     owner: MediaOwner,
     token: CancellationToken,
     done: Arc<Notify>,
+    incarnation: MediaOperationIncarnation,
+    cancel_flights: usize,
+    finished: bool,
+    cancel_unknown: bool,
+}
+
+struct MediaCancelFlight {
+    inner: Arc<Mutex<RuntimeState>>,
+    identity: MediaOperationId,
+    incarnation: MediaOperationIncarnation,
+    settled: bool,
+}
+
+impl MediaCancelFlight {
+    fn finish(&mut self, confirmed: bool) {
+        if self.settled {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let remove = if let Some(active) = inner.active.get_mut(&self.identity) {
+            if active.incarnation != self.incarnation {
+                self.settled = true;
+                return;
+            }
+            active.cancel_flights = active.cancel_flights.saturating_sub(1);
+            if !confirmed {
+                active.cancel_unknown = true;
+            }
+            active.finished && active.cancel_flights == 0 && !active.cancel_unknown
+        } else {
+            false
+        };
+        if remove {
+            inner.active.remove(&self.identity);
+        }
+        self.settled = true;
+    }
+}
+
+impl Drop for MediaCancelFlight {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.finish(false);
+        }
+    }
+}
+
+async fn wait_for_active_operation(
+    inner: &Arc<Mutex<RuntimeState>>,
+    identity: &MediaOperationId,
+    done: &Arc<Notify>,
+    finished_at_admission: bool,
+) {
+    if finished_at_admission {
+        return;
+    }
+    loop {
+        let notified = done.notified();
+        let finished = inner
+            .lock()
+            .unwrap()
+            .active
+            .get(identity)
+            .is_none_or(|active| active.finished);
+        if finished {
+            return;
+        }
+        notified.await;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -401,6 +471,7 @@ struct OwnedAsset {
 
 struct OwnedOperationStatus {
     owner: MediaOwner,
+    incarnation: MediaOperationIncarnation,
     state: MediaResourceState,
     started_at_unix_ms: u64,
     updated_at_unix_ms: u64,
@@ -520,6 +591,18 @@ impl EventBuffer {
 }
 
 impl UnifiedMediaService {
+    fn claim_context_admission(context: &mut MediaOperationContext) -> Result<(), MediaError> {
+        let incarnation = context.operation_incarnation();
+        if !context.runtime_admitted() && !context.claim_operation_admission() {
+            return Err(MediaError::new(
+                MediaErrorKind::InvalidRequest,
+                "media operation context has already been admitted",
+            ));
+        }
+        *context = context.clone().with_operation_incarnation(incarnation);
+        Ok(())
+    }
+
     fn reserve_recording_slot(&self) -> Result<CapacityReservation, MediaError> {
         let mut inner = self.inner.lock().unwrap();
         let active_recordings = inner
@@ -1062,9 +1145,46 @@ impl UnifiedMediaService {
         }
     }
 
+    fn begin_active_cancel(
+        &self,
+        identity: &MediaOperationId,
+        owner: &MediaOwner,
+        expected_incarnation: Option<MediaOperationIncarnation>,
+    ) -> Option<(
+        CancellationToken,
+        Arc<Notify>,
+        bool,
+        MediaOperationIncarnation,
+        MediaCancelFlight,
+    )> {
+        let shared_inner = self.inner.clone();
+        let mut inner = shared_inner.lock().unwrap();
+        let active = inner.active.get_mut(identity)?;
+        if active.owner != *owner {
+            return None;
+        }
+        if expected_incarnation.is_some_and(|expected| active.incarnation != expected) {
+            return None;
+        }
+        active.cancel_flights = active.cancel_flights.saturating_add(1);
+        let incarnation = active.incarnation;
+        Some((
+            active.token.clone(),
+            active.done.clone(),
+            active.finished,
+            incarnation,
+            MediaCancelFlight {
+                inner: shared_inner.clone(),
+                identity: identity.clone(),
+                incarnation,
+                settled: false,
+            },
+        ))
+    }
+
     fn begin_active(
         &self,
-        context: &MediaOperationContext,
+        context: &mut MediaOperationContext,
     ) -> Result<CancellationToken, MediaError> {
         if context.identity.service_epoch != self.service_epoch {
             return Err(MediaError::new(
@@ -1094,12 +1214,24 @@ impl UnifiedMediaService {
                 "media session operation identity is already in use",
             ));
         }
+        let incarnation = context.operation_incarnation();
+        if !context.claim_operation_admission() {
+            return Err(MediaError::new(
+                MediaErrorKind::InvalidRequest,
+                "media operation context has already been admitted",
+            ));
+        }
+        *context = context.clone().with_operation_incarnation(incarnation);
         inner.active.insert(
             context.identity.clone(),
             ActiveOperation {
                 owner: context.owner.clone(),
                 token: token.clone(),
                 done: Arc::new(Notify::new()),
+                incarnation,
+                cancel_flights: 0,
+                finished: false,
+                cancel_unknown: false,
             },
         );
         Ok(token)
@@ -1114,22 +1246,27 @@ impl UnifiedMediaService {
         context
             .timeout_budget_ms
             .get_or_insert(DEFAULT_OPERATION_TIMEOUT_MS);
-        let token = self.begin_active(&context)?;
+        let token = self.begin_active(&mut context)?;
         let mut guard = ActiveGuard {
             service: self,
             identity: context.identity.clone(),
+            incarnation: context.operation_incarnation(),
             armed: true,
         };
         let started = now_ms();
         self.set_operation_status(
             context.owner.clone(),
             context.identity.clone(),
+            context.operation_incarnation(),
             MediaResourceState::Active,
             started,
         );
         self.push_state_event(
             &context,
-            MediaResourceRef::Operation(context.identity.clone()),
+            MediaResourceRef::Operation {
+                identity: context.identity.clone(),
+                incarnation: context.operation_incarnation(),
+            },
             MediaResourceState::Active,
         );
         let operation_future = self.execute_inner(context.clone(), operation);
@@ -1154,7 +1291,18 @@ impl UnifiedMediaService {
                 ..
             })
         ) {
-            let _ = self.audio.cancel(context.identity.clone()).await;
+            if let Some((_, _, _, incarnation, mut cancel_flight)) = self.begin_active_cancel(
+                &context.identity,
+                &context.owner,
+                Some(context.operation_incarnation()),
+            ) {
+                let confirmed = self
+                    .audio_router
+                    .cancel_for_incarnation(&context.identity, &context.owner, &incarnation)
+                    .await
+                    .is_ok();
+                cancel_flight.finish(confirmed);
+            }
         }
         let state = if result.is_ok() {
             MediaResourceState::Completed
@@ -1164,12 +1312,16 @@ impl UnifiedMediaService {
         self.set_operation_status(
             context.owner.clone(),
             context.identity.clone(),
+            context.operation_incarnation(),
             state,
             now_ms(),
         );
         self.push_state_event(
             &context,
-            MediaResourceRef::Operation(context.identity.clone()),
+            MediaResourceRef::Operation {
+                identity: context.identity.clone(),
+                incarnation: context.operation_incarnation(),
+            },
             state,
         );
         result
@@ -1184,10 +1336,11 @@ impl UnifiedMediaService {
         context
             .timeout_budget_ms
             .get_or_insert(DEFAULT_OPERATION_TIMEOUT_MS);
-        let token = self.begin_active(&context)?;
+        let token = self.begin_active(&mut context)?;
         let mut guard = ActiveGuard {
             service: self,
             identity: context.identity.clone(),
+            incarnation: context.operation_incarnation(),
             armed: true,
         };
         let read = self.read_payload(&context, &media);
@@ -1224,7 +1377,18 @@ impl UnifiedMediaService {
                 ..
             })
         ) {
-            let _ = self.audio.cancel(context.identity.clone()).await;
+            if let Some((_, _, _, incarnation, mut cancel_flight)) = self.begin_active_cancel(
+                &context.identity,
+                &context.owner,
+                Some(context.operation_incarnation()),
+            ) {
+                let confirmed = self
+                    .audio_router
+                    .cancel_for_incarnation(&context.identity, &context.owner, &incarnation)
+                    .await
+                    .is_ok();
+                cancel_flight.finish(confirmed);
+            }
         }
         result
     }
@@ -1233,6 +1397,7 @@ impl UnifiedMediaService {
         &self,
         owner: MediaOwner,
         identity: MediaOperationId,
+        incarnation: MediaOperationIncarnation,
         state: MediaResourceState,
         timestamp: u64,
     ) {
@@ -1243,11 +1408,14 @@ impl UnifiedMediaService {
             .entry(identity.clone())
             .or_insert_with(|| OwnedOperationStatus {
                 owner: owner.clone(),
+                incarnation,
                 state,
                 started_at_unix_ms: timestamp,
                 updated_at_unix_ms: timestamp,
             });
         status.state = state;
+        status.owner = owner;
+        status.incarnation = incarnation;
         status.updated_at_unix_ms = timestamp;
         if is_new {
             inner.operation_order.push_back(identity);
@@ -2030,6 +2198,7 @@ impl UnifiedMediaService {
                 "observation sessions do not expose a conversation audio channel",
             ));
         }
+        Self::claim_context_admission(&mut context)?;
         let deadline = tokio::time::Instant::now()
             + Duration::from_millis(
                 context
@@ -2242,14 +2411,19 @@ impl UnifiedMediaService {
                     return Err(not_found("media asset was not found"));
                 }
             }
-            MediaResourceRef::Operation(identity) => {
+            MediaResourceRef::Operation {
+                identity,
+                incarnation,
+            } => {
                 if !self
                     .inner
                     .lock()
                     .unwrap()
                     .operation_status
                     .get(identity)
-                    .is_some_and(|status| status.owner == context.owner)
+                    .is_some_and(|status| {
+                        status.owner == context.owner && status.incarnation == *incarnation
+                    })
                 {
                     return Err(not_found("media operation was not found"));
                 }
@@ -2363,8 +2537,11 @@ impl UnifiedMediaService {
                     for (identity, operation) in &inner.operation_status {
                         if operation.owner == context.owner {
                             statuses.push(MediaResourceStatus {
-                                resource: MediaResourceRef::Operation(identity.clone()),
-                                state: operation.state,
+                                resource: MediaResourceRef::Operation {
+                                    identity: identity.clone(),
+                                    incarnation: operation.incarnation,
+                                },
+                                state: active_operation_state(&inner, identity, operation.state),
                                 started_at_unix_ms: Some(operation.started_at_unix_ms),
                                 updated_at_unix_ms: Some(operation.updated_at_unix_ms),
                             });
@@ -2473,15 +2650,21 @@ impl UnifiedMediaService {
                     updated_at_unix_ms: Some(now_ms()),
                 })
             }
-            MediaResourceRef::Operation(identity) => {
+            MediaResourceRef::Operation {
+                identity,
+                incarnation,
+            } => {
                 let entry = inner
                     .operation_status
                     .get(identity)
-                    .filter(|entry| entry.owner == context.owner)
+                    .filter(|entry| {
+                        entry.owner == context.owner && entry.incarnation == *incarnation
+                    })
                     .ok_or_else(|| not_found("media operation was not found"))?;
+                let state = active_operation_state(inner, identity, entry.state);
                 Ok(MediaResourceStatus {
                     resource,
-                    state: entry.state,
+                    state,
                     started_at_unix_ms: Some(entry.started_at_unix_ms),
                     updated_at_unix_ms: Some(entry.updated_at_unix_ms),
                 })
@@ -2565,41 +2748,52 @@ impl UnifiedMediaService {
                     resource: MediaResourceRef::Session(reference),
                 })
             }
-            MediaResourceRef::Operation(identity) => {
-                if identity == context.identity {
+            MediaResourceRef::Operation {
+                identity,
+                incarnation,
+            } => {
+                if identity == context.identity && incarnation == context.operation_incarnation() {
                     return Err(MediaError::new(
                         MediaErrorKind::InvalidRequest,
                         "an operation cannot stop itself",
                     ));
                 }
-                let (token, done) = {
-                    let inner = self.inner.lock().unwrap();
-                    inner
-                        .active
-                        .get(&identity)
-                        .filter(|active| active.owner == context.owner)
-                        .map(|active| (active.token.clone(), active.done.clone()))
-                }
-                .ok_or_else(|| not_found("active media operation was not found"))?;
-                let completion = done.notified();
-                tokio::pin!(completion);
+                let Some((token, done, finished, incarnation, mut cancel_flight)) =
+                    self.begin_active_cancel(&identity, &context.owner, Some(incarnation))
+                else {
+                    return Err(not_found("active media operation was not found"));
+                };
                 token.cancel();
-                let _ = self.audio.cancel(identity.clone()).await;
+                if let Err(error) = self
+                    .audio_router
+                    .cancel_for_incarnation(&identity, &context.owner, &incarnation)
+                    .await
+                {
+                    cancel_flight.finish(false);
+                    return Err(media_error_from_audio(error));
+                }
                 let deadline = context.timeout_budget_ms.map(Duration::from_millis);
                 if let Some(deadline) = deadline {
-                    tokio::time::timeout(deadline, &mut completion)
-                        .await
-                        .map_err(|_| {
-                            MediaError::new(
-                                MediaErrorKind::Timeout,
-                                "cancelled media operation did not stop before its deadline",
-                            )
-                        })?;
+                    tokio::time::timeout(
+                        deadline,
+                        wait_for_active_operation(&self.inner, &identity, &done, finished),
+                    )
+                    .await
+                    .map_err(|_| {
+                        MediaError::new(
+                            MediaErrorKind::Timeout,
+                            "cancelled media operation did not stop before its deadline",
+                        )
+                    })?;
                 } else {
-                    completion.await;
+                    wait_for_active_operation(&self.inner, &identity, &done, finished).await;
                 }
+                cancel_flight.finish(true);
                 Ok(MediaResult::Stopped {
-                    resource: MediaResourceRef::Operation(identity),
+                    resource: MediaResourceRef::Operation {
+                        identity,
+                        incarnation,
+                    },
                 })
             }
             MediaResourceRef::Media(media) => {
@@ -2726,29 +2920,67 @@ impl UnifiedMediaService {
 struct ActiveGuard<'a> {
     service: &'a UnifiedMediaService,
     identity: MediaOperationId,
+    incarnation: MediaOperationIncarnation,
     armed: bool,
 }
 
 impl Drop for ActiveGuard<'_> {
     fn drop(&mut self) {
-        let active = self
-            .service
-            .inner
-            .lock()
-            .unwrap()
-            .active
-            .remove(&self.identity);
-        if let Some(active) = active {
-            active.done.notify_one();
-            if self.armed {
-                active.token.cancel();
-                let audio = self.service.audio.clone();
-                let identity = self.identity.clone();
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    runtime.spawn(async move {
-                        let _ = audio.cancel(identity).await;
-                    });
+        let flight = {
+            let mut inner = self.service.inner.lock().unwrap();
+            // A dropped execution future may not reach run_operation's
+            // terminal update. Preserve the exact incarnation's failed state
+            // once its cancellation flight has actually settled.
+            if let Some(status) = inner.operation_status.get_mut(&self.identity) {
+                if status.incarnation == self.incarnation
+                    && status.state == MediaResourceState::Active
+                {
+                    status.state = MediaResourceState::Failed;
+                    status.updated_at_unix_ms = now_ms();
                 }
+            }
+            let Some(active) = inner.active.get_mut(&self.identity) else {
+                return;
+            };
+            if active.incarnation != self.incarnation {
+                return;
+            }
+            active.finished = true;
+            active.done.notify_waiters();
+            if self.armed {
+                active.cancel_flights = active.cancel_flights.saturating_add(1);
+                active.token.cancel();
+                Some((
+                    active.owner.clone(),
+                    active.incarnation,
+                    MediaCancelFlight {
+                        inner: self.service.inner.clone(),
+                        identity: self.identity.clone(),
+                        incarnation: active.incarnation,
+                        settled: false,
+                    },
+                ))
+            } else {
+                let remove = active.cancel_flights == 0 && !active.cancel_unknown;
+                if remove {
+                    inner.active.remove(&self.identity);
+                }
+                None
+            }
+        };
+        if let Some((owner, incarnation, mut flight)) = flight {
+            let audio = self.service.audio_router.clone();
+            let identity = self.identity.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let confirmed = audio
+                        .cancel_for_incarnation(&identity, &owner, &incarnation)
+                        .await
+                        .is_ok();
+                    flight.finish(confirmed);
+                });
+            } else {
+                flight.finish(false);
             }
         }
     }
@@ -2942,7 +3174,7 @@ impl media_api::MediaService for UnifiedMediaService {
 
     async fn attach_session(
         &self,
-        context: MediaOperationContext,
+        mut context: MediaOperationContext,
         session: Box<dyn MediaSession>,
     ) -> Result<MediaSessionRef, MediaError> {
         let session: Arc<dyn MediaSession> = Arc::from(session);
@@ -2961,6 +3193,11 @@ impl media_api::MediaService for UnifiedMediaService {
                 return Err(error);
             }
         }
+        if let Err(error) = Self::claim_context_admission(&mut context) {
+            cleanup.stop().await;
+            return Err(error);
+        }
+        cleanup.context = context.clone();
         let declared_sources = match declared_session_sources(session.as_ref()) {
             Ok(sources) => sources,
             Err(error) => {
@@ -3059,18 +3296,29 @@ impl media_api::MediaService for UnifiedMediaService {
         self.run_read(context, media).await
     }
 
-    async fn cancel(&self, identity: MediaOperationId) -> Result<(), MediaError> {
-        let token = self
-            .inner
-            .lock()
-            .unwrap()
-            .active
-            .get(&identity)
-            .map(|operation| operation.token.clone());
-        if let Some(token) = token {
+    async fn cancel(&self, context: MediaOperationContext) -> Result<(), MediaError> {
+        if let Some((token, _, _, incarnation, mut cancel_flight)) = self.begin_active_cancel(
+            &context.identity,
+            &context.owner,
+            Some(context.operation_incarnation()),
+        ) {
             token.cancel();
-            self.audio
-                .cancel(identity)
+            let result = self
+                .audio_router
+                .cancel_for_incarnation(&context.identity, &context.owner, &incarnation)
+                .await
+                .map_err(media_error_from_audio);
+            cancel_flight.finish(result.is_ok());
+            result?;
+        } else {
+            // Media execution can finish before an audio cancellation receipt.
+            // Recheck only the exact audio incarnation retained by the router.
+            self.audio_router
+                .cancel_for_incarnation(
+                    &context.identity,
+                    &context.owner,
+                    &context.operation_incarnation(),
+                )
                 .await
                 .map_err(media_error_from_audio)?;
         }
@@ -3393,7 +3641,7 @@ impl AudioService for UnsupportedAudioService {
         ))
     }
 
-    async fn cancel(&self, _identity: MediaOperationId) -> Result<(), AudioError> {
+    async fn cancel(&self, _context: MediaOperationContext) -> Result<(), AudioError> {
         Ok(())
     }
 }
@@ -3634,9 +3882,25 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn active_operation_state(
+    inner: &RuntimeState,
+    identity: &MediaOperationId,
+    recorded: MediaResourceState,
+) -> MediaResourceState {
+    match inner.active.get(identity) {
+        Some(operation)
+            if operation.finished || operation.cancel_flights > 0 || operation.cancel_unknown =>
+        {
+            MediaResourceState::Stopping
+        }
+        Some(_) => MediaResourceState::Active,
+        None => recorded,
+    }
+}
+
 fn resource_sort_key(resource: &MediaResourceRef) -> (u8, String) {
     match resource {
-        MediaResourceRef::Operation(id) => (0, id.id.clone()),
+        MediaResourceRef::Operation { identity, .. } => (0, identity.id.clone()),
         MediaResourceRef::Recording(id) => (1, id.0 .0.clone()),
         MediaResourceRef::Session(id) => (2, id.0 .0.clone()),
         MediaResourceRef::Media(id) => (3, id.0.clone()),
@@ -3749,7 +4013,7 @@ fn declared_session_sources(
 
 fn validate_resource_reference(reference: &MediaResourceRef) -> Result<(), MediaError> {
     let length = match reference {
-        MediaResourceRef::Operation(identity) => identity.id.len(),
+        MediaResourceRef::Operation { identity, .. } => identity.id.len(),
         MediaResourceRef::Source(source) => source.0 .0.len(),
         MediaResourceRef::Recording(recording) => recording.0 .0.len(),
         MediaResourceRef::Session(session) => session.0 .0.len(),
@@ -3795,7 +4059,7 @@ fn validate_observed_event_identity(
             let authorized = match target {
                 MediaResourceRef::Source(expected) => source == expected,
                 MediaResourceRef::Session(_) => authorized_sources.contains(source),
-                MediaResourceRef::Operation(_)
+                MediaResourceRef::Operation { .. }
                 | MediaResourceRef::Recording(_)
                 | MediaResourceRef::Media(_) => false,
             };

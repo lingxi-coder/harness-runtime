@@ -76,7 +76,9 @@ extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGEventCreate(source: core_foundation::base::CFTypeRef) -> core_foundation::base::CFTypeRef;
-    fn CGEventGetLocation(event: core_foundation::base::CFTypeRef) -> core_graphics::geometry::CGPoint;
+    fn CGEventGetLocation(
+        event: core_foundation::base::CFTypeRef,
+    ) -> core_graphics::geometry::CGPoint;
 }
 
 /// Read-only live TCC queries. Never registers/prompts for access during effects.
@@ -110,11 +112,7 @@ fn accessibility_query_result(
     }
     match (status, has_value) {
         (0, true) => Ok(true),
-        _ => Err(query_unavailable(
-            "hit_test",
-            Some(status),
-            Some(has_value),
-        )),
+        _ => Err(query_unavailable("hit_test", Some(status), Some(has_value))),
     }
 }
 
@@ -150,14 +148,8 @@ fn query_accessibility() -> Result<bool, lingxi_core::host::computer_control::Co
         return Err(query_unavailable("cursor_location", None, None));
     }
     let mut value = std::ptr::null();
-    let status = unsafe {
-        AXUIElementCopyElementAtPosition(
-            system.as_concrete_TypeRef(),
-            x,
-            y,
-            &mut value,
-        )
-    };
+    let status =
+        unsafe { AXUIElementCopyElementAtPosition(system.as_concrete_TypeRef(), x, y, &mut value) };
     let has_value = !value.is_null();
     if has_value {
         // Copy ownership must be released even on an unexpected error/value pair.

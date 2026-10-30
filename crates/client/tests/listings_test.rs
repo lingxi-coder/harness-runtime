@@ -20,8 +20,8 @@ use client::protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
-    ProviderModelCatalogEntryDto, SessionModeDto, SessionRowDto, SlashCommandDto,
-    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    ProviderDirectoryDefinitionDto, ProviderModelCatalogEntryDto, SessionModeDto, SessionRowDto,
+    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client::protocol::message::{MessageBlockDto, MessageDto};
 
@@ -280,6 +280,14 @@ fn provider_model_catalog_round_trips() {
     let event = ClientEvent::ProviderModelCatalog {
         providers: vec![ProviderModelCatalogEntryDto {
             provider_id: "anthropic".into(),
+            definition: Some(ProviderDirectoryDefinitionDto {
+                base_url: "https://api.anthropic.com".into(),
+                protocol: "anthropic_messages".into(),
+                auth: "api_key".into(),
+                credential_env: Some("ANTHROPIC_API_KEY".into()),
+                default_model_id: "claude-opus-4-8".into(),
+                description: "Official provider".into(),
+            }),
             provider_label: "Anthropic".into(),
             models: vec![detail],
             group: None,
@@ -289,7 +297,22 @@ fn provider_model_catalog_round_trips() {
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["type"], "provider_model_catalog");
     assert_eq!(value["providers"][0]["provider_label"], "Anthropic");
+    assert_eq!(
+        value["providers"][0]["definition"]["protocol"],
+        "anthropic_messages"
+    );
     assert_eq!(serde_json::from_value::<ClientEvent>(value).unwrap(), event);
+    let mut without_definition = event;
+    let ClientEvent::ProviderModelCatalog { providers } = &mut without_definition else {
+        unreachable!();
+    };
+    providers[0].definition = None;
+    let value = serde_json::to_value(&without_definition).unwrap();
+    assert!(value["providers"][0].get("definition").is_none());
+    assert_eq!(
+        serde_json::from_value::<ClientEvent>(value).unwrap(),
+        without_definition
+    );
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────────────

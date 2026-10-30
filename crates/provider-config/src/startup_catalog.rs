@@ -743,8 +743,15 @@ fn parse_catalog(
     }
     let mut identities = BTreeSet::new();
     for p in &doc.providers {
-        if p.id.is_empty() || p.id.len() > 64 || !p.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
-            || !p.id.as_bytes()[0].is_ascii_alphanumeric() || !identities.insert(p.id.clone()) {
+        if p.id.is_empty()
+            || p.id.len() > 64
+            || !p
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+            || !p.id.as_bytes()[0].is_ascii_alphanumeric()
+            || !identities.insert(p.id.clone())
+        {
             return Err("duplicate or empty provider identity".into());
         }
     }

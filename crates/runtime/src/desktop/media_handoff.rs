@@ -316,6 +316,7 @@ mod tests {
                 model: "test-model".into(),
                 profile_name: Some("trusted-profile".into()),
                 account_scope: Some("profile:trusted-profile".into()),
+                attachment_id: None,
             },
             assistant_message_id: MessageId::new(),
             assistant_message: ConversationMessage::Assistant {
@@ -381,6 +382,7 @@ mod tests {
             model: "test-model".into(),
             profile_name: Some("trusted-profile".into()),
             account_scope: Some("profile:trusted-profile".into()),
+            attachment_id: None,
         };
         let request = MediaAgentHandoffRequest {
             operation_id: media_api::MediaOperationId::new(1, 1),

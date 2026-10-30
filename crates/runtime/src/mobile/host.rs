@@ -54,7 +54,7 @@ pub use assembly::{
 use automation::{
     cron_task_active, finalize_cron_occurrence, fired_cron_dto, mobile_automation_runtime,
     mobile_cron_schedule_error, mobile_cron_session_gate, read_cron_tasks,
-    supervise_mobile_automation,
+    supervise_mobile_automation, try_mobile_automation_runtime,
 };
 pub use automation::{
     CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto, MobileCronStoreHandle,
@@ -80,6 +80,21 @@ pub use provider_services::{
 use restoration::{canonical_cwd_string, lower_session_mode};
 mod workspace_commands;
 pub use workspace_commands::MobileSessionDiscoveryScope;
+
+/// Initialize the process-lifetime mobile cleanup executor before a native host
+/// issues an attachment or returns an engine handle.
+pub fn initialize_mobile_lifecycle_runtime() -> Result<(), String> {
+    try_mobile_automation_runtime().map(|_| ())
+}
+
+/// Schedule cleanup or recovery work on the process-lifetime mobile executor.
+/// This Rust-only host API is not part of the UniFFI surface.
+pub fn spawn_mobile_lifecycle_task(
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    try_mobile_automation_runtime()?.spawn(task);
+    Ok(())
+}
 
 #[cfg(test)]
 use lingxi_core::host::{Clock, FileSystem};
@@ -213,20 +228,19 @@ async fn end_mobile_audio_owner(
     owner: AudioOwner,
 ) -> Result<(), AudioError> {
     let capabilities = service.capabilities();
-    let context = AudioOperationContext {
-        identity: AudioOperationId::new(
+    let context = AudioOperationContext::new(
+        AudioOperationId::new(
             NEXT_MOBILE_AUDIO_TEARDOWN_GENERATION
                 .fetch_add(1, Ordering::Relaxed)
                 .max(1),
             capabilities.service_epoch,
         ),
-        owner: owner.clone(),
-        initiator: None,
-        timeout_budget_ms: Some(
-            u64::try_from(MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET.as_millis()).unwrap_or(u64::MAX),
-        ),
-        max_payload_bytes: capabilities.max_payload_bytes,
-    };
+        owner.clone(),
+    )
+    .with_timeout_budget_ms(
+        u64::try_from(MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET.as_millis()).unwrap_or(u64::MAX),
+    )
+    .with_max_payload_bytes(capabilities.max_payload_bytes);
     let result = tokio::time::timeout(
         MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET,
         service.execute(context, AudioOperation::EndOwner),
@@ -284,6 +298,10 @@ pub struct MobileRuntime {
     pub provider_region: llm_runtime::Region,
     /// App-scoped media facade shared by tools, UI and remote media callers.
     pub media_service: Option<Arc<dyn media_api::MediaService>>,
+    /// Host-issued media scope retained until its drain is confirmed.
+    pub(crate) media_attachment_handle: Option<media_runtime::MediaAttachmentHandle>,
+    /// Release retained native routes only after confirmed teardown.
+    pub(crate) media_attachment_confirmed_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Host adapter for Conversation-intent media sessions.
     pub(crate) media_conversation_attachment: Option<Arc<dyn MediaConversationAttachment>>,
     /// Identity-bound queue for deferred media Agent continuation.
@@ -1228,6 +1246,10 @@ pub struct MobileEngineHandle {
 
 impl Drop for MobileRuntime {
     fn drop(&mut self) {
+        begin_mobile_attachment_revocation(
+            self.media_attachment_handle.take(),
+            self.media_attachment_confirmed_callback.take(),
+        );
         // Also covers short-lived cron runtimes that have no MobileEngineHandle.
         self.orchestrator.close_background_producer_admission();
     }
@@ -1363,6 +1385,10 @@ impl MobileRuntime {
 
 impl Drop for MobileEngineHandle {
     fn drop(&mut self) {
+        let attachment_configured = begin_mobile_attachment_revocation(
+            self.inner.media_attachment_handle.take(),
+            self.inner.media_attachment_confirmed_callback.take(),
+        );
         self.task_notification_watcher.abort();
         // Native audio callbacks may need the platform's UI executor. In
         // particular, Swift can release this handle on MainActor while an
@@ -1442,52 +1468,58 @@ impl Drop for MobileEngineHandle {
                 tracing::warn!(%error, "mobile side chat teardown did not finish");
             }
             if let Some(pending) = media_agent_handoffs.clear_for_session(&current_session_id) {
+                if !attachment_configured {
+                    if let Some(service) = media_service.as_ref() {
+                        crate::media_handoff::stop_media_session(
+                            service,
+                            &pending.request.session,
+                            media_api::MediaOwner::Session {
+                                session_id: current_session_id.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            if !attachment_configured {
                 if let Some(service) = media_service.as_ref() {
-                    crate::media_handoff::stop_media_session(
+                    let stopped = crate::media_handoff::stop_media_owner_resources(
                         service,
-                        &pending.request.session,
                         media_api::MediaOwner::Session {
                             session_id: current_session_id.clone(),
                         },
                     )
                     .await;
-                }
-            }
-            if let Some(service) = media_service.as_ref() {
-                let stopped = crate::media_handoff::stop_media_owner_resources(
-                    service,
-                    media_api::MediaOwner::Session {
-                        session_id: current_session_id.clone(),
-                    },
-                )
-                .await;
-                if stopped > 0 {
-                    tracing::debug!(
-                        session_id = %current_session_id,
-                        stopped,
-                        "stopped active media resources during mobile engine disposal"
-                    );
-                }
-            }
-            if let Some(audio_service) = audio_service {
-                let mut audio_owners = vec![AudioOwner::Session {
-                    session_id: current_session_id,
-                }];
-                for owner in audio_recording_handles.lock().await.keys() {
-                    if !audio_owners.contains(owner) {
-                        audio_owners.push(owner.clone());
+                    if stopped > 0 {
+                        tracing::debug!(
+                            session_id = %current_session_id,
+                            stopped,
+                            "stopped active media resources during mobile engine disposal"
+                        );
                     }
                 }
-                for owner in audio_owners {
-                    if let Err(error) =
-                        end_mobile_audio_owner(&audio_service, &audio_recording_handles, owner)
-                            .await
-                    {
-                        tracing::warn!(
-                            kind = %error.kind,
-                            %error,
-                            "mobile audio owner teardown failed during engine disposal"
-                        );
+            }
+            if !attachment_configured {
+                if let Some(audio_service) = audio_service {
+                    let mut audio_owners = vec![AudioOwner::Session {
+                        session_id: current_session_id,
+                    }];
+                    for owner in audio_recording_handles.lock().await.keys() {
+                        if !audio_owners.contains(owner) {
+                            audio_owners.push(owner.clone());
+                        }
+                    }
+                    for owner in audio_owners {
+                        if let Err(error) =
+                            end_mobile_audio_owner(&audio_service, &audio_recording_handles, owner)
+                                .await
+                        {
+                            tracing::warn!(
+                                kind = %error.kind,
+                                %error,
+                                "mobile audio owner teardown failed during engine disposal"
+                            );
+                        }
                     }
                 }
             }
@@ -1496,6 +1528,96 @@ impl Drop for MobileEngineHandle {
             }
             lsp_registry.shutdown_all().await;
         });
+    }
+}
+
+fn begin_mobile_attachment_revocation(
+    attachment: Option<media_runtime::MediaAttachmentHandle>,
+    confirmed_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> bool {
+    let Some(attachment) = attachment else {
+        return false;
+    };
+    attachment.begin_revoke();
+    mobile_automation_runtime().spawn(async move {
+        revoke_mobile_attachment(attachment, confirmed_callback).await;
+    });
+    true
+}
+
+async fn revoke_mobile_attachment(
+    attachment: media_runtime::MediaAttachmentHandle,
+    confirmed_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+) {
+    // `Drop` marks the phase Revoking synchronously. The first poll on the
+    // process-lifetime executor starts the shared drain before any graceful
+    // engine cleanup can block.
+    let first = attachment
+        .revoke(crate::media_handoff::CLEANUP_BUDGET)
+        .await;
+    // A wait timeout leaves the drain running in the host-owned attachment
+    // map. Give that same flight one more bounded wait for a just-late receipt.
+    let outcome = match first {
+        media_runtime::MediaAttachmentRevocation::Unknown { .. }
+            if attachment.phase() == media_runtime::MediaAttachmentPhase::Revoking =>
+        {
+            attachment
+                .revoke(crate::media_handoff::CLEANUP_BUDGET)
+                .await
+        }
+        outcome => outcome,
+    };
+    match outcome {
+        media_runtime::MediaAttachmentRevocation::Confirmed => {
+            if let Some(on_confirmed) = confirmed_callback {
+                on_confirmed();
+            }
+        }
+        media_runtime::MediaAttachmentRevocation::Unknown { reason } => {
+            tracing::warn!(
+                %reason,
+                attachment_id = ?attachment.id(),
+                "mobile media attachment teardown remains unconfirmed"
+            );
+            match attachment.phase() {
+                media_runtime::MediaAttachmentPhase::Revoked => {
+                    // The drain may have crossed its completion boundary just
+                    // after the bounded wait expired.
+                    if matches!(
+                        attachment
+                            .revoke(crate::media_handoff::CLEANUP_BUDGET)
+                            .await,
+                        media_runtime::MediaAttachmentRevocation::Confirmed
+                    ) {
+                        if let Some(on_confirmed) = confirmed_callback {
+                            on_confirmed();
+                        }
+                    }
+                }
+                media_runtime::MediaAttachmentPhase::Revoking => {
+                    // Keep watching the same flight. Unknown remains retained;
+                    // a later Confirmed observation may release its route.
+                    let attachment = attachment.clone();
+                    mobile_automation_runtime().spawn(async move {
+                        if attachment.wait_for_drain_completion().await
+                            == media_runtime::MediaAttachmentPhase::Revoked
+                            && matches!(
+                                attachment
+                                    .revoke(crate::media_handoff::CLEANUP_BUDGET)
+                                    .await,
+                                media_runtime::MediaAttachmentRevocation::Confirmed
+                            )
+                        {
+                            if let Some(on_confirmed) = confirmed_callback {
+                                on_confirmed();
+                            }
+                        }
+                    });
+                }
+                media_runtime::MediaAttachmentPhase::Unknown
+                | media_runtime::MediaAttachmentPhase::Active => {}
+            }
+        }
     }
 }
 
@@ -6720,26 +6842,32 @@ impl MobileEngineHandle {
         }
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
-            ClientCommand::GetAudioSessionContext => {
-                match self.inner.orchestrator.current_audio_binding().await {
-                    Ok((session_id, profile)) => {
-                        self.connection_sink
-                            .emit(ClientEvent::AudioSessionContext {
-                                session_id,
-                                account_scope: format!("profile:{profile}"),
-                                profile_id: profile,
-                            })
-                            .await;
-                    }
-                    Err(_) => {
-                        self.connection_sink
-                            .emit(ClientEvent::Error {
-                                kind: ErrorKindDto::Rejected,
-                                message: "audio requires an exact session provider profile".into(),
-                            })
-                            .await;
-                    }
-                }
+            ClientCommand::GetAudioSessionContext { request_id } => {
+                let session_id = self
+                    .inner
+                    .orchestrator
+                    .current_session_id()
+                    .await
+                    .as_uuid()
+                    .to_string();
+                let profile = self
+                    .inner
+                    .orchestrator
+                    .current_audio_binding()
+                    .await
+                    .ok()
+                    .and_then(|(bound_session, profile)| {
+                        (bound_session == session_id).then_some(profile)
+                    });
+                self.connection_sink
+                    .emit(ClientEvent::AudioSessionContext {
+                        request_id,
+                        session_id: Some(session_id),
+                        account_scope: profile.as_ref().map(|profile| format!("profile:{profile}")),
+                        profile_id: profile,
+                        media_owner: None,
+                    })
+                    .await;
                 Ok(())
             }
             ClientCommand::SendPrompt {

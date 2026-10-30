@@ -329,6 +329,15 @@ pub(super) async fn build_mobile_inner_with_ask(
     media_agent_handoffs: Option<Arc<MobileMediaAgentHandoffQueue>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let mut cfg = cfg;
+    if cfg.app_agent_host && cfg.media_attachment_handle.is_some() {
+        return Err(MobileBuildError::Orchestrator(
+            "Local App Agent engines cannot own a media attachment".into(),
+        ));
+    }
+    if let Some(attachment) = cfg.media_attachment_handle.as_ref() {
+        super::initialize_mobile_lifecycle_runtime().map_err(MobileBuildError::Orchestrator)?;
+        cfg.media_service = Some(attachment.service());
+    }
     if cfg.app_agent_host {
         cfg.cwd = cfg.lingxi_home.join("local-apps/v2/agent/host");
         std::fs::create_dir_all(&cfg.cwd).map_err(|_| {
@@ -2064,6 +2073,17 @@ pub(super) async fn build_mobile_inner_with_ask(
     task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
+    let audio_service = platform
+        .audio_service()
+        .map(|audio| match cfg.media_attachment_handle.as_ref() {
+            Some(attachment) => attachment.audio_service(audio).map_err(|error| {
+                MobileBuildError::Orchestrator(format!(
+                    "mobile audio attachment is unavailable: {error}"
+                ))
+            }),
+            None => Ok(audio),
+        })
+        .transpose()?;
     let tool_ctx = BuiltinToolContext {
         host_git_root_cache: cfg.host_git_root_cache.clone(),
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
@@ -2158,7 +2178,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: platform.camera(),
-        audio: platform.audio_service(),
+        audio: audio_service,
         media: if cfg.app_agent_host {
             None
         } else {
@@ -3323,6 +3343,16 @@ pub(super) async fn build_mobile_inner_with_ask(
         } else {
             cfg.media_service.clone()
         },
+        media_attachment_handle: if cfg.app_agent_host {
+            None
+        } else {
+            cfg.media_attachment_handle.clone()
+        },
+        media_attachment_confirmed_callback: if cfg.app_agent_host {
+            None
+        } else {
+            cfg.media_attachment_confirmed_callback.clone()
+        },
         media_conversation_attachment: if cfg.app_agent_host {
             None
         } else {
@@ -3463,6 +3493,15 @@ fn build_mobile_engine_on_worker(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let mut cfg = cfg;
     let app_agent_host = cfg.app_agent_host;
+    if app_agent_host && cfg.media_attachment_handle.is_some() {
+        return Err(MobileEngineError::Internal(
+            "Local App Agent engines cannot own a media attachment".into(),
+        ));
+    }
+    if let Some(attachment) = cfg.media_attachment_handle.as_ref() {
+        super::initialize_mobile_lifecycle_runtime().map_err(MobileEngineError::Internal)?;
+        cfg.media_service = Some(attachment.service());
+    }
     if app_agent_host {
         cfg.cwd = cfg.lingxi_home.join("local-apps/v2/agent/host");
     }

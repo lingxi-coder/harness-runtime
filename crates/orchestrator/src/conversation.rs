@@ -2055,6 +2055,7 @@ pub use drivers_impl::{
     realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, PendingPromptIdentity, QueuedPromptInput, RealtimeAgentContext,
     RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentSessionIo,
+    ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;

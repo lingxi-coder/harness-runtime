@@ -321,7 +321,7 @@ mod tests {
         }
         async fn cancel(
             &self,
-            _identity: lingxi_core::host::AudioOperationId,
+            _context: lingxi_core::host::AudioOperationContext,
         ) -> Result<(), lingxi_core::host::AudioError> {
             Ok(())
         }

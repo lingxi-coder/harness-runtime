@@ -1,0 +1,4 @@
+{
+  "type": "refresh_provider_catalog",
+  "trigger": "network_restored"
+}

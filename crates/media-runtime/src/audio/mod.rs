@@ -10,6 +10,7 @@ pub use media_api::audio::*;
 pub use media_api::stt::SttTranscript;
 pub use media_api::tts::TtsAudio;
 pub use media_api::voice::VoiceRecording;
+use media_api::MediaOperationIncarnation;
 pub use pcm16::{
     Pcm16StreamConverter, Pcm16StreamError, MAX_PCM16_STREAM_PUSH_FRAMES,
     MAX_PCM16_STREAM_SAMPLE_RATE_HZ, MIN_PCM16_STREAM_SAMPLE_RATE_HZ,
@@ -17,6 +18,7 @@ pub use pcm16::{
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 /// A cloud route selected by trusted configuration, never a model argument.
@@ -106,7 +108,7 @@ pub struct UnifiedAudioService {
     host: Option<Arc<dyn CloudAudioHost>>,
     service_epoch: u64,
     settings: RwLock<AudioRoutingSettings>,
-    active: Mutex<HashMap<AudioOperationId, ActiveOperation>>,
+    active: Arc<Mutex<HashMap<AudioOperationId, Arc<ActiveOperation>>>>,
     projection_revision: Mutex<HashMap<AudioOwner, (Vec<AudioOperationKind>, u64)>>,
 }
 
@@ -122,7 +124,23 @@ struct ActiveOperation {
     owner: AudioOwner,
     token: CancellationToken,
     target: Arc<dyn AudioService>,
-    target_identity: AudioOperationId,
+    cancel_context: AudioOperationContext,
+    incarnation: MediaOperationIncarnation,
+    lifecycle: Mutex<ActiveOperationLifecycle>,
+    changed: Notify,
+}
+
+struct ActiveOperationLifecycle {
+    finished: bool,
+    cancellation: Option<AudioCancellationState>,
+    recording: Option<media_api::RecordingRef>,
+    native_work: Option<Box<dyn media_api::MediaNativeWork>>,
+}
+
+enum AudioCancellationState {
+    InFlight,
+    Confirmed,
+    Unknown(AudioError),
 }
 enum SelectedRoute {
     Local(Arc<dyn AudioService>),
@@ -161,7 +179,7 @@ impl UnifiedAudioService {
             host,
             service_epoch,
             settings: RwLock::new(settings),
-            active: Mutex::new(HashMap::new()),
+            active: Arc::new(Mutex::new(HashMap::new())),
             projection_revision: Mutex::new(HashMap::new()),
         }
     }
@@ -171,6 +189,69 @@ impl UnifiedAudioService {
             service: self.clone(),
             owner,
         })
+    }
+
+    /// Cancel one active operation only when its trusted owner still matches.
+    /// The active identity remains reserved until the downstream ID-only
+    /// cancellation call returns.
+    pub(crate) async fn cancel_for_owner(
+        &self,
+        identity: &AudioOperationId,
+        owner: &AudioOwner,
+        incarnation: &MediaOperationIncarnation,
+    ) -> Result<(), AudioError> {
+        self.cancel_identity(identity, Some(owner), Some(incarnation))
+            .await
+    }
+
+    /// Cancel one exact operation admitted by the media runtime. A mismatched
+    /// or already-finished incarnation is a no-op even if the public ID has
+    /// since appeared elsewhere.
+    pub(crate) async fn cancel_for_incarnation(
+        &self,
+        identity: &AudioOperationId,
+        owner: &AudioOwner,
+        incarnation: &MediaOperationIncarnation,
+    ) -> Result<(), AudioError> {
+        self.cancel_identity(identity, Some(owner), Some(incarnation))
+            .await
+    }
+
+    async fn cancel_identity(
+        &self,
+        identity: &AudioOperationId,
+        expected_owner: Option<&AudioOwner>,
+        expected_incarnation: Option<&MediaOperationIncarnation>,
+    ) -> Result<(), AudioError> {
+        let (operation, dispatch) = {
+            let active = self.active.lock().unwrap();
+            let Some(operation) = active.get(identity).cloned() else {
+                return Ok(());
+            };
+            if expected_owner.is_some_and(|owner| owner != &operation.owner) {
+                return Ok(());
+            }
+            if expected_incarnation
+                .is_some_and(|incarnation| !operation.incarnation.same_instance(incarnation))
+            {
+                return Ok(());
+            }
+            let mut lifecycle = operation.lifecycle.lock().unwrap();
+            match &lifecycle.cancellation {
+                Some(AudioCancellationState::InFlight | AudioCancellationState::Confirmed) => {
+                    (operation.clone(), false)
+                }
+                Some(AudioCancellationState::Unknown(_)) | None => {
+                    lifecycle.cancellation = Some(AudioCancellationState::InFlight);
+                    operation.token.cancel();
+                    (operation.clone(), true)
+                }
+            }
+        };
+        if dispatch {
+            dispatch_audio_cancel(self.active.clone(), identity.clone(), operation.clone());
+        }
+        wait_for_audio_cancel(&operation).await
     }
     /// Atomically replace routes; already running calls keep their selected snapshot.
     pub fn update_settings(&self, settings: AudioRoutingSettings) {
@@ -577,24 +658,212 @@ fn check_ready(caps: &AudioCapabilitySnapshot, kind: AudioOperationKind) -> Resu
         _ => Ok(()),
     }
 }
-struct ActiveGuard<'a> {
-    service: &'a UnifiedAudioService,
+struct ActiveGuard {
+    active: Arc<Mutex<HashMap<AudioOperationId, Arc<ActiveOperation>>>>,
     identity: AudioOperationId,
+    operation: Arc<ActiveOperation>,
     armed: bool,
 }
-impl Drop for ActiveGuard<'_> {
+impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        if let Some(active) = self.service.active.lock().unwrap().remove(&self.identity) {
-            active.token.cancel();
-            if self.armed {
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    let target_identity = active.target_identity.clone();
-                    runtime.spawn(async move {
-                        let _ = active.target.cancel(target_identity).await;
-                    });
-                }
-            }
+        finish_audio_operation(
+            self.active.clone(),
+            self.identity.clone(),
+            self.operation.clone(),
+            self.armed,
+        );
+    }
+}
+
+struct AudioCancelTaskGuard {
+    active: Arc<Mutex<HashMap<AudioOperationId, Arc<ActiveOperation>>>>,
+    identity: AudioOperationId,
+    operation: Arc<ActiveOperation>,
+    settled: bool,
+}
+
+impl Drop for AudioCancelTaskGuard {
+    fn drop(&mut self) {
+        if !self.settled {
+            finish_audio_cancel(
+                &self.active,
+                &self.identity,
+                &self.operation,
+                Err(AudioError::new(
+                    AudioErrorKind::NativeFailure,
+                    "audio cancellation ended without a completion receipt",
+                )),
+            );
         }
+    }
+}
+
+fn dispatch_audio_cancel(
+    active: Arc<Mutex<HashMap<AudioOperationId, Arc<ActiveOperation>>>>,
+    identity: AudioOperationId,
+    operation: Arc<ActiveOperation>,
+) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        finish_audio_cancel(
+            &active,
+            &identity,
+            &operation,
+            Err(AudioError::new(
+                AudioErrorKind::NativeFailure,
+                "audio cancellation has no runtime to obtain a completion receipt",
+            )),
+        );
+        return;
+    };
+    runtime.spawn(async move {
+        let mut completion = AudioCancelTaskGuard {
+            active: active.clone(),
+            identity: identity.clone(),
+            operation: operation.clone(),
+            settled: false,
+        };
+        let result = operation
+            .target
+            .cancel(operation.cancel_context.clone())
+            .await;
+        finish_audio_cancel(&active, &identity, &operation, result);
+        completion.settled = true;
+    });
+}
+
+fn finish_audio_cancel(
+    active: &Arc<Mutex<HashMap<AudioOperationId, Arc<ActiveOperation>>>>,
+    identity: &AudioOperationId,
+    operation: &Arc<ActiveOperation>,
+    result: Result<(), AudioError>,
+) {
+    let mut active_map = active.lock().unwrap();
+    let same_operation = active_map
+        .get(identity)
+        .is_some_and(|current| Arc::ptr_eq(current, operation));
+    if !same_operation {
+        return;
+    }
+    let mut lifecycle = operation.lifecycle.lock().unwrap();
+    if matches!(
+        &lifecycle.cancellation,
+        Some(AudioCancellationState::InFlight)
+    ) {
+        lifecycle.cancellation = Some(match result {
+            Ok(()) => AudioCancellationState::Confirmed,
+            Err(error) => AudioCancellationState::Unknown(error),
+        });
+    }
+    let can_remove = lifecycle.finished
+        && matches!(
+            &lifecycle.cancellation,
+            Some(AudioCancellationState::Confirmed)
+        );
+    if can_remove {
+        active_map.remove(identity);
+    }
+    let work = settled_native_work(&mut lifecycle);
+    drop(lifecycle);
+    drop(active_map);
+    resolve_native_work(work);
+    operation.changed.notify_waiters();
+}
+
+// A cancel receipt can race with the operation's terminal result. Wait for
+// both before confirming: a late RecordingStarted must remain unknown even
+// if an earlier cancellation claimed success.
+fn settled_native_work(
+    lifecycle: &mut ActiveOperationLifecycle,
+) -> Option<Box<dyn media_api::MediaNativeWork>> {
+    if !lifecycle.finished {
+        return None;
+    }
+    match &lifecycle.cancellation {
+        Some(AudioCancellationState::Confirmed) => {}
+        Some(AudioCancellationState::Unknown(_) | AudioCancellationState::InFlight) => return None,
+        None if lifecycle.recording.is_none() => {}
+        None => return None,
+    }
+    lifecycle.native_work.take()
+}
+
+fn resolve_native_work(work: Option<Box<dyn media_api::MediaNativeWork>>) {
+    if let Some(work) = work {
+        work.confirm();
+    }
+}
+
+fn finish_audio_operation(
+    active: Arc<Mutex<HashMap<AudioOperationId, Arc<ActiveOperation>>>>,
+    identity: AudioOperationId,
+    operation: Arc<ActiveOperation>,
+    armed: bool,
+) {
+    let (dispatch, work) = {
+        let mut active_map = active.lock().unwrap();
+        let same_operation = active_map
+            .get(&identity)
+            .is_some_and(|current| Arc::ptr_eq(current, &operation));
+        if !same_operation {
+            return;
+        }
+        let mut lifecycle = operation.lifecycle.lock().unwrap();
+        lifecycle.finished = true;
+        let dispatch = if armed && lifecycle.cancellation.is_none() {
+            lifecycle.cancellation = Some(AudioCancellationState::InFlight);
+            operation.token.cancel();
+            true
+        } else {
+            let can_remove = matches!(
+                &lifecycle.cancellation,
+                Some(AudioCancellationState::Confirmed)
+            ) || (lifecycle.cancellation.is_none()
+                && lifecycle.recording.is_none());
+            if can_remove {
+                active_map.remove(&identity);
+            }
+            false
+        };
+        (dispatch, settled_native_work(&mut lifecycle))
+    };
+    resolve_native_work(work);
+    operation.changed.notify_waiters();
+    if dispatch {
+        dispatch_audio_cancel(active, identity, operation);
+    }
+}
+
+async fn wait_for_audio_cancel(operation: &Arc<ActiveOperation>) -> Result<(), AudioError> {
+    loop {
+        let notified = operation.changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let outcome = {
+            let lifecycle = operation.lifecycle.lock().unwrap();
+            match &lifecycle.cancellation {
+                Some(AudioCancellationState::Confirmed) if lifecycle.finished => Some(Ok(())),
+                Some(AudioCancellationState::Confirmed) => None,
+                Some(AudioCancellationState::Unknown(error)) => Some(Err(error.clone())),
+                Some(AudioCancellationState::InFlight) => None,
+                None => Some(Ok(())),
+            }
+        };
+        if let Some(outcome) = outcome {
+            return outcome;
+        }
+        notified.await;
+    }
+}
+
+async fn wait_for_audio_operation_finish(operation: &Arc<ActiveOperation>) {
+    loop {
+        let notified = operation.changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if operation.lifecycle.lock().unwrap().finished {
+            return;
+        }
+        notified.await;
     }
 }
 #[async_trait]
@@ -610,6 +879,14 @@ impl AudioService for UnifiedAudioService {
         mut context: AudioOperationContext,
         operation: AudioOperation,
     ) -> Result<AudioOperationSuccess, AudioError> {
+        let incarnation = context.operation_incarnation();
+        if !context.runtime_admitted() && !context.claim_operation_admission() {
+            return Err(AudioError::new(
+                AudioErrorKind::InvalidRequest,
+                "audio operation context has already been admitted",
+            ));
+        }
+        context = context.with_operation_incarnation(incarnation);
         if context.identity.service_epoch != self.service_epoch {
             return Err(AudioError::new(
                 AudioErrorKind::InvalidRequest,
@@ -628,11 +905,74 @@ impl AudioService for UnifiedAudioService {
             .kind()
             .and_then(|kind| settings.defaults.get(&kind));
         let operation = apply_defaults(operation, defaults)?;
-        if matches!(operation, AudioOperation::EndOwner) {
-            for active in self.active.lock().unwrap().values() {
-                if active.owner == context.owner {
-                    active.token.cancel();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(budget);
+        let recording_origin = match &operation {
+            AudioOperation::StopRecording { handle } => {
+                let matches = self
+                    .active
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, active)| {
+                        active.owner == context.owner
+                            && active.lifecycle.lock().unwrap().recording.as_ref() == Some(handle)
+                    })
+                    .map(|(identity, active)| (identity.clone(), active.incarnation))
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [] => {
+                        return Err(AudioError::new(
+                            AudioErrorKind::NotRecording,
+                            "recording origin was not found for this owner",
+                        ))
+                    }
+                    [origin] => Some(origin.clone()),
+                    _ => {
+                        return Err(AudioError::new(
+                            AudioErrorKind::NativeFailure,
+                            "recording origin is ambiguous",
+                        ))
+                    }
                 }
+            }
+            _ => None,
+        };
+        if matches!(operation, AudioOperation::EndOwner) {
+            let active_operations = {
+                let active = self.active.lock().unwrap();
+                if active.contains_key(&context.identity) {
+                    return Err(AudioError::new(
+                        AudioErrorKind::InvalidRequest,
+                        "duplicate active audio identity",
+                    ));
+                }
+                active
+                    .iter()
+                    .filter(|(_, active)| active.owner == context.owner)
+                    .map(|(identity, active)| (identity.clone(), active.clone()))
+                    .collect::<Vec<_>>()
+            };
+            for (identity, active) in active_operations {
+                tokio::time::timeout_at(
+                    deadline,
+                    self.cancel_identity(
+                        &identity,
+                        Some(&context.owner),
+                        Some(&active.incarnation),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    AudioError::new(
+                        AudioErrorKind::Timeout,
+                        "audio cancellation receipt timed out",
+                    )
+                })??;
+                tokio::time::timeout_at(deadline, wait_for_audio_operation_finish(&active))
+                    .await
+                    .map_err(|_| {
+                        AudioError::new(AudioErrorKind::Timeout, "audio operation did not finish")
+                    })?;
             }
         }
         let selected = operation
@@ -671,6 +1011,20 @@ impl AudioService for UnifiedAudioService {
             }
         }
         let token = CancellationToken::new();
+        let active_operation = Arc::new(ActiveOperation {
+            owner: context.owner.clone(),
+            token: token.clone(),
+            target,
+            cancel_context: target_context.clone(),
+            incarnation,
+            lifecycle: Mutex::new(ActiveOperationLifecycle {
+                finished: false,
+                cancellation: None,
+                recording: None,
+                native_work: None,
+            }),
+            changed: Notify::new(),
+        });
         {
             let mut active = self.active.lock().unwrap();
             if active.contains_key(&context.identity) {
@@ -679,22 +1033,36 @@ impl AudioService for UnifiedAudioService {
                     "duplicate active audio identity",
                 ));
             }
-            active.insert(
-                context.identity.clone(),
-                ActiveOperation {
-                    owner: context.owner.clone(),
-                    token: token.clone(),
-                    target,
-                    target_identity,
-                },
-            );
+            active.insert(context.identity.clone(), active_operation.clone());
         }
         let max_payload_bytes = context.max_payload_bytes;
         let mut guard = ActiveGuard {
-            service: self,
+            active: self.active.clone(),
             identity: context.identity.clone(),
+            operation: active_operation,
             armed: true,
         };
+        if context.attachment_admitted() {
+            match context.begin_native_work() {
+                Ok(Some(work)) => {
+                    guard.operation.lifecycle.lock().unwrap().native_work = Some(work);
+                }
+                Ok(None) => {
+                    guard.armed = false;
+                    return Err(AudioError::new(
+                        AudioErrorKind::Unavailable,
+                        "attachment audio has no native work witness",
+                    ));
+                }
+                Err(error) => {
+                    guard.armed = false;
+                    return Err(AudioError::new(
+                        AudioErrorKind::Unavailable,
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
         let started = Instant::now();
         let run = async {
             match selected {
@@ -724,7 +1092,7 @@ impl AudioService for UnifiedAudioService {
         let result = tokio::select! {
             biased;
             _ = token.cancelled() => Err(AudioError::new(AudioErrorKind::Cancelled, "audio operation cancelled")),
-            _ = tokio::time::sleep(Duration::from_millis(budget)) => Err(AudioError::new(AudioErrorKind::Timeout, "audio deadline has elapsed")),
+            _ = tokio::time::sleep_until(deadline) => Err(AudioError::new(AudioErrorKind::Timeout, "audio deadline has elapsed")),
             result = run => result,
         };
         if let Ok(success) = &result {
@@ -739,20 +1107,43 @@ impl AudioService for UnifiedAudioService {
                     "audio result exceeds the payload bound",
                 ));
             }
+            if let AudioOperationSuccess::RecordingStarted { handle } = success {
+                let mut lifecycle = guard.operation.lifecycle.lock().unwrap();
+                lifecycle.recording = Some(handle.clone());
+                if matches!(
+                    &lifecycle.cancellation,
+                    Some(AudioCancellationState::Confirmed)
+                ) {
+                    lifecycle.cancellation =
+                        Some(AudioCancellationState::Unknown(AudioError::new(
+                            AudioErrorKind::NativeFailure,
+                            "recording started after its cancellation receipt",
+                        )));
+                }
+            }
             guard.armed = false;
+        }
+        if let (Some((identity, incarnation)), Ok(AudioOperationSuccess::Recording { .. })) =
+            (recording_origin, &result)
+        {
+            tokio::time::timeout_at(
+                deadline,
+                self.cancel_identity(&identity, Some(&context.owner), Some(&incarnation)),
+            )
+            .await
+            .map_err(|_| {
+                AudioError::new(
+                    AudioErrorKind::Timeout,
+                    "recording origin close receipt timed out",
+                )
+            })??;
         }
         result
     }
-    async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
-        let target = self.active.lock().unwrap().get(&identity).map(|active| {
-            active.token.cancel();
-            (active.target.clone(), active.target_identity.clone())
-        });
-        if let Some((target, target_identity)) = target {
-            target.cancel(target_identity).await
-        } else {
-            Ok(())
-        }
+    async fn cancel(&self, context: AudioOperationContext) -> Result<(), AudioError> {
+        let incarnation = context.operation_incarnation();
+        self.cancel_identity(&context.identity, Some(&context.owner), Some(&incarnation))
+            .await
     }
 }
 
@@ -784,18 +1175,13 @@ impl AudioService for OwnerAudioService {
         }
         self.service.execute(context, operation).await
     }
-    async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
-        let permitted = self
-            .service
-            .active
-            .lock()
-            .unwrap()
-            .get(&identity)
-            .is_some_and(|active| active.owner == self.owner);
-        if permitted {
-            self.service.cancel(identity).await
-        } else {
-            Ok(())
+    async fn cancel(&self, context: AudioOperationContext) -> Result<(), AudioError> {
+        if context.owner != self.owner {
+            return Ok(());
         }
+        let incarnation = context.operation_incarnation();
+        self.service
+            .cancel_for_owner(&context.identity, &self.owner, &incarnation)
+            .await
     }
 }
