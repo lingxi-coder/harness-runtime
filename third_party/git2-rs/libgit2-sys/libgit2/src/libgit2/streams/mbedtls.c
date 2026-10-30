@@ -42,7 +42,8 @@
 #define GIT_SSL_DEFAULT_CIPHERS "TLS1-3-AES-128-GCM-SHA256:TLS1-3-AES-256-GCM-SHA384:TLS1-3-CHACHA20-POLY1305-SHA256:TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256:TLS-ECDHE-RSA-WITH-AES-128-GCM-SHA256:TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384:TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384:TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256:TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256:TLS-DHE-RSA-WITH-AES-128-GCM-SHA256:TLS-DHE-RSA-WITH-AES-256-GCM-SHA384:TLS-DHE-RSA-WITH-CHACHA20-POLY1305-SHA256:TLS-ECDHE-ECDSA-WITH-AES-128-CBC-SHA256:TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256:TLS-ECDHE-ECDSA-WITH-AES-128-CBC-SHA:TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA:TLS-ECDHE-ECDSA-WITH-AES-256-CBC-SHA384:TLS-ECDHE-RSA-WITH-AES-256-CBC-SHA384:TLS-ECDHE-ECDSA-WITH-AES-256-CBC-SHA:TLS-ECDHE-RSA-WITH-AES-256-CBC-SHA:TLS-DHE-RSA-WITH-AES-128-CBC-SHA256:TLS-DHE-RSA-WITH-AES-256-CBC-SHA256:TLS-RSA-WITH-AES-128-GCM-SHA256:TLS-RSA-WITH-AES-256-GCM-SHA384:TLS-RSA-WITH-AES-128-CBC-SHA256:TLS-RSA-WITH-AES-256-CBC-SHA256:TLS-RSA-WITH-AES-128-CBC-SHA:TLS-RSA-WITH-AES-256-CBC-SHA"
 #define GIT_SSL_DEFAULT_CIPHERS_COUNT 28
 
-static int ciphers_list[GIT_SSL_DEFAULT_CIPHERS_COUNT];
+/* mbedtls_ssl_conf_ciphersuites requires a zero-terminated list. */
+static int ciphers_list[GIT_SSL_DEFAULT_CIPHERS_COUNT + 1];
 
 static bool initialized = false;
 static mbedtls_ssl_config mbedtls_config;
@@ -113,7 +114,7 @@ int git_mbedtls_stream_global_init(void)
 		int cipherid = mbedtls_ssl_get_ciphersuite_id(cipher_name);
 		if (cipherid == 0) continue;
 
-		if (ciphers_known >= ARRAY_SIZE(ciphers_list)) {
+		if (ciphers_known >= ARRAY_SIZE(ciphers_list) - 1) {
 			git_error_set(GIT_ERROR_SSL, "out of cipher list space");
 			goto cleanup;
 		}
@@ -121,6 +122,7 @@ int git_mbedtls_stream_global_init(void)
 		ciphers_list[ciphers_known++] = cipherid;
 	}
 	git__free(cipher_string);
+	ciphers_list[ciphers_known] = 0;
 
 	if (!ciphers_known) {
 		git_error_set(GIT_ERROR_SSL, "no cipher could be enabled");
@@ -245,7 +247,8 @@ static int mbedtls_connect(git_stream *stream)
 
 	st->connected = true;
 
-	mbedtls_ssl_set_hostname(st->ssl, st->host);
+	if ((ret = mbedtls_ssl_set_hostname(st->ssl, st->host)) != 0)
+		return ssl_set_error(st->ssl, ret);
 
 	mbedtls_ssl_set_bio(st->ssl, st->io, bio_write, bio_read, NULL);
 

@@ -2,8 +2,9 @@
 //!
 //! Compiles the three standard mbedTLS static libraries — `mbedcrypto`,
 //! `mbedx509`, `mbedtls` — from `third_party/mbedtls/library/*.c` using the
-//! stock `include/mbedtls/mbedtls_config.h`, then exports the include dir as
-//! `DEP_MBEDTLS_INCLUDE` for the direct dependents (libgit2-sys / libssh2-sys).
+//! upstream configuration with LingXi's platform threading wrapper, then exports
+//! that same include tree as `DEP_MBEDTLS_INCLUDE` for the direct dependents
+//! (libgit2-sys / libssh2-sys).
 //!
 //! Two things matter for this seam to actually link:
 //!
@@ -22,7 +23,32 @@
 //!    archives all use crypto, so the emitted order is tls -> x509 -> crypto.
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn copy_include_tree(source: &Path, target: &Path) {
+    assert!(
+        fs::symlink_metadata(source).unwrap().file_type().is_dir(),
+        "mbedTLS include source is not a directory: {}",
+        source.display()
+    );
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let dest = target.join(entry.file_name());
+        if kind.is_dir() {
+            copy_include_tree(&entry.path(), &dest);
+        } else if kind.is_file() {
+            fs::copy(entry.path(), dest).unwrap();
+        } else {
+            panic!(
+                "unexpected non-file in mbedTLS include tree: {}",
+                entry.path().display()
+            );
+        }
+    }
+}
 
 /// X.509 sources (CMake `src_x509`).
 const SRC_X509: &[&str] = &[
@@ -69,21 +95,62 @@ fn main() {
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     // `third_party/mbedtls` lives next to `third_party/mbedtls-sys`.
     let src_root = manifest.parent().unwrap().join("mbedtls");
-    let include = src_root.join("include");
+    let source_include = src_root.join("include");
     let library = src_root.join("library");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let include = out.join("lingxi-mbedtls-include");
+    let wrapper = manifest.join("lingxi_config.h");
+    assert!(
+        fs::symlink_metadata(&wrapper)
+            .unwrap()
+            .file_type()
+            .is_file(),
+        "mbedTLS configuration wrapper is not a regular file"
+    );
 
     println!("cargo:rerun-if-changed={}", library.display());
-    println!("cargo:rerun-if-changed={}", include.display());
+    println!("cargo:rerun-if-changed={}", source_include.display());
+    println!("cargo:rerun-if-changed={}", wrapper.display());
+
+    // Every C consumer receives this same include tree through DEP_MBEDTLS_INCLUDE.
+    // Retain the release config unchanged and layer the platform threading choice
+    // on top, so public Mbed TLS struct layouts agree across all C objects.
+    match fs::symlink_metadata(&include) {
+        Ok(meta) => {
+            assert!(
+                meta.file_type().is_dir(),
+                "mbedTLS generated include path is not a directory"
+            );
+            fs::remove_dir_all(&include).unwrap();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("cannot inspect generated mbedTLS include directory: {error}"),
+    }
+    copy_include_tree(&source_include, &include);
+    let config = include.join("mbedtls/mbedtls_config.h");
+    fs::copy(&config, include.join("mbedtls/mbedtls_config_upstream.h")).unwrap();
+    fs::copy(&wrapper, &config).unwrap();
 
     // Partition the library *.c into the three standard mbedTLS libs.
     let mut x509_files = Vec::new();
     let mut tls_files = Vec::new();
     let mut crypto_files = Vec::new();
 
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&library)
+    assert!(
+        fs::symlink_metadata(&library).unwrap().file_type().is_dir(),
+        "mbedTLS library source is not a directory"
+    );
+    let mut entries: Vec<PathBuf> = fs::read_dir(&library)
         .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
+        .map(|entry| {
+            let entry = entry.unwrap();
+            assert!(
+                entry.file_type().unwrap().is_file(),
+                "unexpected non-file in mbedTLS library tree: {}",
+                entry.path().display()
+            );
+            entry.path()
+        })
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("c"))
         .collect();
     entries.sort();
@@ -125,7 +192,6 @@ fn main() {
     base(&x509_files).compile("mbedx509");
     base(&crypto_files).compile("mbedcrypto");
 
-    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     println!("cargo:include={}", include.display());
     // Only the search path is emitted here. The `name`/`kind`/`modifiers` of the
     // three archives are declared via `#[link(..)]` in `lib.rs` (with a
