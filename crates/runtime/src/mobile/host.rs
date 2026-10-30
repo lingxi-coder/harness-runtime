@@ -37,6 +37,7 @@ mod assembly;
 mod audio_context;
 mod audio_realtime_owner;
 mod automation;
+mod scheduled_workspaces;
 mod configuration;
 mod linux_runtime;
 mod list_agents;

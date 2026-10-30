@@ -1152,55 +1152,59 @@ pub(super) async fn build_mobile_inner_with_ask(
         _ => None,
     };
     let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
-    let permission_cwd = match workspace_mounts.as_slice() {
-        [mount] => {
-            // BOTH sides must be canonicalized or the containment tests below
-            // compare different spellings of the same directory. `cfg.cwd`
-            // arrives from Swift without `resolvingSymlinksInPath()`, so on
-            // device it can read `/var/mobile/...` while the mount canonicalizes
-            // to `/private/var/mobile/...`. `Path::starts_with` is
-            // component-wise, so the very first component already differs, all
-            // three tests go false, and a NESTED pair takes the disjoint arm —
-            // re-rooting the permission root upward (the case the comment below
-            // says must be refused) and turning
-            // the profile no longer recognising `roots.cwd`, which disables
-            // `denies_host_owned_for_workspace` and `escapes_workspace`
-            // outright.
-            // Canonical forms are used ONLY to decide. BOTH returned values are
-            // raw, and that is load-bearing: `translate_model_path` resolves a
-            // guest path to `mount.host_path.join(rest)` with NO
-            // canonicalization (`mobile_linux_api::find_guest_mount` is
-            // pure path math). Returning the canonicalized spelling here would
-            // leave `FsRoots.cwd` as `/private/var/...` while every translated
-            // path arrives as `/var/...`; `path_matches_rule_pattern`
-            // relativizes component-wise, so the first component would differ
-            // and EVERY rule would miss — the guest/host fix would be inert in
-            // exactly the disjoint case it exists for.
-            let host_canon =
-                std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone());
-            let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            // Which root the rules resolve against.
-            //
-            // A WIDER root is not "more deny coverage": the workspace write
-            // guards are all-or-nothing on the profile recognising
-            // `roots.cwd`. Widening turns them OFF.
-            if cwd_canon == host_canon {
-                // Identical — cwd already IS the workspace. No-op.
-                cwd.clone()
-            } else if cwd_canon.starts_with(&host_canon) {
-                // cwd is INSIDE the mount. Re-rooting would move the rule root
-                // UPWARD, widening every `./**` pattern. Keep the narrower cwd.
-                cwd.clone()
-            } else {
-                // Either disjoint (the `.global` sibling case the on-device
-                // diagnostic printed) or cwd is an ANCESTOR of the mount. Both
-                // re-root onto the workspace: it is the directory the model
-                // actually writes into, and it is the only spelling under which
-                // the workspace guards engage at all.
-                mount.host_path.clone()
+    let permission_cwd = if cfg.cwd.starts_with(cfg.lingxi_home.join("workspaces")) {
+        cwd.clone()
+    } else {
+        match workspace_mounts.as_slice() {
+            [mount] => {
+                // BOTH sides must be canonicalized or the containment tests below
+                // compare different spellings of the same directory. `cfg.cwd`
+                // arrives from Swift without `resolvingSymlinksInPath()`, so on
+                // device it can read `/var/mobile/...` while the mount canonicalizes
+                // to `/private/var/mobile/...`. `Path::starts_with` is
+                // component-wise, so the very first component already differs, all
+                // three tests go false, and a NESTED pair takes the disjoint arm —
+                // re-rooting the permission root upward (the case the comment below
+                // says must be refused) and turning
+                // the profile no longer recognising `roots.cwd`, which disables
+                // `denies_host_owned_for_workspace` and `escapes_workspace`
+                // outright.
+                // Canonical forms are used ONLY to decide. BOTH returned values are
+                // raw, and that is load-bearing: `translate_model_path` resolves a
+                // guest path to `mount.host_path.join(rest)` with NO
+                // canonicalization (`mobile_linux_api::find_guest_mount` is
+                // pure path math). Returning the canonicalized spelling here would
+                // leave `FsRoots.cwd` as `/private/var/...` while every translated
+                // path arrives as `/var/...`; `path_matches_rule_pattern`
+                // relativizes component-wise, so the first component would differ
+                // and EVERY rule would miss — the guest/host fix would be inert in
+                // exactly the disjoint case it exists for.
+                let host_canon = std::fs::canonicalize(&mount.host_path)
+                    .unwrap_or_else(|_| mount.host_path.clone());
+                let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+                // Which root the rules resolve against.
+                //
+                // A WIDER root is not "more deny coverage": the workspace write
+                // guards are all-or-nothing on the profile recognising
+                // `roots.cwd`. Widening turns them OFF.
+                if cwd_canon == host_canon {
+                    // Identical — cwd already IS the workspace. No-op.
+                    cwd.clone()
+                } else if cwd_canon.starts_with(&host_canon) {
+                    // cwd is INSIDE the mount. Re-rooting would move the rule root
+                    // UPWARD, widening every `./**` pattern. Keep the narrower cwd.
+                    cwd.clone()
+                } else {
+                    // Either disjoint (the `.global` sibling case the on-device
+                    // diagnostic printed) or cwd is an ANCESTOR of the mount. Both
+                    // re-root onto the workspace: it is the directory the model
+                    // actually writes into, and it is the only spelling under which
+                    // the workspace guards engage at all.
+                    mount.host_path.clone()
+                }
             }
+            _ => cwd.clone(),
         }
-        _ => cwd.clone(),
     };
 
     let (perms, permission_policy_gate): (
@@ -1363,6 +1367,12 @@ pub(super) async fn build_mobile_inner_with_ask(
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
+        if let Some(memory) = cfg.scheduled_memory_directory.as_ref() {
+            additional_working_dirs.insert(
+                memory.clone(),
+                permission::rule::PermissionRuleSource::Session,
+            );
+        }
         let roots = permission::FsRoots {
             cwd: permission_cwd.clone(),
             home: if mobile_linux.is_some() {
@@ -1651,6 +1661,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // containment. Legacy/unavailable runtimes serve an empty table, so this
     // adds nothing off mobile-linux.
     let mut trusted_dirs = vec![cwd.clone(), logical_cwd.clone()];
+    trusted_dirs.extend(cfg.scheduled_memory_directory.iter().cloned());
     trusted_dirs.extend(mobile_linux_mounts.iter().map(|m| m.host_path.clone()));
     // PathAtlas S3: the MODEL-VISIBLE cwd is the guest workspace when one is
     // mounted — the same coordinate the shell already uses, so file tools and

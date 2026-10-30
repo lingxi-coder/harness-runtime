@@ -96,6 +96,7 @@ desktop = [
     "dep:platform-windows",
 ]
 mobile = [
+    "dep:chrono",
     "dep:httparse",
     "dep:tempfile",
     "dep:jsonschema",

@@ -971,3 +971,79 @@ async fn migration_marker_recovers_each_publication_boundary_without_duplicate_t
         assert_eq!(marker["completed"], true);
     }
 }
+
+#[tokio::test]
+async fn no_project_cron_allocates_brand_workspace_without_moving_its_claim_ledger() {
+    use crate::mobile::test_support::{test_config, HostFakePlatform};
+    let root = tempfile::tempdir().unwrap();
+    let controller = root.path().join("atlas/scheduled");
+    std::fs::create_dir_all(&controller).unwrap();
+    let mut cfg = test_config(&controller);
+    cfg.brand_runtime_profile =
+        mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_user", ".atlas");
+    cfg.lingxi_home = root.path().join(".atlas");
+    std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
+    let platform: Arc<dyn Platform> = Arc::new(HostFakePlatform::new(root.path().to_path_buf()));
+    let fs = platform.filesystem();
+    let mut saved = task("active");
+    saved.automation.as_mut().unwrap().reasoning =
+        serde_json::json!({"type":"invalid-test-reasoning"});
+    let mut document = cron::ScheduledTasks::default();
+    document.tasks.push(saved);
+    cron::tasks_file::write_automation_tasks_body(
+        fs.as_ref(),
+        &controller,
+        &cron::serialize_tasks(&document),
+    )
+    .await
+    .unwrap();
+    let request = cron::claim_automation_run_now(
+        fs.as_ref(),
+        &controller,
+        "d12345678",
+        std::time::SystemTime::now(),
+    )
+    .await
+    .unwrap();
+    let firer = MobileTurnFirer {
+        cfg: cfg.clone(),
+        platform,
+    };
+    let error = firer
+        .fire_session(
+            "task prompt".into(),
+            request.task.automation.as_ref(),
+            Some(&request),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.starts_with("paused:"), "{error}");
+    let stored = read_cron_tasks(fs.as_ref(), &controller).await;
+    let id = stored.tasks[0].automation.as_ref().unwrap().runs[0]
+        .session_id
+        .clone()
+        .expect("session bound in the control ledger");
+    let workspace = super::scheduled_workspaces::ScheduledWorkspace::prepare(
+        &cfg,
+        "d12345678",
+        "title",
+        Some(uuid::Uuid::parse_str(&id).unwrap()),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(workspace.host.starts_with(
+        std::fs::canonicalize(&cfg.lingxi_home)
+            .unwrap()
+            .join("workspaces")
+    ));
+    let transcript =
+        session::jsonl::session_path(&cfg.lingxi_home, &workspace.logical.to_string_lossy(), &id);
+    assert!(
+        transcript.exists(),
+        "session anchor must use the generated cwd"
+    );
+    assert!(
+        !cron::scheduled_tasks_path(&workspace.host).exists(),
+        "execution directory must not get a duplicate schedule"
+    );
+}

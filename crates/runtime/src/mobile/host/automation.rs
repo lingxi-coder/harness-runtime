@@ -550,7 +550,7 @@ impl MobileTurnFirer {
 
     async fn fire_session_scoped(
         &self,
-        prompt: Utf16JsonProjection,
+        mut prompt: Utf16JsonProjection,
         automation: Option<&cron::CronAutomation>,
         request: Option<&cron::AutomationRunRequest>,
     ) -> Result<cron::AutomationRunResult, String> {
@@ -564,7 +564,7 @@ impl MobileTurnFirer {
         {
             return Err("paused: Select a conversation".into());
         }
-        let cwd = self
+        let store_cwd = self
             .cfg
             .logical_cwd
             .as_ref()
@@ -574,6 +574,30 @@ impl MobileTurnFirer {
             .map(|id| uuid::Uuid::parse_str(id.strip_prefix("sess:").unwrap_or(id)))
             .transpose()
             .map_err(|e| format!("paused: Invalid session: {e}"))?;
+        let workspace = if automation.is_some() {
+            super::scheduled_workspaces::ScheduledWorkspace::prepare(
+                &self.cfg,
+                request.map(|r| r.task.id.as_str()).unwrap_or("scheduled"),
+                automation.and_then(|a| a.name.as_deref()).unwrap_or("task"),
+                target_uuid,
+            )
+            .map_err(|error| format!("paused: {error}"))?
+        } else {
+            None
+        };
+        let cwd = workspace
+            .as_ref()
+            .map(|w| w.logical.to_string_lossy().into_owned())
+            .unwrap_or_else(|| store_cwd.clone());
+        if let Some(workspace) = &workspace {
+            let mut units = prompt
+                .string_units("")
+                .ok_or_else(|| "invalid task prompt".to_string())?;
+            units.extend(workspace.instructions().encode_utf16());
+            prompt
+                .set_string_units("", &units)
+                .map_err(|error| error.to_string())?;
+        }
         let gate = target_uuid.map(|id| mobile_cron_session_gate(&cwd, &id.to_string()));
         let _session_guard = match &gate {
             Some(gate) => Some(
@@ -621,6 +645,18 @@ impl MobileTurnFirer {
         });
         let (mut config, child_media) = self.scheduled_runtime_config()?;
         cleanup.media_attachment = child_media;
+        if let Some(workspace) = &workspace {
+            config.cwd = workspace.host.clone();
+            config.logical_cwd = self
+                .cfg
+                .logical_cwd
+                .as_ref()
+                .map(|_| workspace.logical.clone());
+            config.scheduled_memory_directory = workspace
+                .memory_host
+                .parent()
+                .map(std::path::Path::to_path_buf);
+        }
         // Session transcripts and the scheduler store are host-owned paths,
         // not model-supplied guest paths, even if their spelling overlaps a
         // guest root such as /tmp.
@@ -702,10 +738,13 @@ impl MobileTurnFirer {
                 .await
                 .map_err(|error| format!("persist scheduled session mode: {error}"))?;
         }
+        if let Some(workspace) = &workspace {
+            workspace.bind(&self.cfg.lingxi_home, &session_id)?;
+        }
         if let Some(request) = request {
             cron::bind_automation_run_session(
                 model_fs.as_ref(),
-                std::path::Path::new(&cwd),
+                std::path::Path::new(&store_cwd),
                 request,
                 &session_id,
             )

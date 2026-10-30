@@ -25,6 +25,8 @@ pub struct MobileConfig {
     pub brand_runtime_profile: mobile_linux_api::BrandRuntimeProfile,
     /// Private model/tool service bootstrap for Local Apps; never a chat.
     pub app_agent_host: bool,
+    /// Host-authorized task memory, never the whole branded data directory.
+    pub scheduled_memory_directory: Option<std::path::PathBuf>,
     /// Host-scoped official catalog delivery; never inferred from credentials.
     pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
@@ -239,6 +241,7 @@ impl Default for MobileConfig {
         Self {
             brand_runtime_profile: mobile_linux_api::BrandRuntimeProfile::default(),
             app_agent_host: false,
+            scheduled_memory_directory: None,
             startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             build_info: command_api::builtins::BuildInfo::default(),
