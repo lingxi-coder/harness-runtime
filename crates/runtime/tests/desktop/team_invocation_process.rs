@@ -648,7 +648,7 @@ async fn private_bootstrap_rejects_dirty_environment_oversize_and_unknown_fields
             let mut value = raw_bootstrap(&root, id, "http://127.0.0.1:1");
             match case {
                 "unknown" => value["owner_approval"] = json!(true),
-                "version" => value["version"] = json!(2),
+                "version" => value["version"] = json!(3),
                 "zero_limit" => value["physical_dispatches"] = json!(0),
                 _ => unreachable!(),
             }

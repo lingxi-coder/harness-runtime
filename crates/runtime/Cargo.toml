@@ -387,6 +387,21 @@ path = "tests/desktop/team_connector.rs"
 required-features = ["desktop"]
 
 [[test]]
+name = "team_sandbox_process_boundary"
+path = "tests/desktop/team_sandbox_process_boundary.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "team_process_interactions"
+path = "tests/desktop/team_process_interactions.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "harness-team-host"
+path = "src/bin/team_host.rs"
+required-features = ["desktop"]
+
+[[test]]
 name = "settings_watch_spawn"
 path = "tests/desktop/settings_watch_spawn.rs"
 required-features = ["desktop"]

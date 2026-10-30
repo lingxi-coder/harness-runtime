@@ -1,3 +1,4 @@
+use super::interaction::ChildInteraction;
 use super::protocol::{self, Bootstrap, MAX_FRAME, MAX_RESULT_TEXT};
 use super::{
     environment, TeamProcessDeadline, TeamProcessError, TeamProcessOutcome, TeamProcessResult,
@@ -6,7 +7,7 @@ use crate::api::{LifecycleService, RunInput, SessionService};
 use crate::desktop::team_invocation::TeamInvocationProfile;
 use crate::desktop::DesktopConfig;
 use client::adapter::PermissionRequestSink;
-use client::protocol::permission::{PermissionRequest, PermissionResponseDto};
+use client::protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
 use lingxi_core::host::{CostSnapshot, OutputStream, TurnOutcome};
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
 use lingxi_core::types::{ConversationMessage, ToolUseId};
@@ -45,10 +46,10 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let deadline = TeamProcessDeadline::from_backend_unix_millis(bootstrap.deadline_unix_ms)?;
     let model = bootstrap.model()?;
     let limits = bootstrap.limits()?;
-    if bootstrap.version != 1 {
+    if !matches!(bootstrap.version, 1 | 2) {
         return Err(TeamProcessError::Protocol);
     }
-    let profile = TeamInvocationProfile::prepare(
+    let mut profile = TeamInvocationProfile::prepare(
         &bootstrap.storage_root,
         bootstrap.identity(),
         bootstrap.invocation_id,
@@ -64,23 +65,41 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     if std::env::current_dir()? != profile.scope_root().join("workspace") {
         return Err(TeamProcessError::Environment);
     }
+    let cancel = CancellationToken::new();
+    if bootstrap.version == 2 {
+        // Only this fresh, validated broker-enabled worker can route private
+        // Bash through a crash-safe per-command helper. Its lease closes even
+        // after abrupt worker death; the helper receives no model credential.
+        platform_posix::process::team_guardian::enable_team_guardian(
+            std::env::current_exe()?,
+            profile.scope_root().to_owned(),
+            bootstrap.deadline_unix_ms,
+            cancel.clone(),
+        )
+        .map_err(|_| TeamProcessError::Worker)?;
+    }
+    let (interaction, questions) = if bootstrap.version == 2 {
+        let bridge = ChildInteraction::start(cancel.clone())?;
+        let (sender, questions) = tokio::sync::mpsc::channel(4);
+        profile = profile.with_original_human_question_sender(sender);
+        (Some(bridge), Some(questions))
+    } else {
+        let parent_gone = cancel.clone();
+        // Version one preserves the bootstrap/result-only explicit-deny route.
+        std::thread::Builder::new()
+            .name("team-parent-lease".into())
+            .spawn(move || {
+                let _ = std::io::stdin().read(&mut [0u8; 1]);
+                parent_gone.cancel();
+            })?;
+        (None, None)
+    };
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("anthropic/{}", model.model_id);
     cfg.api_base = model.endpoint;
     cfg.api_key = model.api_key;
     profile.apply_to(&mut cfg)?;
 
-    let cancel = CancellationToken::new();
-    let parent_gone = cancel.clone();
-    // Tokio stdin uses an uncancellable blocking task, which can deadlock
-    // runtime shutdown. A dedicated detached reader observes EOF/unexpected
-    // bytes without joining or keeping the runtime alive.
-    std::thread::Builder::new()
-        .name("team-parent-lease".into())
-        .spawn(move || {
-            let _ = std::io::stdin().read(&mut [0u8; 1]);
-            parent_gone.cancel();
-        })?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -90,14 +109,23 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             biased;
             _ = tokio::time::sleep_until(deadline.instant.into()) => Err(TeamProcessError::Deadline),
             _ = cancel.cancelled() => Err(TeamProcessError::Cancelled),
-            result = run(cfg, &profile, bootstrap.input, limits.physical_dispatches.get(), cancel.child_token()) => result,
+            result = run(cfg, &profile, bootstrap.input, limits.physical_dispatches.get(), cancel.child_token(), interaction, questions) => result,
         }
     });
     // Runtime tasks (including an in-flight model request) cannot outlive this
     // worker. Parent independently kills the process on its monotonic deadline.
     profile.revoke();
     runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-    let frame = protocol::encode(&result?)?;
+    let mut result = result?;
+    if cancel.is_cancelled() {
+        return Err(TeamProcessError::Cancelled);
+    }
+    result.version = bootstrap.version;
+    let frame = if bootstrap.version == 2 {
+        protocol::encode(&protocol::WorkerFrame::Result { result })?
+    } else {
+        protocol::encode(&result)?
+    };
     std::io::stdout().write_all(&frame)?;
     std::io::stdout().flush()?;
     Ok(())
@@ -148,9 +176,9 @@ fn read_bootstrap() -> Result<Bootstrap, TeamProcessError> {
     serde_json::from_slice(&body).map_err(|_| TeamProcessError::Protocol)
 }
 
-struct DenySink(tokio::sync::mpsc::Sender<PermissionRequest>);
+struct PermissionSink(tokio::sync::mpsc::Sender<PermissionRequest>);
 #[async_trait::async_trait]
-impl PermissionRequestSink for DenySink {
+impl PermissionRequestSink for PermissionSink {
     async fn emit_request(&self, request: PermissionRequest) {
         let _ = self.0.send(request).await;
     }
@@ -162,6 +190,10 @@ async fn run(
     input: String,
     dispatch_limit: u32,
     cancel: CancellationToken,
+    interaction: Option<Arc<ChildInteraction>>,
+    questions: Option<
+        tokio::sync::mpsc::Receiver<tool_api::ask_user_question::AskUserQuestionExchange>,
+    >,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     let output = Arc::new(BoundedOutput {
         received_bytes: AtomicUsize::new(0),
@@ -170,7 +202,7 @@ async fn run(
         cancel: cancel.clone(),
     });
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
-    let rt = crate::desktop::build(cfg, output.clone(), Arc::new(DenySink(tx)))
+    let rt = crate::desktop::build(cfg, output.clone(), Arc::new(PermissionSink(tx)))
         .await
         .map_err(|_| TeamProcessError::Worker)?;
     let gate = rt
@@ -180,23 +212,72 @@ async fn run(
         .clone();
     let denied = Arc::new(AtomicU32::new(0));
     let count = denied.clone();
-    let pump = tokio::spawn(async move {
-        while let Some(request) = rx.recv().await {
-            if gate
-                .resolve(request.request_id, PermissionResponseDto::Deny, "")
-                .await
-            {
+    let permission_bridge = interaction.clone();
+    let permission_cancel = cancel.clone();
+    let pump = AbortOnDrop(tokio::spawn(async move {
+        while let Some(request) = tokio::select! {
+            biased;
+            _ = permission_cancel.cancelled() => None,
+            request = rx.recv() => request,
+        } {
+            let approved = if let Some(bridge) = &permission_bridge {
+                match request.kind {
+                    PermissionKindDto::ToolUseConfirm {
+                        tool_name,
+                        tool_input_json,
+                        ..
+                    } if tool_name == "Bash" => match serde_json::from_str(&tool_input_json) {
+                        Ok(input) => bridge.approve(tool_name, input).await,
+                        Err(_) => Err(TeamProcessError::Protocol),
+                    },
+                    _ => Ok(false),
+                }
+            } else {
+                Ok(false)
+            };
+            let allow = match approved {
+                Ok(allow) if !permission_cancel.is_cancelled() => allow,
+                _ => {
+                    permission_cancel.cancel();
+                    break;
+                }
+            };
+            let response = if allow {
+                PermissionResponseDto::AllowOnce
+            } else {
+                PermissionResponseDto::Deny
+            };
+            if !gate.resolve(request.request_id, response, "").await {
+                permission_cancel.cancel();
+                break;
+            }
+            if !allow {
                 count.fetch_add(1, Ordering::Relaxed);
             }
         }
-    });
+    }));
+    let question_pump = match (interaction, questions) {
+        (Some(bridge), Some(mut questions)) => Some(AbortOnDrop(tokio::spawn(async move {
+            while let Some(question) = tokio::select! {
+                biased;
+                _ = bridge.cancel.cancelled() => None,
+                question = questions.recv() => question,
+            } {
+                if bridge.ask(question).await.is_err() {
+                    bridge.cancel.cancel();
+                    break;
+                }
+            }
+        }))),
+        _ => None,
+    };
     let outcome = rt
         .run(
             RunInput {
                 prompt: input,
                 images: Vec::new(),
             },
-            cancel,
+            cancel.clone(),
         )
         .await;
     let metrics = rt.orchestrator.completed_turn_metrics();
@@ -213,7 +294,11 @@ async fn run(
         })
         .unwrap_or_default();
     let drain = rt.shutdown().await;
-    pump.abort();
+    drop(pump);
+    drop(question_pump);
+    if cancel.is_cancelled() && !output.overflow.load(Ordering::Acquire) {
+        return Err(TeamProcessError::Cancelled);
+    }
     if !drain.complete {
         return Err(TeamProcessError::Worker);
     }
@@ -252,6 +337,15 @@ async fn run(
         dispatched_requests: dispatch_limit - profile.output_quota().remaining_dispatches(),
         denied_tools: denied.load(Ordering::Relaxed),
     })
+}
+
+// Dropping a run future also drops its callbacks; no detached broker wait
+// survives runtime cancellation or a terminal turn.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct BoundedOutput {

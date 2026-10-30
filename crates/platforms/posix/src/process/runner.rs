@@ -856,6 +856,9 @@ impl ProcessRunner for PosixProcess {
     }
 
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        if super::team_guardian::enabled() {
+            return super::team_guardian::execute(cmd, None).await;
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -922,6 +925,16 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         sink: std::sync::Arc<dyn ProcessStreamSink>,
     ) -> Result<ProcessOutput, ProcessError> {
+        if super::team_guardian::enabled() {
+            let output = super::team_guardian::execute(cmd, None).await?;
+            for line in output.stdout.lines() {
+                sink.stdout_line(line.to_owned()).await?;
+            }
+            if !output.stderr.is_empty() {
+                sink.stderr_chunk(output.stderr.as_bytes().to_vec()).await?;
+            }
+            return Ok(output);
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -1049,6 +1062,13 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
     ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        if super::team_guardian::enabled() {
+            let output = super::team_guardian::execute(cmd, max_output_bytes).await?;
+            return Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(output),
+                output_file: None,
+            });
+        }
         if super::supervisor::enabled(cmd) {
             return super::supervisor::execute(cmd, max_output_bytes, false).await;
         }
@@ -1393,6 +1413,9 @@ impl ProcessRunner for PosixProcess {
         observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<HookRunOutcome, ProcessError> {
+        if super::team_guardian::enabled() {
+            return Err(ProcessError::Unsupported);
+        }
         if cancellation
             .as_ref()
             .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
@@ -1630,6 +1653,9 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
     ) -> Result<ProcessHandle, ProcessError> {
+        if super::team_guardian::enabled() {
+            return Err(ProcessError::Unsupported);
+        }
         if super::supervisor::enabled(cmd) {
             return match super::supervisor::execute(cmd, None, true).await?.outcome {
                 lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),

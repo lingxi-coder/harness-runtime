@@ -1,115 +1,123 @@
-# Team invocation process prerequisite
+# Private Team invocation process
 
-`harness-team-worker` and `desktop::team_process` provide a fresh macOS process
-for one trusted host invocation. **T3 remains disabled.** This is not a backend
-listener, public IPC endpoint, authenticated approval broker or durable executor.
-Product dependency pins and launch paths do not consume this local companion.
+`desktop::team_process` launches one clean macOS `harness-team-worker` per trusted
+start. `TeamProcessStart::run` preserves the v1 all-tools-denied route.
+`run_with_broker` selects v2 for explicit owner permissions and original-human
+questions. The API is not an authentication boundary or public IPC decoder; the
+[trusted connector](TEAM_CONNECTOR.md) supplies those authorities. Packaging,
+publication, and live acceptance remain separate from the source described here.
 
-## Trusted host boundary
+## One-shot launch and clean process
 
-The host must authenticate and consume `startBot`'s one-shot `execute:true`
-response, preserve its trigger/attempt fencing and stable invocation UUID, and
-capture `leaseUntil` with `TeamProcessDeadline::from_backend_unix_millis` when
-the response arrives. Requests have no serde/settings constructor. This API does
-not authenticate the caller or a backend response. A member, renderer, ordinary
-Bot router or remote-control client must not construct these inputs.
+The host must authenticate/consume `startBot execute:true`, preserve its
+trigger/attempt fencing and stable invocation UUID, and capture `leaseUntil`
+once with `TeamProcessDeadline::from_backend_unix_millis`. `TeamProcessRequest`
+has no settings/wire constructor. Its identity, immutable persona/Skill snapshot,
+fully composed human text, finite limits, model, and deadline come from the
+trusted host. A member, renderer, ordinary Bot router, or Remote Control caller
+cannot mint a request.
 
-Construct `TeamProcessRequest` from the verified human principal, immutable
-persona/Skill snapshot, fully composed human text, finite limits, selected model
-and that deadline. `TeamProcessStart::prepare` applies the private profile's
-storage and input checks. `run` consumes the launch and uses a canonical,
-host-owned executable that is not writable by group/others. The host must
-select its trusted built worker; file ownership alone does not authenticate an
-arbitrary executable or protect it against replacement by the same OS user.
+`prepare` validates the private profile and input. Before spawning, the parent
+creates/syncs a private `process-started` tombstone and its directory. Concurrent
+or restarted launches with that UUID refuse, including after spawn/pipe failure,
+cancellation, timeout, or a lost result. The tombstone contains no prompt/key and
+is never automatically deleted. Changing UUID/root is not authorized recovery.
+The executable must be canonical, owner-owned, and not group/other writable;
+the host must also select the correct trusted build. This does not defend
+against a malicious process sharing that OS account.
 
-Before spawning, the parent creates and syncs an owner-only `process-started`
-tombstone under that invocation's private output directory, including syncing
-the directory. Concurrent starts and restarts with that same UUID fail closed.
-Spawn failure, pipe failure, cancellation, timeout and a lost result never remove
-the tombstone or authorize execution again. It contains no credential or prompt.
-Stable backend identity mapping and cross-host fencing remain product duties;
-choosing another UUID/root is not an authorized recovery mechanism.
+The worker has no model-role CLI options or shared pool. The parent clears its
+environment and fixes private HOME/config/TMPDIR/cwd, PATH, locale, and
+CoreFoundation home/encoding. At fresh single-threaded entry, the worker checks
+all eight keys and closes inherited descriptors above stdio using `/dev/fd`,
+including descriptors without CLOEXEC. Never call its entry point inside an
+existing host process. The selected model key travels only in an anonymous
+bootstrap pipe; stderr is discarded. HTTPS is required except literal loopback
+HTTP for gateways/fixtures. URL userinfo/query/fragment refuse. Only a qualified
+Anthropic model and selected static API key are admitted; other protocols and
+authentication routes require independent work/validation.
 
-## Process and transport
+## Private framed protocol and brokers
 
-Every invocation executes the dedicated binary, with no CLI options or shared
-worker pool. The parent clears the environment, fixes private home/config/tmp,
-cwd, PATH and locale, and supplies only the selected model credential through
-an anonymous stdin pipe. The binary checks its environment before loading the
-bootstrap or building the runtime. The eight exact environment keys also fix
-CoreFoundation's private user home and UTF-8 encoding. Pre-main framework
-initialization must not recover the owner's encoding preferences or add a
-user-derived value after `env_clear`. It closes all inherited descriptors above
-stdio at its fresh single-threaded entry, including descriptors without CLOEXEC,
-using actual `/dev/fd` entries rather than a current-rlimit assumption. Do not
-call the binary's entry function inside an existing host process.
+Frames use a four-byte big-endian length and a bounded JSON body, at most
+256 KiB. Unknown fields, invalid versions/limits, zero/oversized/truncated frames
+refuse. Both versions accept exactly one bootstrap and retain stdin as a parent
+liveness lease. EOF cancels live model/tool work. A dedicated blocking OS thread
+reads stdin so shutdown cannot hang on Tokio's blocking stdin task.
 
-The only inbound frame is a versioned, length-prefixed bootstrap, limited to
-256 KiB. Unknown fields, invalid versions/limits, truncated or oversized frames
-refuse. The pipe remains open as a parent-liveness lease; EOF or any extra byte
-cancels work. There is no second-start, permission, question, settings, registry,
-credential-refresh, resume or command-dispatch message. The private format is
-never registered on product IPC. Stderr is discarded, and fixed nonzero exit
-categories contain no provider bodies or diagnostics.
-The exit categories are 65 (protocol), 74 (I/O), 75 (deadline/cancellation),
-77 (profile), 78 (environment) and 70 (other worker failure).
+Version 1 permits only a terminal result on stdout. Every tool is denied, no
+question sender is installed, and any further inbound byte cancels execution.
+Version 2 permits typed owner-permission/human-question requests and one terminal
+result on stdout. Parent replies can resolve only a pending interaction of the
+same type and exact ID. There is no second-start, settings, registry, resume,
+credential-refresh, or arbitrary command route. The format is not registered on
+product IPC. IDs are unique across both interaction channels for the invocation,
+1–128 printable ASCII bytes. Interactions are serialized; unknown, duplicate,
+wrong-kind, out-of-order, or oversized traffic fails closed. The parent also
+rejects any worker byte/EOF while awaiting a broker callback.
 
-Only a selected static Anthropic API key and qualified Anthropic model are
-currently supported. Other protocols/OAuth/cloud/subscription auth require their
-own explicit credential transfer and real wire validation before admission.
-The host chooses an HTTPS endpoint; literal loopback HTTP is allowed for local
-gateways and acceptance fixtures. URL userinfo, queries and fragments refuse.
-No key is placed in argv, environment, a settings file or a credential sidecar.
-Provider configuration, model routing, memory and transcripts use the preceding
-[private profile contract](TEAM_INVOCATION_PROFILE.md).
+The trusted host implements `TeamProcessBroker::approve` and `ask`. Callbacks
+run inline under the captured deadline/cancellation, receive revocable child
+tokens, and are dropped with the parent future. Only Bash can request owner
+approval; the gate resolves AllowOnce or Deny against its original JSON input.
+No Always/Auto decision, edited input, policy mutation, or generic owner/TUI
+question route is available. Broker-enabled workers explicitly install
+`with_original_human_question_sender`; default workers never inherit one.
 
-The child constructs a new private runtime/quota exactly once and submits one
-human turn through the real SessionService. **All tool requests are denied** by
-the worker's permission pump. No owner approval resolver is exported, and no
-original-human question sender is installed. This restriction must remain until
-the authenticated owner and original-human brokers are implemented and tested.
-Consequently this prerequisite never executes model-selected shell commands.
+Questions contain 1–4 unique original texts of at most 2000 UTF-16 units each.
+Their exact texts are answer-map keys. Headers, options, and descriptions appear
+only in rendered text bounded to 8192 UTF-8 bytes. Answers must use exactly those
+keys and nonempty strings of at most 2000 UTF-16 units, with a bounded aggregate
+encoding. Duplicate JSON keys and lossy lone-surrogate question projections
+refuse; validated strings are projected back to the tool's UTF-16 carrier.
+An explicit absent answer drops that dedicated responder. No broker events or
+tool arguments are added to the process journal; ordinary private transcripts
+retain their existing behavior.
 
-## Deadlines and results
+## Lifetime, tools, and terminal results
 
-The parent accepts an absolute lease only within the next five minutes and
-converts it once to a monotonic deadline. Waiting before launch never extends
-it. Bootstrap writes, output reads, child waiting, build/model/drain work and
-future provider requests share the deadline; cancellation or dropping the
-parent future kills its worker process group, with kill-on-drop as a fallback.
-The child also checks the absolute lease and supervises its runtime and parent
-pipe independently. Async stdin is deliberately avoided because its blocking
-reader can prevent runtime shutdown.
+The absolute lease must initially lie within the next five minutes and is
+captured once into a monotonic deadline. Waiting never renews it. Bootstrap,
+build/model/tool work, both broker waits, output reads, shutdown, and worker
+waiting share it. Cancellation/drop/expiry kills the worker group with
+kill-on-drop fallback; reaping gets a separate two-second bound. The child
+independently supervises the lease/deadline and revokes its private tool/quota
+authority during teardown. Late results never become successful completion.
 
-At expiry, the parent sends SIGKILL and separately permits up to two seconds for
-reaping; it never accepts a late result. This is not a proof of hard real-time
-termination during scheduler/OS/filesystem stalls. Detached tool descendants,
-CPU/memory/disk ceilings and general cross-platform process containment remain
-gates before allowing tools. Earlier private Bash group cleanup does not solve
-`setsid`/detach escape. The current worker denies every tool rather than relying
-on incomplete tree containment.
+For v2 Bash, a fresh private shell guardian receives the bounded approved,
+sandbox-wrapped command without the model key. Only the worker holds the helper's
+stdin lease. Worker death, parent loss, cancellation, command completion, and the
+original deadline trigger shell-group cleanup. The guardian pins the group ID
+with an unreaped leader, kills/verifies no live members before reaping, and
+returns a successful tool result only after verified cleanup. The private macOS
+policy denies `setsid`, `setpgid`, and `posix_spawn` while allowing ordinary
+fork/exec. See the [profile contract](TEAM_INVOCATION_PROFILE.md). Scheduler/OS
+stalls, CPU/memory/disk quotas, cgroups, and billing ceilings are not guaranteed.
 
-Only one bounded terminal result may leave stdout. Text is limited to 8192 UTF-8
-bytes, matching the backend result ceiling; cumulative received text also has a
-conservative 8192-byte cap across retries, not a token or billing bound. The
-reply comes from the last accepted assistant message, preserving the core's
-visible-text rules. Retracted attempts and intermediate tool preambles cannot
-become the Bot reply. Typed completed-turn API-error facts, abnormal/missing
-natural stops and an empty final answer cannot be reported as Completed.
-Provider errors and overflow return a fixed outcome with empty text. The host
-must map failed/limited outcomes to an appropriate fixed settlement message;
-it must not publish raw error bodies.
+Only one terminal result is accepted, after clean stdout EOF and successful
+worker exit. Text is at most 8192 UTF-8 bytes; cumulative received model text has
+a separate conservative 8192-byte bound across retries. The reply uses the last
+accepted assistant, retaining visible-text/retraction rules. Missing/abnormal
+natural stops, typed API-error facts, and empty final answers cannot report
+Completed. Provider failures/overflow carry fixed typed outcomes with empty
+text. Dispatch counts cannot exceed the original quota. Model-role exit codes
+are 65 protocol, 74 I/O, 75 cancellation/deadline, 77 profile, 78 environment, and
+70 other failure; no provider diagnostics leave the process.
 
-Terminal delivery/ACK loss is still ambiguous: no automatic retry or quota
-reset is performed. Persisting results, idempotent `finishBot` retries,
-revocation polling, recovery UI and four-client integration remain product work.
+A lost terminal result is ambiguous and never authorizes model/tool replay or
+quota reset. Once the connector has durably saved an exact settlement, its
+strict `retry_result` API retries only `finishBot`. Host observational retry uses
+`observe_saved`: existing start markers are only polled, and a prelaunch journal
+with no start/result returns Unstarted without model or HTTP work. Neither status
+nor result retry authorizes execution; see the connector journal contract.
 
-## Validation boundary
+## Evidence boundary
 
-The integration suite runs the actual built worker and pinned SDK against only
-synthetic loopback HTTP/SSE fixtures. It checks selected credentials/request
-caps/private prompts, ambient environment exclusion, denied model tool calls,
-quota exhaustion, retries/typed terminal errors, finite result text, inherited
-FD positive controls, deadlines/cancellation/drop, parent-pipe loss, malformed
-bootstrap and duplicate/concurrent launch refusal. No real model credential,
-Firebase account, public deployment, signed product or device flow is exercised.
+Existing prerequisite checkpoints describe their own source snapshots and
+all-tools-denied tests. Current suites additionally exercise owner AllowOnce/
+Deny, original-human answers, malformed/replayed replies, callback lifetime,
+admitted shell/child cleanup after worker SIGKILL/EOF/deadline/drop, and normal
+return with residual children. Test definitions alone are not passing results.
+The delivery owner records current commands/results/source hashes separately.
+Synthetic loopback/native evidence does not establish real provider/Firebase
+accounts, published pins, signed packages, device flows, or public deployment.

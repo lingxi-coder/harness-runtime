@@ -1,91 +1,108 @@
-# Team invocation profile prerequisite
+# Private Team invocation profile
 
-This is a host-owned, macOS-only runtime building block. **T3 execution stays
-disabled.** It is not a Team executor, authenticated broker or complete process
-isolation implementation. Product clients still use the previous Harness pin.
+`desktop::team_invocation::TeamInvocationProfile` supplies fresh private storage,
+configuration, tool authority, and output quota for a trusted macOS Team start.
+The [connector](TEAM_CONNECTOR.md) consumes authenticated backend authority;
+the [worker](TEAM_INVOCATION_PROCESS.md) enforces fresh-process lifetime and
+interaction transport. This profile itself does not authenticate a caller or
+prove packaged/live acceptance.
 
-## Host contract
+## Identity, storage, and configuration
 
-Only the trusted host constructs `desktop::team_invocation::TeamInvocationProfile`.
-It has no settings, renderer, wire or serialization constructor. `prepare` mints
-fresh tool/quota authority and must be called once for a consumed authenticated
-start permit, never to replay an ambiguous invocation after restart.
+Only the trusted host constructs the profile; it has no settings, renderer,
+public-wire, or serialization constructor. `prepare` mints fresh tool/quota
+authority once for a consumed start permit. Never reconstruct it to replay an
+ambiguous invocation. Its canonical host-controlled storage root is 0700. The
+namespace hashes length-delimited owner UID, Bot key, Team/conversation IDs,
+original human UID, and that human's membership generation; a generation alone
+is not an identity.
 
-Supply a canonical, host-controlled 0700 storage root. The profile derives a
-SHA-256 namespace from length-delimited owner UID, Bot key, Team ID, conversation
-ID, **original human UID** and that human's membership generation. A generation
-alone is not an identity. It creates private home/workspace/tmp/shell-home/inputs,
-transcripts and per-invocation output directories. Symlinks, non-private modes,
-wrong ownership, sandbox glob characters and corrupted input snapshots fail
-closed. Host-selected persona/Skill text is bounded, hashed and stored as a
-regular 0400 snapshot; live owner Skill directories are never copied.
+Private home/workspace/tmp/shell-home/inputs, transcripts, and per-invocation
+output paths are created/validated. Symlinks, wrong owners/modes, sandbox glob
+characters, and corrupted snapshots fail closed. Persona/Skill text is bounded,
+hashed, and saved as a regular 0400 immutable snapshot; owner Skill directories
+are not copied.
 
-Set an explicit `provider/model`, with only that selected provider's credentials
-and endpoint configuration. The profile discards other provider profiles and
-unrelated Anthropic credentials. Team credential bootstrap uses a fresh memory
-store, never native/file credentials. A host supplying a shared credential stack
-must itself restrict its memory store to the selected credential; a memory
-backend label does not prove its contents. Generic provider environment fallback,
-ambient OAuth/PAT capture, API-key/proxy/AWS refresh helpers and owner identity
-metadata are disabled on the Team assembly and public headless service paths.
-The SDK still has process-level environment readers: a clean, dedicated host
-process and request-level verification remain prerequisites for full credential
-isolation. No real provider request is validated by the fixture tests.
+`validate_input` checks fully composed human text before submission. `apply_to`
+and assembly/headless entry points reapply the profile before settings or
+credential loading. Configuration is reconstructed from defaults rather than
+inheriting owner callbacks, resume state, folders, MCP/plugins/hooks/startup
+work, skills, prompt shell expansion, native tools, or settings watchers.
+Clones share the profile-owned policy cache and authority; owner initialized
+caches are not reused. Managed policy may deny but cannot grant shell execution.
 
-Call `validate_input` on the **fully composed human text** before submission, then
-`apply_to` on the host config. Assembly and public headless service entry points
-reapply the profile before loading credentials/settings. They reconstruct the
-config from defaults; they do not inherit owner callbacks, resume state, folders,
-MCP, plugins, hooks, startup tasks, skills, prompt shell expansion, native tools
-or settings watchers. The profile owns its policy cache across clones/reapply;
-an owner's initialized cache is not reused. Managed policy can deny capabilities
-but cannot grant shell execution on the owner's behalf.
+Only the selected provider/model profile can supply credentials/endpoint.
+Credential bootstrap uses a fresh memory store, never native/file credentials.
+A host supplying a credential stack must restrict its contents, not merely its
+backend label. Generic environment fallback, ambient OAuth/PAT capture,
+API-key/proxy/AWS refresh helpers, and owner identity metadata are disabled.
+The supported process route is selected static Anthropic only, with its key
+supplied over a private pipe. SDK environment readers also require the clean
+fresh worker; profile configuration inside an owner process is insufficient.
+No real-provider behavior follows from synthetic fixture acceptance.
 
-Host Git probes are also disabled at subagent-renderer construction, prompt/
-environment rendering, transcript branch stamping and server-classifier context.
-A model-owned `.git` pointer or `core.fsmonitor` must never cause the host to
-inspect another repository or execute a command outside the shell sandbox.
+Host Git probes are disabled in renderers/prompts, transcript branch stamping,
+and server classification. Model-owned `.git` pointers or fsmonitor settings
+cannot authorize host probes or commands. Memory retrieval/extraction use
+explicit private-home paths and share the main model/quota; ambient HOME,
+LINGXI_CONFIG_DIR, and ancestor instructions are not their roots. Transcripts
+and tool-output spools remain private. Real model memory behavior requires
+separate acceptance.
 
-Only Bash and, when explicitly configured, AskUserQuestion can be registered.
-The revocable tool lease also filters dynamic tools. Every Bash command requests
-host approval, including read-only commands; managed allow rules and sandbox
-auto-approval cannot substitute for that approval. The product must bind the
-permission adapter exclusively to the authenticated owner. Do not expose its
-resolver through generic Team-member or remote-control IPC.
+## Tools and human authority
 
-No question sender is inherited from `DesktopConfig`. Without an explicit
-`with_original_human_question_sender`, questionnaire registration fails closed.
-That method accepts a trusted host channel, not an authenticated broker: the
-product must implement a separate broker checking original human UID/generation,
-question identity, membership, revocation and the shared deadline for every answer.
-An owner/TUI/remote-control answer channel is not a substitute.
+Only Bash and explicitly configured AskUserQuestion can be registered; the
+revocable tool lease also filters dynamic tools. Every Bash invocation,
+including read-only commands, requires explicit owner approval. Managed allow
+rules or sandbox auto-approval cannot replace it. The broker-enabled worker
+resolves only AllowOnce/Deny with unchanged original input, never Always/Auto or
+a persistent rule. Its permission port is bound to the authenticated owner,
+not ordinary Team-member/renderer/Remote Control input.
 
-Automatic-memory retrieval and session-memory extraction use explicit paths under
-the same private config home, sharing the main model service/quota. Ambient
-HOME/LINGXI_CONFIG_DIR and ancestor instruction discovery are not their roots.
-Transcripts and shell output spools also stay under the private home. Real model
-memory retrieval/extraction remains untested.
+No question sender is inherited from `DesktopConfig`.
+`with_original_human_question_sender` accepts only an explicitly supplied host
+channel; without it question registration fails closed. Worker v2 supplies that
+channel through the connector's separately authenticated original-human backend
+broker. Exact question identity/text keys, original-human UID/generation,
+membership, account epoch, revocation, and the original lease are rechecked
+around waits. An owner/TUI answer is not a substitute. The default worker v1
+continues to deny all tools and installs no question sender.
 
-## Shell boundary
+## macOS shell and crash boundary
 
-The immutable shell policy requires a working macOS sandbox. The Team wrapper
-generates its own profile instead of using the general desktop sandbox manager's
-owner-home/global-temp write grants. Only the private workspace/tmp are mutable;
-private inputs/home/shell-home remain read-only. Fixed system executables and
-libraries are readable. Network and shared system credential/UI IPC have no
-grants. Other platforms reject profile creation.
+The immutable shell policy requires the working private macOS sandbox and
+rejects other platforms. It generates its own profile rather than inheriting
+ordinary desktop owner-home/global-temp grants. Only workspace/tmp are mutable;
+inputs/home/shell-home remain read-only. Fixed system executables/libraries are
+readable; network, system credential/UI services, and shared IPC have no grants.
 
-Both outer and wrapped Bash use `/bin/bash --noprofile --norc -c` with a cleared
-environment, a fixed PATH and private HOME/TMPDIR. Owner startup files, loader
-variables and model credentials are not inherited by these shell children.
-The model cannot disable the sandbox, expand grants with `.git/commondir`, persist
-`cd`, use host Git snapshots or trigger unconfined cwd readback. Explicit/automatic
-background handoff is disabled. Each command is capped at 120 seconds.
+Outer/wrapped Bash use `/bin/bash --noprofile --norc -c`, cleared environments,
+fixed PATH, and private HOME/TMPDIR. No owner startup files, loader variables,
+or model keys are inherited. Model input cannot disable sandboxing, expand
+filesystem grants through Git metadata, persist cwd, use host Git snapshots, or
+invoke unconfined cwd readback. Explicit/automatic background handoff is disabled;
+each command is capped at 120 seconds within the original invocation deadline.
+The private SBPL denies Darwin `setsid`, `setpgid`, and `posix_spawn` syscall
+entries, including the spawn-attribute escape route. Ordinary fork/exec remain
+available; unsupported profiles fail closed rather than dropping restrictions.
 
-Private foreground completion and cancellation kill their owned process group,
-including same-group children whose parent already exited. **This does not prove
-termination of descendants escaping through setsid or other detach mechanisms.**
-There is no completed five-minute process supervisor or CPU/memory/disk limit.
+Broker-enabled fresh workers enable a private per-command shell guardian before
+runtime assembly. The helper is a distinct role of the trusted worker binary,
+validates its clean environment/command/scope, closes inherited descriptors
+before Tokio, and receives no model credential. Only the worker owns its stdin
+lease writer. Abrupt worker death closes that lease independently of the dead
+worker's cleanup code; cancellation, EOF, normal return, and deadline also clean
+the command group.
+
+The guardian keeps its direct shell leader unreaped as a PID/PGID anchor, kills
+the group, verifies no live group members remain, then disarms/reaps the anchor.
+Success is withheld on cleanup failure; it does not infer completion from pipe
+EOF or reconstruct ancestry by polling. Residual same-group children are removed
+even if the shell returns with their stdio redirected. The policy prevents model
+processes from escaping that group via the admitted detach mechanisms. Cleanup
+has finite bounds and is not hard real-time during OS/scheduler/filesystem
+stalls. This is not a cross-platform resource supervisor, cgroup implementation,
+CPU/memory/disk quota, or billing guarantee.
 
 ## Bounds and revocation
 
@@ -97,25 +114,27 @@ There is no completed five-minute process supervisor or CPU/memory/disk limit.
 | Output tokens per physical request | 4,096 | 4,096 |
 | Physical generation dispatches | 24 | 32 |
 
-Clones/reapplication share the same tool lease and `ScopeOutputQuota`; they never
-reset spent authority. `revoke` blocks captured tools and future model dispatches,
-not already admitted OS/model work. See [the output-quota contract](SCOPE_OUTPUT_QUOTA.md)
-for provider-cap assumptions and entry-point restrictions. The input byte check
-does not bound history/tool output, total model input/tokens, money or runtime.
+Clones/reapplication share the tool lease and `ScopeOutputQuota`; neither resets
+spent authority. `revoke` blocks captured tools and future model dispatches; it
+alone is not proof that previously admitted OS/model work stopped. The fresh
+worker/guardian cancellation path handles that lifetime. See
+[SCOPE_OUTPUT_QUOTA.md](SCOPE_OUTPUT_QUOTA.md) for provider-cap assumptions. Input
+bounds do not bound history/tool output, total input tokens, money, or CPU use.
+The worker additionally applies its original absolute five-minute lease,
+bounded interaction frames/questions/answers, and 8192-byte final/cumulative
+model-text limits described in the process contract.
 
-## Required before enabling T3
+## Evidence and remaining delivery gates
 
-1. A one-shot-start consumer and fresh invocation process with a clean environment,
-   selected credentials, narrow host transport and actual request inspection.
-2. Owner-only permissions and a separate authenticated original-human question
-   broker, including membership/revocation checks after every asynchronous wait.
-3. A total five-minute deadline covering queue start, model/tools and approvals,
-   with reliable process termination including detached descendants.
-4. Durable result publication/retry and owner recovery for ambiguous work. No
-   automatic tool replay, new quota or start authority after an uncertain crash.
-5. Desktop/Web/iOS/Android binding, trigger, question and recovery UI; real model,
-   crash/offline/rejoin/revocation and complete native/product acceptance.
+Historical `acceptance/teams-t3-profile-20261029/` checkpoints remain evidence
+only for their recorded source/commands. The current worker, interaction,
+connector/host, and native process-boundary suites add synthetic coverage for
+the new brokers and guardian. Their current execution/review status must be
+reported with source hashes; definitions or older passes do not prove a new pass.
 
-Fixture verification commands are recorded with exact results and source hashes
-in the product's `acceptance/teams-t3-profile-20261029/` checkpoint. Passing these
-checks does not satisfy the remaining executor or release gates.
+Release delivery still requires verified product pins/publication, correct fresh
+host launch/account lifecycle, signed native packages, four-client binding/
+trigger/question/recovery behavior, and real crash/offline/rejoin/revocation,
+model, device, and public-network acceptance. No production Firebase account,
+provider request, deployment, or physical acceptance is established by this
+profile document.

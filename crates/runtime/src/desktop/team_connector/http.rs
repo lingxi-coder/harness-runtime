@@ -24,6 +24,7 @@ pub struct TeamConnectorCredential {
     pub id_token: String,
 }
 
+#[derive(Clone)]
 pub(super) struct Client {
     pub endpoint: url::Url,
     account: Arc<dyn TeamConnectorAccount>,

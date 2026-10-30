@@ -1,11 +1,9 @@
-//! Process spawn for desktop hosts.
+//! Desktop process execution and shell lifetime support.
 //!
-//! [`runner`] holds the v0.2.0 `tokio::process`-backed `ProcessRunner`
-//! implementation. The Phase-C helper modules — [`spawn_unsafe`],
-//! [`kill_tree`], and [`wrap`] — implement claude-code's `setsid`+`killpg`
-//! tree-kill semantics and the env-vars / cwd-tracking wrappers that
-//! `BashShell` relies on. `spawn_unsafe` is the only module in the crate
-//! that allows `unsafe` (single `libc::setsid` call from `pre_exec`).
+//! [`runner`] implements `ProcessRunner`; [`kill_tree`] signals owned process
+//! groups, and [`wrap`] supplies shell environment/cwd tracking. Private Team
+//! shells use [`team_guardian`] so cleanup survives model worker death.
+//! [`spawn_unsafe`] contains the audited spawning and process-observation FFI.
 
 pub mod active_children;
 mod agent_processes;
@@ -13,6 +11,7 @@ pub mod kill_tree;
 pub mod runner;
 pub mod spawn_unsafe;
 pub mod supervisor;
+pub mod team_guardian;
 mod watchdog;
 pub mod wrap;
 

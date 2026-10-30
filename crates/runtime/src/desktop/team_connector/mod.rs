@@ -1,9 +1,14 @@
-//! Disabled trusted-host Team executor. Backend authentication stays in this
-//! parent; only the selected model key reaches the dedicated all-tools-denied
-//! worker. No renderer/RC/owner Bot launch or public IPC registration exists.
+//! Trusted-host Team executor. Backend authentication stays in this parent;
+//! the private worker receives only the selected model key and narrow broker
+//! responses. No renderer/Remote Control or public IPC launch route exists.
 
+mod host;
 mod http;
+mod interactions;
 mod journal;
+
+pub use host::host_main;
+pub use interactions::TeamOwnerApproval;
 
 use super::team_invocation::{TeamInvocationIdentity, TeamInvocationLimits};
 use super::team_process::{
@@ -108,6 +113,10 @@ impl TeamBotSnapshot {
 pub enum Error {
     #[error("invalid trusted Team connector configuration")]
     Configuration,
+    #[error("selected Team model credential is unavailable")]
+    ModelUnavailable,
+    #[error("Team result is saved locally and awaits exact delivery retry")]
+    ResultPending,
     #[error("Team owner account changed or signed out")]
     Account,
     #[error("Team connector cancelled")]
@@ -156,6 +165,9 @@ impl TeamBotState {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TeamConnectorStatus {
+    /// No durable start request or terminal result exists. Only an explicit
+    /// observational host request emits this; it grants no execution authority.
+    Unstarted,
     Settled {
         state: TeamBotState,
         reply_id: Option<String>,
@@ -276,6 +288,7 @@ pub struct TeamConnector {
     journal_root: PathBuf,
     runtime_root: PathBuf,
     worker_executable: PathBuf,
+    owner_approval: Option<Arc<dyn TeamOwnerApproval>>,
 }
 impl TeamConnector {
     pub fn new(
@@ -299,7 +312,14 @@ impl TeamConnector {
             journal_root,
             runtime_root,
             worker_executable,
+            owner_approval: None,
         })
+    }
+
+    /// A trusted owner-only approval port. Human questions never use this port.
+    pub fn with_owner_approval(mut self, approval: Arc<dyn TeamOwnerApproval>) -> Self {
+        self.owner_approval = Some(approval);
+        self
     }
 
     fn open(&self, target: Target) -> Result<Journal, Error> {
@@ -317,7 +337,17 @@ impl TeamConnector {
         snapshot: TeamBotSnapshot,
         cancel: CancellationToken,
     ) -> Result<TeamConnectorStatus, Error> {
-        snapshot.validate()?;
+        self.run_optional(target, Some(snapshot), cancel).await
+    }
+
+    /// Saved results and ambiguous starts can be handled without requesting a
+    /// new model credential. Missing credentials never authorize a fresh claim.
+    pub async fn run_optional(
+        &self,
+        target: Target,
+        snapshot: Option<TeamBotSnapshot>,
+        cancel: CancellationToken,
+    ) -> Result<TeamConnectorStatus, Error> {
         let journal = self.open(target)?;
         if journal.read::<Settlement>("result.json")?.is_some() {
             return self.finish_saved(&journal, &cancel).await;
@@ -325,6 +355,8 @@ impl TeamConnector {
         if journal.read::<bool>("start-requested.json")?.is_some() {
             return self.observe_abandoned(&journal, &cancel).await;
         }
+        let snapshot = snapshot.ok_or(Error::ModelUnavailable)?;
+        snapshot.validate()?;
         let t = &journal.intent.target;
         let claim: Reply = self
             .client
@@ -392,7 +424,29 @@ impl TeamConnector {
         )
         .map_err(|_| Error::Configuration)?;
         let worker_cancel = self.client.session_cancel.child_token();
-        let worker = start.run(&self.worker_executable, worker_cancel.clone());
+        let broker = self.owner_approval.as_ref().map(|owner| {
+            Arc::new(interactions::Broker::new(
+                self.client.clone(),
+                t.clone(),
+                journal.intent.attempt_id.clone(),
+                lease_until,
+                owner.clone(),
+            )) as Arc<dyn super::team_process::TeamProcessBroker>
+        });
+        let worker = async {
+            match broker {
+                Some(broker) => {
+                    start
+                        .run_with_broker(&self.worker_executable, worker_cancel.clone(), broker)
+                        .await
+                }
+                None => {
+                    start
+                        .run(&self.worker_executable, worker_cancel.clone())
+                        .await
+                }
+            }
+        };
         tokio::pin!(worker);
         let monitor = self.monitor(&journal, lease_until, deadline, &cancel);
         tokio::pin!(monitor);
@@ -429,6 +483,29 @@ impl TeamConnector {
         self.finish_saved(&journal, &cancel).await
     }
 
+    /// Observe a product-side pending index without starting execution. A crash
+    /// between indexing and host launch may leave no start marker at all. That
+    /// is Unstarted, not permanent recovery and never an implicit claim/start.
+    /// Saved results retry only their exact settlement; ambiguous starts only
+    /// poll the existing attempt. No snapshot or model credential is accepted.
+    pub async fn observe_saved(
+        &self,
+        target: Target,
+        cancel: CancellationToken,
+    ) -> Result<TeamConnectorStatus, Error> {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let journal = self.open(target)?;
+        if journal.read::<Settlement>("result.json")?.is_some() {
+            return self.finish_saved(&journal, &cancel).await;
+        }
+        if journal.read::<bool>("start-requested.json")?.is_some() {
+            return self.observe_abandoned(&journal, &cancel).await;
+        }
+        Ok(TeamConnectorStatus::Unstarted)
+    }
+
     /// Retry ONLY the exact durable result. No snapshot/model credential is
     /// required, no claim/start is sent and no worker can be prepared here.
     pub async fn retry_result(
@@ -452,7 +529,13 @@ impl TeamConnector {
         let mut command = t.command("finishBot", &journal.intent.attempt_id);
         command["text"] = json!(result.text);
         command["outcome"] = json!(result.outcome);
-        let reply: Reply = self.client.call(t, command, cancel).await?;
+        let reply: Reply = match self.client.call(t, command, cancel).await {
+            Ok(reply) => reply,
+            Err(Error::Transport | Error::Http(429 | 500..=599)) => {
+                return Err(Error::ResultPending)
+            }
+            Err(error) => return Err(error),
+        };
         receipt(t, reply)
     }
 

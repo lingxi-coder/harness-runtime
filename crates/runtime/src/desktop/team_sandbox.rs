@@ -55,8 +55,18 @@ impl TeamSandboxRunner {
             },
         );
         // General desktop profiles permit system credential/UI services and
-        // shared IPC. This file-only Team profile has no such capabilities.
+        // shared IPC. This private Team profile has no such capabilities.
         profile.push_str("\n(deny mach-lookup)\n(deny appleevent-send)\n(deny ipc-posix-shm)\n(deny ipc-posix-sem)\n(deny iokit-open)\n(deny distributed-notification-post)\n");
+        // Descendants must retain the session/group established by the trusted
+        // launcher. Filtering only setsid/setpgid is insufficient: Darwin's
+        // posix_spawn attributes call those implementations inside the kernel,
+        // bypassing their syscall-entry checks. Fork/exec remain available;
+        // programs requiring posix_spawn are outside this private capability.
+        // An OS that cannot compile these Apple syscall constants must refuse
+        // the command; there is deliberately no less restricted fallback.
+        profile.push_str(
+            "\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid SYS_posix_spawn))\n",
+        );
         Ok(format!(
             "exec /usr/bin/sandbox-exec -p {} /bin/bash --noprofile --norc -c {}",
             quote(&profile),

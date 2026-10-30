@@ -499,7 +499,7 @@ async fn lost_finish_ack_retries_saved_result_without_new_model_credential_or_wo
                 CancellationToken::new()
             )
             .await,
-        Err(Error::Transport)
+        Err(Error::ResultPending)
     ));
     assert!(roots.entry().join("result.json").is_file());
     drop(connector);
@@ -1018,4 +1018,135 @@ async fn partial_symlink_and_hardlinked_journal_records_fail_closed() {
         assert_eq!(backend.requests.lock().unwrap().len(), calls);
         assert_eq!(std::fs::read_dir(&roots.runtime).unwrap().count(), 0);
     }
+}
+
+struct NoCredentialForObservation;
+#[async_trait]
+impl TeamConnectorAccount for NoCredentialForObservation {
+    fn is_current(&self, uid: &str, epoch: u64) -> bool {
+        uid == "fixture-owner" && epoch == 3
+    }
+    async fn credential(&self) -> Result<TeamConnectorCredential, Error> {
+        panic!("an unstarted observation must not acquire any credential")
+    }
+}
+
+#[tokio::test]
+async fn pending_index_before_host_launch_observes_unstarted_without_http_or_model() {
+    let roots = Roots::new();
+    let backend = Backend::new(Mode::Good).await;
+    let model = Model::new(false).await;
+    let connector = roots.connector(
+        &backend.endpoint,
+        Arc::new(NoCredentialForObservation),
+        CancellationToken::new(),
+    );
+    assert_eq!(
+        connector
+            .observe_saved(target(), CancellationToken::new())
+            .await
+            .unwrap(),
+        TeamConnectorStatus::Unstarted
+    );
+    let intent = std::fs::read(roots.entry().join("intent.json")).unwrap();
+    assert_eq!(
+        connector
+            .observe_saved(target(), CancellationToken::new())
+            .await
+            .unwrap(),
+        TeamConnectorStatus::Unstarted
+    );
+    assert_eq!(
+        std::fs::read(roots.entry().join("intent.json")).unwrap(),
+        intent
+    );
+    assert!(!roots.entry().join("start-requested.json").exists());
+    assert!(!roots.entry().join("result.json").exists());
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert!(model.requests.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(&roots.runtime).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn observing_abandoned_start_marker_only_polls_existing_attempt_for_recovery() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let roots = Roots::new();
+    let backend = Backend::new(Mode::ExpiredClaim).await;
+    let model = Model::new(false).await;
+    let connector = roots.connector(&backend.endpoint, Account::new(), CancellationToken::new());
+    assert_eq!(
+        connector
+            .observe_saved(target(), CancellationToken::new())
+            .await
+            .unwrap(),
+        TeamConnectorStatus::Unstarted
+    );
+    let intent: Value =
+        serde_json::from_slice(&std::fs::read(roots.entry().join("intent.json")).unwrap()).unwrap();
+    let mut marker = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o400)
+        .open(roots.entry().join("start-requested.json"))
+        .unwrap();
+    std::io::Write::write_all(&mut marker, b"true").unwrap();
+    marker.sync_all().unwrap();
+    assert_eq!(
+        connector
+            .observe_saved(target(), CancellationToken::new())
+            .await
+            .unwrap(),
+        TeamConnectorStatus::RecoveryRequired
+    );
+    let requests = backend.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["action"], "botPoll");
+    assert_eq!(requests[0]["attemptId"], intent["attemptId"]);
+    assert!(model.requests.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(&roots.runtime).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn observing_saved_result_after_lost_ack_retries_exact_finish_without_execution() {
+    let roots = Roots::new();
+    let backend = Backend::new(Mode::LostFinish).await;
+    let model = Model::new(false).await;
+    let connector = roots.connector(&backend.endpoint, Account::new(), CancellationToken::new());
+    assert!(matches!(
+        connector
+            .run(
+                target(),
+                snapshot(&model.endpoint),
+                CancellationToken::new()
+            )
+            .await,
+        Err(Error::ResultPending)
+    ));
+    let saved = std::fs::read(roots.entry().join("result.json")).unwrap();
+    let before = backend.requests.lock().unwrap().len();
+    let restarted = roots.connector(&backend.endpoint, Account::new(), CancellationToken::new());
+    assert_eq!(
+        restarted
+            .observe_saved(target(), CancellationToken::new())
+            .await
+            .unwrap(),
+        TeamConnectorStatus::Settled {
+            state: TeamBotState::Completed,
+            reply_id: Some(reply_id(&target()))
+        }
+    );
+    assert_eq!(
+        std::fs::read(roots.entry().join("result.json")).unwrap(),
+        saved
+    );
+    let requests = backend.requests.lock().unwrap();
+    assert_eq!(requests.len(), before + 1);
+    let finishes = requests
+        .iter()
+        .filter(|r| r["action"] == "finishBot")
+        .collect::<Vec<_>>();
+    assert_eq!(finishes.len(), 2);
+    assert_eq!(finishes[0], finishes[1]);
+    assert_eq!(requests.last().unwrap()["action"], "finishBot");
+    assert_eq!(model.requests.lock().unwrap().len(), 1);
 }
