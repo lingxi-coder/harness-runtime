@@ -256,6 +256,23 @@ impl ModelRuntime {
         )
     }
 
+    /// Whether this exact route can use the Responses WebSocket transport.
+    /// This uses the same resolved profile and effective protocol as request
+    /// preparation, without loading credentials or constructing a request.
+    pub fn supports_responses_websocket(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<bool, LlmError> {
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        Ok(entry.supports_websockets
+            && self.protocol_for_model(model, profile)? == ProtocolFamily::OpenAiResponses)
+    }
+
     pub(crate) fn fast_account_identity(
         &self,
         model: &str,

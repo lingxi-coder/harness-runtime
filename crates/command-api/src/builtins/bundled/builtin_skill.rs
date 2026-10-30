@@ -34,9 +34,15 @@ mod tests {
     #[test]
     fn slash_bodies_share_the_registered_skill_source() {
         for (name, expected_marker) in [
-            ("docs", "Documents in LingXi"),
-            ("lingxi-api", "LingXi API guide"),
-            ("plugin-authoring", ".lingxi-plugin/\n    plugin.json"),
+            ("docs", format!("Documents in {}", branding::PRODUCT_NAME)),
+            (
+                "lingxi-api",
+                format!("{} API guide", branding::PRODUCT_NAME),
+            ),
+            (
+                "plugin-authoring",
+                ".lingxi-plugin/\n    plugin.json".to_owned(),
+            ),
         ] {
             let prompt = DesktopBuiltinSkillPromptFn::new(name).build(&"".into());
             let skill = skill::desktop_builtin_skill(name).expect("desktop builtin skill");
@@ -45,7 +51,7 @@ mod tests {
             assert!(
                 prompt
                     .string_at("")
-                    .is_some_and(|body| body.contains(expected_marker)),
+                    .is_some_and(|body| body.contains(expected_marker.as_str())),
                 "the shared body for {name} contains its expected content"
             );
         }

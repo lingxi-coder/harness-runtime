@@ -7,15 +7,20 @@
 /// Result of applying Cd deny rules before allow rules.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CdCheck {
+    /// The target is permitted by the configured rules.
     Allowed,
+    /// A deny rule prevents changing to the target.
     BlockedByRule {
         /// Already formatted rule, normally produced by [`format_cd_rule`].
         rule: String,
+        /// Human-readable source of the rule.
         source_label: String,
         /// True when `ruleContent` is absent, rather than an empty pattern.
         tool_wide: bool,
     },
+    /// The target does not match any configured allow rule.
     OutsideAllowedPatterns {
+        /// Patterns that would permit changing directories.
         allowed_patterns: Vec<String>,
     },
 }

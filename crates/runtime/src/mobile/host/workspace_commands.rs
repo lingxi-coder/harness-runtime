@@ -283,7 +283,7 @@ impl MobileEngineHandle {
         if let Some(scheduler) = &self.session_cron {
             scheduler
                 .set_tasks_file(cron::tasks_file::session_scheduled_tasks_path(
-                    &self.current_mobile_config()?.cwd,
+                    std::path::Path::new(&self.session_cwd()),
                 ))
                 .await
                 .map_err(|error| ClientError::Internal {
@@ -420,7 +420,7 @@ impl MobileEngineHandle {
                 &self.session_cwd(),
                 scope,
                 limit as usize,
-                self.fs.clone(),
+                self.host_fs.clone(),
                 &roots,
             )
             .await
@@ -431,7 +431,7 @@ impl MobileEngineHandle {
                 &self.session_cwd(),
                 scope,
                 limit as usize,
-                self.fs.clone(),
+                self.host_fs.clone(),
             )
             .await
         };
@@ -501,17 +501,6 @@ impl MobileEngineHandle {
         transcript_path: String,
     ) -> Result<(), ClientError> {
         let _transition = self.loop_transition.lock().await;
-        let path = self
-            .fs
-            .translate_model_path(&transcript_path, false)
-            .map_err(|error| ClientError::Rejected {
-                message: error.to_string(),
-            })?
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(&transcript_path));
-        let path = path.canonicalize().map_err(|error| ClientError::Rejected {
-            message: format!("session source unavailable: {error}"),
-        })?;
         let catalog = self
             .lingxi_home
             .join("projects")
@@ -519,6 +508,28 @@ impl MobileEngineHandle {
             .map_err(|error| ClientError::Rejected {
                 message: error.to_string(),
             })?;
+        // Catalog entries can be returned in host coordinates. Only accept a
+        // host path directly after canonicalizing it inside the catalog; all
+        // other inputs still pass through the guest path fence.
+        let native_catalog_path = Path::new(&transcript_path)
+            .canonicalize()
+            .ok()
+            .filter(|path| path.starts_with(&catalog));
+        let path = match native_catalog_path {
+            Some(path) => path,
+            None => self
+                .fs
+                .translate_model_path(&transcript_path, false)
+                .map_err(|error| ClientError::Rejected {
+                    message: error.to_string(),
+                })?
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(&transcript_path))
+                .canonicalize()
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("session source unavailable: {error}"),
+                })?,
+        };
         let relative = path
             .strip_prefix(catalog)
             .map_err(|_| ClientError::Rejected {
@@ -552,12 +563,23 @@ mod tests {
     use super::*;
     use crate::mobile::test_support::{
         new_engine_with_streaming, test_config, CollectingPermissionSink, FakeListener,
-        HostFakePlatform,
+        HostFakePlatform, MountTableRuntime,
     };
     use mobile_linux_api::MobileLinuxRuntime;
     use std::sync::Arc;
 
     fn fixture() -> (
+        tempfile::TempDir,
+        crate::mobile::MobileUserDirectories,
+        super::super::MobileConfig,
+        Arc<dyn lingxi_core::host::Platform>,
+    ) {
+        fixture_with_runtime(None)
+    }
+
+    fn fixture_with_runtime(
+        runtime: Option<Arc<dyn MobileLinuxRuntime>>,
+    ) -> (
         tempfile::TempDir,
         crate::mobile::MobileUserDirectories,
         super::super::MobileConfig,
@@ -572,17 +594,19 @@ mod tests {
         let b = Path::new(&directories.projects).join("b");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        let runtime = Arc::new(mobile_linux_android::AndroidProotRuntime::new(
-            mobile_linux_android::AndroidProotRuntimeConfig {
-                managed_root: root,
-                brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
-                app_sandbox_root: temp.path().to_path_buf(),
-                abi: "arm64-v8a".into(),
-                rootfs_version: "test".into(),
-                archive_sha256: None,
-                native_library_dir: None,
-            },
-        ));
+        let runtime = runtime.unwrap_or_else(|| {
+            Arc::new(mobile_linux_android::AndroidProotRuntime::new(
+                mobile_linux_android::AndroidProotRuntimeConfig {
+                    managed_root: root,
+                    brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
+                    app_sandbox_root: temp.path().to_path_buf(),
+                    abi: "arm64-v8a".into(),
+                    rootfs_version: "test".into(),
+                    archive_sha256: None,
+                    native_library_dir: None,
+                },
+            ))
+        });
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(runtime.configure_mounts(vec![mobile_linux_api::MountSpec {
             host_path: PathBuf::from(&directories.projects),
@@ -846,6 +870,53 @@ mod tests {
                 .join(branding::DOT_DIR)
                 .join("scheduled_tasks.json")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn read_only_workspace_denies_public_cron_mutation_and_run_claim() {
+        let (_temp, directories, cfg, platform) =
+            fixture_with_runtime(Some(Arc::new(MountTableRuntime::default())));
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform.clone(),
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        handle.runtime().block_on(async {
+            let store = handle.cron_store().await.unwrap();
+            let task = store
+                .create("0 9 * * *".into(), "original".into(), true)
+                .await
+                .unwrap();
+            let path = Path::new(&directories.projects)
+                .join("a")
+                .join(branding::DOT_DIR)
+                .join("scheduled_tasks.json");
+            let before = std::fs::read(&path).unwrap();
+            let linux = platform.mobile_linux().unwrap();
+            let mut mounts = linux.current_mounts();
+            for mount in &mut mounts {
+                mount.read_only = true;
+            }
+            linux.configure_mounts(mounts).await.unwrap();
+            assert!(store
+                .create("0 9 * * *".into(), "new".into(), true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("read-only"));
+            assert!(store
+                .update(task.id.clone(), "0 9 * * *".into(), "changed".into(), true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("read-only"));
+            assert!(!store.delete(task.id.clone()).await);
+            assert!(handle.run_cron_task_now(task.id).await.is_none());
+            assert_eq!(std::fs::read(path).unwrap(), before);
         });
     }
     #[test]

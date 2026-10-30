@@ -22,6 +22,7 @@ use lingxi_core::host::{
     WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager, WorktreePatch,
 };
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
@@ -191,20 +192,87 @@ fn trimmed(stdout: &[u8]) -> String {
 /// same tree. Removed on drop.
 struct TempIndex {
     path: PathBuf,
+    directory: PathBuf,
 }
 
 impl TempIndex {
+    #[cfg(unix)]
     async fn seeded_from(checkout: &Path) -> Result<Self, WorktreeError> {
+        use std::os::unix::fs::DirBuilderExt;
+
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let source =
             trimmed(&git_stdout(checkout, &["rev-parse", "--git-path", "index"], None).await?);
-        let path = std::env::temp_dir().join(format!(
-            "worktree-index-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = tokio::fs::copy(checkout.join(source), &path).await;
-        Ok(Self { path })
+        // Reserve a private directory atomically. Git creates index.lock
+        // beside this file, so both the index and its lock stay isolated.
+        let mut directory = None;
+        for _ in 0..100 {
+            let candidate = std::env::temp_dir().join(format!(
+                "worktree-index-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::DirBuilder::new().mode(0o700).create(&candidate) {
+                Ok(()) => {
+                    directory = Some(candidate);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(WorktreeError::Io(error.to_string())),
+            }
+        }
+        let directory = directory.ok_or_else(|| {
+            WorktreeError::Io("could not reserve a private worktree index directory".into())
+        })?;
+        let index = Self {
+            path: directory.join("index"),
+            directory,
+        };
+        match tokio::fs::File::open(checkout.join(source)).await {
+            Ok(mut source) => {
+                use tokio::io::AsyncWriteExt;
+
+                // Git uses the index mtime to identify racily clean entries.
+                // Copying the bytes alone makes the index look newer, which
+                // can hide rapid same-size changes made after checkout.
+                let modified = source
+                    .metadata()
+                    .await
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| WorktreeError::Io(error.to_string()))?;
+                let mut copy = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&index.path)
+                    .await
+                    .map_err(|error| WorktreeError::Io(error.to_string()))?;
+                tokio::io::copy(&mut source, &mut copy)
+                    .await
+                    .map_err(|error| WorktreeError::Io(error.to_string()))?;
+                copy.flush()
+                    .await
+                    .map_err(|error| WorktreeError::Io(error.to_string()))?;
+                copy.into_std()
+                    .await
+                    .set_times(std::fs::FileTimes::new().set_modified(modified))
+                    .map_err(|error| WorktreeError::Io(error.to_string()))?;
+            }
+            // A newly initialized repository may not have an index yet; Git
+            // can create one when add_all runs. Other copy errors fail closed.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(WorktreeError::Io(error.to_string())),
+        }
+        Ok(index)
+    }
+
+    #[cfg(not(unix))]
+    async fn seeded_from(_checkout: &Path) -> Result<Self, WorktreeError> {
+        // This manager is the POSIX implementation. Windows desktop uses
+        // WindowsWorktreeManager; do not create an index in a potentially
+        // shared temp directory without the POSIX private-directory guarantee.
+        Err(WorktreeError::Io(
+            "private POSIX worktree indexes require a Unix host".into(),
+        ))
     }
 
     /// Stage everything in `checkout` except the managed worktrees.
@@ -226,6 +294,7 @@ impl Drop for TempIndex {
         let mut lock = self.path.clone().into_os_string();
         lock.push(".lock");
         let _ = std::fs::remove_file(lock);
+        let _ = std::fs::remove_dir(&self.directory);
     }
 }
 
@@ -1415,7 +1484,7 @@ mod change_summary_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod snapshot_tests {
     use super::*;
     use tempfile::TempDir;
@@ -1503,6 +1572,60 @@ mod snapshot_tests {
             .unwrap();
         assert!(wt.path.join("new.txt").exists());
         assert!(!wt.path.join("gone.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn private_index_preserves_racy_clean_detection_and_the_original_index() {
+        let (_tmp, dir) = repo().await;
+        // A legitimate Git configuration used on filesystems with limited
+        // stat precision. Cache a fixed old mtime and the original file size.
+        git(&dir, &["config", "core.checkStat", "minimal"]).await;
+        let tracked = dir.join("keep.txt");
+        let old_mtime = std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        std::fs::File::open(&tracked)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_mtime))
+            .unwrap();
+        git(&dir, &["add", "keep.txt"]).await;
+        let source = dir.join(
+            git(&dir, &["rev-parse", "--git-path", "index"])
+                .await
+                .trim(),
+        );
+        std::fs::File::open(&source)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_mtime))
+            .unwrap();
+        let original = std::fs::read(&source).unwrap();
+        // Keep the cached size and mtime while changing the bytes. Git must
+        // hash this racy entry because its mtime equals the index mtime.
+        // Giving the copied index a newer mtime incorrectly marks it clean.
+        std::fs::write(&tracked, "ONE\nTWO\n").unwrap();
+        std::fs::File::open(&tracked)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_mtime))
+            .unwrap();
+
+        let index = TempIndex::seeded_from(&dir).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&index.path).unwrap().modified().unwrap(),
+            old_mtime,
+            "the copied index must retain the Git racy-clean boundary"
+        );
+        index.add_all(&dir).await.unwrap();
+        let status = git_stdout(
+            &dir,
+            &["diff", "--cached", "--name-status", "--", "keep.txt"],
+            Some(&index.path),
+        )
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8(status).unwrap(), "M\tkeep.txt\n");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().modified().unwrap(),
+            old_mtime
+        );
     }
 
     #[tokio::test]
@@ -1657,6 +1780,18 @@ mod snapshot_tests {
                 ("b".to_string(), PatchFileStatus::Added),
             ]
         );
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod non_unix_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn private_posix_index_fails_closed() {
+        let result = TempIndex::seeded_from(Path::new("unused")).await;
+        assert!(matches!(result, Err(WorktreeError::Io(message))
+            if message == "private POSIX worktree indexes require a Unix host"));
     }
 }
 

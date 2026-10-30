@@ -18,6 +18,18 @@ use media_api::{MediaOperationId, MediaSessionRef};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Meaning of the cancellation token for a tool invocation.
+///
+/// A model-turn interruption may hand a foreground Bash process to a background
+/// task. A host request instead owns its work until it is stopped and settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCancellationScope {
+    /// Streaming/model turn cancellation retains the ordinary handoff behavior.
+    ModelTurn,
+    /// Cancellation of an external host request must terminate its owned work.
+    HostRequest,
+}
+
 /// Per-invocation context passed to every [`crate::Tool`] method that needs
 /// to reason about the current call (validation, permission, execution).
 ///
@@ -112,6 +124,8 @@ pub struct ToolUseContext {
     /// the Bash/subprocess tools observe it in Phase 2 to kill in-flight work.
     /// `None` for batched/legacy call sites.
     pub cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Trusted origin that determines whether cancellation may hand work off.
+    pub cancellation_scope: ToolCancellationScope,
     /// The parent agent's already-rendered system prompt bytes, threaded onto a
     /// fork-subagent spawn so the child replays the parent's exact prompt (TS
     /// `forkContextMessages` / `override.systemPrompt = forkParentSystemPrompt`).
@@ -330,6 +344,7 @@ impl ToolUseContext {
             session: None,
             subagent_registry: None,
             cancel: None,
+            cancellation_scope: ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
             cwd: None,
             // Inert seed; model-only context is never handed to a tool.
@@ -349,6 +364,7 @@ mod tests {
     fn tool_use_context_carries_optional_cancel_token() {
         let mut ctx = ToolUseContext::model_seed("opus".into());
         assert!(ctx.cancel.is_none());
+        assert_eq!(ctx.cancellation_scope, ToolCancellationScope::ModelTurn);
         ctx.cancel = Some(tokio_util::sync::CancellationToken::new());
         assert!(ctx.cancel.is_some());
     }

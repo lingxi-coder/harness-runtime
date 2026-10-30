@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,6 +17,7 @@ use tool_api::BuiltinToolContext;
 
 struct StubMedia {
     supported: Vec<MediaOperationKind>,
+    source_calls: AtomicUsize,
 }
 
 #[async_trait]
@@ -41,8 +43,14 @@ impl MediaService for StubMedia {
     async fn execute(
         &self,
         _context: MediaOperationContext,
-        _operation: MediaOperation,
+        operation: MediaOperation,
     ) -> Result<MediaResult, MediaError> {
+        if matches!(operation, MediaOperation::Sources { .. }) {
+            self.source_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(MediaResult::Sources {
+                sources: Vec::new(),
+            });
+        }
         Err(MediaError::new(MediaErrorKind::Unavailable, "test stub"))
     }
 
@@ -97,6 +105,7 @@ fn media_tools_follow_supported_operations_not_transient_readiness() {
             MediaOperationKind::SessionStart,
             MediaOperationKind::Stop,
         ],
+        source_calls: AtomicUsize::new(0),
     });
     let names = registered_tool_names(BuiltinToolContext {
         media: Some(service),
@@ -131,23 +140,70 @@ impl client::adapter::PermissionRequestSink for NoopPermissionSink {
 #[tokio::test]
 async fn desktop_build_exposes_the_injected_app_media_service() {
     let tmp = tempfile::tempdir().unwrap();
+    // Exercise the real policy gate without depending on an Auto-mode classifier.
+    let settings_dir = tmp.path().join(".lingxi");
+    std::fs::create_dir_all(&settings_dir).unwrap();
+    std::fs::write(
+        settings_dir.join("settings.local.json"),
+        r#"{"permissions":{"defaultMode":"default","allow":["media_sources"]}}"#,
+    )
+    .unwrap();
     let mut cfg = DesktopConfig::default();
     cfg.cwd = tmp.path().to_path_buf();
-    cfg.lingxi_home = tmp.path().join(".lingxi");
+    cfg.lingxi_home = settings_dir;
     cfg.isolated_credential_storage = true;
     cfg.session_persistence = false;
-    cfg.media_service = Some(Arc::new(StubMedia {
+    cfg.use_noop_permission_gate = true;
+    let stub = Arc::new(StubMedia {
         supported: vec![MediaOperationKind::Sources, MediaOperationKind::Capture],
-    }));
+        source_calls: AtomicUsize::new(0),
+    });
+    let injected: Arc<dyn MediaService> = stub.clone();
+    cfg.media_service = Some(injected.clone());
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let runtime = Box::pin(build(cfg, output, Arc::new(NoopPermissionSink)))
         .await
         .expect("the sandbox config must build");
     let service = runtime.media_service().expect("same injected media facade");
-    assert_eq!(service.capabilities().service_epoch, 9);
+    assert!(Arc::ptr_eq(&service, &injected));
+    let capabilities = service.capabilities();
+    assert_eq!(capabilities.service_epoch, 9);
+    assert_eq!(
+        capabilities.supported_operations,
+        [MediaOperationKind::Sources, MediaOperationKind::Capture]
+    );
+    // Registration is deliberately broader than the live availability view:
+    // capability changes must be reflected without rebuilding the registry.
+    // The preceding test checks the filtered view for unsupported operations.
     let names = runtime.registered_tool_names();
-    assert!(names.iter().any(|name| name == "media_sources"));
-    assert!(names.iter().any(|name| name == "media_capture"));
-    assert!(!names.iter().any(|name| name == "media_record"));
+    for name in tool_media::TOOL_NAMES {
+        assert!(
+            names.iter().any(|registered| registered == name),
+            "{name}: {names:?}"
+        );
+    }
+
+    // Dispatch through the assembled orchestrator and its actual registry,
+    // not a separately constructed test registry.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Box::pin(runtime.orchestrator.call_tool_from_host(
+            lingxi_core::types::ToolUseId::new(),
+            "media_sources".into(),
+            tool_api::tool_trait::generated_builtin_result(&serde_json::json!({})),
+            None,
+        )),
+    )
+    .await
+    .expect("assembled media dispatch must finish")
+    .expect("assembled media dispatch must succeed")
+    .expect("media_sources must be dispatchable");
+    match result {
+        lingxi_core::types::ContentBlock::ToolResult {
+            is_error, content, ..
+        } => assert_ne!(is_error, Some(true), "{content:?}"),
+        other => panic!("expected a media tool result, got {other:?}"),
+    }
+    assert_eq!(stub.source_calls.load(Ordering::SeqCst), 1);
 }

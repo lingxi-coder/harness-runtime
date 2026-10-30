@@ -599,8 +599,14 @@ mod identity_projection_tests {
         };
         let rows = lower_replayed_transcript(&replayed);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].transcript_uuid.as_deref(), Some(first.as_uuid().to_string().as_str()));
-        assert_eq!(rows[1].transcript_uuid.as_deref(), Some(last.as_uuid().to_string().as_str()));
+        assert_eq!(
+            rows[0].transcript_uuid.as_deref(),
+            Some(first.as_uuid().to_string().as_str())
+        );
+        assert_eq!(
+            rows[1].transcript_uuid.as_deref(),
+            Some(last.as_uuid().to_string().as_str())
+        );
         assert_eq!(rows[0].sent_at_ms, Some(1_791_417_600_000));
         assert_eq!(rows[1].sent_at_ms, Some(1_791_417_660_000));
     }

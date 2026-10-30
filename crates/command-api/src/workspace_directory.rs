@@ -20,17 +20,34 @@ pub enum AddDirValidation {
     /// No path was supplied.
     EmptyPath,
     /// A NUL byte cannot be passed through the filesystem path boundary.
-    InvalidPath { input: String },
+    InvalidPath {
+        /// Original argument containing the invalid character.
+        input: String,
+    },
     /// The resolved path does not exist or is inaccessible (claude-code maps
     /// ENOENT/ENOTDIR/EACCES/EPERM all to "not found").
-    PathNotFound { absolute: String },
+    PathNotFound {
+        /// Resolved absolute path that could not be accessed.
+        absolute: String,
+    },
     /// The resolved path exists but is a file, not a directory.
-    NotADirectory { input: String, parent: String },
+    NotADirectory {
+        /// Original argument that resolved to a file.
+        input: String,
+        /// Parent directory suggested to the caller.
+        parent: String,
+    },
     /// UNC / `/net/<host>` automount — refused before `stat` (claude-code
     /// `resultType:"networkPath"`).
-    NetworkPath { directory_path: String },
+    NetworkPath {
+        /// Original network path that was refused.
+        directory_path: String,
+    },
     /// The path resolved to an existing directory at `absolute`.
-    Success { absolute: String },
+    Success {
+        /// Resolved absolute directory path.
+        absolute: String,
+    },
 }
 
 /// Expand a leading `~` / `~/…` against the user's home directory. Any other

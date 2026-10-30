@@ -45,6 +45,138 @@ pub use crate::mobile::host::{
 const FAKE_PROCESS_SANDBOX_REASON: &str =
     "test-only admission for a fake ProcessRunner that never executes child processes";
 
+/// A live mount table for host filesystem tests; it does not execute processes
+/// or enforce operating-system mounts. `GuestPathFileSystem` enforces the
+/// read-only flag when resolving test paths.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MountTableRuntime {
+    mounts: std::sync::RwLock<Vec<mobile_linux_api::MountSpec>>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl mobile_linux_api::MobileLinuxRuntime for MountTableRuntime {
+    fn backend(&self) -> mobile_linux_api::SandboxBackend {
+        mobile_linux_api::SandboxBackend::None
+    }
+
+    fn mode(&self) -> mobile_linux_api::MobileLinuxRuntimeMode {
+        mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux
+    }
+
+    async fn probe_capability(&self) -> mobile_linux_api::MobileLinuxCapability {
+        mobile_linux_api::MobileLinuxCapability {
+            available: false,
+            backend: self.backend(),
+            mode: self.mode(),
+            reason: Some("mount-table fixture cannot execute processes".into()),
+            streaming_output: false,
+            background_processes: false,
+            pty: false,
+            bind_mounts: false,
+            rootfs_integrity: false,
+        }
+    }
+
+    async fn boot(
+        &self,
+    ) -> Result<mobile_linux_api::RootfsStatus, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn shutdown(&self) -> Result<(), mobile_linux_api::MobileLinuxError> {
+        Ok(())
+    }
+
+    async fn run(
+        &self,
+        _request: mobile_linux_api::LinuxCommandRequest,
+    ) -> Result<mobile_linux_api::LinuxCommandResult, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn spawn_background(
+        &self,
+        _request: mobile_linux_api::LinuxCommandRequest,
+    ) -> Result<mobile_linux_api::LinuxProcessHandle, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn kill(
+        &self,
+        _handle: &mobile_linux_api::LinuxProcessHandle,
+    ) -> Result<(), mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn open_pty(
+        &self,
+        _request: mobile_linux_api::PtyOpenRequest,
+    ) -> Result<mobile_linux_api::PtySessionHandle, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn write_pty(
+        &self,
+        _handle: &mobile_linux_api::PtySessionHandle,
+        _input: Vec<u8>,
+    ) -> Result<(), mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn resize_pty(
+        &self,
+        _handle: &mobile_linux_api::PtySessionHandle,
+        _size: mobile_linux_api::PtySize,
+    ) -> Result<(), mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn close_pty(
+        &self,
+        _handle: &mobile_linux_api::PtySessionHandle,
+    ) -> Result<(), mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn rootfs_status(
+        &self,
+    ) -> Result<mobile_linux_api::RootfsStatus, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn verify_rootfs(
+        &self,
+    ) -> Result<mobile_linux_api::RootfsStatus, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn repair_rootfs(
+        &self,
+    ) -> Result<mobile_linux_api::RootfsStatus, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn reset_rootfs(
+        &self,
+    ) -> Result<mobile_linux_api::RootfsStatus, mobile_linux_api::MobileLinuxError> {
+        Err(mobile_linux_api::MobileLinuxError::Unsupported)
+    }
+
+    async fn configure_mounts(
+        &self,
+        mounts: Vec<mobile_linux_api::MountSpec>,
+    ) -> Result<(), mobile_linux_api::MobileLinuxError> {
+        *self.mounts.write().expect("mount table lock") = mounts;
+        Ok(())
+    }
+
+    fn current_mounts(&self) -> Vec<mobile_linux_api::MountSpec> {
+        self.mounts.read().expect("mount table lock").clone()
+    }
+}
+
 /// Test-only sandbox admission for host integration tests that inject a fake
 /// `ProcessRunner`. It does not enforce policy and reports itself unavailable;
 /// `prepare()` only mints the required typed command so the fake runner can

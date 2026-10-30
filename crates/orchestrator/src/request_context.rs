@@ -46,9 +46,9 @@ pub(crate) enum BufferedPromptHistoryAppend {
     },
 }
 
-/// Trusted source class for one user-row/model-step ingress. Direct Bash is
-/// carried by the host from the durable queue; it is never inferred from
-/// rendered transcript text and is consumed for exactly one model step.
+/// Trusted source class for one user-row/model-step ingress. Direct Bash and
+/// LocalSkill are carried from the accepted input, never inferred from rendered
+/// transcript text, and consumed for exactly one model step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptIngressKind {
     RegularUser,
@@ -705,13 +705,18 @@ pub(crate) async fn persist_prompt_ingress_after_user(
     prompt_id: MessageId,
     kind: PromptIngressKind,
 ) -> Result<(), lingxi_core::settings::SettingsError> {
-    if kind == PromptIngressKind::DirectBash {
+    if matches!(
+        kind,
+        PromptIngressKind::DirectBash | PromptIngressKind::LocalSkill
+    ) {
         let _ = REQUEST_CONTEXT.try_with(|context| {
             *context
                 .next_model_step_ingress_kind
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
         });
+    }
+    if kind == PromptIngressKind::DirectBash {
         return Ok(());
     }
     // App Chat owns a self-contained transcript and an explicit system/tool

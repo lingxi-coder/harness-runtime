@@ -2799,6 +2799,7 @@ fn resume_restores_only_the_exact_prompts_accepted_nar_run_without_reappending_i
         recovered.extend([
             staged_system_attachment("deferred_tools_delta", "accepted deferred delta"),
             staged_system_attachment("deferred_tools_record", "accepted name-only state"),
+            staged_system_attachment("skill_listing", "accepted skill listing"),
             auto_mode,
         ]);
         for row in &recovered {
@@ -2818,6 +2819,13 @@ fn resume_restores_only_the_exact_prompts_accepted_nar_run_without_reappending_i
         orch.append_native_prompt_expansion_history_rows(&[upe])
             .await;
         let hook_id = orch.session.lock().await.history.last().unwrap().id();
+        // A real mobile PauseTurn appends this ordinary user row after the
+        // accepted batch before the same Skill input is resumed.
+        let interruption =
+            ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".into());
+        orch.session.lock().await.history.push(interruption.clone());
+        orch.persist_message_to_jsonl(&interruption).await;
+        assert!(orch.regular_user_prompt_for_model_step().await);
         recovered.sort_by_key(|row| native_ingress_source_order(row));
         let recovered_ids = recovered
             .iter()
@@ -2829,6 +2837,14 @@ fn resume_restores_only_the_exact_prompts_accepted_nar_run_without_reappending_i
                 persist_prompt_ingress_after_user(&orch, prompt_id, PromptIngressKind::LocalSkill)
                     .await
                     .unwrap();
+                assert_eq!(
+                    pending_model_step_ingress_kind(),
+                    Some(PromptIngressKind::LocalSkill)
+                );
+                assert!(
+                    !orch.regular_user_prompt_for_model_step().await,
+                    "the accepted Skill source owns this step even with a later interruption row"
+                );
 
                 let staged = staged_prompt_ingress_attachments().unwrap();
                 let staged_ids = staged
@@ -2887,6 +2903,51 @@ fn resume_restores_only_the_exact_prompts_accepted_nar_run_without_reappending_i
 
                 finalize_prompt_ingress_batch_for_test(&orch, false).await;
                 assert!(prompt_ingress_batch_finalized());
+
+                let expected = [
+                    "environment",
+                    "model",
+                    "deferred_tools_delta",
+                    "skill_listing",
+                    "auto_mode",
+                ]
+                .map(|kind| {
+                    recovered
+                        .iter()
+                        .find(|row| row.payload.string_at("/type") == Some(kind))
+                        .expect("recovered source attachment")
+                        .message
+                        .id()
+                });
+                let prepared = orch
+                    .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+                    .await
+                    .expect("prepare the resumed Skill request");
+                let actual = prepared
+                    .snapshot
+                    .iter()
+                    .filter(|row| expected.contains(&row.id()))
+                    .map(ConversationMessage::id)
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "recovered NAr UUIDs keep source order");
+                let deferred = recovered
+                    .iter()
+                    .find(|row| row.payload.string_at("/type") == Some("deferred_tools_delta"))
+                    .unwrap();
+                let request_deferred = prepared
+                    .snapshot
+                    .iter()
+                    .find(|row| row.id() == deferred.message.id())
+                    .expect("recovered deferred attachment keeps its source UUID");
+                assert_eq!(request_deferred.text_content(), deferred.message.text_content());
+                assert_eq!(pending_model_step_ingress_kind(), None);
+
+                let later_user = ConversationMessage::user(MessageId::new(), "new prompt".into());
+                orch.session.lock().await.history.push(later_user);
+                assert!(
+                    orch.regular_user_prompt_for_model_step().await,
+                    "the consumed Skill source cannot override a later regular user"
+                );
             })
             .await;
 

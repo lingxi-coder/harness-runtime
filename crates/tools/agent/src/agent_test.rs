@@ -388,6 +388,7 @@ mod tests {
             session: None,
             subagent_registry: Some(registry),
             cancel: None,
+            cancellation_scope: tool_api::context::ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,

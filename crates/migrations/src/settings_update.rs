@@ -1329,11 +1329,9 @@ mod tests {
                 .len(),
             0
         );
-        assert!(
-            restored
-                .at_pointer("/pluginConfigs/p/options/TOKEN")
-                .is_none()
-        );
+        assert!(restored
+            .at_pointer("/pluginConfigs/p/options/TOKEN")
+            .is_none());
         assert_eq!(
             restored.string_at("/pluginConfigs/other/options/REGION"),
             Some("stay")
@@ -1379,11 +1377,9 @@ mod tests {
             assert!(!rollback_settings_update(&receipt).unwrap());
             assert_eq!(std::fs::read(&path).unwrap(), latest_bytes);
             let restored = read_settings_source(&path).unwrap();
-            assert!(
-                restored
-                    .at_pointer("/pluginConfigs/p/options/TOKEN")
-                    .is_none()
-            );
+            assert!(restored
+                .at_pointer("/pluginConfigs/p/options/TOKEN")
+                .is_none());
             assert_eq!(
                 restored.string_at("/pluginConfigs/p/mcpServers/server/url"),
                 Some("stay")

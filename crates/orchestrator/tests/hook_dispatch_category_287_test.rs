@@ -185,7 +185,7 @@ async fn real_hook_stream_has_no_connection_recovery_and_main_resends_v2p() {
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["stream"], true);
         assert!(body.get("tool_choice").is_none());
-        assert!(body.get("thinking").is_none());
+        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(
             body["output_config"]["format"]["schema"]["required"],
@@ -220,7 +220,7 @@ async fn real_hook_stream_has_no_connection_recovery_and_main_resends_v2p() {
             "disable={disabled}: {body}"
         );
         assert!(body.get("tools").is_none());
-        assert!(body.get("thinking").is_none());
+        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
         assert_eq!(dispatch(&requests[0]), None);
     }
     for enabled in ["0", "false", "FALSE", "wat", ""] {

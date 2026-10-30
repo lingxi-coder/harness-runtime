@@ -533,6 +533,12 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Whether the selected route can use startup Responses WebSocket prewarm.
+    /// Clients without this capability skip prompt and tool preparation.
+    fn supports_responses_websocket_prewarm(&self, _model: &str, _profile: Option<&str>) -> bool {
+        false
+    }
+
     /// Best-effort startup prewarm for OpenAI Responses WebSocket providers.
     ///
     /// Default is a no-op so non-routing mocks and non-WebSocket clients keep

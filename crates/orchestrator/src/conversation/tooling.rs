@@ -1392,12 +1392,53 @@ impl ConversationOrchestrator {
         input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
+        self.dispatch_host_tool(tool_use_id, name, input, cancel, false)
+            .await
+    }
+
+    /// Execute an external request whose cancellation must stop and settle its
+    /// owned work rather than handing a foreground shell to a model-turn task.
+    pub async fn call_tool_from_host_request(
+        &self,
+        tool_use_id: lingxi_core::types::ToolUseId,
+        name: String,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
+        self.dispatch_host_tool(tool_use_id, name, input, Some(cancel), true)
+            .await
+    }
+
+    async fn dispatch_host_tool(
+        &self,
+        tool_use_id: lingxi_core::types::ToolUseId,
+        name: String,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        request_owned: bool,
+    ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
         if self.find_dispatchable_tool(&name).is_none() {
             return Ok(None);
         }
         let tool_uses = vec![(tool_use_id, name, input, None)];
         let (mut results, _prevent_continuation, _injected, modifiers) =
-            crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await?;
+            if request_owned {
+                let mut context = crate::turn_loop::streaming_tool_context_base(
+                    self,
+                    self.snapshot_history().await,
+                )
+                .await;
+                context.cancellation_scope = tool_api::context::ToolCancellationScope::HostRequest;
+                let dispatched =
+                crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred_with_facts(
+                    self, &tool_uses, cancel, None, None, None, Some(context), None, None,
+                )
+                .await?;
+                crate::turn_loop::tool_dispatch::finish_direct_tool_dispatch(self, dispatched)
+                    .await?
+            } else {
+                crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await?
+            };
         crate::turn_loop::apply_model_context_modifiers(self, modifiers).await?;
         // O3: this host-driven path writes NO transcript line at all (the block
         // is handed back to the caller), so a queued hook attachment would be a

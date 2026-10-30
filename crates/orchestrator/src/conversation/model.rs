@@ -4,6 +4,9 @@ use super::*;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
 use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 
+#[path = "startup_prewarm.rs"]
+pub(crate) mod startup_prewarm;
+
 fn same_request_route(left: &llm_runtime::MediaRoute, right: &llm_runtime::MediaRoute) -> bool {
     left.main.provider_id == right.main.provider_id
         && left.main.profile_name == right.main.profile_name
@@ -2983,13 +2986,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// can then reuse the returned `response.id` when its request is a strict
     /// extension of this prefix. Failures are intentionally ignored.
     pub fn spawn_startup_responses_websocket_prewarm(self: &Arc<Self>) {
-        self.abort_startup_responses_websocket_prewarm();
         let orchestrator = Arc::clone(self);
-        let handle = tokio::spawn(async move {
+        self.lifecycle_runtime.startup_responses_websocket_prewarm.spawn(async move {
             let (model, profile) = {
                 let session = orchestrator.session.lock().await;
                 (session.model.clone(), session.model_profile.clone())
             };
+            if !orchestrator
+                .api
+                .supports_responses_websocket_prewarm(&model, profile.as_deref())
+            {
+                return;
+            }
             let system = match orchestrator.provider_system_prompt().await {
                 Ok(system) => system,
                 Err(error) => {
@@ -3019,24 +3027,44 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 )
                 .await;
         });
-        *self
-            .lifecycle_runtime
-            .startup_responses_websocket_prewarm
-            .lock()
-            .expect("startup responses websocket prewarm") = Some(handle);
     }
 
     /// Abort any pending startup Responses WebSocket prewarm task.
     pub fn abort_startup_responses_websocket_prewarm(&self) {
-        if let Some(handle) = self
-            .lifecycle_runtime
+        self.lifecycle_runtime
             .startup_responses_websocket_prewarm
-            .lock()
-            .expect("startup responses websocket prewarm")
-            .take()
-        {
-            handle.abort();
+            .abort_current();
+    }
+
+    /// Revoke both foreground launch and startup-prewarm admission before the
+    /// host awaits teardown. Existing Arc holders cannot reopen either owner.
+    pub fn close_background_producer_admission(&self) {
+        if let Some(forker) = &self.bg_session_forker {
+            forker.lifecycle().close();
         }
+        self.lifecycle_runtime
+            .startup_responses_websocket_prewarm
+            .close();
+    }
+
+    /// Wait for all launches accepted before foreground admission closed.
+    pub async fn drain_background_session_launches(&self) -> Result<(), String> {
+        if let Some(forker) = &self.bg_session_forker {
+            forker
+                .lifecycle()
+                .close_and_drain()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Joining is owned independently of this waiter, including on timeout.
+    pub async fn shutdown_startup_responses_websocket_prewarm(&self) -> Result<(), String> {
+        self.lifecycle_runtime
+            .startup_responses_websocket_prewarm
+            .close_and_drain()
+            .await
     }
 
     /// Task 6 (llm-runtime future-work batch 5): re-map a terminal

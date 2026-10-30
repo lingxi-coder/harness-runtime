@@ -177,9 +177,13 @@ impl ConversationOrchestrator {
     /// history metadata: it makes a LocalSkill step non-regular even when the
     /// preceding command header is an ordinary user row.
     pub(crate) async fn regular_user_prompt_for_model_step(&self) -> bool {
-        if crate::request_context::pending_model_step_ingress_kind()
-            == Some(crate::request_context::PromptIngressKind::DirectBash)
-            || crate::request_context::unknown_command_fallback_pending()
+        if matches!(
+            crate::request_context::pending_model_step_ingress_kind(),
+            Some(
+                crate::request_context::PromptIngressKind::DirectBash
+                    | crate::request_context::PromptIngressKind::LocalSkill
+            )
+        ) || crate::request_context::unknown_command_fallback_pending()
         {
             return false;
         }

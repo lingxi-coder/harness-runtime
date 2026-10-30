@@ -2412,7 +2412,15 @@ impl BashTool {
         }
         .await;
         if let Err(error) = result {
-            let _ = self.ctx.process.kill(handle).await;
+            if ctx.cancellation_scope == tool_api::context::ToolCancellationScope::HostRequest {
+                self.ctx
+                    .process
+                    .stop_request_background(handle)
+                    .await
+                    .map_err(|stop_error| ToolError::Io(stop_error.to_string().into()))?;
+            } else {
+                let _ = self.ctx.process.kill(handle).await;
+            }
             if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
                 let _ = registry.settle_background_bash(id, None, true).await;
                 registry.discard_bash_output(id).await;
@@ -2420,6 +2428,31 @@ impl BashTool {
             return Err(error);
         }
         Ok(task_id)
+    }
+
+    /// Stop a host-request background launch through its supervisor capability
+    /// and wait for the reaped terminal receipt before releasing its output.
+    async fn cancel_host_background(
+        &self,
+        handle: &lingxi_core::host::ProcessHandle,
+        bound: Option<&(String, String)>,
+        registered: bool,
+    ) -> Result<(), ToolError> {
+        self.ctx
+            .process
+            .stop_request_background(handle)
+            .await
+            .map_err(|error| ToolError::Io(error.to_string().into()))?;
+        if let (Some(registry), Some((task_id, _))) = (self.ctx.task_registry.as_ref(), bound) {
+            if registered {
+                registry
+                    .settle_background_bash(task_id, None, true)
+                    .await
+                    .map_err(|error| ToolError::Io(error.to_string().into()))?;
+            }
+            registry.discard_bash_output(task_id).await;
+        }
+        Ok(())
     }
 
     /// Construct a fresh tool bound to the given builtin context.
@@ -3050,10 +3083,17 @@ impl Tool for BashTool {
         // non-streaming caller, in which case the run is awaited directly (no
         // behavior change).
         let cancel = ctx.cancel.clone();
-        if self.ctx.requires_inline_foreground()
-            && cancel
-                .as_ref()
-                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        let request_owner = match ctx.cancellation_scope {
+            tool_api::context::ToolCancellationScope::ModelTurn => None,
+            // The host-supplied tool ID is a correlation key, not an
+            // ownership capability: callers may reuse it concurrently.
+            tool_api::context::ToolCancellationScope::HostRequest => Some(format!(
+                "host-request:{}",
+                lingxi_core::types::ToolUseId::new()
+            )),
+        };
+        if (request_owner.is_some() || self.ctx.requires_inline_foreground())
+            && cancel.as_ref().is_some_and(|token| token.is_cancelled())
         {
             return Err(ToolError::Aborted);
         }
@@ -3154,7 +3194,8 @@ impl Tool for BashTool {
         // rather than kill it (claude-code `dn = !Dl() && $es(command)`). A
         // command whose first statement starts with `sleep` is excluded: the
         // point of a sleep is to finish, so backgrounding it just hides it.
-        let can_auto_background = !self.ctx.requires_inline_foreground()
+        let can_auto_background = request_owner.is_none()
+            && !self.ctx.requires_inline_foreground()
             && !crate::prompt::background_tasks_disabled()
             && !first_statement_is_sleep(&cmd_str);
         // BASH.5: optional `dangerouslyDisableSandbox` override.
@@ -3416,21 +3457,98 @@ impl Tool for BashTool {
             // behaviour, retained for hosts that have no task registry.
             let bound = self.allocate_task_identity().await;
             let sandboxed = self.bind_identity(sandboxed, bound.as_ref(), None);
-            let sandboxed =
-                sandboxed.with_process_owner(ctx.agent_id.map(|id| id.to_string()).or_else(|| {
-                    self.ctx
-                        .requires_inline_foreground()
-                        .then(|| self.ctx.session_id.map(|id| id.to_string()))
-                        .flatten()
-                }));
-            return match self.ctx.process.spawn_background(&sandboxed).await {
+            let sandboxed = sandboxed
+                .with_process_owner(request_owner.clone().or_else(|| {
+                    ctx.agent_id.map(|id| id.to_string()).or_else(|| {
+                        self.ctx
+                            .requires_inline_foreground()
+                            .then(|| self.ctx.session_id.map(|id| id.to_string()))
+                            .flatten()
+                    })
+                }))
+                .with_start_cancellation(request_owner.as_ref().and(cancel.clone()));
+            // A request-owned background launch needs an identity-checked
+            // supervisor receipt to prove cancellation has reaped the child.
+            if request_owner.is_some()
+                && !self.ctx.process.supports_request_cancellation(&sandboxed)
+            {
+                if let (Some(registry), Some((task_id, _))) =
+                    (self.ctx.task_registry.as_ref(), bound.as_ref())
+                {
+                    registry.discard_bash_output(task_id).await;
+                }
+                self.ctx.sandbox_runner.cleanup_after_command().await;
+                return Err(ToolError::Internal(
+                    "host background Bash requires a supervised process".into(),
+                ));
+            }
+            let spawned = self.ctx.process.spawn_background(&sandboxed);
+            tokio::pin!(spawned);
+            let spawn_polled = std::sync::atomic::AtomicBool::new(false);
+            let tracked_spawn = std::future::poll_fn(|cx| {
+                spawn_polled.store(true, std::sync::atomic::Ordering::Release);
+                std::future::Future::poll(spawned.as_mut(), cx)
+            });
+            tokio::pin!(tracked_spawn);
+            let mut cancelled_during_spawn = false;
+            let spawn_result = match (request_owner.as_deref(), cancel.as_ref()) {
+                (Some(owner), Some(token)) => tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        cancelled_during_spawn = true;
+                        if !spawn_polled.load(std::sync::atomic::Ordering::Acquire) {
+                            None
+                        } else {
+                            Some(loop {
+                                self.ctx.process.kill_owner_processes(owner).await;
+                                tokio::select! {
+                                    result = &mut tracked_spawn => break result,
+                                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                                }
+                            })
+                        }
+                    }
+                    result = &mut tracked_spawn => Some(result),
+                },
+                _ => Some(tracked_spawn.await),
+            };
+            if cancelled_during_spawn {
+                match spawn_result {
+                    Some(Ok(handle)) => {
+                        self.cancel_host_background(&handle, bound.as_ref(), false)
+                            .await?;
+                    }
+                    None => {}
+                    Some(Err(error))
+                        if lingxi_core::host::shell_supervisor::is_settled_request_cancellation(
+                            &error,
+                        ) => {}
+                    Some(Err(error)) => return Err(ToolError::Io(error.to_string().into())),
+                }
+                if let (Some(registry), Some((task_id, _))) =
+                    (self.ctx.task_registry.as_ref(), bound.as_ref())
+                {
+                    registry.discard_bash_output(task_id).await;
+                }
+                self.ctx.sandbox_runner.cleanup_after_command().await;
+                return Err(ToolError::Aborted);
+            }
+            return match spawn_result.expect("uncancelled spawn was polled") {
                 Ok(handle) => {
                     // Only claim the registry identity if the runner actually
                     // honoured it; a runner that mints its own id is writing to
                     // its own file, so the registry must not advertise a path
                     // nothing writes to.
                     let bound = self.take_honoured_identity(bound, &handle).await;
-                    let task_id = self
+                    if request_owner.is_some()
+                        && cancel.as_ref().is_some_and(|token| token.is_cancelled())
+                    {
+                        self.cancel_host_background(&handle, bound.as_ref(), false)
+                            .await?;
+                        self.ctx.sandbox_runner.cleanup_after_command().await;
+                        return Err(ToolError::Aborted);
+                    }
+                    let acknowledged = self
                         .acknowledge_background_task(
                             &ctx,
                             bound.as_ref(),
@@ -3439,7 +3557,16 @@ impl Tool for BashTool {
                             &cwd,
                             &handle,
                         )
-                        .await?;
+                        .await;
+                    let task_id = acknowledged?;
+                    if request_owner.is_some()
+                        && cancel.as_ref().is_some_and(|token| token.is_cancelled())
+                    {
+                        self.cancel_host_background(&handle, bound.as_ref(), true)
+                            .await?;
+                        self.ctx.sandbox_runner.cleanup_after_command().await;
+                        return Err(ToolError::Aborted);
+                    }
                     let out_path = match bound.as_ref() {
                         Some((_, path)) => path.clone(),
                         None => task_output_path(&handle.task_id).display().to_string(),
@@ -3538,7 +3665,7 @@ impl Tool for BashTool {
             .with_background_timeout(
                 resolve_background_timeout_ms(&input, false).map(Duration::from_millis),
             )
-            .with_process_owner(
+            .with_process_owner(request_owner.clone().or_else(|| {
                 ctx.agent_id
                     .as_ref()
                     .map(ToString::to_string)
@@ -3556,8 +3683,8 @@ impl Tool for BashTool {
                         } else {
                             owner
                         }
-                    }),
-            );
+                    })
+            }));
         // A foreground command can still be moved to the background when it
         // exceeds its timeout (claude-code 2.1.210 `timedOutAfterMs`), and the
         // id it is then given must be a registry id for the same reason the
@@ -3576,9 +3703,24 @@ impl Tool for BashTool {
         // exactly like the deadline firing.
         let on_demand = fg_bound
             .as_ref()
-            .filter(|_| self.ctx.process.supports_foreground_backgrounding())
+            .filter(|_| {
+                request_owner.is_none() && self.ctx.process.supports_foreground_backgrounding()
+            })
             .map(|_| std::sync::Arc::new(tokio::sync::Notify::new()));
-        let sandboxed = self.bind_identity(sandboxed, fg_bound.as_ref(), on_demand.clone());
+        let sandboxed = self
+            .bind_identity(sandboxed, fg_bound.as_ref(), on_demand.clone())
+            .with_start_cancellation(request_owner.as_ref().and(cancel.clone()));
+        if request_owner.is_some() && !self.ctx.process.supports_request_cancellation(&sandboxed) {
+            if let (Some(registry), Some((task_id, _))) =
+                (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
+            {
+                registry.discard_bash_output(task_id).await;
+            }
+            self.ctx.sandbox_runner.cleanup_after_command().await;
+            return Err(ToolError::Internal(
+                "host foreground Bash requires a supervised process".into(),
+            ));
+        }
         // claude-code `U6t` after `cnr` (2000) ms: a foreground command that is
         // still running becomes a visible `local_bash` row so `/tasks`, Ctrl+B
         // and background-all have something to address. Short commands never
@@ -3619,7 +3761,7 @@ impl Tool for BashTool {
         // default trait impl still maps a normal finish to `Completed` and a
         // timeout to `Err(Timeout)`, preserving the interrupted-result fallback.
         let cleanup_owner = sandboxed.process_owner().map(str::to_owned);
-        let run_fut = async {
+        let runner = async {
             if self.ctx.is_persistent_app_chat() {
                 self.ctx
                     .process
@@ -3642,35 +3784,61 @@ impl Tool for BashTool {
                     .await
             }
         };
+        tokio::pin!(runner);
+        // If cancellation wins before the first poll, do not poll the runner
+        // afterward: that could start a new child after cancellation. Once it
+        // has been polled, keep that same owner alive through kill and reap.
+        let runner_polled = std::sync::atomic::AtomicBool::new(false);
+        let run_fut = std::future::poll_fn(|cx| {
+            runner_polled.store(true, std::sync::atomic::Ordering::Release);
+            std::future::Future::poll(runner.as_mut(), cx)
+        });
         tokio::pin!(run_fut);
-        // Register the owned child before racing cancellation. Otherwise a
-        // cancellation selected before the first poll could spawn new work
-        // only while trying to drain it after the kill request.
-        let first_result = if self.ctx.requires_inline_foreground() {
-            if cancel
-                .as_ref()
-                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-            {
-                self.ctx.sandbox_runner.cleanup_after_command().await;
-                return Err(ToolError::Aborted);
-            }
-            std::future::poll_fn(|cx| match std::future::Future::poll(run_fut.as_mut(), cx) {
-                std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
-                std::task::Poll::Pending => std::task::Poll::Ready(None),
-            })
-            .await
-        } else {
-            None
-        };
-        let run_result = if let Some(result) = first_result {
-            result
-        } else {
-            match &cancel {
-                Some(token) => {
-                    tokio::select! {
-                        biased;
-                        () = token.cancelled() => {
-                            if self.ctx.requires_inline_foreground() {
+        let run_result = match &cancel {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        if let Some(owner) = request_owner.as_deref() {
+                            let settled = if runner_polled.load(std::sync::atomic::Ordering::Acquire) {
+                                Some(loop {
+                                    // Registration may race cancellation. Each
+                                    // sweep checks the immutable request owner;
+                                    // the held runner completes only after wait/reap.
+                                    self.ctx.process.kill_owner_processes(owner).await;
+                                    tokio::select! {
+                                        result = &mut run_fut => break result,
+                                        () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                                    }
+                                })
+                            } else {
+                                None
+                            };
+                            self.ctx.sandbox_runner.cleanup_after_command().await;
+                            if let (Some(registry), Some((task_id, _))) =
+                                (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
+                            {
+                                registry.discard_bash_output(task_id).await;
+                            }
+                            match settled {
+                                None => return Err(ToolError::Aborted),
+                                // The supervisor emits this error only after it
+                                // has joined its cancelled child-owning runner.
+                                Some(Err(error))
+                                    if lingxi_core::host::shell_supervisor::is_settled_request_cancellation(&error) =>
+                                {
+                                    return Err(ToolError::Aborted);
+                                }
+                                Some(Err(error)) => return Err(ToolError::Io(error.to_string().into())),
+                                Some(Ok(_)) => return Err(ToolError::Internal(
+                                    "host Bash runner did not prove cancellation settlement".into(),
+                                )),
+                            }
+                        }
+                        if self.ctx.requires_inline_foreground() {
+                            // An unpolled runner owns no child. Never start it
+                            // only to drain a cancellation that already won.
+                            if runner_polled.load(std::sync::atomic::Ordering::Acquire) {
                                 if let Some(owner) = cleanup_owner.as_ref() {
                                     loop {
                                         self.ctx.process.kill_owner_processes(owner).await;
@@ -3693,25 +3861,25 @@ impl Tool for BashTool {
                                         }
                                     }
                                 }
-                                self.ctx.sandbox_runner.cleanup_after_command().await;
-                                return Err(ToolError::Aborted);
                             }
-                            // `turnAbortBackgrounds: !Dl()` applies even before the
-                            // 2 s UI row is armed. Keep polling the same runner so
-                            // detachment does not drop (and kill) its OS child.
-                            if !self.ctx.requires_inline_foreground() && !crate::prompt::background_tasks_disabled() {
-                                if let Some(notify) = &on_demand {
-                                    let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
-                                    notify.notify_one();
-                                    run_fut.await
-                                } else { return Err(ToolError::Aborted); }
-                            } else { return Err(ToolError::Aborted); }
+                            self.ctx.sandbox_runner.cleanup_after_command().await;
+                            return Err(ToolError::Aborted);
                         }
-                        res = &mut run_fut => res,
+                        // `turnAbortBackgrounds: !Dl()` applies even before the
+                        // 2 s UI row is armed. Keep polling the same runner so
+                        // detachment does not drop (and kill) its OS child.
+                        if !self.ctx.requires_inline_foreground() && !crate::prompt::background_tasks_disabled() {
+                            if let Some(notify) = &on_demand {
+                                let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+                                notify.notify_one();
+                                run_fut.await
+                            } else { return Err(ToolError::Aborted); }
+                        } else { return Err(ToolError::Aborted); }
                     }
+                    res = &mut run_fut => res,
                 }
-                None => run_fut.await,
             }
+            None => run_fut.await,
         };
         if let Err(error) = &run_result {
             self.ctx.note_side_chat_cleanup_failure(&error.to_string());
@@ -8668,6 +8836,465 @@ mod tests {
                 "test must exercise the pre-2s path"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn host_request_cancel_kills_only_its_owner_and_waits_for_runner() {
+        struct RequestRunner {
+            started: Arc<tokio::sync::Notify>,
+            killed: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+            owner: Arc<std::sync::Mutex<Option<String>>>,
+            settled: Arc<std::sync::atomic::AtomicBool>,
+            kill_count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for RequestRunner {
+            fn supports_request_cancellation(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                command: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+                assert!(!command.auto_background_on_timeout());
+                assert!(command.background_task().unwrap().on_demand.is_none());
+                *self.owner.lock().unwrap() = command.process_owner().map(str::to_owned);
+                self.started.notify_one();
+                self.release.notified().await;
+                self.settled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if command
+                    .start_cancellation()
+                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                {
+                    return Err(ProcessError::Io("io: supervisor command cancelled".into()));
+                }
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: -1,
+                        timed_out: false,
+                    }),
+                    output_file: None,
+                })
+            }
+            async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+                assert_eq!(self.owner.lock().unwrap().as_deref(), Some(owner));
+                self.kill_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.killed.notify_one();
+                vec![4242]
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                panic!("foreground request must not spawn a background process");
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                panic!("foreground cancellation uses the request owner");
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let killed = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let owner = Arc::new(std::sync::Mutex::new(None));
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kill_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+        context.process = Arc::new(RequestRunner {
+            started: started.clone(),
+            killed: killed.clone(),
+            release: release.clone(),
+            owner: owner.clone(),
+            settled: settled.clone(),
+            kill_count: kill_count.clone(),
+        });
+        let tool = BashTool::new(context);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut use_context = use_ctx();
+        let id = lingxi_core::types::ToolUseId::new();
+        use_context.tool_use_id = Some(id.clone());
+        use_context.cancellation_scope = tool_api::context::ToolCancellationScope::HostRequest;
+        use_context.cancel = Some(cancel.clone());
+        let running = tokio::spawn(async move {
+            tool.call(
+                source_json!({"command":"sleep 10"}),
+                use_context,
+                fresh_tx(),
+            )
+            .await
+        });
+        let other_started = Arc::new(tokio::sync::Notify::new());
+        let other_release = Arc::new(tokio::sync::Notify::new());
+        let other_owner = Arc::new(std::sync::Mutex::new(None));
+        let other_settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let other_kill_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut other_context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        other_context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+        other_context.process = Arc::new(RequestRunner {
+            started: other_started.clone(),
+            killed: Arc::new(tokio::sync::Notify::new()),
+            release: other_release.clone(),
+            owner: other_owner.clone(),
+            settled: other_settled.clone(),
+            kill_count: other_kill_count.clone(),
+        });
+        let mut other_use = use_ctx();
+        other_use.tool_use_id = Some(id);
+        other_use.cancellation_scope = tool_api::context::ToolCancellationScope::HostRequest;
+        other_use.cancel = Some(tokio_util::sync::CancellationToken::new());
+        let other_running = tokio::spawn(async move {
+            BashTool::new(other_context)
+                .call(source_json!({"command":"sleep 10"}), other_use, fresh_tx())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("request runner started");
+        tokio::time::timeout(Duration::from_secs(5), other_started.notified())
+            .await
+            .expect("other request runner started");
+        assert_ne!(
+            *owner.lock().unwrap(),
+            *other_owner.lock().unwrap(),
+            "concurrent requests with the same tool ID must have distinct owners"
+        );
+        assert!(owner
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap()
+            .starts_with("host-request:"));
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), killed.notified())
+            .await
+            .expect("owned process was signalled");
+        assert!(
+            !running.is_finished(),
+            "cancellation must await process settlement"
+        );
+        assert!(!settled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!other_running.is_finished());
+        assert_eq!(
+            other_kill_count.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(!other_settled.load(std::sync::atomic::Ordering::Acquire));
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("request settled")
+            .unwrap();
+        assert!(matches!(result, Err(ToolError::Aborted)));
+        assert!(settled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(kill_count.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        other_release.notify_one();
+        let other_result = tokio::time::timeout(Duration::from_secs(5), other_running)
+            .await
+            .expect("other request settled")
+            .unwrap();
+        assert!(other_result.is_ok());
+        assert!(other_settled.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn host_request_cancellation_rejects_unproven_completed_timeout() {
+        struct UnprovenRunner {
+            started: Arc<tokio::sync::Notify>,
+            stopped: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for UnprovenRunner {
+            fn supports_request_cancellation(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 143,
+                        timed_out: true,
+                    }),
+                    output_file: None,
+                })
+            }
+            async fn kill_owner_processes(&self, _: &str) -> Vec<u32> {
+                self.stopped.notify_one();
+                vec![]
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let started = Arc::new(tokio::sync::Notify::new());
+        let stopped = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+        context.process = Arc::new(UnprovenRunner {
+            started: started.clone(),
+            stopped: stopped.clone(),
+            release: release.clone(),
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut use_context = use_ctx();
+        use_context.cancellation_scope = tool_api::context::ToolCancellationScope::HostRequest;
+        use_context.cancel = Some(cancel.clone());
+        let running = tokio::spawn(async move {
+            BashTool::new(context)
+                .call(
+                    source_json!({"command":"sleep 10"}),
+                    use_context,
+                    fresh_tx(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), stopped.notified())
+            .await
+            .unwrap();
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(ToolError::Internal(message)) if message.contains("did not prove cancellation settlement"))
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn host_request_refuses_unsupported_runner_before_start() {
+        const CHILD_ENV: &str = "LINGXI_TEST_UNSUPPORTED_REQUEST_RUNNER";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // The supervisor flag is process-global and cannot be unset. Use
+            // an isolated test process so unrelated tests retain their setup.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "bash::tests::host_request_refuses_unsupported_runner_before_start",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .env_remove("LINGXI_DISABLE_BACKGROUND_TASKS")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated capability test failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "isolated capability test was not selected: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        lingxi_core::host::shell_supervisor::enable_supervisor(std::env::current_exe().unwrap());
+        struct UnsupportedRunner(Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait::async_trait]
+        impl ProcessRunner for UnsupportedRunner {
+            fn supports_request_cancellation(&self, command: &SandboxedCommand) -> bool {
+                assert!(
+                    lingxi_core::host::shell_supervisor::enabled(command),
+                    "the globally enabled supervisor must not stand in for runner support"
+                );
+                false
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(ProcessError::Unsupported)
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(ProcessError::Unsupported)
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        for background in [false, true] {
+            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut context = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+            context.process = Arc::new(UnsupportedRunner(started.clone()));
+            let mut use_context = use_ctx();
+            use_context.cancellation_scope = tool_api::context::ToolCancellationScope::HostRequest;
+            use_context.cancel = Some(tokio_util::sync::CancellationToken::new());
+            let input = source_json!({"command":"sleep 10", "run_in_background":background});
+            let result = BashTool::new(context)
+                .call(input, use_context, fresh_tx())
+                .await;
+            assert!(matches!(result, Err(ToolError::Internal(_))));
+            assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn host_background_registration_failure_waits_for_terminal_cleanup() {
+        struct DelayedStop {
+            started: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+            stopped: Arc<std::sync::atomic::AtomicBool>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for DelayedStop {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                panic!("host request must wait for a terminal receipt");
+            }
+            async fn stop_request_background(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.started.notify_one();
+                self.release.notified().await;
+                self.stopped
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let registry = Arc::new(RecordingRegistry {
+            fail_register: true,
+            ..Default::default()
+        });
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        context.task_registry = Some(registry.clone());
+        context.process = Arc::new(DelayedStop {
+            started: started.clone(),
+            release: release.clone(),
+            stopped: stopped.clone(),
+        });
+        let operation = tokio::spawn(async move {
+            let mut use_context = use_ctx();
+            use_context.cancellation_scope = tool_api::context::ToolCancellationScope::HostRequest;
+            let bound = (
+                "b1a2b3c4d".to_string(),
+                "/session/tasks/b1a2b3c4d.output".to_string(),
+            );
+            let handle = ProcessHandle {
+                task_id: bound.0.clone(),
+                pid: 4242,
+            };
+            BashTool::new(context)
+                .acknowledge_background_task(
+                    &use_context,
+                    Some(&bound),
+                    "sleep 10",
+                    None,
+                    std::path::Path::new("/tmp"),
+                    &handle,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("stop-and-wait started");
+        assert!(!operation.is_finished());
+        assert!(registry.discarded.lock().unwrap().is_empty());
+        assert!(!stopped.load(std::sync::atomic::Ordering::Acquire));
+        release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(5), operation)
+            .await
+            .expect("registration failure settled")
+            .unwrap()
+            .expect_err("registration failed");
+        assert!(matches!(&error, ToolError::Io(_)));
+        assert_eq!(
+            error.model_facing_message().string_at(""),
+            Some("could not register background shell: Task: internal error: registration failed")
+        );
+        assert!(stopped.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            registry.discarded.lock().unwrap().as_slice(),
+            &["b1a2b3c4d"]
+        );
     }
 
     // ===== CLI-5 `bashEditDiffEnabled` wiring =============================

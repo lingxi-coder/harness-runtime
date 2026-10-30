@@ -359,6 +359,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     let http = platform.http();
     let clock = platform.clock();
     let fs = platform.filesystem();
+    let host_fs = fs.host_filesystem().unwrap_or_else(|| fs.clone());
     let storage: Arc<dyn lingxi_core::host::SecureStorage> = platform
         .secure_storage()
         .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
@@ -507,7 +508,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         &main_session_uuid,
     );
     let session_writer = Arc::new(
-        session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), fs.clone())
+        session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), host_fs.clone())
             .with_durable_lock(transcript_authority),
     );
     if !cfg.app_agent_host {
@@ -1746,7 +1747,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         fs.clone(),
         Arc::new(tasks::output_manager::TaskOutputManager::new(
             task_output_dir,
-            fs.clone(),
+            host_fs.clone(),
         )),
     )
     // `tengu_agent_tool_terminated` (async twin): the registry is where
@@ -1924,7 +1925,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             Some(main_subagents_dir.clone()),
         )
         .with_subagents_dir_provider(subagents_dir_provider)
-        .with_transcript_fs(fs.clone())
+        .with_transcript_fs(host_fs.clone())
         .with_spawn_observer(session_agent_observer)
         .with_new_diagnostics_source_factory(Arc::new({
             let workspace_leases = mobile_lsp_workspace_leases.clone();
@@ -3485,6 +3486,7 @@ fn build_mobile_engine_on_worker(
     // reads the on-disk catalog with these (the SAME `fs` the tools use).
     let lingxi_home = cfg.lingxi_home.clone();
     let fs = platform.filesystem();
+    let host_fs = fs.host_filesystem().unwrap_or_else(|| fs.clone());
     // Capture the build recipe + platform BEFORE they move into
     // `build_mobile_inner`, so the cron firing path can rebuild a fresh throwaway
     // runtime per fired job (the same pattern as `lingxi_home`/`session_cwd`/`fs`).
@@ -3576,7 +3578,9 @@ fn build_mobile_engine_on_worker(
                 fs.clone(),
                 firer_platform.clock(),
                 Arc::new(platform_posix_minimal::runtime::PosixRuntime::new()),
-                cron::tasks_file::session_scheduled_tasks_path(&firer_cfg.cwd),
+                cron::tasks_file::session_scheduled_tasks_path(
+                    firer_cfg.logical_cwd.as_deref().unwrap_or(&firer_cfg.cwd),
+                ),
             )
             .with_session_id(initial_session_key.clone()),
         );
@@ -4200,6 +4204,7 @@ fn build_mobile_engine_on_worker(
         settings_write_lock,
         session_lifecycle_tx,
         fs,
+        host_fs,
         firer_cfg,
         firer_platform,
     });

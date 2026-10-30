@@ -6466,15 +6466,20 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
         );
 
         first
+            .submit(ClientCommand::PauseTurn {
+                turn_id: 246,
+                reason: "simulated_process_restart".into(),
+            })
+            .await
+            .expect("quiesce the in-flight request before restart");
+        let paused = first
             .durable_turns
-            .transition(
-                &session_id,
-                246,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
-            )
-            .expect("mark the in-flight request recoverable before restart");
+            .load(&session_id, 246)
+            .expect("load the paused prompt checkpoint");
+        assert_eq!(paused.state, Some(TurnRecoveryStateDto::PausedRecoverable));
+        assert_eq!(paused.queue_delivery, QueueDeliveryState::Claimed);
+        assert!(paused.safe_to_resume);
+        assert!(first.active_cancel.lock().await.is_none());
         session_id
     });
     drop(first);
@@ -6728,15 +6733,20 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         assert_eq!(checkpoint.state, Some(TurnRecoveryStateDto::Running));
         assert_eq!(checkpoint.queue_delivery, QueueDeliveryState::Claimed);
         engine_for_work
-            .durable_turns
-            .transition(
-                &session_id,
+            .submit(ClientCommand::PauseTurn {
                 turn_id,
-                TurnRecoveryStateDto::PausedRecoverable,
-                true,
-                Some("simulated_process_restart".into()),
-            )
-            .expect("mark the active request resumable before restart");
+                reason: "simulated_process_restart".into(),
+            })
+            .await
+            .expect("quiesce the active request before restart");
+        let paused = engine_for_work
+            .durable_turns
+            .load(&session_id, turn_id)
+            .expect("load the paused no-ID prompt checkpoint");
+        assert_eq!(paused.state, Some(TurnRecoveryStateDto::PausedRecoverable));
+        assert_eq!(paused.queue_delivery, QueueDeliveryState::Claimed);
+        assert!(paused.safe_to_resume);
+        assert!(engine_for_work.active_cancel.lock().await.is_none());
         (session_id, turn_id)
     });
     drop(engine);
@@ -6841,6 +6851,8 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
         message_stop, text_delta, MockStreamingApiClient,
     };
+
+    const PAUSE_INTERRUPTION: &str = "[Request interrupted by user]";
 
     struct SourceUserRow {
         id: lingxi_core::types::MessageId,
@@ -7988,15 +8000,41 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             );
 
             first
+                .submit(ClientCommand::PauseTurn {
+                    turn_id: 247,
+                    reason: "simulated_process_restart".into(),
+                })
+                .await
+                .expect("quiesce the still-pending skill batch before restart");
+            let paused = first
                 .durable_turns
-                .transition(
-                    &session_id,
-                    247,
-                    TurnRecoveryStateDto::PausedRecoverable,
-                    true,
-                    Some("simulated_process_restart".into()),
-                )
-                .expect("mark the still-pending skill batch recoverable");
+                .load(&session_id, 247)
+                .expect("load the quiesced skill checkpoint");
+            assert_eq!(paused.state, Some(TurnRecoveryStateDto::PausedRecoverable));
+            assert_eq!(paused.queue_delivery, QueueDeliveryState::Claimed);
+            assert!(paused.safe_to_resume);
+            let paused_transcript = std::fs::read_to_string(session::jsonl::session_path(
+                &first.lingxi_home,
+                &first.session_cwd(),
+                &session_id,
+            ))
+            .expect("read the quiesced skill transcript");
+            let interruption_ids = session::jsonl::reader::route_lines(&paused_transcript)
+                .messages_in_order
+                .into_iter()
+                .filter(|row| {
+                    row.message_type == "user"
+                        && row.message.string_at("/content/0/text") == Some(PAUSE_INTERRUPTION)
+                })
+                .map(|row| row.uuid)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                interruption_ids.len(),
+                1,
+                "quiescing the pending stream persists exactly one interruption row"
+            );
+            let interruption_uuid = interruption_ids[0].clone();
+            assert_eq!(transcript_uuid_count(&paused_transcript, &interruption_uuid), 1);
             (
                 session_id,
                 skill_listing_uuid,
@@ -8005,6 +8043,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 body_message_id,
                 upe_message_id,
                 upe_text_units,
+                interruption_uuid,
             )
         });
     let (
@@ -8015,6 +8054,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         body_message_id,
         upe_message_id,
         upe_text_units,
+        interruption_uuid,
     ) = first_session;
     drop(first);
 
@@ -8057,6 +8097,13 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             })
             .await
             .expect("restore the session containing the skill turn");
+        let paused = resumed
+            .durable_turns
+            .load(&session_id, 247)
+            .expect("reload the skill checkpoint after restart");
+        assert_eq!(paused.state, Some(TurnRecoveryStateDto::PausedRecoverable));
+        assert_eq!(paused.queue_delivery, QueueDeliveryState::Claimed);
+        assert!(paused.safe_to_resume);
         resumed
             .submit(ClientCommand::ResumeTurn { turn_id: 247 })
             .await
@@ -8108,9 +8155,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             .expect("cold request contains the original command identity");
         let resumed_body_index = resumed_command_index + 1;
         assert_eq!(
-            resumed_body_index + 1,
+            resumed_body_index + 2,
             resumed_user_rows.len(),
-            "cold Native packing leaves the original command/body pair at the request tail"
+            "cold request ends with the original command/body pair and the pause interruption; bounded rows:\n{}",
+            bounded_request_rows_diagnostic(&calls[0].messages),
         );
         for (index, row) in resumed_user_rows[..resumed_command_index]
             .iter()
@@ -8123,10 +8171,30 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             );
         }
         assert_skill_pair(
-            &resumed_user_rows[resumed_command_index..],
+            &resumed_user_rows[resumed_command_index..=resumed_body_index],
             &command_header_units,
         );
         assert_eq!(resumed_user_rows[resumed_body_index].id, body_message_id);
+        let interruption = &resumed_user_rows[resumed_body_index + 1];
+        let interruption_units = PAUSE_INTERRUPTION.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(interruption.id.as_uuid().to_string(), interruption_uuid);
+        assert_ne!(interruption.id, command_message_id);
+        assert_ne!(interruption.id, body_message_id);
+        assert!(!interruption.is_meta);
+        assert_eq!(interruption.turn_companion, None);
+        assert_eq!(
+            interruption.text_utf16.as_deref(),
+            Some(interruption_units.as_slice()),
+            "the pause interruption keeps its exact source text"
+        );
+        assert_eq!(
+            resumed_user_rows
+                .iter()
+                .filter(|row| row.text_utf16.as_deref() == Some(interruption_units.as_slice()))
+                .count(),
+            1,
+            "the pause interruption appears exactly once in the cold request"
+        );
         let resumed_upe_index = resumed_user_rows
             .iter()
             .position(|row| row.id == upe_message_id)

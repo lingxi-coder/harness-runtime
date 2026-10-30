@@ -516,6 +516,10 @@ impl OrchestratorApiClient for BlockingPrewarmApiClient {
         })
     }
 
+    fn supports_responses_websocket_prewarm(&self, _model: &str, _profile: Option<&str>) -> bool {
+        true
+    }
+
     async fn prewarm_responses_websocket(
         &self,
         _model: &str,
@@ -1597,6 +1601,88 @@ async fn recov2_batched_blocking_limit_does_not_trigger_budget_continuation() {
 }
 
 #[tokio::test]
+async fn unsupported_startup_prewarm_skips_prompt_and_tool_preparation() {
+    struct IneligibleApi {
+        checked: Notify,
+        route: std::sync::Mutex<Option<(String, Option<String>)>>,
+    }
+
+    #[async_trait]
+    impl OrchestratorApiClient for IneligibleApi {
+        async fn messages_create(
+            &self,
+            _request: crate::OrchestratorApiRequest,
+        ) -> Result<HistoryResponse, LlmError> {
+            unreachable!("fixture does not submit model requests")
+        }
+
+        fn supports_responses_websocket_prewarm(&self, model: &str, profile: Option<&str>) -> bool {
+            *self.route.lock().unwrap() = Some((model.to_owned(), profile.map(str::to_owned)));
+            self.checked.notify_one();
+            false
+        }
+    }
+
+    struct CountingMemory(AtomicBool);
+
+    #[async_trait]
+    impl crate::prompt::MemoryHierarchyProvider for CountingMemory {
+        async fn load(&self, _cwd: &std::path::Path) -> Vec<crate::prompt::MemoryFile> {
+            self.0.store(true, Ordering::SeqCst);
+            Vec::new()
+        }
+
+        async fn load_conditional_rules(
+            &self,
+            _cwd: &std::path::Path,
+            _trigger: &std::path::Path,
+            _mode: crate::prompt::memory_block::InstructionFilesMode,
+        ) -> Vec<crate::prompt::MemoryFile> {
+            Vec::new()
+        }
+    }
+
+    let api = Arc::new(IneligibleApi {
+        checked: Notify::new(),
+        route: std::sync::Mutex::new(None),
+    });
+    let memory = Arc::new(CountingMemory(AtomicBool::new(false)));
+    let orch = Arc::new(ConversationOrchestrator::new(
+        OrchestratorConfig {
+            model: "selected-model".to_owned(),
+            ..OrchestratorConfig::default()
+        },
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        memory.clone(),
+        std::env::temp_dir(),
+    ));
+    orch.session.lock().await.model_profile = Some("selected-profile".to_owned());
+
+    orch.spawn_startup_responses_websocket_prewarm();
+    tokio::time::timeout(Duration::from_secs(5), api.checked.notified())
+        .await
+        .expect("prewarm must check the selected route");
+    orch.shutdown_startup_responses_websocket_prewarm()
+        .await
+        .unwrap();
+    assert_eq!(
+        *api.route.lock().unwrap(),
+        Some((
+            "selected-model".to_owned(),
+            Some("selected-profile".to_owned())
+        ))
+    );
+    assert!(
+        !memory.0.load(Ordering::SeqCst),
+        "an unsupported route must not assemble the system prompt"
+    );
+}
+
+#[tokio::test]
 async fn startup_responses_websocket_prewarm_uses_current_model_profile_system_and_empty_history() {
     let api = Arc::new(MockApiClient::new(vec![]));
     let orch = Arc::new(ConversationOrchestrator::new(
@@ -1949,17 +2035,56 @@ async fn streaming_turn_aborts_pending_startup_prewarm_before_opening_stream() {
     );
     api.wait_inactive().await;
     assert!(
-        orch.lifecycle_runtime
+        !orch
+            .lifecycle_runtime
             .startup_responses_websocket_prewarm
-            .lock()
-            .expect("startup responses websocket prewarm")
-            .is_none(),
+            .is_running(),
         "turn start must clear the pending startup prewarm handle"
     );
     assert_eq!(
         streaming.captured_calls().await.len(),
         1,
         "the real streaming turn should still open normally"
+    );
+}
+
+#[tokio::test]
+async fn host_shutdown_joins_blocked_startup_prewarm_and_rejects_late_registration() {
+    let api = Arc::new(BlockingPrewarmApiClient::new());
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+    let weak = Arc::downgrade(&orch);
+    orch.spawn_startup_responses_websocket_prewarm();
+    api.wait_started().await;
+    orch.close_background_producer_admission();
+    orch.shutdown_startup_responses_websocket_prewarm()
+        .await
+        .unwrap();
+    assert!(
+        !api.active.load(Ordering::SeqCst),
+        "shutdown must join the work future's drop"
+    );
+    // Retaining the root allocation cannot restore startup-producer authority.
+    orch.spawn_startup_responses_websocket_prewarm();
+    assert!(!orch
+        .lifecycle_runtime
+        .startup_responses_websocket_prewarm
+        .is_running());
+    orch.shutdown_startup_responses_websocket_prewarm()
+        .await
+        .unwrap();
+    drop(orch);
+    assert!(
+        weak.upgrade().is_none(),
+        "joined prewarm cannot retain the closed root"
     );
 }
 

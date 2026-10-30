@@ -24,6 +24,9 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
 
+#[path = "bg_session_lifecycle.rs"]
+pub mod lifecycle;
+
 /// Conversation state copied into a background session. Model reminders keep
 /// their structured attachment payloads as well as rendered messages, so the
 /// new session can replay MCP deltas without announcing them a second time.
@@ -54,6 +57,10 @@ pub enum BgForkError {
     /// failed.
     #[error("could not dispatch background session: {0}")]
     Dispatch(String),
+    /// The source cannot prove that an exported shell is either retained or
+    /// durably owned by the destination. Teardown must retain its dependencies.
+    #[error("background session ownership is uncertain: {0}")]
+    OwnershipUncertain(String),
 }
 
 /// Copies the current conversation into a new background session.
@@ -64,6 +71,12 @@ pub enum BgForkError {
 /// `ActionFailed` rather than panicking.
 #[async_trait]
 pub trait BgSessionForker: Send + Sync {
+    /// The foreground owner's admission fence. All three launch paths must
+    /// claim this same owner before I/O and retain the claim until their owned
+    /// publication or recovery finishes. Closing it is permanent, independent
+    /// of any remaining orchestrator references.
+    fn lifecycle(&self) -> Arc<lifecycle::BackgroundLaunchLifecycle>;
+
     /// Late binding after the host has constructed its session registry.
     fn set_task_registry(
         &self,

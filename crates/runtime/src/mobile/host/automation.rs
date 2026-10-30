@@ -403,14 +403,16 @@ impl MobileTurnFirer {
             sender: permission_tx,
         });
         let mut config = self.cfg.clone();
+        // Session transcripts and the scheduler store are host-owned paths,
+        // not model-supplied guest paths, even if their spelling overlaps a
+        // guest root such as /tmp.
+        let model_fs = self.platform.filesystem();
+        let host_fs = model_fs
+            .host_filesystem()
+            .unwrap_or_else(|| model_fs.clone());
         if let Some(uuid) = target_uuid {
-            config.session_mode = cron_target_session_mode(
-                &config.lingxi_home,
-                &cwd,
-                uuid,
-                self.platform.filesystem(),
-            )
-            .await?;
+            config.session_mode =
+                cron_target_session_mode(&config.lingxi_home, &cwd, uuid, host_fs.clone()).await?;
         }
         if let Some(automation) = automation {
             config.default_model = automation.model.clone();
@@ -427,13 +429,8 @@ impl MobileTurnFirer {
 
         let handle: Arc<dyn OrchestratorHandle> = rt.orchestrator.clone();
         if let Some(uuid) = target_uuid {
-            let replayed = cron_replay_session(
-                &self.cfg.lingxi_home,
-                &cwd,
-                uuid,
-                self.platform.filesystem(),
-            )
-            .await?;
+            let replayed =
+                cron_replay_session(&self.cfg.lingxi_home, &cwd, uuid, host_fs.clone()).await?;
             let (history, last_message, runtime) = match replayed {
                 Some(replayed) => (
                     replayed.state.history.clone(),
@@ -485,8 +482,8 @@ impl MobileTurnFirer {
         }
         if let Some(request) = request {
             cron::bind_automation_run_session(
-                self.platform.filesystem().as_ref(),
-                &self.cfg.cwd,
+                model_fs.as_ref(),
+                std::path::Path::new(&cwd),
                 request,
                 &session_id,
             )
