@@ -3,6 +3,8 @@
 //! owner/original-human broker; no backend permit decoder or public IPC lives here.
 
 mod interaction;
+pub(super) mod model;
+pub use model::TeamModelRoute;
 mod protocol;
 mod worker;
 
@@ -60,13 +62,14 @@ impl TeamProcessDeadline {
     }
 }
 
-/// A selected static Anthropic credential. Other auth/protocol routes refuse
-/// until their clean-process transfer and real wire behavior are validated.
-/// The key is carried only over an anonymous pipe, never argv/env/a settings file.
+/// One frozen registry-selected static route and key. The key crosses only
+/// anonymous pipes, never argv/environment/settings or catalog projections.
+#[derive(Clone)]
 pub struct TeamProcessModel {
     model_id: String,
     endpoint: String,
     api_key: String,
+    route: TeamModelRoute,
 }
 
 impl std::fmt::Debug for TeamProcessModel {
@@ -86,34 +89,40 @@ impl TeamProcessModel {
         endpoint: String,
         api_key: String,
     ) -> Result<Self, TeamProcessError> {
-        let url = url::Url::parse(&endpoint).map_err(|_| TeamProcessError::Model)?;
-        let loopback = url
-            .host_str()
-            .and_then(|s| s.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok())
-            .is_some_and(|ip| ip.is_loopback());
-        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
-            || url.host().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || model_id.is_empty()
-            || model_id.len() > 256
-            || model_id.contains('/')
-            || model_id
-                .chars()
-                .any(|c| c.is_control() || c.is_whitespace())
-            || api_key.trim().is_empty()
-            || api_key.len() > 8192
-            || api_key.chars().any(char::is_control)
-        {
+        if model_id.contains('/') {
             return Err(TeamProcessError::Model);
         }
-        Ok(Self {
-            model_id,
-            endpoint,
-            api_key,
+        let mut profile = llm_runtime::anthropic_provider_profile(
+            &endpoint,
+            llm_runtime::AuthStrategy::ApiKey,
+            llm_runtime::CredentialConfig::Static {
+                id: model::PRIVATE_CREDENTIAL.into(),
+            },
+        );
+        profile
+            .models
+            .retain(|entry| entry.request_model == model_id);
+        let client = llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+            providers: vec![profile],
         })
+        .map_err(|_| TeamProcessError::Model)?;
+        let profile = client
+            .provider_service_profiles()
+            .into_iter()
+            .next()
+            .ok_or(TeamProcessError::Model)?;
+        let profile = model::sanitized(profile, &model_id)?;
+        Self::selected_api_key(
+            TeamModelRoute {
+                model_provider: profile.profile_name.clone(),
+                model_protocol: profile.protocol,
+                model_id,
+                model_endpoint: endpoint,
+                credential_id: "anthropic-api-key".into(),
+                model_profile: profile,
+            },
+            api_key,
+        )
     }
 }
 
@@ -160,7 +169,7 @@ pub enum TeamProcessError {
     AlreadyAttempted,
     #[error("Team worker must be a canonical private-owner executable")]
     Executable,
-    #[error("Team worker model requires a selected static credential and explicit safe endpoint")]
+    #[error("Team worker model requires one supported frozen static route and safe endpoint")]
     Model,
     #[error("Team worker private protocol is invalid or exceeds its bound")]
     Protocol,
@@ -244,7 +253,8 @@ impl TeamProcessStart {
             request.invocation_id,
             request.instructions.clone(),
             request.limits,
-        )?;
+        )?
+        .with_selected_model(request.model.clone());
         profile.validate_input(&request.input)?;
         let identity = profile.identity();
         let bootstrap = Bootstrap {
@@ -264,6 +274,9 @@ impl TeamProcessStart {
             output_tokens_per_request: request.limits.output_tokens_per_request.get(),
             physical_dispatches: request.limits.physical_dispatches.get(),
             deadline_unix_ms: request.deadline.unix_ms,
+            model_provider: request.model.route.model_provider.clone(),
+            model_protocol: request.model.route.model_protocol,
+            model_profile: request.model.route.model_profile.clone(),
             model_id: request.model.model_id,
             endpoint: request.model.endpoint,
             api_key: request.model.api_key,
@@ -312,7 +325,15 @@ impl TeamProcessStart {
         check_executable(worker_executable)?;
         self.profile.validate_input(&self.bootstrap.input)?;
         let mut cfg = super::DesktopConfig::default();
-        cfg.default_model = format!("anthropic/{}", self.bootstrap.model_id);
+        cfg.default_model = format!(
+            "{}/{}",
+            self.profile
+                .selected_model()
+                .ok_or(TeamProcessError::Model)?
+                .route
+                .model_provider,
+            self.bootstrap.model_id
+        );
         self.profile.apply_to(&mut cfg)?;
         self.bootstrap.version = if broker.is_some() { 2 } else { 1 };
         let frame = protocol::encode(&self.bootstrap)?;

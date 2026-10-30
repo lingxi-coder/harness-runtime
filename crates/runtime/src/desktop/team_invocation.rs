@@ -92,6 +92,7 @@ pub struct TeamInvocationProfile {
     lease: SessionToolGrantLease,
     quota: Arc<llm_runtime::ScopeOutputQuota>,
     policy_cache: super::settings_watch::ManagedPolicySnapshotCache,
+    selected_model: Option<Arc<super::team_process::TeamProcessModel>>,
     question_sender:
         Option<tokio::sync::mpsc::Sender<tool_api::ask_user_question::AskUserQuestionExchange>>,
 }
@@ -208,6 +209,7 @@ impl TeamInvocationProfile {
             lease,
             quota,
             policy_cache: Default::default(),
+            selected_model: None,
             question_sender: None,
         })
     }
@@ -240,6 +242,17 @@ impl TeamInvocationProfile {
     #[must_use]
     pub fn output_quota(&self) -> Arc<llm_runtime::ScopeOutputQuota> {
         self.quota.clone()
+    }
+
+    /// Freeze one host-selected registry route before private runtime assembly.
+    #[must_use]
+    pub fn with_selected_model(mut self, model: super::team_process::TeamProcessModel) -> Self {
+        self.selected_model = Some(Arc::new(model));
+        self
+    }
+
+    pub(crate) fn selected_model(&self) -> Option<&super::team_process::TeamProcessModel> {
+        self.selected_model.as_deref()
     }
 
     /// Install a dedicated broker that authenticates answers against this
@@ -337,6 +350,19 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
     });
+    if let Some(model) = profile.selected_model() {
+        model
+            .route()
+            .validate()
+            .map_err(|_| TeamInvocationError::Model)?;
+        scoped.default_model = format!(
+            "{}/{}",
+            model.route().model_provider,
+            model.route().model_id
+        );
+        scoped.api_key.clear();
+        scoped.provider_profiles = None;
+    }
     scoped.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::NativeOrMemory;
     scoped.isolated_credential_storage = true;
     // The product host must supply a Team-only original-human broker. No

@@ -55,7 +55,8 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         bootstrap.invocation_id,
         bootstrap.instructions,
         limits,
-    )?;
+    )?
+    .with_selected_model(model.clone());
     profile.validate_input(&bootstrap.input)?;
     for (key, value) in environment(profile.scope_root()) {
         if std::env::var_os(key).as_ref() != Some(&value) {
@@ -95,9 +96,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         (None, None)
     };
     let mut cfg = DesktopConfig::default();
-    cfg.default_model = format!("anthropic/{}", model.model_id);
-    cfg.api_base = model.endpoint;
-    cfg.api_key = model.api_key;
+    cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
     profile.apply_to(&mut cfg)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

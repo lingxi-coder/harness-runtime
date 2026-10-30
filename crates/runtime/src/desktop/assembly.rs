@@ -1317,6 +1317,7 @@ pub async fn build_with_credential_stack(
         .iter()
         .map(|source| (source.profile_name.clone(), source.credential_id.clone()))
         .collect();
+    let team_model_runtime = llm_runtime.clone();
     let mut service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
         llm_transport.clone(),
@@ -7573,6 +7574,7 @@ pub async fn build_with_credential_stack(
         provider_region,
         audio_services,
         audio_credential_ids,
+        team_model_runtime,
         orchestrator: orch,
         session_state,
         fusion_recorder,

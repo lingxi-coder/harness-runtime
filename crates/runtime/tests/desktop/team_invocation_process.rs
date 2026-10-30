@@ -553,12 +553,16 @@ async fn invalid_executable_and_pre_cancel_do_not_consume_launch_but_spawn_failu
 }
 
 fn raw_bootstrap(root: &Path, id: uuid::Uuid, endpoint: &str) -> Value {
+    let model =
+        TeamProcessModel::anthropic_api_key(MODEL.into(), endpoint.into(), KEY.into()).unwrap();
+    let route = model.route();
     json!({
         "version":1,"storage_root":root,"owner_uid":"fixture-owner","bot_key":"fixture-bot",
         "team_id":"fixture-team","conversation_id":"fixture-conversation","origin_human_uid":"fixture-human",
         "membership_generation":1,"invocation_id":id,"instructions":PERSONA,"input":"fixture human",
         "max_turns":12,"max_input_bytes":32768,"output_tokens_per_request":4096,"physical_dispatches":24,
         "deadline_unix_ms":now_ms()+20_000,"model_id":MODEL,"endpoint":endpoint,"api_key":KEY,
+        "model_provider":route.model_provider,"model_protocol":route.model_protocol,"model_profile":route.model_profile,
     })
 }
 fn raw_command(root: &Path, id: uuid::Uuid) -> tokio::process::Command {
@@ -630,6 +634,8 @@ async fn private_bootstrap_rejects_dirty_environment_oversize_and_unknown_fields
         "unknown",
         "version",
         "zero_limit",
+        "missing_profile",
+        "partial_profile",
     ] {
         let (_dir, root) = root();
         let id = uuid::Uuid::new_v4();
@@ -650,6 +656,15 @@ async fn private_bootstrap_rejects_dirty_environment_oversize_and_unknown_fields
                 "unknown" => value["owner_approval"] = json!(true),
                 "version" => value["version"] = json!(3),
                 "zero_limit" => value["physical_dispatches"] = json!(0),
+                "missing_profile" => {
+                    let fields = value.as_object_mut().unwrap();
+                    fields.remove("model_profile");
+                    fields.remove("model_provider");
+                    fields.remove("model_protocol");
+                }
+                "partial_profile" => {
+                    value.as_object_mut().unwrap().remove("model_profile");
+                }
                 _ => unreachable!(),
             }
             write_bootstrap(&mut input, &value).await;

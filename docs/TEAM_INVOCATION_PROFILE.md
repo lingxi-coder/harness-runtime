@@ -36,8 +36,10 @@ Credential bootstrap uses a fresh memory store, never native/file credentials.
 A host supplying a credential stack must restrict its contents, not merely its
 backend label. Generic environment fallback, ambient OAuth/PAT capture,
 API-key/proxy/AWS refresh helpers, and owner identity metadata are disabled.
-The supported process route is selected static Anthropic only, with its key
-supplied over a private pipe. SDK environment readers also require the clean
+The process freezes one sanitized native SDK provider/model route and its exact
+static credential slot; see the [process contract](TEAM_INVOCATION_PROCESS.md)
+for admitted protocols. Its selected key is supplied over a private pipe.
+SDK environment readers also require the clean
 fresh worker; profile configuration inside an owner process is insufficient.
 No real-provider behavior follows from synthetic fixture acceptance.
 

@@ -32,6 +32,9 @@ pub(super) struct Bootstrap {
     pub output_tokens_per_request: u32,
     pub physical_dispatches: u32,
     pub deadline_unix_ms: u64,
+    pub model_provider: String,
+    pub model_protocol: lingxi_llm_client::protocol::ProtocolFamily,
+    pub model_profile: lingxi_llm_client::protocol::ProviderProfile,
     pub model_id: String,
     pub endpoint: String,
     pub api_key: String,
@@ -60,9 +63,15 @@ impl Bootstrap {
     }
 
     pub fn model(&self) -> Result<TeamProcessModel, TeamProcessError> {
-        TeamProcessModel::anthropic_api_key(
-            self.model_id.clone(),
-            self.endpoint.clone(),
+        TeamProcessModel::selected_api_key(
+            super::TeamModelRoute {
+                model_provider: self.model_provider.clone(),
+                model_protocol: self.model_protocol,
+                model_id: self.model_id.clone(),
+                model_endpoint: self.endpoint.clone(),
+                credential_id: super::model::PRIVATE_CREDENTIAL.into(),
+                model_profile: self.model_profile.clone(),
+            },
             self.api_key.clone(),
         )
     }

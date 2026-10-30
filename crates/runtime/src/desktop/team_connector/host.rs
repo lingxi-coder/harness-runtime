@@ -40,6 +40,9 @@ struct Start {
 struct Snapshot {
     instructions: String,
     model_id: String,
+    model_provider: String,
+    model_protocol: lingxi_llm_client::protocol::ProtocolFamily,
+    model_profile: lingxi_llm_client::protocol::ProviderProfile,
     model_endpoint: String,
     model_api_key: String,
     max_turns: u32,
@@ -52,9 +55,15 @@ impl Snapshot {
         let nonzero = |n| NonZeroU32::new(n).ok_or(Error::Configuration);
         Ok(TeamBotSnapshot {
             instructions: self.instructions,
-            model: TeamProcessModel::anthropic_api_key(
-                self.model_id,
-                self.model_endpoint,
+            model: TeamProcessModel::selected_api_key(
+                crate::desktop::team_process::TeamModelRoute {
+                    model_provider: self.model_provider,
+                    model_protocol: self.model_protocol,
+                    model_id: self.model_id,
+                    model_endpoint: self.model_endpoint,
+                    credential_id: crate::desktop::team_process::model::PRIVATE_CREDENTIAL.into(),
+                    model_profile: self.model_profile,
+                },
                 self.model_api_key,
             )
             .map_err(|_| Error::Configuration)?,

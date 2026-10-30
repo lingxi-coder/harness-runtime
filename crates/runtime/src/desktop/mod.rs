@@ -2532,6 +2532,8 @@ pub struct DesktopRuntime {
     pub provider_region: llm_runtime::Region,
     audio_services: llm_runtime::services::ProviderServices,
     audio_credential_ids: std::collections::BTreeMap<String, String>,
+    // Shared with ApiService; exporting a Team route never boots another client.
+    team_model_runtime: Arc<llm_runtime::ModelRuntime>,
     /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
     /// registries + compaction wired), bound to the supplied output stream and
     /// permission gate.
@@ -3027,6 +3029,18 @@ impl DesktopRuntime {
 
     /// Shared app-scoped service used by media tools and host UI/remote callers.
     #[must_use]
+    /// Nonsecret singleton routes from this runtime's exact SDK catalog and
+    /// credential-slot map. No credential read, request or second boot occurs.
+    pub fn team_model_routes(
+        &self,
+    ) -> std::collections::BTreeMap<(String, String), team_process::TeamModelRoute> {
+        team_process::model::routes(
+            &self.team_model_runtime,
+            &self.audio_credential_ids,
+            self.provider_region,
+        )
+    }
+
     pub fn media_service(&self) -> Option<Arc<dyn media_api::MediaService>> {
         self.media.clone()
     }

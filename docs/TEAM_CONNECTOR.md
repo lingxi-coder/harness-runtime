@@ -35,7 +35,7 @@ acquisition, request, and bounded response reads share a five-second limit; HTTP
 request/response JSON is limited to 64 KiB. The endpoint is fixed HTTPS, with
 literal loopback HTTP allowed for fixtures. Userinfo, queries, fragments,
 redirects, ambient proxies, and implicit HTTP retries are excluded. Firebase ID
-tokens remain in the trusted host; only the selected static Anthropic key crosses
+tokens remain in the trusted host; only the frozen route's selected static key crosses
 the separate model-worker pipe. Keys are absent from argv, environment, settings,
 and journal records.
 
@@ -125,9 +125,10 @@ Broker-enabled Bash uses the private macOS shell guardian described in the
 [profile contract](TEAM_INVOCATION_PROFILE.md). Worker death closes its lease;
 verified group cleanup precedes a successful tool result. This does not impose
 CPU/memory/disk cgroups or a billing ceiling. Only macOS with the working private
-sandbox and the selected static Anthropic route is admitted. Other platforms,
-provider protocols, OAuth/cloud/subscription credentials, and real-model behavior
-need their own implementation and acceptance.
+sandbox and a supported frozen static route are admitted. The
+[process contract](TEAM_INVOCATION_PROCESS.md) lists the existing SDK codecs used
+for those routes. Other platforms, OAuth/cloud/subscription credentials, and
+real-model behavior need their own implementation and acceptance.
 
 The connector, host, worker-interaction, and native process-boundary suites use
 synthetic loopback HTTP/SSE and owned fixture processes. They cover permit,

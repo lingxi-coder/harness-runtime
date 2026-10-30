@@ -4,7 +4,7 @@ use harness_runtime::desktop::team_invocation::{
     TeamInvocationIdentity, TeamInvocationLimits, TeamInvocationProfile,
 };
 use harness_runtime::desktop::team_process::{
-    TeamHumanQuestion, TeamOwnerPermission, TeamProcessBroker, TeamProcessDeadline,
+    TeamHumanQuestion, TeamModelRoute, TeamOwnerPermission, TeamProcessBroker, TeamProcessDeadline,
     TeamProcessError, TeamProcessModel, TeamProcessOutcome, TeamProcessRequest, TeamProcessStart,
 };
 use serde_json::{json, Value};
@@ -60,12 +60,14 @@ fn request(endpoint: String, id: uuid::Uuid, duration_ms: u64) -> TeamProcessReq
 }
 #[derive(Clone)]
 struct Captured {
+    headers: String,
     body: Value,
 }
 enum Reply {
     Text(String),
     Question,
     Bash(String),
+    Responses(Value),
 }
 struct Server {
     endpoint: String,
@@ -84,6 +86,9 @@ impl Server {
                 let request = read_http(&mut stream).await;
                 captured.lock().unwrap().push(request);
                 let (status, kind, body) = match reply {
+                    Reply::Responses(output) => {
+                        ("200 OK", "text/event-stream", responses_sse(output, index))
+                    }
                     Reply::Text(text) => (
                         "200 OK",
                         "text/event-stream",
@@ -152,6 +157,7 @@ async fn read_http(stream: &mut TcpStream) -> Captured {
         bytes.extend_from_slice(&buf[..size]);
     }
     Captured {
+        headers,
         body: serde_json::from_slice(&bytes[end..end + len]).unwrap(),
     }
 }
@@ -491,12 +497,16 @@ async fn cancellation_and_future_drop_cancel_the_inline_broker() {
 }
 
 fn raw_bootstrap(root: &Path, id: uuid::Uuid, endpoint: &str) -> Value {
+    let model =
+        TeamProcessModel::anthropic_api_key(MODEL.into(), endpoint.into(), KEY.into()).unwrap();
+    let route = model.route();
     json!({
         "version":2,"storage_root":root,"owner_uid":"fixture-owner","bot_key":"fixture-bot",
         "team_id":"fixture-team","conversation_id":"fixture-conversation","origin_human_uid":"fixture-human",
         "membership_generation":1,"invocation_id":id,"instructions":PERSONA,"input":"fixture human",
         "max_turns":12,"max_input_bytes":32768,"output_tokens_per_request":4096,"physical_dispatches":24,
         "deadline_unix_ms":now_ms()+20_000,"model_id":MODEL,"endpoint":endpoint,"api_key":KEY,
+        "model_provider":route.model_provider,"model_protocol":route.model_protocol,"model_profile":route.model_profile,
     })
 }
 fn raw_command(root: &Path, id: uuid::Uuid) -> tokio::process::Command {
@@ -861,4 +871,87 @@ async fn normal_bash_return_removes_residual_child_before_model_receives_tool_re
         assert!(results.iter().all(|result| result["is_error"] != true));
     }
     assert_admitted_processes_terminated(processes).await;
+}
+
+fn responses_sse(item: Value, index: usize) -> String {
+    let mut start = item.clone();
+    if item["type"] == "function_call" {
+        start["arguments"] = json!("");
+    } else {
+        start["content"] = json!([]);
+    }
+    let mut frames = vec![
+        json!({"type":"response.created","response":{"id":format!("resp_{index}"),"model":"gpt-6-luna","status":"in_progress","output":[]}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":start}),
+    ];
+    if item["type"] == "message" {
+        frames.push(json!({"type":"response.output_text.delta","item_id":item["id"],"output_index":0,"content_index":0,"delta":item["content"][0]["text"]}));
+    }
+    frames.push(json!({"type":"response.output_item.done","output_index":0,"item":item}));
+    frames.push(json!({"type":"response.completed","response":{"id":format!("resp_{index}"),"model":"gpt-6-luna","status":"completed","output":[item],"usage":{"input_tokens":1,"output_tokens":3,"total_tokens":4}}}));
+    frames
+        .into_iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn selected_openai_responses_uses_existing_codec_for_owner_bash_and_human_question() {
+    let (_dir, root) = root();
+    let id = uuid::Uuid::new_v4();
+    let workspace = workspace(&root, id);
+    let server = Server::new(vec![
+        Reply::Responses(json!({"type":"function_call","id":"fc_bash","call_id":"call_bash","name":"Bash","arguments":json!({"command":"printf responses-ok > responses.txt"}).to_string()})),
+        Reply::Responses(json!({"type":"function_call","id":"fc_human","call_id":"call_human","name":"AskUserQuestion","arguments":json!({"questions":[{"question":"Which résumé should I use?","header":"Document","options":[{"label":"Current","description":"Current document"},{"label":"Archived","description":"Saved document"}],"multiSelect":false}]}).to_string()})),
+        Reply::Responses(json!({"type":"message","id":"msg_final","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Responses result","annotations":[]}]})),
+    ]).await;
+    let endpoint = format!("{}/v1", server.endpoint);
+    let route = TeamModelRoute {
+        model_provider:"openai".into(), model_protocol:serde_json::from_value(json!("open_ai_responses")).unwrap(),
+        model_id:"gpt-6-luna".into(), model_endpoint:endpoint.clone(), credential_id:"openai".into(),
+        model_profile:serde_json::from_value(json!({"provider_id":"openai","profile_name":"openai","protocol":"open_ai_responses","base_url":endpoint,"auth":"api_key","credential":{"source":"host_managed","key":"team-selected-model"},"models":[{"display_model":"gpt-6-luna","request_model":"gpt-6-luna","billing_model":"gpt-6-luna","capability_support":{"streaming":"supported","tools":"supported"}}],"extra":{}})).unwrap(),
+    };
+    let mut request = request(server.endpoint.clone(), id, 20_000);
+    request.model = TeamProcessModel::selected_api_key(route, KEY.into()).unwrap();
+    let broker = Broker::new(vec![true]);
+    let result = broker_run(&root, request, broker.clone()).await.unwrap();
+    assert_eq!(result.outcome, TeamProcessOutcome::Completed, "{result:?}");
+    assert_eq!(result.text, "Responses result");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("responses.txt")).unwrap(),
+        "responses-ok"
+    );
+    assert_eq!(broker.permissions.lock().unwrap().len(), 1);
+    assert_eq!(broker.questions.lock().unwrap().len(), 1);
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in requests.iter() {
+        assert!(request.headers.starts_with("POST /v1/responses "));
+        assert!(request
+            .headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case(&format!("authorization: Bearer {KEY}"))));
+        assert!(!request.headers.to_ascii_lowercase().contains("x-api-key:"));
+        assert_eq!(request.body["model"], "gpt-6-luna");
+        assert!(request.body["max_output_tokens"]
+            .as_u64()
+            .is_some_and(|n| n > 0 && n <= 4096));
+        assert_eq!(request.body["store"], false);
+        assert!(request.body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["type"] == "function" && tool.get("function").is_none()));
+    }
+    assert!(requests[1].body.to_string().contains("call_bash"));
+    assert!(requests[2].body.to_string().contains("call_human"));
+    assert!(requests[2]
+        .body
+        .to_string()
+        .contains("Current — exact human response"));
 }

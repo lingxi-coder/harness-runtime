@@ -33,9 +33,20 @@ all eight keys and closes inherited descriptors above stdio using `/dev/fd`,
 including descriptors without CLOEXEC. Never call its entry point inside an
 existing host process. The selected model key travels only in an anonymous
 bootstrap pipe; stderr is discarded. HTTPS is required except literal loopback
-HTTP for gateways/fixtures. URL userinfo/query/fragment refuse. Only a qualified
-Anthropic model and selected static API key are admitted; other protocols and
-authentication routes require independent work/validation.
+HTTP for gateways/fixtures. URL userinfo/query/fragment refuse.
+
+`TeamModelRoute` freezes the native SDK registry's resolved model, protocol,
+endpoint, sanitized singleton provider profile and exact external credential ID.
+The existing codecs admit Anthropic Messages, OpenAI Chat/Responses, Gemini
+GenerateContent/Interactions, Foundry Claude and Azure OpenAI with static API-key
+or bearer auth; Azure additionally requires its configured API version. OAuth,
+managed credentials, delegate/fallback routes and embedded static secrets refuse.
+Arbitrary extra headers/body and sibling connections are removed. Selected model
+capabilities, inference settings and deployment facts remain intact. Bootstrap
+requires the complete route; missing fields never select an Anthropic default.
+The worker rewrites only the credential reference to its single private in-memory
+slot. Its key never appears in the frozen profile or persistent snapshot.
+Codec admission and synthetic fixtures do not establish live provider acceptance.
 
 ## Private framed protocol and brokers
 

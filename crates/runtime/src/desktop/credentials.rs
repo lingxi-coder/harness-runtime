@@ -385,6 +385,18 @@ pub(super) async fn build_shared_credential_stack_for_config(
             clock.clone(),
             http.clone(),
         ));
+        if let Some(model) = cfg
+            .team_invocation
+            .as_ref()
+            .and_then(|profile| profile.selected_model())
+        {
+            credentials
+                .set_provider_key_ephemeral(
+                    super::team_process::model::PRIVATE_CREDENTIAL,
+                    model.api_key(),
+                )
+                .await;
+        }
         return Ok(SharedCredentialStack {
             catalog_registry: FusionCatalogRegistry::default(),
             http,
@@ -1031,7 +1043,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         Some(source) => Some((*source.load().await).clone()),
         None => None,
     };
-    let assembled = provider_config::assemble_for_region(
+    let mut assembled = provider_config::assemble_for_region(
         provider_config::AssembleInputs {
             official_catalog,
             anthropic_api_base: cfg.api_base.clone(),
@@ -1046,6 +1058,26 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         },
         provider_region,
     );
+    if let Some(model) = cfg
+        .team_invocation
+        .as_ref()
+        .and_then(|profile| profile.selected_model())
+    {
+        let profile = model
+            .route()
+            .host_profile()
+            .map_err(|_| super::team_invocation::TeamInvocationError::Model)?;
+        assembled.credential_sources = vec![provider_config::CredentialSource {
+            provider_id: profile.provider_id.clone(),
+            profile_name: profile.profile_name.clone(),
+            credential_id: super::team_process::model::PRIVATE_CREDENTIAL.into(),
+            env_var: None,
+            kind: provider_config::CredentialKind::ApiKey,
+        }];
+        assembled.client_config.providers = vec![profile];
+        assembled.chains = Default::default();
+        assembled.warnings.clear();
+    }
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly");
     }
