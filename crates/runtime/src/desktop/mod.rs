@@ -29,6 +29,7 @@ pub mod app_invocation;
 pub mod auto_mode_propose;
 mod sdk;
 pub mod team_invocation;
+pub mod team_process;
 mod team_sandbox;
 pub use sdk::build_harness;
 

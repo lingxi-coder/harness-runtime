@@ -371,6 +371,16 @@ name = "team_invocation_profile"
 path = "tests/desktop/team_invocation_profile.rs"
 required-features = ["desktop"]
 
+[[bin]]
+name = "harness-team-worker"
+path = "src/bin/team_worker.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "team_invocation_process"
+path = "tests/desktop/team_invocation_process.rs"
+required-features = ["desktop"]
+
 [[test]]
 name = "settings_watch_spawn"
 path = "tests/desktop/settings_watch_spawn.rs"
