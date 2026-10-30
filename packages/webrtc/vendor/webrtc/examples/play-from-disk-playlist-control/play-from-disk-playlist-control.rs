@@ -11,7 +11,7 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_OPUS, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCSignalingState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -29,6 +29,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
+use std::time::Instant;
 use std::{fs::OpenOptions, io::Write};
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::media_stream::Track;
@@ -302,6 +303,7 @@ fn parse_playlist(path: &str) -> Result<Vec<OggTrack>> {
                     }
                     continue;
                 }
+                _ => {}
             }
         }
 
@@ -461,8 +463,9 @@ async fn handle_whep_connection(
     tracks: Arc<Vec<OggTrack>>,
     runtime: Arc<dyn Runtime>,
 ) -> Result<String> {
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Server)
+        .build();
 
     let mut media_engine = MediaEngine::default();
     let opus_codec = RTCRtpCodecParameters {
@@ -509,20 +512,23 @@ async fn handle_whep_connection(
     );
 
     let ssrc = rand::random::<u32>();
-    let audio_track = Arc::new(TrackLocalStaticSample::new(MediaStreamTrack::new(
-        "webrtc-rs-stream-id".to_string(),
-        LABEL_AUDIO.to_string(),
-        LABEL_TRACK.to_string(),
-        RtpCodecKind::Audio,
-        vec![RTCRtpEncodingParameters {
-            rtp_coding_parameters: RTCRtpCodingParameters {
-                ssrc: Some(ssrc),
+    let audio_track = Arc::new(TrackLocalStaticSample::new(
+        Instant::now(),
+        MediaStreamTrack::new(
+            "webrtc-rs-stream-id".to_string(),
+            LABEL_AUDIO.to_string(),
+            LABEL_TRACK.to_string(),
+            RtpCodecKind::Audio,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc),
+                    ..Default::default()
+                },
+                codec: opus_codec.rtp_codec.clone(),
                 ..Default::default()
-            },
-            codec: opus_codec.rtp_codec.clone(),
-            ..Default::default()
-        }],
-    ))?);
+            }],
+        ),
+    )?);
     let audio_sender = peer_connection
         .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal>)
         .await?;
@@ -678,7 +684,7 @@ async fn stream_playlist_audio(
             .write_sample(&Sample {
                 data: page.payload.clone().into(),
                 duration: page.duration,
-                ..Default::default()
+                ..Sample::new(Instant::now())
             })
             .await?;
 

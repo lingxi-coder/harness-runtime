@@ -30,7 +30,7 @@ async-trait.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # Platform versions are validated with the workspace Rust 1.94 toolchain.
 enigo = "=0.3.0"
-xcap = "=0.5.2"
+xcap = { path = "../../../third_party/xcap", version = "=0.5.2" }
 # xcap depends on `image = "0.25"` unconstrained; left alone the resolver
 # floats to the newest 0.25.x, which pulls in `moxcms` (edition2024). Pinning
 # our own requirement to the last edition2021-compatible patch forces the

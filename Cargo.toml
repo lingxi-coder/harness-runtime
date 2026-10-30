@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys", "third_party/syntect", "third_party/icu_collator"]
+exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys", "third_party/syntect", "third_party/icu_collator", "third_party/xcap", "packages/webrtc/vendor/webrtc", "packages/webrtc/vendor/nix"]
 resolver = "2"
 members = [
     "crates/json-projection",
@@ -168,7 +168,7 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "39f64b37e686a2eef4fc4bef2283836415d945a0", default-features = false }
+lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "8392fbb83571252ef0356b68477d7d82b12c6fce", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
 mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b" }
 mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b" }

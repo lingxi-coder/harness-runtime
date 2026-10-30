@@ -351,6 +351,13 @@ pub const VISUALIZATIONS_DIR: &str = "visualizations";
 /// (`<config-home>/local-apps/`).
 pub const LOCAL_APPS_DIR: &str = "local-apps";
 
+/// Marker file for a prepared local app.
+pub const LOCAL_APP_PREPARATION_MARKER: &str = ".lingxi-prepared.json";
+/// Data directory used while preparing a local app.
+pub const LOCAL_APP_PREPARATION_DATA_DIRECTORY: &str = ".lingxi-prepare-data";
+/// Prefix for temporary files holding remote attachments.
+pub const REMOTE_ATTACHMENT_PREFIX: &str = ".lingxi-remote-attachment-";
+
 /// Current product namespace inventory, audited by the brand gate. Native
 /// protocol identifiers and the unbranded global-config filename are separate.
 pub const NAMESPACE_VALUES: &[&str] = &[
@@ -414,6 +421,9 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     VISUALIZATION_REFERENCE_PREFIX,
     VISUALIZATIONS_DIR,
     LOCAL_APPS_DIR,
+    LOCAL_APP_PREPARATION_MARKER,
+    LOCAL_APP_PREPARATION_DATA_DIRECTORY,
+    REMOTE_ATTACHMENT_PREFIX,
 ];
 
 /// Resolve the user config-home: `$LINGXI_CONFIG_DIR` when the env value is
@@ -543,6 +553,54 @@ mod tests {
         ] {
             assert!(!v.to_lowercase().contains("claude"), "claude leak: {v}");
         }
+    }
+
+    #[test]
+    fn namespace_inventory_values_are_unique() {
+        let mut seen = BTreeSet::new();
+        for value in NAMESPACE_VALUES {
+            assert!(!value.is_empty(), "namespace value must not be empty");
+            assert!(seen.insert(value), "duplicate namespace value: {value}");
+        }
+    }
+
+    #[test]
+    fn local_app_and_remote_attachment_names_are_stable_path_components() {
+        let names = [
+            (LOCAL_APP_PREPARATION_MARKER, ".lingxi-prepared.json"),
+            (LOCAL_APP_PREPARATION_DATA_DIRECTORY, ".lingxi-prepare-data"),
+            (REMOTE_ATTACHMENT_PREFIX, ".lingxi-remote-attachment-"),
+        ];
+        for (value, expected) in names {
+            assert_eq!(value, expected);
+            assert_eq!(
+                NAMESPACE_VALUES
+                    .iter()
+                    .filter(|item| **item == value)
+                    .count(),
+                1,
+                "{value} must occur once in the namespace inventory"
+            );
+            assert!(value.starts_with(DOT_DIR));
+            assert!(
+                value.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'-' | b'_')),
+                "{value} must be a portable single path component"
+            );
+            assert!(matches!(
+                Path::new(value).components().collect::<Vec<_>>().as_slice(),
+                [std::path::Component::Normal(_)]
+            ));
+        }
+        let attachment_name = format!("{REMOTE_ATTACHMENT_PREFIX}sample-123");
+        assert!(matches!(
+            Path::new(&attachment_name)
+                .components()
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [std::path::Component::Normal(_)]
+        ));
     }
 
     // ---------------------------------------------------------------------

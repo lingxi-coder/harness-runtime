@@ -160,6 +160,28 @@ impl Notify {
     pub async fn notified(&self) {
         self.0.listen().await;
     }
+
+    /// Register interest **now**, returning a future that observes any notification published
+    /// from this point on.
+    ///
+    /// The difference from [`notified`](Self::notified) is the one that matters for
+    /// lost wakeups. This primitive stores no permit, so a notification published between a
+    /// caller checking its condition and beginning to wait is dropped: the caller then sleeps
+    /// on a condition that has already changed. Registering first and re-checking afterwards
+    /// closes that window — anything published before the check is caught by the re-check,
+    /// anything after it by this listener.
+    ///
+    /// Allocates, so register only when the condition is plausibly true.
+    ///
+    /// The `use<>` is load-bearing, not decoration. `event_listener`'s listener owns an `Arc`
+    /// and borrows nothing, but under edition 2024 an `impl Trait` return captures every
+    /// in-scope lifetime by default — including the `&self` here — so without it the future
+    /// would borrow the `Notify` and could not be held across a `&mut` call on its owner,
+    /// which is exactly what the peer-connection driver does with it. (No MSRV concern:
+    /// precise capturing landed in 1.82, below the 1.85 this crate's edition already needs.)
+    pub fn listen(&self) -> impl std::future::Future<Output = ()> + Send + use<> {
+        self.0.listen()
+    }
 }
 
 // ── Bounded MPMC channel ──────────────────────────────────────────────────────
@@ -169,6 +191,11 @@ impl Notify {
 pub struct SendError<T>(pub T);
 
 /// Error returned by [`Sender::try_send`].
+///
+/// Deliberately left exhaustive (see `docs/semver.md`): "at capacity" and "closed" are the
+/// complete set of reasons a non-blocking send can fail, and callers routinely branch on
+/// them — retry on [`Full`](Self::Full), give up on [`Disconnected`](Self::Disconnected).
+/// `std`, `tokio`, and `async-channel` all leave their equivalents exhaustive.
 #[derive(Debug)]
 pub enum TrySendError<T> {
     /// The channel is at capacity.
@@ -178,6 +205,8 @@ pub enum TrySendError<T> {
 }
 
 /// Error returned by [`Receiver::try_recv`].
+///
+/// Deliberately left exhaustive — see [`TrySendError`].
 #[derive(Debug)]
 pub enum TryRecvError {
     /// No message is currently available.
@@ -274,6 +303,8 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 pub struct BroadcastSendError<T>(pub T);
 
 /// Error returned when a broadcast receive fails.
+///
+/// Deliberately left exhaustive — see [`TrySendError`].
 #[derive(Debug)]
 pub enum BroadcastRecvError {
     /// The channel is closed and no senders remain.

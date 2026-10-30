@@ -13,7 +13,7 @@ fn packet(size: usize, at: Instant) -> TaggedPacket {
     TaggedPacket {
         now: at,
         transport: Default::default(),
-        message: Packet::Rtp(rtc::rtp::Packet {
+        message: rtc::interceptor::AttributedPacket::new(Packet::Rtp(rtc::rtp::Packet {
             header: Header {
                 version: 2,
                 payload_type: 111,
@@ -21,7 +21,7 @@ fn packet(size: usize, at: Instant) -> TaggedPacket {
                 ..Default::default()
             },
             payload: vec![5; size - 12].into(),
-        }),
+        })),
     }
 }
 
@@ -30,7 +30,7 @@ fn arrival_and_rtp_bytes_survive_the_adapter_without_an_upstream_copy() {
     let (mut incoming, mut ingress) = pair();
     let at = Instant::now() - Duration::from_millis(/*millis*/ 20);
     let input = packet(/*size*/ 32, at);
-    let Packet::Rtp(expected) = &input.message else {
+    let Packet::Rtp(expected) = &input.message.packet else {
         panic!()
     };
     let expected = expected.marshal().unwrap();
@@ -109,7 +109,7 @@ fn invalid_stream_and_oversize_packets_fail_without_returning_media() {
         let (mut incoming, mut ingress) = pair();
         let mut input = packet(size, Instant::now());
         if size == 32
-            && let Packet::Rtp(packet) = &mut input.message
+            && let Packet::Rtp(packet) = &mut input.message.packet
         {
             packet.header.payload_type = 96;
         }

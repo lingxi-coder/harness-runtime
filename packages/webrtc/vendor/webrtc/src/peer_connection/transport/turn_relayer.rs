@@ -2,6 +2,7 @@
 
 use crate::runtime::Runtime;
 use log::{debug, error, trace, warn};
+use rtc::crypto::RTCCryptoProvider;
 use rtc::ice::url::SchemeType;
 use rtc::peer_connection::configuration::{RTCIceServer, RTCIceTransportPolicy};
 use rtc::peer_connection::state::RTCIceGatheringState;
@@ -11,7 +12,10 @@ use rtc::peer_connection::transport::{
 use rtc::sansio::Protocol;
 use rtc::shared::error::{Error, Result};
 use rtc::shared::{FourTuple, TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::message::{METHOD_BINDING, Message as StunMessage, is_stun_message};
+use rtc::stun::message::{
+    CLASS_ERROR_RESPONSE, CLASS_INDICATION, CLASS_SUCCESS_RESPONSE, Message as StunMessage,
+    TransactionId, is_stun_message,
+};
 use rtc::turn::client::{
     Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent,
 };
@@ -19,7 +23,7 @@ use rtc::turn::proto::chandata::ChannelData;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const MAX_PENDING_PACKETS_PER_PEER: usize = 64;
 
@@ -56,11 +60,19 @@ pub(crate) struct RTCTurnRelayer {
     state: RTCIceGatheringState,
     /// Host runtime, used to resolve TURN server hostnames.
     runtime: Arc<dyn Runtime>,
+    /// Taken from the peer connection rather than resolved here: the whole connection shares one
+    /// provider, and no async-layer code selects crypto on its own.
+    crypto_provider: Arc<dyn RTCCryptoProvider>,
+    allocation_refresh_interval_cap: Option<Duration>,
     clients: HashMap<FourTuple, ManagedTurnClient>,
     relay_addrs: HashMap<SocketAddr, FourTuple>,
     pending_permissions: HashMap<rtc::stun::message::TransactionId, PendingPermission>,
     pending_permission_pairs: HashMap<(SocketAddr, SocketAddr), rtc::stun::message::TransactionId>,
     pending_packets: HashMap<(SocketAddr, SocketAddr), VecDeque<TaggedBytesMut>>,
+    /// Refresh(LIFETIME=0) requests queued while retiring a TURN client. They must survive a
+    /// configuration reset (which clears `wouts`) and go out on the socket that owns the
+    /// allocation, so they are kept apart and sent first.
+    retirement_wouts: VecDeque<TaggedBytesMut>,
     wouts: VecDeque<TaggedBytesMut>,
     routs: VecDeque<TaggedBytesMut>,
     events: VecDeque<RTCTurnRelayEventOut>,
@@ -71,7 +83,9 @@ impl RTCTurnRelayer {
         local_addrs: Vec<SocketAddr>,
         ice_servers: Vec<RTCIceServer>,
         ice_gather_policy: RTCIceTransportPolicy,
+        allocation_refresh_interval_cap: Option<Duration>,
         runtime: Arc<dyn Runtime>,
+        crypto_provider: Arc<dyn RTCCryptoProvider>,
     ) -> Self {
         Self {
             local_addrs,
@@ -79,11 +93,14 @@ impl RTCTurnRelayer {
             ice_gather_policy,
             state: RTCIceGatheringState::New,
             runtime,
+            crypto_provider,
+            allocation_refresh_interval_cap,
             clients: HashMap::new(),
             relay_addrs: HashMap::new(),
             pending_permissions: HashMap::new(),
             pending_permission_pairs: HashMap::new(),
             pending_packets: HashMap::new(),
+            retirement_wouts: VecDeque::new(),
             wouts: VecDeque::new(),
             routs: VecDeque::new(),
             events: VecDeque::new(),
@@ -104,7 +121,7 @@ impl RTCTurnRelayer {
         // construction (the sockets are shared with host candidates), so a teardown here
         // means the following `gather()` re-`Allocate`s on exactly the same 5-tuple. The
         // server still holds the previous allocation for it and answers **437 (Allocation
-        // Mismatch)** per RFC 5766 §6.2, and the restart gathers no relay candidate at all
+        // Mismatch)** per RFC 8656 §7.2, and the restart gathers no relay candidate at all
         // (issue #835).
         //
         // An allocation is a 5-tuple resource, independent of the credential that created
@@ -119,7 +136,7 @@ impl RTCTurnRelayer {
 
         let keys: Vec<FourTuple> = self.clients.keys().copied().collect();
         for key in keys {
-            self.remove_client(key);
+            self.remove_client(key, true);
         }
         self.relay_addrs.clear();
         self.pending_permissions.clear();
@@ -201,11 +218,11 @@ impl RTCTurnRelayer {
                 continue;
             };
 
-            managed
+            let _ = managed
                 .client
                 .update_credentials(username.clone(), password.clone());
 
-            if let Err(err) = managed.client.refresh_allocations() {
+            if let Err(err) = managed.client.refresh_allocations(self.runtime.now()) {
                 warn!(
                     "TURN credential rotation: refresh failed for {} via {}: {}",
                     managed.local_addr, managed.url, err
@@ -291,19 +308,23 @@ impl RTCTurnRelayer {
                         continue;
                     }
 
-                    let mut client = TurnClient::new(TurnClientConfig {
-                        stun_serv_addr: peer_addr.to_string(),
-                        turn_serv_addr: peer_addr.to_string(),
-                        local_addr: *local_addr,
-                        transport_protocol: TransportProtocol::UDP,
-                        username: url.username.clone(),
-                        password: url.password.clone(),
-                        realm: String::new(),
-                        software: String::new(),
-                        rto_in_ms: 0,
-                    })?;
+                    let mut client = TurnClient::new(
+                        TurnClientConfig {
+                            stun_serv_addr: peer_addr.to_string(),
+                            turn_serv_addr: peer_addr.to_string(),
+                            local_addr: *local_addr,
+                            transport_protocol: TransportProtocol::UDP,
+                            username: url.username.clone(),
+                            password: url.password.clone(),
+                            realm: String::new(),
+                            software: String::new(),
+                            rto_in_ms: 0,
+                            allocation_refresh_interval_cap: self.allocation_refresh_interval_cap,
+                        },
+                        Arc::clone(&self.crypto_provider),
+                    )?;
 
-                    let allocate_tid = client.allocate()?;
+                    let allocate_tid = client.allocate(self.runtime.now())?;
                     debug!(
                         "TURN allocation started from {} to {} via {}",
                         local_addr, peer_addr, url
@@ -384,24 +405,21 @@ impl RTCTurnRelayer {
         }
     }
 
+    /// Which TURN client, if any, this inbound packet belongs to.
+    ///
+    /// These sockets are shared with [`RTCStunGatherer`](super::stun_gatherer::RTCStunGatherer),
+    /// and when the configuration points `stun:` and `turn:` URLs at one `host:port` — the standard
+    /// single-listener coturn deployment — the four-tuple is *identical* for both users. So the
+    /// message is inspected before the four-tuple is trusted, because in that deployment an address
+    /// match cannot say whose the packet is: a response is matched by transaction id, and only the
+    /// framings that carry none fall back to addresses. See [webrtc#890].
+    ///
+    /// [webrtc#890]: https://github.com/webrtc-rs/webrtc/issues/890
     fn matching_client_key(&self, msg: &TaggedBytesMut) -> Option<FourTuple> {
-        let exact = FourTuple::from(&msg.transport);
-        if self.clients.contains_key(&exact) {
-            return Some(exact);
-        }
-
-        let same_local: Vec<FourTuple> = self
-            .clients
-            .keys()
-            .copied()
-            .filter(|four_tuple| four_tuple.local_addr == msg.transport.local_addr)
-            .collect();
-        if same_local.is_empty() {
-            return None;
-        }
-
+        // ChannelData is not STUN-framed and carries no transaction id, so addresses are all there
+        // is — and they suffice, because the gatherer neither sends nor receives it.
         if ChannelData::is_channel_data(&msg.message) {
-            return Self::match_same_local_client(&same_local, msg.transport.peer_addr);
+            return self.match_by_local_addr(msg);
         }
 
         if !is_stun_message(&msg.message) {
@@ -414,9 +432,54 @@ impl RTCTurnRelayer {
             return None;
         }
 
-        if stun_message.typ.method == METHOD_BINDING {
-            return None;
+        match stun_message.typ.class {
+            // Data and Send indications are not transaction-matched, so they route by address for
+            // the same reason ChannelData does.
+            CLASS_INDICATION => self.match_by_local_addr(msg),
+
+            // RFC 5389 section 7.3.3: a response belongs to whoever sent the request, identified by
+            // transaction id and by nothing else. Every TURN request registers one, so a response
+            // no client is waiting on is not ours — most often a Binding response for the gatherer,
+            // arriving from the address we share with it.
+            CLASS_SUCCESS_RESPONSE | CLASS_ERROR_RESPONSE => {
+                self.match_by_transaction(&stun_message.transaction_id)
+            }
+
+            // An inbound request on these sockets is an ICE connectivity check, which belongs to
+            // neither this relayer nor the gatherer.
+            _ => None,
         }
+    }
+
+    /// The client waiting on `transaction_id`.
+    ///
+    /// Searches every client rather than the one whose four-tuple matches, because a multi-homed
+    /// server may answer from an address other than the one we sent to — the case
+    /// [`match_same_local_client`](Self::match_same_local_client) exists for. A transaction id
+    /// identifies the client outright, so that heuristic is not needed here.
+    fn match_by_transaction(&self, transaction_id: &TransactionId) -> Option<FourTuple> {
+        self.clients
+            .iter()
+            .find(|(_, managed)| managed.client.has_transaction(transaction_id))
+            .map(|(four_tuple, _)| *four_tuple)
+    }
+
+    /// The client on this packet's local socket, disambiguated by peer address.
+    ///
+    /// For the framings that carry no transaction id. Prefers an exact four-tuple, then falls back
+    /// to clients sharing the local socket.
+    fn match_by_local_addr(&self, msg: &TaggedBytesMut) -> Option<FourTuple> {
+        let exact = FourTuple::from(&msg.transport);
+        if self.clients.contains_key(&exact) {
+            return Some(exact);
+        }
+
+        let same_local: Vec<FourTuple> = self
+            .clients
+            .keys()
+            .copied()
+            .filter(|four_tuple| four_tuple.local_addr == msg.transport.local_addr)
+            .collect();
 
         Self::match_same_local_client(&same_local, msg.transport.peer_addr)
     }
@@ -449,20 +512,25 @@ impl RTCTurnRelayer {
         }
     }
 
-    fn remove_client(&mut self, four_tuple: FourTuple) {
+    /// Drops a TURN client. With `release_allocation`, a live allocation is released first
+    /// (RFC 8656 §7: a Refresh with LIFETIME 0) instead of being left on the server until its
+    /// lifetime expires.
+    fn remove_client(&mut self, four_tuple: FourTuple, release_allocation: bool) {
         if let Some(mut managed_client) = self.clients.remove(&four_tuple) {
-            if let Some(relay_addr) = managed_client.relay_addr.take() {
-                // RFC 8656 section 8: explicitly release the authenticated
-                // allocation before dropping the sans-I/O client and socket.
-                // Discard stale queued media/transactions; only the zero-lifetime
-                // Refresh generated here belongs in the shutdown flush.
-                while managed_client.client.poll_write().is_some() {}
+            // `Client::close` only clears transaction state; the release is `Relay::close`,
+            // which queues an authenticated Refresh(LIFETIME=0). Clear the old transactions
+            // first, then create and drain the release so the driver sends it on the socket
+            // that owns the allocation.
+            let _ = managed_client.client.close();
+            if release_allocation && let Some(relay_addr) = managed_client.relay_addr {
                 if let Ok(mut relay) = managed_client.client.relay(relay_addr) {
-                    let _ = relay.close();
+                    let _ = relay.close(self.runtime.now());
                 }
-                while let Some(message) = managed_client.client.poll_write() {
-                    self.wouts.push_back(message);
+                while let Some(msg) = managed_client.client.poll_write() {
+                    self.retirement_wouts.push_back(msg);
                 }
+            }
+            if let Some(relay_addr) = managed_client.relay_addr.take() {
                 self.relay_addrs.remove(&relay_addr);
                 self.pending_packets
                     .retain(|(addr, _), _| *addr != relay_addr);
@@ -471,7 +539,6 @@ impl RTCTurnRelayer {
                 self.pending_permission_pairs
                     .retain(|(addr, _), _| *addr != relay_addr);
             }
-            let _ = managed_client.client.close();
         }
     }
 
@@ -506,7 +573,7 @@ impl RTCTurnRelayer {
             match managed_client
                 .client
                 .relay(relay_addr)
-                .and_then(|mut relay| relay.send_to(&packet.message, peer_addr))
+                .and_then(|mut relay| relay.send_to(packet.now, &packet.message, peer_addr))
             {
                 Ok(()) => {}
                 Err(Error::ErrNoPermission) => {
@@ -567,7 +634,7 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
         match managed_client
             .client
             .relay(relay_addr)
-            .and_then(|mut relay| relay.send_to(&msg.message, peer_addr))
+            .and_then(|mut relay| relay.send_to(msg.now, &msg.message, peer_addr))
         {
             Ok(()) => Ok(()),
             Err(Error::ErrNoPermission) => {
@@ -577,7 +644,7 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
                     && let Some(tid) = managed_client
                         .client
                         .relay(relay_addr)?
-                        .create_permission(peer_addr)?
+                        .create_permission(msg.now, peer_addr)?
                 {
                     self.pending_permissions.insert(
                         tid,
@@ -598,6 +665,9 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
     }
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
+        if let Some(msg) = self.retirement_wouts.pop_front() {
+            return Some(msg);
+        }
         for managed_client in self.clients.values_mut() {
             while let Some(msg) = managed_client.client.poll_write() {
                 self.wouts.push_back(msg);
@@ -609,7 +679,9 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
     fn handle_event(&mut self, evt: RTCTurnRelayEventIn) -> Result<()> {
         match evt {
             RTCTurnRelayEventIn::SocketWriteFailure(four_tuple) => {
-                self.remove_client(four_tuple);
+                // The socket is already unusable, so a Refresh(0) could not be delivered; the
+                // server reclaims this allocation when its lifetime expires.
+                self.remove_client(four_tuple, false);
                 self.maybe_emit_gathering_complete();
             }
         }
@@ -628,28 +700,28 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
             if let Some(managed_client) = self.clients.get_mut(&four_tuple) {
                 while let Some(event) = managed_client.client.poll_event() {
                     match event {
-                        TurnEvent::AllocateResponse(tid, relay_addr) => {
-                            if tid == managed_client.allocate_tid {
-                                managed_client.relay_addr = Some(relay_addr);
-                                managed_client.gather_finished = true;
-                                self.relay_addrs.insert(relay_addr, four_tuple);
-                                local_candidate = Some(Self::build_local_candidate(
-                                    relay_addr,
-                                    managed_client.local_addr,
-                                    &managed_client.url,
-                                ));
-                                gathered_complete = true;
-                            }
+                        TurnEvent::AllocateResponse(tid, relay_addr)
+                            if tid == managed_client.allocate_tid =>
+                        {
+                            managed_client.relay_addr = Some(relay_addr);
+                            managed_client.gather_finished = true;
+                            self.relay_addrs.insert(relay_addr, four_tuple);
+                            local_candidate = Some(Self::build_local_candidate(
+                                relay_addr,
+                                managed_client.local_addr,
+                                &managed_client.url,
+                            ));
+                            gathered_complete = true;
                         }
-                        TurnEvent::AllocateError(tid, err) => {
-                            if tid == managed_client.allocate_tid {
-                                error!(
-                                    "TURN allocation failed from {} to {}: {}",
-                                    four_tuple.local_addr, four_tuple.peer_addr, err
-                                );
-                                managed_client.gather_finished = true;
-                                gathered_complete = true;
-                            }
+                        TurnEvent::AllocateError(tid, err)
+                            if tid == managed_client.allocate_tid =>
+                        {
+                            error!(
+                                "TURN allocation failed from {} to {}: {}",
+                                four_tuple.local_addr, four_tuple.peer_addr, err
+                            );
+                            managed_client.gather_finished = true;
+                            gathered_complete = true;
                         }
                         TurnEvent::CreatePermissionResponse(tid, peer_addr) => {
                             if let Some(pending) = self.pending_permissions.remove(&tid) {
@@ -669,7 +741,7 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
                         TurnEvent::DataIndicationOrChannelData(_, peer_addr, data) => {
                             if let Some(relay_addr) = managed_client.relay_addr {
                                 read_msgs.push(TaggedBytesMut {
-                                    now: Instant::now(),
+                                    now: self.runtime.now(),
                                     transport: TransportContext {
                                         local_addr: relay_addr,
                                         peer_addr,
@@ -692,6 +764,9 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
                             }
                         }
                         TurnEvent::BindingResponse(_, _) | TurnEvent::BindingError(_, _) => {}
+                        _ => {
+                            warn!("Ignoring unknown TurnEvent variant");
+                        }
                     }
                 }
             }
@@ -745,22 +820,58 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
     fn close(&mut self) -> Result<()> {
         let keys: Vec<FourTuple> = self.clients.keys().copied().collect();
         for key in keys {
-            self.remove_client(key);
+            self.remove_client(key, true);
         }
         Ok(())
     }
 }
 
-#[cfg(test)]
+// A built-in provider is required: these construct real peer connections, and construction
+// resolves a provider. The no-built-in configuration is exercised by the provider tests in
+// `tests/`, which supply their own.
+#[cfg(all(test, any(feature = "crypto-ring", feature = "crypto-aws-lc-rs")))]
 mod tests {
     use super::*;
     use bytes::BytesMut;
     use rtc::peer_connection::configuration::RTCIceServer;
     use rtc::stun::attributes::{ATTR_NONCE, ATTR_REALM};
     use rtc::stun::error_code::CODE_UNAUTHORIZED;
-    use rtc::stun::message::{CLASS_ERROR_RESPONSE, MessageType, TransactionId};
+    use rtc::stun::message::{
+        CLASS_ERROR_RESPONSE, CLASS_SUCCESS_RESPONSE, MessageType, TransactionId,
+    };
     use rtc::stun::textattrs::{Nonce, Realm};
+    use rtc::stun::xoraddr::XorMappedAddress;
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn build_binding_success(transaction_id: TransactionId) -> StunMessage {
+        let mut msg = StunMessage::new();
+        msg.build(&[
+            Box::new(transaction_id),
+            Box::new(MessageType::new(
+                rtc::stun::message::METHOD_BINDING,
+                CLASS_SUCCESS_RESPONSE,
+            )),
+            Box::new(XorMappedAddress {
+                ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)),
+                port: 51234,
+            }),
+        ])
+        .expect("failed to build Binding success response");
+        msg
+    }
+
+    fn tagged(local_addr: SocketAddr, peer_addr: SocketAddr, raw: &[u8]) -> TaggedBytesMut {
+        TaggedBytesMut {
+            now: Instant::now(), // Exemption: usage in #test code
+            transport: TransportContext {
+                local_addr,
+                peer_addr,
+                ecn: None,
+                transport_protocol: TransportProtocol::UDP,
+            },
+            message: BytesMut::from(raw),
+        }
+    }
 
     fn build_turn_allocate_unauthorized(transaction_id: TransactionId) -> StunMessage {
         let mut msg = StunMessage::new();
@@ -791,7 +902,9 @@ mod tests {
                     credential: "pass".to_owned(),
                 }],
                 RTCIceTransportPolicy::Relay,
+                None,
                 crate::runtime::default_runtime().expect("test requires a runtime feature"),
+                rtc::crypto::default_provider().expect("a built-in crypto provider for tests"),
             );
 
             relayer.gather().await.expect("TURN gather should start");
@@ -806,7 +919,7 @@ mod tests {
 
             let response = build_turn_allocate_unauthorized(initial_request_msg.transaction_id);
             let msg = TaggedBytesMut {
-                now: Instant::now(),
+                now: Instant::now(), // Exemption: usage in #test code
                 transport: TransportContext {
                     local_addr,
                     peer_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 3478),
@@ -832,6 +945,160 @@ mod tests {
             assert!(
                 retry_request.message.len() > initial_request.message.len(),
                 "authenticated retry should be larger than the unauthenticated Allocate request"
+            );
+        });
+    }
+
+    /// webrtc#890: with `stun:` and `turn:` on one address, the Binding response the gatherer is
+    /// waiting for arrives on the TURN client's exact four-tuple. Claimed here, it is discarded for
+    /// having no matching transaction and no server-reflexive candidate is ever gathered.
+    #[test]
+    fn binding_response_from_turn_server_addr_is_not_turn_traffic() {
+        futures::executor::block_on(async {
+            let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+            let shared_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3478);
+            let mut relayer = RTCTurnRelayer::new(
+                vec![local_addr],
+                vec![RTCIceServer {
+                    urls: vec![format!("turn:{}?transport=udp", shared_addr)],
+                    username: "user".to_owned(),
+                    credential: "pass".to_owned(),
+                }],
+                RTCIceTransportPolicy::Relay,
+                None,
+                crate::runtime::default_runtime().expect("test requires a runtime feature"),
+                rtc::crypto::default_provider().expect("a built-in crypto provider for tests"),
+            );
+
+            relayer.gather().await.expect("TURN gather should start");
+            relayer.poll_write().expect("initial Allocate request");
+
+            // The gatherer's transaction, not the relayer's, on the shared four-tuple.
+            let response = build_binding_success(TransactionId::new());
+            let msg = tagged(local_addr, shared_addr, &response.raw);
+
+            assert!(
+                !relayer.is_turn_message(&msg),
+                "a Binding response is the STUN gatherer's even on the TURN client's four-tuple"
+            );
+        });
+    }
+
+    /// The guard must not cost the relayer its own traffic on the same four-tuple.
+    #[test]
+    fn allocate_response_on_exact_four_tuple_still_routes_to_turn() {
+        futures::executor::block_on(async {
+            let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+            let shared_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3478);
+            let mut relayer = RTCTurnRelayer::new(
+                vec![local_addr],
+                vec![RTCIceServer {
+                    urls: vec![format!("turn:{}?transport=udp", shared_addr)],
+                    username: "user".to_owned(),
+                    credential: "pass".to_owned(),
+                }],
+                RTCIceTransportPolicy::Relay,
+                None,
+                crate::runtime::default_runtime().expect("test requires a runtime feature"),
+                rtc::crypto::default_provider().expect("a built-in crypto provider for tests"),
+            );
+
+            relayer.gather().await.expect("TURN gather should start");
+            let request = relayer.poll_write().expect("initial Allocate request");
+            let mut request_msg = StunMessage::new();
+            request_msg.raw = request.message.to_vec();
+            request_msg.decode().expect("decode Allocate request");
+
+            let response = build_turn_allocate_unauthorized(request_msg.transaction_id);
+            let msg = tagged(local_addr, shared_addr, &response.raw);
+
+            assert!(
+                relayer.is_turn_message(&msg),
+                "an Allocate response on the TURN client's four-tuple is TURN traffic"
+            );
+        });
+    }
+
+    /// The property a method-based guard could not have. A Binding response *is* TURN traffic when
+    /// this client sent the request — as it would if the relayer ever gained STUN keepalives or
+    /// consent freshness. Ownership follows the transaction id, so that stays correct without
+    /// anyone remembering to revisit this function.
+    #[test]
+    fn binding_response_matching_an_outstanding_turn_transaction_routes_to_turn() {
+        futures::executor::block_on(async {
+            let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+            let shared_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3478);
+            let mut relayer = RTCTurnRelayer::new(
+                vec![local_addr],
+                vec![RTCIceServer {
+                    urls: vec![format!("turn:{}?transport=udp", shared_addr)],
+                    username: "user".to_owned(),
+                    credential: "pass".to_owned(),
+                }],
+                RTCIceTransportPolicy::Relay,
+                None,
+                crate::runtime::default_runtime().expect("test requires a runtime feature"),
+                rtc::crypto::default_provider().expect("a built-in crypto provider for tests"),
+            );
+
+            relayer.gather().await.expect("TURN gather should start");
+            relayer.poll_write().expect("initial Allocate request");
+
+            let four_tuple = *relayer.clients.keys().next().expect("one TURN client");
+            let tid = relayer
+                .clients
+                .get_mut(&four_tuple)
+                .expect("the TURN client")
+                .client
+                .send_binding_request_to(
+                    Instant::now(), // Exemption: usage in #test code
+                    shared_addr,
+                )
+                .expect("TURN client sends its own Binding request");
+
+            let response = build_binding_success(tid);
+            let msg = tagged(local_addr, shared_addr, &response.raw);
+
+            assert!(
+                relayer.is_turn_message(&msg),
+                "a Binding response the TURN client is waiting on is its own"
+            );
+        });
+    }
+
+    /// ChannelData carries no transaction id, so it must still be claimed on addresses alone.
+    #[test]
+    fn channel_data_on_exact_four_tuple_still_routes_to_turn() {
+        futures::executor::block_on(async {
+            let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+            let shared_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3478);
+            let mut relayer = RTCTurnRelayer::new(
+                vec![local_addr],
+                vec![RTCIceServer {
+                    urls: vec![format!("turn:{}?transport=udp", shared_addr)],
+                    username: "user".to_owned(),
+                    credential: "pass".to_owned(),
+                }],
+                RTCIceTransportPolicy::Relay,
+                None,
+                crate::runtime::default_runtime().expect("test requires a runtime feature"),
+                rtc::crypto::default_provider().expect("a built-in crypto provider for tests"),
+            );
+
+            relayer.gather().await.expect("TURN gather should start");
+            relayer.poll_write().expect("initial Allocate request");
+
+            // Channel 0x4000, four payload bytes, padded to a 4-byte boundary.
+            let channel_data = [0x40u8, 0x00, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef];
+            assert!(
+                ChannelData::is_channel_data(&channel_data),
+                "test fixture must be valid ChannelData"
+            );
+            let msg = tagged(local_addr, shared_addr, &channel_data);
+
+            assert!(
+                relayer.is_turn_message(&msg),
+                "ChannelData has no transaction id and must route by address"
             );
         });
     }

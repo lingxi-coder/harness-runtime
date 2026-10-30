@@ -106,8 +106,9 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
         timeout(Duration::from_secs(/*secs*/ 30), async {
             let (sender, mut channels) = mpsc::channel(/*buffer*/ 1);
             let gathered = Arc::new(Notify::new());
-            let mut settings = webrtc::peer_connection::SettingEngine::default();
-            settings.set_lite(/*lite*/ true);
+            let settings = webrtc::peer_connection::SettingEngineBuilder::new()
+                .with_lite(/*lite*/ true)
+                .build();
             let (media, mut remote_audio) = crate::audio_track::AudioTrack::new().unwrap();
             let builder = PeerConnectionBuilder::new()
                 .with_media_engine(media)
@@ -344,8 +345,9 @@ async fn camera_and_screen_rtp_do_not_poison_audio_ingress() {
     timeout(Duration::from_secs(15), async {
         let (sender, _channels) = mpsc::channel(1);
         let gathered = Arc::new(Notify::new());
-        let mut settings = webrtc::peer_connection::SettingEngine::default();
-        settings.set_lite(true);
+        let settings = webrtc::peer_connection::SettingEngineBuilder::new()
+            .with_lite(true)
+            .build();
         let (mut media, mut audio) = crate::audio_track::AudioTrack::new().unwrap();
         let camera =
             crate::video_track::VideoTrack::new(&mut media, crate::VideoSource::Camera).unwrap();
