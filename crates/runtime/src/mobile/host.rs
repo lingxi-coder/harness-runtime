@@ -269,6 +269,10 @@ use crate::mobile::{
 pub struct MobileRuntime {
     /// Official provider settings data from the same settled startup snapshot.
     pub provider_catalog: Vec<ProviderCatalogEntryDto>,
+    pub official_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
+    pub(crate) catalog_refresh: Option<provider_config::startup_catalog::CatalogRefreshGuard>,
+    pub(crate) catalog_observer:
+        std::sync::Mutex<Option<provider_config::startup_catalog::CatalogRefreshGuard>>,
     /// Per-host owner for V2 installed-plugin archive materializations.
     /// Plugin discovery and the manager retain clones of this same session.
     pub(crate) plugin_archive_session: Arc<plugin::PluginArchiveSession>,
@@ -6453,7 +6457,11 @@ impl MobileEngineHandle {
     /// snapshots used to build the live LLM registry.
     #[must_use]
     pub fn builtin_provider_catalog(&self) -> Vec<ProviderCatalogEntryDto> {
-        self.inner.provider_catalog.clone()
+        self.inner
+            .official_catalog
+            .as_ref()
+            .map(|source| provider_catalog_from_profiles(source.snapshot().providers.clone()))
+            .unwrap_or_else(|| self.inner.provider_catalog.clone())
     }
 
     /// Start a native OAuth authorization-code flow. PKCE verifier/state stay
@@ -7302,6 +7310,18 @@ impl MobileEngineHandle {
                 self.emit_controls_snapshot().await;
                 Ok(())
             }
+            ClientCommand::RefreshProviderCatalog { trigger } => {
+                if let Some(source) = &self.inner.official_catalog {
+                    let trigger = trigger
+                        .parse()
+                        .map_err(|e: String| ClientError::Internal { message: e })?;
+                    if let Err(error) = source.trigger(trigger).await {
+                        tracing::warn!(%error, "official provider directory refresh failed; keeping current snapshot");
+                    }
+                }
+                self.emit_listing(ProtocolListingKind::Models).await;
+                Ok(())
+            }
             ClientCommand::ListModels => {
                 self.emit_listing(ProtocolListingKind::Models).await;
                 Ok(())
@@ -8038,10 +8058,26 @@ impl MobileEngineHandle {
         }
 
         use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
-        let kind = match provider_preset.as_str() {
-            "anthropic" => ProbeProtocol::Anthropic,
-            "google" => ProbeProtocol::Google,
-            _ => ProbeProtocol::OpenAi,
+        let catalog_protocol = self.inner.official_catalog.as_ref().and_then(|source| {
+            source
+                .snapshot()
+                .providers
+                .iter()
+                .find(|p| {
+                    p.profile_name == provider_preset
+                        || (provider_preset == "google" && p.profile_name == "gemini")
+                })
+                .map(|p| p.protocol)
+        });
+        let kind = match catalog_protocol {
+            Some(llm_runtime::ProtocolFamily::AnthropicMessages) => ProbeProtocol::Anthropic,
+            Some(llm_runtime::ProtocolFamily::GeminiGenerateContent) => ProbeProtocol::Google,
+            Some(_) => ProbeProtocol::OpenAi,
+            None => match provider_preset.as_str() {
+                "anthropic" => ProbeProtocol::Anthropic,
+                "google" => ProbeProtocol::Google,
+                _ => ProbeProtocol::OpenAi,
+            },
         };
         let started = std::time::Instant::now();
         let response = probe_provider(
@@ -9086,7 +9122,12 @@ impl MobileEngineHandle {
             ProtocolListingKind::Models => {
                 self.event_sink
                     .emit(ClientEvent::ProviderModelCatalog {
-                        providers: self.inner.provider_model_catalog.clone(),
+                        providers: self
+                            .inner
+                            .official_catalog
+                            .as_ref()
+                            .map(|source| crate::provider_directory::entries(&source.snapshot()))
+                            .unwrap_or_else(|| self.inner.provider_model_catalog.clone()),
                     })
                     .await;
                 // Curate to the "latest few" per provider instead of flooding the

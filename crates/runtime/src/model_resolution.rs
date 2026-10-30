@@ -228,8 +228,8 @@ impl RuntimeModelResolutionProvider {
     }
 }
 
-impl ModelResolutionContextProvider for RuntimeModelResolutionProvider {
-    fn context_for_route(
+impl RuntimeModelResolutionProvider {
+    fn context_for_snapshot(
         &self,
         model: &str,
         profile: Option<&str>,
@@ -262,6 +262,18 @@ impl ModelResolutionContextProvider for RuntimeModelResolutionProvider {
             disable_1m_context: env_truthy(branding::DISABLE_1M_CONTEXT_ENV),
             disable_legacy_model_remap: env_truthy(branding::DISABLE_LEGACY_MODEL_REMAP_ENV),
         })
+    }
+}
+
+impl ModelResolutionContextProvider for RuntimeModelResolutionProvider {
+    fn context_for_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError> {
+        let current = self.runtime.current();
+        let snapshot = Self::new(current.clone(), &current.configuration());
+        snapshot.context_for_snapshot(model, profile)
     }
 
     fn native_model_validation_context(

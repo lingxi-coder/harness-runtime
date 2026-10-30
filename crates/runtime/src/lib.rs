@@ -13,7 +13,7 @@
 pub const RUNTIME_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
-pub use provider_config::startup_catalog::{CatalogPlatform, StartupCatalog};
+pub use provider_config::startup_catalog::{CatalogPlatform, CatalogTrigger, StartupCatalog};
 
 #[cfg(feature = "engine")]
 pub mod api;
@@ -128,3 +128,6 @@ mod workflow_catalog;
 /// Native-shaped slash-command projection for the validated workflow catalog.
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod workflow_slash;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod provider_directory;

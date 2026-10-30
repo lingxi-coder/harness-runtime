@@ -2441,6 +2441,7 @@ pub fn curated_model_listings(
     if !current.is_empty() {
         if let Some(current_listing) = listings.iter().find(|listing| {
             listing.request_model == current
+                && listing.metadata.status.as_deref() != Some("disabled")
                 && current_provider_id.is_none_or(|provider| listing.provider_id == provider)
         }) {
             seen.insert((
@@ -2453,7 +2454,10 @@ pub fn curated_model_listings(
     for listing in listings {
         if (listing.metadata.catalog_offered
             || is_offered_model(&listing.provider_id, &listing.request_model))
-            && listing.metadata.status.as_deref() != Some("deprecated")
+            && !matches!(
+                listing.metadata.status.as_deref(),
+                Some("deprecated" | "disabled")
+            )
         {
             let key = (listing.provider_id.clone(), listing.request_model.clone());
             if seen.insert(key) {
@@ -2477,7 +2481,10 @@ pub fn provider_model_catalog_listings(listings: &[ModelListing]) -> Vec<ModelLi
         if !listing.capabilities.tools
             || (!listing.metadata.catalog_offered
                 && !is_offered_model(&listing.provider_id, &listing.request_model))
-            || listing.metadata.status.as_deref() == Some("deprecated")
+            || matches!(
+                listing.metadata.status.as_deref(),
+                Some("deprecated" | "disabled")
+            )
         {
             continue;
         }

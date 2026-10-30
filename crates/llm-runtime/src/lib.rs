@@ -39,6 +39,7 @@ mod codec_tests;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
 pub mod catalog;
+pub mod catalog_task;
 #[allow(missing_docs)]
 pub mod client;
 pub mod cloud_provider_env;

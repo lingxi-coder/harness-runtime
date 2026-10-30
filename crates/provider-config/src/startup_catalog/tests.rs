@@ -110,11 +110,11 @@ fn all_four_platforms_project_the_same_complete_executable_snapshot() {
             wire.models[0].pricing.as_ref().unwrap().input_per_million,
             Some(0.3)
         );
-        assert!(result
-            .catalog
-            .providers
-            .iter()
-            .any(|p| p.profile_name == "openai-chatgpt"));
+        assert_eq!(
+            result.catalog.providers.len(),
+            1,
+            "cloud inventory does not resurrect embedded providers"
+        );
     }
 }
 
@@ -168,54 +168,6 @@ fn newly_published_model_is_routable_and_visible_without_a_binary_shortlist_upda
 }
 
 #[test]
-fn retired_official_default_can_fall_back_without_rewriting_user_configuration() {
-    let catalog = parsed(&fixture(), CatalogPlatform::Desktop, "0.1.0")
-        .unwrap()
-        .catalog;
-    assert_eq!(
-        retired_default("anthropic/claude-sonnet-5", &catalog.providers),
-        Some(("deepseek-flash".into(), "deepseek".into()))
-    );
-    assert!(retired_default("deepseek/deepseek-flash", &catalog.providers).is_none());
-    assert!(retired_default("private/my-model", &catalog.providers).is_none());
-}
-
-#[test]
-fn an_unlisted_primary_format_does_not_rebind_a_surviving_formats_credential() {
-    let mut value = fixture();
-    let wire = presets::builtin_provider_definition("deepseek-search")
-        .unwrap()
-        .unwrap()
-        .profile;
-    value["providers"][0]["id"] = json!("deepseek-search");
-    value["providers"][0]["baseUrl"] = json!(wire.base_url);
-    value["providers"][0]["protocol"] = serde_json::to_value(wire.protocol).unwrap();
-    value["providers"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("executionDefinition");
-    value["models"][0]["providerId"] = json!("deepseek-search");
-    let snapshot = parsed(&value, CatalogPlatform::Desktop, "0.1.0")
-        .unwrap()
-        .catalog;
-    let result = crate::assemble(crate::AssembleInputs {
-        official_catalog: Some(snapshot),
-        anthropic_api_base: "https://api.anthropic.com".into(),
-        anthropic_models: Vec::new(),
-        anthropic_has_api_key: false,
-        anthropic_has_oauth: false,
-        user_providers: BTreeMap::new(),
-        routing: None,
-    });
-    let credential = result
-        .credential_sources
-        .iter()
-        .find(|c| c.profile_name == "deepseek-search")
-        .unwrap();
-    assert_eq!(credential.credential_id, "deepseek");
-}
-
-#[test]
 fn availability_is_inclusive_platform_scoped_and_uses_semver_precedence() {
     let mut value = fixture();
     value["models"][0]["platforms"] = json!(["ios"]);
@@ -242,12 +194,13 @@ fn availability_is_inclusive_platform_scoped_and_uses_semver_precedence() {
         .iter()
         .any(|p| p.profile_name == "deepseek"));
     value["providers"][0]["enabled"] = json!(false);
-    assert!(!parsed(&value, CatalogPlatform::Ios, "2.4.1")
+    let disabled = parsed(&value, CatalogPlatform::Ios, "2.4.1")
         .unwrap()
-        .catalog
-        .providers
+        .catalog;
+    assert!(deepseek(&disabled)
+        .models
         .iter()
-        .any(|p| p.profile_name == "deepseek"));
+        .all(|m| m.metadata.status.as_deref() == Some("disabled")));
 }
 fn has_provider(value: &Value, name: &str) -> bool {
     parsed(value, CatalogPlatform::Desktop, "0.1.0")
@@ -284,8 +237,8 @@ fn invalid_source_identity_limits_and_unknown_models_are_not_admitted() {
         .unwrap()
         .remove("executionDefinition");
     assert!(
-        has_provider(&value, "deepseek"),
-        "an existing SDK definition can supply complete facts"
+        parsed(&value, CatalogPlatform::Desktop, "0.1.0").is_err(),
+        "execution definitions are mandatory"
     );
     value["providers"][0]["id"] = json!("new-provider");
     value["models"][0]["providerId"] = json!("new-provider");
@@ -347,163 +300,212 @@ fn settings_models_connections_credential_ids_and_routing_win_after_refresh() {
 }
 
 #[tokio::test]
-async fn conditional_get_304_cold_cache_and_owner_snapshot_are_consistent() {
+async fn schema_capabilities_and_lifecycle_are_explicit() {
+    let mut value = fixture();
+    value["schemaVersion"] = json!(1);
+    assert!(parsed(&value, CatalogPlatform::Desktop, "0.1.0").is_err());
+    let mut value = fixture();
+    value["models"][0]["requiredCapabilities"] = json!(["protocol.future"]);
+    assert!(!has_provider(&value, "deepseek"));
+    value["models"][0]["requiredCapabilities"] = json!([]);
+    value["models"][0]["status"] = json!("deprecated");
+    let catalog = parsed(&value, CatalogPlatform::Desktop, "0.1.0")
+        .unwrap()
+        .catalog;
+    assert_eq!(
+        deepseek(&catalog).models[0].metadata.status.as_deref(),
+        Some("deprecated")
+    );
+    value["models"][0]["status"] = json!("disabled");
+    let catalog = parsed(&value, CatalogPlatform::Desktop, "0.1.0")
+        .unwrap()
+        .catalog;
+    let runtime = llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+        providers: catalog.providers,
+    })
+    .unwrap();
+    assert!(!runtime.model_enabled("deepseek-flash", Some("deepseek")));
+    assert!(
+        runtime
+            .resolve_media_route("deepseek-flash", Some("deepseek"))
+            .is_ok(),
+        "a disabled saved default still has metadata so settings can open"
+    );
+    let request = llm_runtime::LlmRequest::new("deepseek-flash").with_profile("deepseek");
+    assert!(
+        matches!(
+            runtime.prepare(&request).await,
+            Err(llm_runtime::LlmError::ModelUnavailable)
+        ),
+        "dispatch must reject the disabled model before reading credentials"
+    );
+}
+
+#[tokio::test]
+async fn conditional_get_publishes_to_current_owner_and_keeps_task_snapshot() {
     let home = Home::new();
-    let body = fixture().to_string();
-    let (url, server) = serve(vec![
-        (200, body),
-        (304, String::new()),
-        (304, String::new()),
-    ]);
-    let first = source(&home, &url, CatalogPlatform::Android, "0.1.0");
-    first.refresh().await.unwrap();
-    let snapshot = first.load().await;
-    assert_eq!(deepseek(&snapshot).models.len(), 1);
-    assert!(Arc::ptr_eq(&snapshot, &first.clone().load().await));
-    let cold = source(&home, &url, CatalogPlatform::Android, "0.1.0");
-    let restored = cold.load().await;
-    assert_eq!(context(&snapshot), context(&restored));
+    let mut next = fixture();
+    next["models"][0]["contextWindow"] = json!(333333);
+    next["models"][0]["maxOutputTokens"] = json!(8192);
+    let (url, server) = serve(vec![(200, next.to_string()), (304, String::new())]);
+    let source = source(&home, &url, CatalogPlatform::Android, "0.1.0");
+    let task_snapshot = source.snapshot();
+    let mut updates = source.subscribe();
+    assert!(source.trigger(CatalogTrigger::Manual).await.unwrap());
+    updates.changed().await.unwrap();
+    assert_eq!(context(&source.snapshot()), 333333);
+    assert!(!Arc::ptr_eq(&task_snapshot, &source.snapshot()));
+    assert!(
+        !source.trigger(CatalogTrigger::Manual).await.unwrap(),
+        "304 must not publish another generation"
+    );
     let requests = tokio::task::spawn_blocking(move || server.join().unwrap())
         .await
         .unwrap();
-    assert!(
-        requests[0].contains("platform=android")
-            && requests[0].contains("appVersion=0.1.0")
-            && requests[0].contains("schemaVersion=1")
-    );
+    assert!(requests[0].contains("schemaVersion=2"));
+    assert!(requests[0].contains("capability=protocol.open_ai_responses"));
     assert!(!requests[0].to_lowercase().contains("authorization:"));
     assert!(requests[1]
         .to_lowercase()
         .contains("if-none-match: \"fixture\""));
-    assert_ne!(
-        first.cache_path(),
-        source(&home, &url, CatalogPlatform::Ios, "0.1.0").cache_path()
-    );
-    assert_ne!(
-        first.cache_path(),
-        source(&home, &url, CatalogPlatform::Android, "0.2.0").cache_path()
-    );
 }
 
 #[tokio::test]
-async fn malformed_refresh_and_outage_preserve_valid_cache_without_touching_settings() {
+async fn refresh_policy_respects_foreground_network_ttls_and_failure_backoff() {
     let home = Home::new();
-    let settings = home.0.join("settings.json");
-    fs::write(&settings, b"user-owned settings and connection ids").unwrap();
-    let mut value = fixture();
-    value["models"][0]["contextWindow"] = json!(333333);
-    value["models"][0]["maxOutputTokens"] = json!(8192);
     let (url, server) = serve(vec![
-        (200, value.to_string()),
-        (200, "broken JSON".into()),
+        (200, fixture().to_string()),
         (503, "down".into()),
-    ]);
-    source(&home, &url, CatalogPlatform::Desktop, "0.1.0")
-        .refresh()
-        .await
-        .unwrap();
-    for _ in 0..2 {
-        assert_eq!(
-            context(
-                source(&home, &url, CatalogPlatform::Desktop, "0.1.0")
-                    .load()
-                    .await
-                    .as_ref()
-            ),
-            333333
-        );
-    }
-    tokio::task::spawn_blocking(move || server.join().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(
-        fs::read(&settings).unwrap(),
-        b"user-owned settings and connection ids"
-    );
-    assert!(fs::read_dir(home.0.join("cache/model-catalog"))
-        .unwrap()
-        .all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
-}
-
-#[tokio::test]
-async fn invalid_304_and_corrupt_cache_fall_back_to_embedded_definitions() {
-    let home = Home::new();
-    let (url, server) = serve(vec![(304, String::new()), (304, String::new())]);
-    let src = source(&home, &url, CatalogPlatform::Cli, "0.1.0");
-    fs::create_dir_all(&src.cache_dir).unwrap();
-    fs::write(src.cache_path(), b"{broken").unwrap();
-    assert!(src.load().await.providers.len() > 2);
-    let mut other = source(&home, &url, CatalogPlatform::Cli, "0.1.0");
-    other.endpoint = url;
-    assert!(other.load().await.providers.len() > 2);
-    tokio::task::spawn_blocking(move || server.join().unwrap())
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn background_refresh_is_used_by_new_owners_and_never_swaps_an_active_snapshot() {
-    let home = Home::new();
-    let mut old = fixture();
-    old["models"][0]["contextWindow"] = json!(333333);
-    old["models"][0]["maxOutputTokens"] = json!(8192);
-    let mut new = old.clone();
-    new["publishedAt"] = json!(2000);
-    new["models"][0]["contextWindow"] = json!(444444);
-    let (url, server) = serve(vec![
-        (200, old.to_string()),
-        (200, new.to_string()),
         (304, String::new()),
     ]);
-    let first = source(&home, &url, CatalogPlatform::Ios, "2.4.1");
-    first.refresh().await.unwrap();
-    let active = first.load().await;
-    assert_eq!(context(&active), 333333);
-    for _ in 0..100 {
-        if first.cached().is_some_and(|(_, p)| p.published_at == 2000) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(first.cached().unwrap().1.published_at, 2000);
-    assert!(Arc::ptr_eq(&active, &first.load().await));
-    assert_eq!(context(&active), 333333);
-    let newest = source(&home, &url, CatalogPlatform::Ios, "2.4.1")
-        .load()
-        .await;
-    assert_eq!(context(&newest), 444444);
+    let source = source(&home, &url, CatalogPlatform::Ios, "0.1.0");
+    source.trigger(CatalogTrigger::Startup).await.unwrap();
+    assert!(!source.trigger(CatalogTrigger::Foreground).await.unwrap());
+    assert!(!source.trigger(CatalogTrigger::Settings).await.unwrap());
+    source.shared.timing.lock().unwrap().last_success =
+        Some(std::time::Instant::now() - Duration::from_secs(901));
+    let (mut saved, parsed) = source.cached().unwrap();
+    saved.checked_at = 0;
+    source.save(&saved, parsed.published_at).unwrap();
+    assert!(!source.trigger(CatalogTrigger::Foreground).await.unwrap());
+    assert!(source.trigger(CatalogTrigger::Settings).await.is_err());
+    let active = source.snapshot();
+    assert!(!source.trigger(CatalogTrigger::Timer).await.unwrap());
+    source.trigger(CatalogTrigger::Background).await.unwrap();
+    assert!(!source
+        .trigger(CatalogTrigger::NetworkRestored)
+        .await
+        .unwrap());
+    source.trigger(CatalogTrigger::NetworkLost).await.unwrap();
+    assert!(!source.trigger(CatalogTrigger::Foreground).await.unwrap());
+    source
+        .trigger(CatalogTrigger::NetworkRestored)
+        .await
+        .unwrap();
+    assert!(
+        Arc::ptr_eq(&active, &source.snapshot()) || context(&active) == context(&source.snapshot())
+    );
     tokio::task::spawn_blocking(move || server.join().unwrap())
         .await
         .unwrap();
 }
 
 #[tokio::test]
-async fn canceling_a_cold_prefetch_does_not_poison_the_startup_owner() {
+async fn refresh_failure_preserves_cache_and_user_configuration() {
     let home = Home::new();
-    let (url, server) = serve(vec![(200, fixture().to_string())]);
-    let source = source(&home, &url, CatalogPlatform::Cli, "0.9.0");
-    drop(source.prefetch());
-    tokio::task::yield_now().await;
-    assert!(source.settled.get().is_none());
-    // A cold owner settles embedded definitions without waiting for HTTP.
-    assert!(source.load().await.providers.len() > 2);
+    fs::write(home.0.join("settings.json"), b"user settings").unwrap();
+    let (url, server) = serve(vec![(200, fixture().to_string()), (200, "broken".into())]);
+    let source = source(&home, &url, CatalogPlatform::Desktop, "0.1.0");
+    source.refresh().await.unwrap();
+    let active = source.snapshot();
+    assert!(source.refresh().await.is_err());
+    assert!(Arc::ptr_eq(&active, &source.snapshot()));
+    assert!(source.cached().is_some());
+    assert_eq!(
+        fs::read(home.0.join("settings.json")).unwrap(),
+        b"user settings"
+    );
     tokio::task::spawn_blocking(move || server.join().unwrap())
         .await
         .unwrap();
 }
 
 #[tokio::test]
-async fn cold_start_does_not_wait_for_a_stalled_network() {
+async fn execution_source_updates_models_and_keeps_custom_profiles() {
     let home = Home::new();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    // Keep the socket listening without accepting or sending any HTTP response.
-    let source = source(&home, &endpoint, CatalogPlatform::Desktop, "0.1.0");
-    let local = tokio::time::timeout(Duration::from_secs(1), source.load())
+    let mut next = fixture();
+    next["models"][0]["contextWindow"] = json!(333333);
+    next["models"][0]["maxOutputTokens"] = json!(8192);
+    let (url, server) = serve(vec![(200, next.to_string())]);
+    let source = source(&home, &url, CatalogPlatform::Desktop, "0.1.0");
+    let inputs = crate::AssembleInputs {
+        official_catalog: Some((*source.snapshot()).clone()),
+        anthropic_api_base: "https://api.anthropic.com".into(),
+        anthropic_models: Vec::new(),
+        anthropic_has_api_key: false,
+        anthropic_has_oauth: false,
+        user_providers: BTreeMap::from([(
+            "private".into(),
+            json!({"type":"openai","baseUrl":"https://custom.invalid/v1","models":["private-model"]}),
+        )]),
+        routing: None,
+    };
+    let template =
+        llm_runtime::ModelRuntime::from_config(crate::assemble(inputs.clone()).client_config)
+            .unwrap()
+            .with_catalog_source(source.runtime_source(inputs, llm_runtime::Region::International));
+    llm_runtime::catalog_task::scope(async {
+        let task_client = template.current();
+        source.refresh().await.unwrap();
+        assert!(
+            Arc::ptr_eq(&task_client, &template.current()),
+            "a running task retains its original directory"
+        );
+    })
+    .await;
+    let task_client = llm_runtime::ModelRuntime::from_config(
+        crate::assemble(crate::AssembleInputs {
+            official_catalog: Some(source.embedded_catalog()),
+            anthropic_api_base: "https://api.anthropic.com".into(),
+            anthropic_models: Vec::new(),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: BTreeMap::new(),
+            routing: None,
+        })
+        .client_config,
+    )
+    .unwrap()
+    .current();
+    let next_client = template.current();
+    assert!(next_client
+        .available_models()
+        .iter()
+        .any(|m| m.request_model == "private-model"));
+    assert!(next_client
+        .available_models()
+        .iter()
+        .any(|m| m.profile_name == "deepseek" && m.metadata.context_window_tokens == Some(333333)));
+    assert!(!Arc::ptr_eq(&task_client, &next_client));
+    tokio::task::spawn_blocking(move || server.join().unwrap())
         .await
-        .expect("cold startup must settle local data without HTTP");
+        .unwrap();
+}
+
+#[tokio::test]
+async fn startup_and_corrupt_cache_never_wait_for_network() {
+    let home = Home::new();
+    let source = source(
+        &home,
+        "http://127.0.0.1:1/catalog",
+        CatalogPlatform::Cli,
+        "0.1.0",
+    );
+    fs::create_dir_all(&source.cache_dir).unwrap();
+    fs::write(source.cache_path(), b"broken").unwrap();
+    let local = tokio::time::timeout(Duration::from_millis(100), source.load())
+        .await
+        .unwrap();
     assert!(local.providers.len() > 2);
-    assert!(Arc::ptr_eq(&local, &source.load().await));
-    assert!(source.cached().is_none());
-    drop(listener);
+    assert!(Arc::ptr_eq(&local, &source.snapshot()));
 }

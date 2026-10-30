@@ -987,21 +987,16 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         Some(source) => Some((*source.load().await).clone()),
         None => None,
     };
-    let assembled = provider_config::assemble_for_region(
-        provider_config::AssembleInputs {
-            official_catalog,
-            anthropic_api_base: cfg.api_base.clone(),
-            anthropic_models: anthropic_models_for(
-                &configured_model,
-                cfg.fallback_model.as_deref(),
-            ),
-            anthropic_has_api_key: has_api_key && !has_oauth,
-            anthropic_has_oauth: has_oauth,
-            user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
-            routing: cfg.routing.clone(),
-        },
-        provider_region,
-    );
+    let catalog_inputs = provider_config::AssembleInputs {
+        official_catalog,
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: anthropic_models_for(&configured_model, cfg.fallback_model.as_deref()),
+        anthropic_has_api_key: has_api_key && !has_oauth,
+        anthropic_has_oauth: has_oauth,
+        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+        routing: cfg.routing.clone(),
+    };
+    let assembled = provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly");
     }
@@ -1073,20 +1068,6 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .collect();
     let (mut default_model_id, mut default_model_profile) =
         lingxi_core::host::parse_model_ref(&configured_model, &default_listings);
-    if cfg.startup_catalog.is_some()
-        && !model_provenance.is_managed()
-        && !cfg.default_model_explicit
-        && !cfg.default_model_env_pinned
-    {
-        if let Some((model, profile)) = provider_config::startup_catalog::retired_default(
-            &configured_model,
-            &assembled.client_config.providers,
-        ) {
-            tracing::warn!(from = %configured_model, to = %model, "official catalog retired the startup model; using an available route without changing saved settings");
-            default_model_id = model;
-            default_model_profile = Some(profile);
-        }
-    }
 
     // Per-profile Claude provider tag, captured while
     // `assembled.client_config.providers` is still owned (`from_config` moves it
@@ -1112,6 +1093,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         super::fusion_services::anthropic_dynamic_auth_profile(&assembled.client_config.providers);
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-runtime config: {e}")))?;
+    if let Some(source) = &cfg.startup_catalog {
+        client = client.with_catalog_source(source.runtime_source(catalog_inputs, provider_region));
+    }
     let model_resolution_context_provider: Arc<
         dyn agent::model_resolution::ModelResolutionContextProvider,
     > = Arc::new(

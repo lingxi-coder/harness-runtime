@@ -9,10 +9,17 @@ use crate::{
     ProviderStreamTransport, Route, Transport,
 };
 
+/// Host-owned catalog projection. Implementations preserve user settings and
+/// return a validated immutable execution snapshot for new operations.
+pub trait ModelRuntimeSource: std::fmt::Debug + Send + Sync {
+    fn current(&self, template: &ModelRuntime) -> Arc<ModelRuntime>;
+}
+
 /// Host execution composition: immutable routing, request-local credentials,
 /// and shared SDK clients. Protocol execution and stream assembly belong to SDK.
 #[derive(Debug, Clone)]
 pub struct ModelRuntime {
+    source: Option<Arc<dyn ModelRuntimeSource>>,
     cache: Arc<crate::execution::ClientCache>,
     registry: Arc<ModelRegistry>,
     routes: Arc<BTreeMap<String, RouteEntry>>,
@@ -194,6 +201,9 @@ impl ModelRuntime {
         model: &str,
         profile: Option<&str>,
     ) -> Result<lingxi_llm_client::client::OutputTokenLimits, LlmError> {
+        if self.source.is_some() {
+            return self.current().output_token_limits_in(model, profile);
+        }
         self.registry.output_token_limits_in(model, profile)
     }
 
@@ -206,6 +216,11 @@ impl ModelRuntime {
         profile: Option<&str>,
         requested: Option<u32>,
     ) -> Result<lingxi_llm_client::client::ResolvedOutputBudget, LlmError> {
+        if self.source.is_some() {
+            return self
+                .current()
+                .resolve_output_budget_in(model, profile, requested);
+        }
         let route = self.registry.resolve_in(model, profile)?;
         let entry = self
             .routes
@@ -241,6 +256,9 @@ impl ModelRuntime {
         model: &str,
         profile: Option<&str>,
     ) -> Result<ProtocolFamily, LlmError> {
+        if self.source.is_some() {
+            return self.current().protocol_for_model(model, profile);
+        }
         let route = self.registry.resolve_in(model, profile)?;
         let entry = self
             .routes
@@ -264,6 +282,9 @@ impl ModelRuntime {
         model: &str,
         profile: Option<&str>,
     ) -> Result<bool, LlmError> {
+        if self.source.is_some() {
+            return self.current().supports_responses_websocket(model, profile);
+        }
         let route = self.registry.resolve_in(model, profile)?;
         let entry = self
             .routes
@@ -623,11 +644,64 @@ impl ModelRuntime {
         }
 
         Ok(Self {
+            source: None,
             cache: Arc::new(Default::default()),
             registry: Arc::new(registry),
             routes: Arc::new(routes),
             credentials: None,
         })
+    }
+
+    /// Attach the app-scoped official directory; prepared requests retain their
+    /// own SDK client and route even when a newer directory is published.
+    pub fn with_catalog_source(mut self, source: Arc<dyn ModelRuntimeSource>) -> Self {
+        self.source = Some(source);
+        self
+    }
+    pub fn current(&self) -> Arc<Self> {
+        crate::catalog_task::client(self)
+    }
+    pub(crate) fn unscoped_current(&self) -> Arc<Self> {
+        self.source
+            .as_ref()
+            .map_or_else(|| Arc::new(self.clone()), |source| source.current(self))
+    }
+    pub(crate) fn catalog_owner_key(&self) -> usize {
+        self.source.as_ref().map_or_else(
+            || Arc::as_ptr(&self.cache) as usize,
+            |source| Arc::as_ptr(source) as *const () as usize,
+        )
+    }
+    pub fn with_owner_state(&self, template: &Self) -> Arc<Self> {
+        let mut current = self.clone();
+        current.source = None;
+        current.credentials = template.credentials.clone();
+        current.cache = template.cache.clone();
+        Arc::new(current)
+    }
+    /// Current execution facts for host-owned model resolution. Metadata lookup
+    /// stays available for a disabled saved default so settings can still open.
+    pub fn configuration(&self) -> ClientConfig {
+        if self.source.is_some() {
+            return self.current().configuration();
+        }
+        self.registry.configuration().clone()
+    }
+    /// A disabled model keeps its identity but cannot dispatch a new request.
+    pub fn model_enabled(&self, model: &str, profile: Option<&str>) -> bool {
+        if self.source.is_some() {
+            return self.current().model_enabled(model, profile);
+        }
+        self.registry
+            .resolve_in(model, profile)
+            .is_ok_and(|route| !self.registry.model_disabled(&route))
+    }
+
+    pub fn reconfigured(&self, config: ClientConfig) -> Result<Self, LlmError> {
+        let mut current = Self::from_config(config)?;
+        current.credentials = self.credentials.clone();
+        current.cache = self.cache.clone();
+        Ok(current)
     }
 
     /// Attach a host-managed credential store consulted for
@@ -731,7 +805,14 @@ impl ModelRuntime {
 
     #[must_use]
     pub fn available_models(&self) -> Vec<ModelListing> {
-        self.registry.available_models()
+        if self.source.is_some() {
+            return self.current().available_models();
+        }
+        self.registry
+            .available_models()
+            .into_iter()
+            .filter(|m| m.metadata.status.as_deref() != Some("disabled"))
+            .collect()
     }
 
     /// Inspect the credential source for the exact selected model/profile.
@@ -812,6 +893,9 @@ impl ModelRuntime {
         model: &str,
         profile: Option<&str>,
     ) -> Result<MediaRoute, LlmError> {
+        if self.source.is_some() {
+            return self.current().resolve_media_route(model, profile);
+        }
         self.registry.resolve_media_route_in(model, profile)
     }
 
@@ -823,6 +907,9 @@ impl ModelRuntime {
         model: &str,
         profile: Option<&str>,
     ) -> Option<lingxi_llm_client::protocol::ProviderProfile> {
+        if self.source.is_some() {
+            return self.current().prompt_cache_profile(model, profile);
+        }
         let route = self.registry.resolve_in(model, profile).ok()?;
         let entry = self.routes.get(&route.profile_name)?;
         Some(entry.profile.clone())
@@ -872,6 +959,14 @@ impl ModelRuntime {
         transport: Option<Arc<dyn Transport>>,
         authenticate: bool,
     ) -> crate::BoxFuture<'a, Result<PreparedLlmCall, LlmError>> {
+        if self.source.is_some() {
+            let current = self.current();
+            return Box::pin(async move {
+                current
+                    .prepare_internal_impl(request, now, transport, authenticate)
+                    .await
+            });
+        }
         Box::pin(self.prepare_internal_impl(request, now, transport, authenticate))
     }
 
@@ -885,6 +980,10 @@ impl ModelRuntime {
         let resolved_route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
+
+        if self.registry.model_disabled(&resolved_route) {
+            return Err(LlmError::ModelUnavailable);
+        }
 
         let effective_protocol =
             self.protocol_for_model(&request.input.model, request.profile.as_deref())?;

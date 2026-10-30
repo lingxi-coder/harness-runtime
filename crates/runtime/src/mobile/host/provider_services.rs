@@ -95,20 +95,23 @@ pub(super) fn provider_catalog_from_profiles(
         let curated = listings
             .into_iter()
             .filter(|listing| {
-                listing.metadata.catalog_offered
+                !matches!(
+                    listing.metadata.status.as_deref(),
+                    Some("disabled" | "deprecated")
+                ) && (listing.metadata.catalog_offered
                     || lingxi_core::host::is_curated_model(
                         &provider.profile_name,
                         &listing.request_model,
                     )
-                    || !lingxi_core::host::provider_has_curated_list(&provider.profile_name)
+                    || !lingxi_core::host::provider_has_curated_list(&provider.profile_name))
             })
             .collect::<Vec<_>>();
         ProviderCatalogEntryDto {
             profile_id: provider.profile_name.clone(),
             display_name,
             base_url: provider.base_url,
-            protocol: format!("{:?}", provider.protocol),
-            auth: format!("{:?}", provider.auth),
+            protocol: serde_json::to_value(provider.protocol).unwrap().as_str().unwrap().into(),
+            auth: serde_json::to_value(provider.auth).unwrap().as_str().unwrap().into(),
             credential_env,
             models: curated
                 .iter()

@@ -965,55 +965,58 @@ impl ConversationOrchestrator {
         &self,
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        let prompt = prompt.into();
-        self.cancel_idle_compaction();
-        let _turn_guard = self.turn_gate.lock().await;
-        self.begin_turn_metrics();
-        let _activity_guard = self.main_loop_activity(true);
-        tracing::info!(
-            event = orch_events::CONVERSATION_STARTED,
-            prompt_len = prompt.string_at("").unwrap_or_default().len()
-        );
-        let result = crate::request_context::scope_if_missing(
-            self,
-            crate::server_fallback::scope_query_and_flush(
+        llm_runtime::catalog_task::scope(async {
+            let prompt = prompt.into();
+            self.cancel_idle_compaction();
+            let _turn_guard = self.turn_gate.lock().await;
+            self.begin_turn_metrics();
+            let _activity_guard = self.main_loop_activity(true);
+            tracing::info!(
+                event = orch_events::CONVERSATION_STARTED,
+                prompt_len = prompt.string_at("").unwrap_or_default().len()
+            );
+            let result = crate::request_context::scope_if_missing(
                 self,
-                telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
-                    self.scope_api_session(
-                        !self.prompt_is_interactive(),
-                        crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt)),
-                    )
-                    .await
-                }),
-            ),
-        )
-        .await;
-        let cleanup = crate::native_computer::cleanup(self).await;
-        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
-        self.fire_mod_turn_complete(false, result.is_err()).await;
-        self.complete_turn_metrics(result.as_ref().ok());
-        self.emit_terminal_rate_limit_if_changed(&result).await;
-        let result = result.map_err(|e| self.enrich_api_error(e));
-        // ConversationOutcome is #[non_exhaustive] so future variants will
-        // also log as Completed when the only existing variant is EndTurn.
-        match &result {
-            Ok(
-                ConversationOutcome::EndTurn { turn_count, .. }
-                | ConversationOutcome::StopHookPrevented { turn_count, .. },
-            ) => {
-                tracing::info!(
-                    event = orch_events::CONVERSATION_COMPLETED,
-                    turn_count = *turn_count
-                );
+                crate::server_fallback::scope_query_and_flush(
+                    self,
+                    telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
+                        self.scope_api_session(
+                            !self.prompt_is_interactive(),
+                            crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt)),
+                        )
+                        .await
+                    }),
+                ),
+            )
+            .await;
+            let cleanup = crate::native_computer::cleanup(self).await;
+            let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            self.fire_mod_turn_complete(false, result.is_err()).await;
+            self.complete_turn_metrics(result.as_ref().ok());
+            self.emit_terminal_rate_limit_if_changed(&result).await;
+            let result = result.map_err(|e| self.enrich_api_error(e));
+            // ConversationOutcome is #[non_exhaustive] so future variants will
+            // also log as Completed when the only existing variant is EndTurn.
+            match &result {
+                Ok(
+                    ConversationOutcome::EndTurn { turn_count, .. }
+                    | ConversationOutcome::StopHookPrevented { turn_count, .. },
+                ) => {
+                    tracing::info!(
+                        event = orch_events::CONVERSATION_COMPLETED,
+                        turn_count = *turn_count
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        event = orch_events::CONVERSATION_FAILED,
+                        reason = %err
+                    );
+                }
             }
-            Err(err) => {
-                tracing::error!(
-                    event = orch_events::CONVERSATION_FAILED,
-                    reason = %err
-                );
-            }
-        }
-        result
+            result
+        })
+        .await
     }
 
     async fn try_run_turn(
@@ -1188,65 +1191,70 @@ impl ConversationOrchestrator {
         &self,
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        let prompt = prompt.into();
-        let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
-        let ambient_origin = crate::mod_prompt_origin::current();
-        let mod_origin = streaming::external_receive_kind(&ambient_origin)
-            .is_some()
-            .then_some(ambient_origin);
-        self.cancel_idle_compaction();
-        let _turn_guard = self.turn_gate.lock().await;
-        let _activity_guard = self.main_loop_activity(true);
-        tracing::info!(
-            event = orch_events::TURN_STREAMING_STARTED,
-            prompt_len = prompt.string_at("").unwrap_or_default().len()
-        );
-        // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
-        // user-interrupt token → `None` (behaviour byte-identical to before).
-        let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
-            self.scope_api_session(
-                !self.prompt_is_interactive(),
-                Box::pin(self.try_run_turn_streaming_inputs(
-                    prompt.string_at("").unwrap_or_default(),
-                    Vec::new(),
-                    None,
-                    None,
-                    false,
-                    true,
-                    Some(vec![QueuedPromptInput {
-                        text: prompt.clone(),
-                        mod_origin,
-                        message_origin: native_user_source.message_origin,
-                        prompt_source: native_user_source.prompt_source,
-                        ..Default::default()
-                    }]),
-                    None,
-                    None,
-                )),
-            )
-            .await
+        llm_runtime::catalog_task::scope(async {
+            let prompt = prompt.into();
+            let native_user_source =
+                crate::native_user_message_source::current().unwrap_or_default();
+            let ambient_origin = crate::mod_prompt_origin::current();
+            let mod_origin = streaming::external_receive_kind(&ambient_origin)
+                .is_some()
+                .then_some(ambient_origin);
+            self.cancel_idle_compaction();
+            let _turn_guard = self.turn_gate.lock().await;
+            let _activity_guard = self.main_loop_activity(true);
+            tracing::info!(
+                event = orch_events::TURN_STREAMING_STARTED,
+                prompt_len = prompt.string_at("").unwrap_or_default().len()
+            );
+            // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
+            // user-interrupt token → `None` (behaviour byte-identical to before).
+            let result =
+                telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
+                    self.scope_api_session(
+                        !self.prompt_is_interactive(),
+                        Box::pin(self.try_run_turn_streaming_inputs(
+                            prompt.string_at("").unwrap_or_default(),
+                            Vec::new(),
+                            None,
+                            None,
+                            false,
+                            true,
+                            Some(vec![QueuedPromptInput {
+                                text: prompt.clone(),
+                                mod_origin,
+                                message_origin: native_user_source.message_origin,
+                                prompt_source: native_user_source.prompt_source,
+                                ..Default::default()
+                            }]),
+                            None,
+                            None,
+                        )),
+                    )
+                    .await
+                })
+                .await;
+            self.emit_terminal_rate_limit_if_changed(&result).await;
+            let result = result.map_err(|e| self.enrich_api_error(e));
+            match &result {
+                Ok(
+                    ConversationOutcome::EndTurn { turn_count, .. }
+                    | ConversationOutcome::StopHookPrevented { turn_count, .. },
+                ) => {
+                    tracing::info!(
+                        event = orch_events::TURN_STREAMING_COMPLETED,
+                        turn_count = *turn_count
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        event = orch_events::CONVERSATION_FAILED,
+                        reason = %err
+                    );
+                }
+            }
+            result
         })
-        .await;
-        self.emit_terminal_rate_limit_if_changed(&result).await;
-        let result = result.map_err(|e| self.enrich_api_error(e));
-        match &result {
-            Ok(
-                ConversationOutcome::EndTurn { turn_count, .. }
-                | ConversationOutcome::StopHookPrevented { turn_count, .. },
-            ) => {
-                tracing::info!(
-                    event = orch_events::TURN_STREAMING_COMPLETED,
-                    turn_count = *turn_count
-                );
-            }
-            Err(err) => {
-                tracing::error!(
-                    event = orch_events::CONVERSATION_FAILED,
-                    reason = %err
-                );
-            }
-        }
-        result
+        .await
     }
 
     /// Start a model turn solely to deliver completed async-hook responses.
@@ -3285,7 +3293,10 @@ impl ConversationOrchestrator {
         images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
     ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
-        self.run_turn_with_cancel_image_sources_and_message_id(prompt, images, cancel, None)
+        let future = {
+            self.run_turn_with_cancel_image_sources_and_message_id(prompt, images, cancel, None)
+        };
+        Box::pin(llm_runtime::catalog_task::scope(future))
     }
 
     pub(crate) fn run_turn_with_cancel_image_sources_and_message_id<'a>(
@@ -3295,54 +3306,60 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
         message_id: Option<MessageId>,
     ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
-        let prompt = prompt.into();
-        Box::pin(async move {
-            let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-                self.record_pre_admission_shutdown_interruption().await;
-                return Ok(TurnOutcome::Cancelled);
-            };
-            self.begin_turn_metrics();
-            let _activity_guard = self.main_loop_activity(true);
-            tracing::info!(
-                event = orch_events::CONVERSATION_STARTED,
-                prompt_len = prompt.string_at("").unwrap_or_default().len()
-            );
-            let result = crate::request_context::scope_if_missing(
-                self,
-                crate::server_fallback::scope_query_and_flush(
+        let future = {
+            let prompt = prompt.into();
+            Box::pin(async move {
+                let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                    self.record_pre_admission_shutdown_interruption().await;
+                    return Ok(TurnOutcome::Cancelled);
+                };
+                self.begin_turn_metrics();
+                let _activity_guard = self.main_loop_activity(true);
+                tracing::info!(
+                    event = orch_events::CONVERSATION_STARTED,
+                    prompt_len = prompt.string_at("").unwrap_or_default().len()
+                );
+                let result = crate::request_context::scope_if_missing(
                     self,
-                    telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
-                        self.scope_api_session(
-                            !self.prompt_is_interactive(),
-                            crate::turn_loop::boxed_turn_future(|| {
-                                self.try_run_turn_cancelable(
-                                    &prompt,
-                                    images,
-                                    message_id,
-                                    cancel.clone(),
-                                    None,
+                    crate::server_fallback::scope_query_and_flush(
+                        self,
+                        telemetry::otel::with_turn_span(
+                            "lingxi.orchestrator.turn.cancelable",
+                            async {
+                                self.scope_api_session(
+                                    !self.prompt_is_interactive(),
+                                    crate::turn_loop::boxed_turn_future(|| {
+                                        self.try_run_turn_cancelable(
+                                            &prompt,
+                                            images,
+                                            message_id,
+                                            cancel.clone(),
+                                            None,
+                                        )
+                                    }),
                                 )
-                            }),
-                        )
-                        .await
-                    }),
-                ),
-            )
-            .await;
-            let cleanup = crate::native_computer::cleanup(self).await;
-            let result = result.and_then(|outcome| cleanup.map(|()| outcome));
-            self.fire_mod_turn_complete(
-                cancel.is_cancelled()
-                    || result
-                        .as_ref()
-                        .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
-                result.is_err(),
-            )
-            .await;
-            self.emit_terminal_rate_limit_if_changed(&result).await;
-            self.complete_turn_metrics(None);
-            result.map_err(|e| self.enrich_api_error(e))
-        })
+                                .await
+                            },
+                        ),
+                    ),
+                )
+                .await;
+                let cleanup = crate::native_computer::cleanup(self).await;
+                let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+                self.fire_mod_turn_complete(
+                    cancel.is_cancelled()
+                        || result
+                            .as_ref()
+                            .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
+                    result.is_err(),
+                )
+                .await;
+                self.emit_terminal_rate_limit_if_changed(&result).await;
+                self.complete_turn_metrics(None);
+                result.map_err(|e| self.enrich_api_error(e))
+            })
+        };
+        Box::pin(llm_runtime::catalog_task::scope(future))
     }
 
     /// Deliver source-projected queued entries through the non-streaming turn
@@ -4023,26 +4040,29 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
         on_admitted: Box<dyn FnOnce() + Send + 'static>,
     ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
-        let prompt = prompt.into();
-        Box::pin(async move {
-            if in_human_turn {
-                self.reset_goal_interruption();
-            }
-            let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-                return Ok(TurnOutcome::Cancelled);
-            };
-            on_admitted();
-            self.run_turn_streaming_source_with_origin_locked(
-                &turn_guard,
-                prompt,
-                images,
-                cancel,
-                message_id,
-                in_human_turn,
-                row_token,
-            )
-            .await
-        })
+        let future = {
+            let prompt = prompt.into();
+            Box::pin(async move {
+                if in_human_turn {
+                    self.reset_goal_interruption();
+                }
+                let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                    return Ok(TurnOutcome::Cancelled);
+                };
+                on_admitted();
+                self.run_turn_streaming_source_with_origin_locked(
+                    &turn_guard,
+                    prompt,
+                    images,
+                    cancel,
+                    message_id,
+                    in_human_turn,
+                    row_token,
+                )
+                .await
+            })
+        };
+        Box::pin(llm_runtime::catalog_task::scope(future))
     }
 
     /// Deliver a queued batch as separate transcript messages in one model turn.

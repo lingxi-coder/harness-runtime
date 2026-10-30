@@ -1,4 +1,4 @@
-//! Public catalog delivery. No settings or credential store is written here.
+//! Shared, refreshable official provider catalog. User settings and credentials are separate.
 use fs2::FileExt;
 use lingxi_llm_client::{presets, protocol as wire};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock, RwLock, Weak},
     time::Duration,
 };
 
@@ -41,66 +41,320 @@ impl CatalogPlatform {
     }
 }
 
-/// One host-owned startup recipe. Clones share a settled snapshot, so settings
-/// refreshes and sibling sessions cannot silently revert to embedded defaults.
+/// Protocol and feature support compiled into this runtime. A publication can
+/// require these facts but cannot grant the binary a new implementation.
+pub const SCHEMA_VERSION: u32 = 2;
+/// Capability identifiers understood by this compiled runtime.
+pub const RUNTIME_CAPABILITIES: &[&str] = &[
+    "protocol.anthropic_messages",
+    "protocol.open_ai_responses",
+    "protocol.open_ai_chat",
+    "protocol.gemini_generate_content",
+    "protocol.gemini_interactions",
+    "protocol.bedrock_converse",
+    "protocol.bedrock_anthropic",
+    "protocol.vertex_gemini",
+    "protocol.vertex_anthropic",
+    "protocol.foundry_claude",
+    "auth.api_key",
+    "auth.bearer",
+    "auth.oauth",
+    "reasoning.effort.max",
+    "catalog.execution_definition.v1",
+];
+
+/// Host lifecycle signals. All timing and retry decisions live in Rust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogTrigger {
+    /// Initial application launch.
+    Startup,
+    /// The host became visible.
+    Foreground,
+    /// The host is no longer visible.
+    Background,
+    /// Foreground maintenance tick.
+    Timer,
+    /// A usable network path returned.
+    NetworkRestored,
+    /// The host lost its network path.
+    NetworkLost,
+    /// The provider/model settings page opened.
+    Settings,
+    /// The user requested an immediate refresh.
+    Manual,
+}
+
+impl std::str::FromStr for CatalogTrigger {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "startup" => Ok(Self::Startup),
+            "foreground" => Ok(Self::Foreground),
+            "background" => Ok(Self::Background),
+            "timer" => Ok(Self::Timer),
+            "network_restored" => Ok(Self::NetworkRestored),
+            "network_lost" => Ok(Self::NetworkLost),
+            "settings" => Ok(Self::Settings),
+            "manual" => Ok(Self::Manual),
+            _ => Err("invalid provider catalog trigger".into()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Shared {
+    snapshot: RwLock<Option<Arc<llm_runtime::BuiltinCatalog>>>,
+    refresh: tokio::sync::Mutex<()>,
+    timing: Mutex<Timing>,
+    updates: tokio::sync::watch::Sender<u64>,
+}
+#[derive(Debug)]
+struct Timing {
+    foreground: bool,
+    online: bool,
+    last_success: Option<std::time::Instant>,
+    retry_at: Option<std::time::Instant>,
+    failures: usize,
+    publication: Option<String>,
+}
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            snapshot: RwLock::new(None),
+            refresh: tokio::sync::Mutex::new(()),
+            timing: Mutex::new(Timing {
+                foreground: true,
+                online: true,
+                last_success: None,
+                retry_at: None,
+                failures: 0,
+                publication: None,
+            }),
+            updates: tokio::sync::watch::channel(0).0,
+        }
+    }
+}
+/// Clones and sibling sessions share one snapshot and one in-flight fetch.
 #[derive(Clone, Debug)]
 pub struct StartupCatalog {
     endpoint: String,
     platform: CatalogPlatform,
     app_version: String,
     cache_dir: PathBuf,
-    settled: Arc<tokio::sync::OnceCell<Arc<llm_runtime::BuiltinCatalog>>>,
+    shared: Arc<Shared>,
 }
 impl StartupCatalog {
-    /// Bind a catalog request and its private cache to this application owner.
+    /// Construct or join the directory owner for one platform, version and home.
     pub fn new(platform: CatalogPlatform, app_version: impl Into<String>, home: &Path) -> Self {
+        let app_version = app_version.into();
+        let cache_dir = home.join("cache/provider-catalog-v2");
+        static OWNERS: OnceLock<Mutex<BTreeMap<String, Weak<Shared>>>> = OnceLock::new();
+        let key = format!(
+            "{}\0{}\0{}",
+            cache_dir.display(),
+            platform.label(),
+            app_version
+        );
+        let mut owners = OWNERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        owners.retain(|_, owner| owner.strong_count() > 0);
+        let shared = owners.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+            let owner = Arc::new(Shared::default());
+            owners.insert(key, Arc::downgrade(&owner));
+            owner
+        });
         Self {
             endpoint: PUBLIC_ENDPOINT.into(),
             platform,
-            app_version: app_version.into(),
-            cache_dir: home.join("cache/model-catalog"),
-            settled: Arc::default(),
+            app_version,
+            cache_dir,
+            shared,
         }
     }
 
-    /// Settle the local snapshot while unrelated host startup runs. Dropping
-    /// the guard cancels this settling task; network refresh is always bounded.
+    /// A stable snapshot for an individual runtime/task. Updates replace the
+    /// shared Arc; existing owners retain their previous execution facts.
+    pub fn snapshot(&self) -> Arc<llm_runtime::BuiltinCatalog> {
+        if let Some(value) = self
+            .shared
+            .snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return value.clone();
+        }
+        let initial = Arc::new(
+            self.cached()
+                .map(|(_, p)| p.catalog)
+                .unwrap_or_else(|| self.embedded_catalog()),
+        );
+        let mut current = self
+            .shared
+            .snapshot
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        current.get_or_insert(initial).clone()
+    }
+    /// Subscribe to validated publication changes.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.shared.updates.subscribe()
+    }
+
+    /// Read the current local snapshot without waiting for the network.
+    pub async fn load(&self) -> Arc<llm_runtime::BuiltinCatalog> {
+        self.snapshot()
+    }
+
+    /// One application-owned guard keeps scheduled checks alive. No network is
+    /// performed while backgrounded; native lifecycle signals wake the service.
     pub fn prefetch(&self) -> CatalogRefreshGuard {
         let source = self.clone();
         CatalogRefreshGuard(tokio::spawn(async move {
-            source.load().await;
+            let _ = source.trigger(CatalogTrigger::Startup).await;
+            let jitter = u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 31;
+            loop {
+                tokio::time::sleep(Duration::from_secs(60 + jitter)).await;
+                let _ = source.trigger(CatalogTrigger::Timer).await;
+            }
         }))
     }
 
-    /// Settle once before constructing a runtime. Existing runtimes keep their
-    /// immutable request snapshot; no in-flight route or credential is changed.
-    pub async fn load(&self) -> Arc<llm_runtime::BuiltinCatalog> {
-        self.settled
-            .get_or_init(|| async {
-                let catalog = self
-                    .cached()
-                    .map(|(_, parsed)| parsed.catalog)
-                    .unwrap_or_else(llm_runtime::builtin_presets);
-                // Neither cold nor cached startup waits for the network. The
-                // selected snapshot remains immutable for this runtime owner.
-                let source = self.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = source.refresh().await {
-                        tracing::warn!(%error, "background official model catalog refresh failed");
-                    }
-                });
-                Arc::new(catalog)
-            })
-            .await
-            .clone()
+    /// Apply a lifecycle signal and perform a refresh only when policy allows.
+    pub async fn trigger(&self, trigger: CatalogTrigger) -> Result<bool, String> {
+        let _ = self.snapshot();
+        {
+            let mut timing = self.shared.timing.lock().unwrap_or_else(|e| e.into_inner());
+            if trigger == CatalogTrigger::Background {
+                timing.foreground = false;
+                return Ok(false);
+            }
+            if trigger == CatalogTrigger::Foreground {
+                timing.foreground = true;
+            }
+            if trigger == CatalogTrigger::NetworkLost {
+                timing.online = false;
+                return Ok(false);
+            }
+            if trigger == CatalogTrigger::NetworkRestored {
+                timing.online = true;
+            }
+            if !timing.online {
+                return Ok(false);
+            }
+            if !timing.foreground && trigger != CatalogTrigger::Manual {
+                return Ok(false);
+            }
+            let now = std::time::Instant::now();
+            let age = timing.last_success.map(|last| now.duration_since(last));
+            let interval = if trigger == CatalogTrigger::Settings {
+                900
+            } else {
+                3600
+            };
+            if trigger != CatalogTrigger::Manual {
+                if timing.retry_at.is_some_and(|next| now < next)
+                    && trigger != CatalogTrigger::NetworkRestored
+                {
+                    return Ok(false);
+                }
+                if timing.failures == 0
+                    && age.is_some_and(|age| age < Duration::from_secs(interval))
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        // Concurrent triggers join the first fetch instead of queuing downloads.
+        let Ok(_guard) = self.shared.refresh.try_lock() else {
+            return Ok(false);
+        };
+        fs::create_dir_all(&self.cache_dir).map_err(|e| e.to_string())?;
+        let fetch_lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.cache_path().with_extension("fetch-lock"))
+            .map_err(|e| e.to_string())?;
+        if fetch_lock.try_lock_exclusive().is_err() {
+            return Ok(false);
+        }
+        // A sibling process may already have refreshed the common cache.
+        if trigger != CatalogTrigger::Manual {
+            if let Some((saved, parsed)) = self
+                .cached()
+                .filter(|(saved, _)| unix_millis().saturating_sub(saved.checked_at) < 60_000)
+            {
+                let mut timing = self.shared.timing.lock().unwrap_or_else(|e| e.into_inner());
+                let changed = timing.publication.as_ref() != Some(&saved.body_sha256);
+                timing.publication = Some(saved.body_sha256);
+                timing.last_success = Some(std::time::Instant::now());
+                timing.failures = 0;
+                timing.retry_at = None;
+                drop(timing);
+                *self
+                    .shared
+                    .snapshot
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(parsed.catalog));
+                if changed {
+                    self.shared
+                        .updates
+                        .send_modify(|generation| *generation += 1);
+                }
+                return Ok(changed);
+            }
+        }
+        let generation = *self.shared.updates.borrow();
+        let result = self.fetch().await;
+        let mut timing = self.shared.timing.lock().unwrap_or_else(|e| e.into_inner());
+        match result {
+            Ok((catalog, publication)) => {
+                timing.last_success = Some(std::time::Instant::now());
+                timing.failures = 0;
+                timing.retry_at = None;
+                let publication = Some(publication);
+                let changed = timing.publication != publication;
+                timing.publication = publication;
+                drop(timing);
+                let catalog = Arc::new(catalog);
+                let mut current = self
+                    .shared
+                    .snapshot
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                *current = Some(catalog);
+                if changed {
+                    self.shared.updates.send_replace(generation + 1);
+                }
+                Ok(changed)
+            }
+            Err(error) => {
+                let minutes = [1, 5, 15, 60][timing.failures.min(3)];
+                timing.failures += 1;
+                timing.retry_at =
+                    Some(std::time::Instant::now() + Duration::from_secs(minutes * 60));
+                Err(error)
+            }
+        }
+    }
+
+    /// Perform an explicit user refresh while preserving the last valid snapshot on failure.
+    pub async fn refresh(&self) -> Result<llm_runtime::BuiltinCatalog, String> {
+        self.trigger(CatalogTrigger::Manual).await?;
+        Ok((*self.snapshot()).clone())
     }
 
     fn cache_path(&self) -> PathBuf {
         let key = format!(
-            "{}\0{}\0{}\01",
+            "{}\0{}\0{}\02\0{}",
             self.endpoint,
             self.platform.label(),
-            self.app_version
+            self.app_version,
+            RUNTIME_CAPABILITIES.join(",")
         );
         self.cache_dir
             .join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
@@ -133,9 +387,8 @@ impl StartupCatalog {
         Some((saved, parsed))
     }
 
-    /// Fetch, validate and cache a publication for the next runtime owner.
-    /// This explicit prewarm operation never replaces an already settled snapshot.
-    pub async fn refresh(&self) -> Result<llm_runtime::BuiltinCatalog, String> {
+    /// Fetch and validate a complete publication, preserving its ETag and checksum.
+    async fn fetch(&self) -> Result<(llm_runtime::BuiltinCatalog, String), String> {
         semver::Version::parse(&self.app_version).map_err(|_| "invalid application version")?;
         let url = reqwest::Url::parse(&self.endpoint).map_err(|_| "invalid catalog endpoint")?;
         if url.scheme() != "https"
@@ -155,15 +408,25 @@ impl StartupCatalog {
         let mut request = client.get(url).query(&[
             ("platform", self.platform.label()),
             ("appVersion", self.app_version.as_str()),
-            ("schemaVersion", "1"),
+            ("schemaVersion", "2"),
         ]);
+        request = request.query(
+            &RUNTIME_CAPABILITIES
+                .iter()
+                .map(|cap| ("capability", *cap))
+                .collect::<Vec<_>>(),
+        );
         if let Some(etag) = cached.as_ref().and_then(|(saved, _)| saved.etag.as_ref()) {
             request = request.header(reqwest::header::IF_NONE_MATCH, etag);
         }
         let mut response = request.send().await.map_err(|e| e.to_string())?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return cached
-                .map(|(_, parsed)| parsed.catalog)
+                .map(|(mut saved, parsed)| {
+                    saved.checked_at = unix_millis();
+                    let _ = self.save(&saved, parsed.published_at);
+                    (parsed.catalog, saved.body_sha256)
+                })
                 .ok_or_else(|| "304 without valid cache".into());
         }
         if response.status() != reqwest::StatusCode::OK {
@@ -202,7 +465,8 @@ impl StartupCatalog {
             app_version: self.app_version.clone(),
             etag,
             body,
-            body_sha256,
+            body_sha256: body_sha256.clone(),
+            checked_at: unix_millis(),
         };
         if let Err(error) = self.save(&saved, parsed.published_at) {
             tracing::warn!(%error, "could not cache official model catalog");
@@ -211,9 +475,15 @@ impl StartupCatalog {
             .cached()
             .filter(|(_, latest)| latest.published_at > parsed.published_at)
         {
-            return Ok(latest.catalog);
+            return Ok((
+                latest.catalog,
+                self.cached()
+                    .expect("latest cached catalog exists")
+                    .0
+                    .body_sha256,
+            ));
         }
-        Ok(parsed.catalog)
+        Ok((parsed.catalog, body_sha256))
     }
 
     fn save(&self, saved: &Cached, published_at: u64) -> Result<(), String> {
@@ -255,47 +525,105 @@ impl StartupCatalog {
     }
 }
 
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+/// Reassembles cloud execution facts with the original host-owned user
+/// configuration. Provider credentials are inherited from the running client.
+#[derive(Debug)]
+struct LiveRuntime {
+    source: StartupCatalog,
+    inputs: crate::AssembleInputs,
+    region: llm_runtime::Region,
+    cached: Mutex<Option<(u64, Arc<llm_runtime::ModelRuntime>)>>,
+}
+impl llm_runtime::client::ModelRuntimeSource for LiveRuntime {
+    fn current(&self, template: &llm_runtime::ModelRuntime) -> Arc<llm_runtime::ModelRuntime> {
+        let generation = *self.source.shared.updates.borrow();
+        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((revision, client)) = cached
+            .as_ref()
+            .filter(|(revision, _)| *revision == generation)
+        {
+            let _ = revision;
+            return client.with_owner_state(template);
+        }
+        let mut inputs = self.inputs.clone();
+        inputs.official_catalog = Some((*self.source.snapshot()).clone());
+        let mut assembled = crate::assemble_for_region(inputs, self.region);
+        if matches!(
+            self.source.platform,
+            CatalogPlatform::Android | CatalogPlatform::Ios
+        ) {
+            if let Some(enabled) = self
+                .inputs
+                .routing
+                .as_ref()
+                .and_then(|r| r.get("mobileEnabledProfiles"))
+            {
+                assembled.client_config.providers.retain(|p| {
+                    enabled.as_array().is_some_and(|ids| {
+                        ids.iter().any(|id| id.as_str() == Some(&p.profile_name))
+                    })
+                });
+            }
+        }
+        match template.reconfigured(assembled.client_config) {
+            Ok(client) => {
+                let client = Arc::new(client);
+                *cached = Some((generation, client.clone()));
+                client.with_owner_state(template)
+            }
+            Err(error) => {
+                tracing::error!(%error, "catalog execution projection failed");
+                cached
+                    .as_ref()
+                    .map(|(_, client)| client.with_owner_state(template))
+                    .unwrap_or_else(|| {
+                        Arc::new(
+                            template
+                                .reconfigured(
+                                    crate::assemble_for_region(self.inputs.clone(), self.region)
+                                        .client_config,
+                                )
+                                .expect("initial execution catalog was already validated"),
+                        )
+                    })
+            }
+        }
+    }
+}
+impl StartupCatalog {
+    /// Project directory publications into executable profiles while retaining user settings.
+    pub fn runtime_source(
+        &self,
+        inputs: crate::AssembleInputs,
+        region: llm_runtime::Region,
+    ) -> Arc<dyn llm_runtime::client::ModelRuntimeSource> {
+        Arc::new(LiveRuntime {
+            source: self.clone(),
+            inputs,
+            region,
+            cached: Mutex::new(None),
+        })
+    }
+}
+
 /// Owns a bounded background startup fetch, never an application-global task.
-pub struct CatalogRefreshGuard(tokio::task::JoinHandle<()>);
+pub struct CatalogRefreshGuard(
+    /// Background work aborted when its host owner is dropped.
+    pub tokio::task::JoinHandle<()>,
+);
 impl Drop for CatalogRefreshGuard {
     fn drop(&mut self) {
         self.0.abort();
     }
-}
-
-/// Choose a current route only when a previously built-in default was retired
-/// by the official snapshot. Custom models and ambiguous live routes are kept.
-pub fn retired_default(
-    configured: &str,
-    providers: &[llm_runtime::ProviderProfile],
-) -> Option<(String, String)> {
-    let matches = |profile: &llm_runtime::ProviderProfile| {
-        let qualified = configured.strip_prefix(&format!("{}/", profile.profile_name));
-        profile.models.iter().any(|model| {
-            std::iter::once(&model.request_model)
-                .chain(std::iter::once(&model.display_model))
-                .chain(model.aliases.iter())
-                .any(|id| id == configured || qualified == Some(id.as_str()))
-        })
-    };
-    if providers.iter().any(matches) {
-        return None;
-    }
-    let embedded = llm_runtime::builtin_presets();
-    let previous = embedded.providers.iter().find(|profile| matches(profile))?;
-    let provider = providers
-        .iter()
-        .find(|p| p.profile_name == previous.profile_name && !p.models.is_empty())
-        .or_else(|| {
-            providers
-                .iter()
-                .find(|p| p.profile_name != "openai-chatgpt" && !p.models.is_empty())
-        })
-        .or_else(|| providers.iter().find(|p| !p.models.is_empty()))?;
-    Some((
-        provider.models[0].request_model.clone(),
-        provider.profile_name.clone(),
-    ))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -307,6 +635,7 @@ struct Cached {
     etag: Option<String>,
     body: String,
     body_sha256: String,
+    checked_at: u64,
 }
 
 #[derive(Deserialize)]
@@ -329,7 +658,9 @@ struct Provider {
     enabled: bool,
     order: u32,
     regions: Vec<wire::Region>,
-    execution_definition: Option<Definition>,
+    execution_definition: Definition,
+    required_capabilities: Vec<String>,
+    default_model_id: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -345,7 +676,8 @@ struct Model {
     id: String,
     name: String,
     description: String,
-    enabled: bool,
+    status: ModelStatus,
+    required_capabilities: Vec<String>,
     order: u32,
     platforms: Vec<CatalogPlatform>,
     min_app_version: String,
@@ -357,6 +689,19 @@ struct Model {
     output_modalities: Vec<String>,
     pricing: Option<Price>,
 }
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ModelStatus {
+    Active,
+    Deprecated,
+    Disabled,
+}
+fn supports(required: &[String]) -> bool {
+    required
+        .iter()
+        .all(|c| RUNTIME_CAPABILITIES.contains(&c.as_str()))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Capabilities {
@@ -389,7 +734,7 @@ fn parse_catalog(
     }
     let app = semver::Version::parse(app_version).map_err(|_| "invalid application version")?;
     let mut doc: Document = serde_json::from_str(body).map_err(|e| e.to_string())?;
-    if doc.schema_version != 1
+    if doc.schema_version != SCHEMA_VERSION
         || doc.release_id.is_empty()
         || doc.providers.len() > 100
         || doc.models.len() > 5000
@@ -398,7 +743,8 @@ fn parse_catalog(
     }
     let mut identities = BTreeSet::new();
     for p in &doc.providers {
-        if p.id.is_empty() || !identities.insert(p.id.clone()) {
+        if p.id.is_empty() || p.id.len() > 64 || !p.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+            || !p.id.as_bytes()[0].is_ascii_alphanumeric() || !identities.insert(p.id.clone()) {
             return Err("duplicate or empty provider identity".into());
         }
     }
@@ -456,24 +802,26 @@ fn parse_catalog(
     }
     let mut profiles = Vec::new();
     for provider in &doc.providers {
-        if !provider.enabled {
+        if !supports(&provider.required_capabilities) {
             continue;
         }
-        let parsed = match &provider.execution_definition {
-            Some(definition) => {
-                if definition.format != "llm-client-preset-toml"
-                    || format!("{:x}", Sha256::digest(definition.source.as_bytes()))
-                        != definition.sha256
-                {
-                    return Err("invalid execution definition hash or format".into());
-                }
-                presets::parse_provider_definition(&provider.id, &definition.source)
-                    .map_err(|e| e.to_string())?
-            }
-            None => presets::builtin_provider_definition(&provider.id)
-                .map_err(|e| e.to_string())?
-                .ok_or("new provider requires a complete execution definition")?,
-        };
+        let definition = &provider.execution_definition;
+        if definition.format != "llm-client-preset-toml"
+            || format!("{:x}", Sha256::digest(definition.source.as_bytes())) != definition.sha256
+        {
+            return Err("invalid execution definition hash or format".into());
+        }
+        let parsed = presets::parse_provider_definition(&provider.id, &definition.source)
+            .map_err(|e| e.to_string())?;
+        if !provider
+            .required_capabilities
+            .contains(&format!("protocol.{}", provider.protocol))
+        {
+            return Err("provider must require its compiled protocol capability".into());
+        }
+        if !parsed.declared_models.contains(&provider.default_model_id) {
+            return Err("provider default is not declared".into());
+        }
         let mut profile = parsed.profile;
         let protocol = serde_json::to_value(profile.protocol).map_err(|e| e.to_string())?;
         if protocol.as_str() != Some(provider.protocol.as_str()) {
@@ -503,7 +851,7 @@ fn parse_catalog(
                 .transpose()
                 .map_err(|e| e.to_string())?;
             // Build metadata does not affect SemVer precedence.
-            if !row.enabled
+            if !supports(&row.required_capabilities)
                 || !row.platforms.contains(&platform)
                 || app.cmp_precedence(&min).is_lt()
                 || max
@@ -520,6 +868,13 @@ fn parse_catalog(
                 .cloned()
             else {
                 continue;
+            };
+            model.metadata.status = if !provider.enabled || row.status == ModelStatus::Disabled {
+                Some("disabled".into())
+            } else if row.status == ModelStatus::Deprecated {
+                Some("deprecated".into())
+            } else {
+                None
             };
             model.display_model = row.name.clone();
             model.description = Some(row.description.clone());
@@ -555,6 +910,15 @@ fn parse_catalog(
             }
             selected.push(model);
         }
+        // Put the published default first only when it survives capability and
+        // platform filtering. Never rewrite the user's configured selection.
+        if let Some(index) = selected
+            .iter()
+            .position(|m| m.request_model == provider.default_model_id)
+        {
+            let default = selected.remove(index);
+            selected.insert(0, default);
+        }
         profile.models = selected;
         profiles.push(profile);
     }
@@ -564,17 +928,6 @@ fn parse_catalog(
             model.metadata.catalog_offered = true;
         }
     }
-    // Sign-in is a host-owned connection, independent of the public OpenAI API
-    // inventory and its platform/version availability rules.
-    catalog
-        .providers
-        .retain(|p| p.profile_name != "openai-chatgpt");
-    catalog.providers.extend(
-        llm_runtime::builtin_presets()
-            .providers
-            .into_iter()
-            .filter(|p| p.profile_name == "openai-chatgpt"),
-    );
     llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
         providers: catalog.providers.clone(),
     })
@@ -583,6 +936,18 @@ fn parse_catalog(
         catalog,
         published_at: doc.published_at,
     })
+}
+
+impl StartupCatalog {
+    fn embedded_catalog(&self) -> llm_runtime::BuiltinCatalog {
+        parse_catalog(
+            include_str!("../data/official-catalog.json"),
+            self.platform,
+            &self.app_version,
+        )
+        .expect("compiled official catalog must be validated")
+        .catalog
+    }
 }
 
 #[cfg(test)]

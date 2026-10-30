@@ -654,18 +654,17 @@ pub(super) async fn build_mobile_inner_with_ask(
         .as_ref()
         .map(|catalog| provider_catalog_from_profiles(catalog.providers.clone()))
         .unwrap_or_else(builtin_provider_catalog);
-    let mut assembled = provider_config::assemble_for_region(
-        provider_config::AssembleInputs {
-            official_catalog,
-            anthropic_api_base: cfg.api_base.clone(),
-            anthropic_models: anthropic_models(&cfg.default_model),
-            anthropic_has_api_key: has_api_key,
-            anthropic_has_oauth: has_anthropic_oauth,
-            user_providers: provider_settings.providers.unwrap_or_default(),
-            routing: provider_settings.routing.clone(),
-        },
-        provider_region,
-    );
+    let catalog_inputs = provider_config::AssembleInputs {
+        official_catalog,
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: anthropic_models(&cfg.default_model),
+        anthropic_has_api_key: has_api_key,
+        anthropic_has_oauth: has_anthropic_oauth,
+        user_providers: provider_settings.providers.unwrap_or_default(),
+        routing: provider_settings.routing.clone(),
+    };
+    let mut assembled =
+        provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
     let full_provider_model_catalog =
         provider_model_catalog_from_listings(&model_listings(&assembled.client_config.providers));
     apply_mobile_profile_allowlist(&mut assembled, provider_settings.routing.as_ref());
@@ -709,6 +708,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     let model_resolution_client_config = assembled.client_config.clone();
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-runtime config: {e}")))?;
+    if let Some(source) = &cfg.startup_catalog {
+        client = client.with_catalog_source(source.runtime_source(catalog_inputs, provider_region));
+    }
     // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
     // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
     // Swift; API-key profiles retain the existing keychain → env fallback.
@@ -3309,6 +3311,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     Ok(MobileRuntime {
         session_cwd,
         provider_catalog,
+        official_catalog: cfg.startup_catalog.clone(),
+        catalog_refresh: _catalog_refresh,
+        catalog_observer: StdMutex::new(None),
         plugin_archive_session,
         side_chat_factory,
         app_agent_factory,
@@ -4208,6 +4213,26 @@ fn build_mobile_engine_on_worker(
         firer_cfg,
         firer_platform,
     });
+    if let Some(source) = &handle.inner.official_catalog {
+        let mut updates = source.subscribe();
+        let weak = Arc::downgrade(&handle);
+        let task = handle.runtime().spawn(async move {
+            while updates.changed().await.is_ok() {
+                let Some(handle) = weak.upgrade() else {
+                    break;
+                };
+                handle
+                    .emit_listing(client::protocol::commands::ListingKindDto::Models)
+                    .await;
+            }
+        });
+        *handle
+            .inner
+            .catalog_observer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            Some(provider_config::startup_catalog::CatalogRefreshGuard(task));
+    }
     let _ = queued_slash_handle.set(Arc::downgrade(&handle));
     if !app_agent_host {
         // This runs on every scope switch / reconnect within one process, not

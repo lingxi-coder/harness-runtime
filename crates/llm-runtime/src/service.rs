@@ -1623,10 +1623,6 @@ pub struct ApiService {
     /// Subsequent rungs are scaled proportionally (`DEFAULT[i] * b/500`).
     /// Jitter ±20% still applies.
     settings_backoff_ms: Option<u64>,
-    /// Available model ids from the client registry (for `available_models`).
-    available_model_ids: Vec<String>,
-    /// Full provider-specific model listings for rich picker surfaces.
-    model_listings: Vec<crate::ModelListing>,
     /// Native `hQ` (`Ta(midConversationSystem, model, TF(model))`) memoized
     /// decisions. The service is host-scoped; each entry keeps the raw model
     /// key, partitioned by resolved provider/profile because one Harness
@@ -2365,7 +2361,7 @@ impl ApiService {
     }
 
     pub fn uses_deepseek_web(&self, model: &str, profile: Option<&str>) -> bool {
-        self.client.deepseek_web_profile(model, profile).is_some()
+        self.client().deepseek_web_profile(model, profile).is_some()
     }
 
     async fn deepseek_web_client(
@@ -2382,7 +2378,7 @@ impl ApiService {
         let started = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_secs(60);
         let profile = self
-            .client
+            .client()
             .deepseek_web_profile(model, profile)
             .ok_or_else(|| LlmError::UnsupportedCapability {
                 capability: "independent DeepSeek web APIs require a first-party route".into(),
@@ -2390,7 +2386,7 @@ impl ApiService {
         let services = self
             .independent_web_services
             .get_or_init(|| {
-                self.client
+                self.client()
                     .provider_services(
                         lingxi_llm_client::protocol::Region::International,
                         self.transport.clone(),
@@ -2411,7 +2407,7 @@ impl ApiService {
             credential: Some(
                 tokio::time::timeout(
                     timeout.saturating_sub(started.elapsed()),
-                    self.client.service_credential(&profile),
+                    self.client().service_credential(&profile),
                 )
                 .await
                 .map_err(|_| LlmError::TransportTimeout {
@@ -2460,10 +2456,10 @@ impl ApiService {
         model: &str,
         profile: Option<&str>,
     ) -> Result<crate::ResolvedRoute, LlmError> {
-        self.client.hosted_search_route(model, profile)
+        self.client().hosted_search_route(model, profile)
     }
     pub fn uses_codex_standalone_search(&self, model: &str, profile: Option<&str>) -> bool {
-        self.client
+        self.client()
             .search_profile(model, profile)
             .is_some_and(lingxi_llm_client::providers::openai::codex_search::supports)
     }
@@ -2483,7 +2479,7 @@ impl ApiService {
         let Ok(route) = self.hosted_search_route(model, profile) else {
             return false;
         };
-        self.client
+        self.client()
             .search_profile(model, profile)
             .is_some_and(|profile| {
                 lingxi_llm_client::hosted_search::supports_model_with_config(
@@ -2494,7 +2490,7 @@ impl ApiService {
             })
     }
     pub fn hosted_search_max_uses(&self, model: &str, profile: Option<&str>) -> Option<u32> {
-        self.client
+        self.client()
             .search_profile(model, profile)
             .filter(|p| {
                 p.extra
@@ -2770,7 +2766,7 @@ impl ApiService {
         model: &str,
         profile: Option<&str>,
     ) -> Result<crate::ProtocolFamily, LlmError> {
-        self.client.protocol_for_model(model, profile)
+        self.client().protocol_for_model(model, profile)
     }
 
     /// Account epoch used to fence model-validation probes. This is the
@@ -2821,18 +2817,17 @@ impl ApiService {
         profile: Option<&str>,
         model_source_units: &[u16],
     ) -> Option<FoundryDeploymentKey> {
-        if self.client.protocol_for_model(model, profile).ok()?
+        if self.client().protocol_for_model(model, profile).ok()?
             != crate::ProtocolFamily::FoundryClaude
         {
             return None;
         }
-        let route = self.client.resolve_media_route(model, profile).ok()?.main;
+        let route = self.client().resolve_media_route(model, profile).ok()?.main;
         if route.provider_id != crate::ProviderId::FoundryClaude {
             return None;
         }
-        let selected_profile = self
-            .client
-            .search_profile(model, Some(&route.profile_name))?;
+        let client = self.client();
+        let selected_profile = client.search_profile(model, Some(&route.profile_name))?;
         Some(FoundryDeploymentKey {
             endpoint: native_foundry_deployment_endpoint(&selected_profile.base_url),
             model: native_foundry_model_key(model_source_units),
@@ -2942,7 +2937,7 @@ impl ApiService {
         if !Self::is_anthropic_family_protocol(&protocol) {
             return false;
         }
-        let Ok(route) = self.client.resolve_media_route(model, profile) else {
+        let Ok(route) = self.client().resolve_media_route(model, profile) else {
             return false;
         };
         let cache_key = (
@@ -2975,7 +2970,7 @@ impl ApiService {
         profile: Option<&str>,
     ) -> Option<bool> {
         let protocol = self.protocol_for_model(model, profile).ok()?;
-        let route = self.client.resolve_media_route(model, profile).ok()?.main;
+        let route = self.client().resolve_media_route(model, profile).ok()?.main;
         let route_admitted = match protocol {
             crate::ProtocolFamily::AnthropicMessages => {
                 route.provider_id == crate::ProviderId::AnthropicFirstParty
@@ -3038,11 +3033,11 @@ impl ApiService {
         capability: &str,
     ) -> Result<Option<bool>, LlmError> {
         let route = self
-            .client
+            .client()
             .resolve_media_route(&request.input.model, request.profile.as_deref())?
             .main;
         let protocol = self
-            .client
+            .client()
             .protocol_for_model(&request.input.model, Some(&route.profile_name))?;
         if !is_native_main_anthropic_route(&route.provider_id, protocol) {
             return Ok(None);
@@ -3120,8 +3115,8 @@ impl ApiService {
             .payload_at("/stream")
             .unwrap_or_else(|| usage.provider_metadata.clone());
         let observed_profile = provider_metadata.string_at("/llm_client/executed_profile");
-        let route = self.client.resolve_media_route(model, profile)?.main;
-        let profiles = self.client.provider_service_profiles();
+        let route = self.client().resolve_media_route(model, profile)?.main;
+        let profiles = self.client().provider_service_profiles();
         let Some(connection) = profiles
             .iter()
             .find(|p| p.profile_name == route.profile_name)
@@ -3195,8 +3190,8 @@ impl ApiService {
         output_tokens: Option<u32>,
         service_tier: Option<lingxi_llm_client::protocol::ServiceTier>,
     ) -> Result<crate::ResolvedContext, LlmError> {
-        let route = self.client.resolve_media_route(model, profile)?.main;
-        let profiles = self.client.provider_service_profiles();
+        let route = self.client().resolve_media_route(model, profile)?.main;
+        let profiles = self.client().provider_service_profiles();
         let connection = profiles
             .iter()
             .find(|p| p.profile_name == route.profile_name)
@@ -3283,7 +3278,7 @@ impl ApiService {
         let mut counted = request.clone();
         counted.profile = Some(context.profile_name.clone());
         let exact = crate::model::count_tokens::try_count_tokens_exact(
-            self.client.as_ref(),
+            self.client().as_ref(),
             self.transport.clone(),
             &counted,
         )
@@ -3296,7 +3291,7 @@ impl ApiService {
         model: &str,
         profile: Option<&str>,
     ) -> Result<MediaRoute, LlmError> {
-        self.client.resolve_media_route(model, profile)
+        self.client().resolve_media_route(model, profile)
     }
 
     /// Redacted source from the selected route's host credential resolver.
@@ -3305,7 +3300,7 @@ impl ApiService {
         model: &str,
         profile: Option<&str>,
     ) -> Result<crate::CredentialSource, LlmError> {
-        self.client.credential_source(model, profile).await
+        self.client().credential_source(model, profile).await
     }
 
     /// Resolve classifier model gates while fencing credential reads against
@@ -3318,7 +3313,7 @@ impl ApiService {
         for _ in 0..2 {
             let epoch = self.prompt_cache_overage.account_epoch();
             let mut facts = self
-                .client
+                .client()
                 .classifier_model_route_facts(model, profile)
                 .await?;
             let assume_first_party_base_url = self
@@ -3341,7 +3336,7 @@ impl ApiService {
         model: &str,
         profile: Option<&str>,
     ) -> Result<bool, LlmError> {
-        self.client.is_first_party_route(model, profile)
+        self.client().is_first_party_route(model, profile)
     }
 
     fn apply_side_query_thinking(
@@ -3498,7 +3493,6 @@ impl ApiService {
         settings_backoff_ms: Option<u64>,
     ) -> Self {
         let models = client.available_models();
-        let available_model_ids = models.iter().map(|m| m.display_model.clone()).collect();
         // Build alias→display map once so configured model fallback can
         // normalize an alias request to the display model before looking up
         // per-model fallback overrides (whose keys are display-normalized).
@@ -3561,8 +3555,6 @@ impl ApiService {
             alias_to_display,
             settings_max_retries,
             settings_backoff_ms,
-            available_model_ids,
-            model_listings: models,
             native_mid_conversation_system_cache: Mutex::new(Default::default()),
             estimator,
             last_rate_limit: Mutex::new(None),
@@ -3591,7 +3583,7 @@ impl ApiService {
     #[must_use]
     pub fn fork_independent(&self) -> Self {
         let mut child = Self::new_with_routing(
-            self.client.clone(),
+            self.client().clone(),
             self.transport.clone(),
             self.subscriber,
             self.ua.clone(),
@@ -3821,10 +3813,10 @@ impl ApiService {
 
     /// Current route/model Fast gate, without authentication or transport.
     pub fn fast_model_allowed(&self, model: &str, profile: Option<&str>) -> Result<bool, LlmError> {
-        if !self.client.fast_model_allowed(model, profile)? {
+        if !self.client().fast_model_allowed(model, profile)? {
             return Ok(false);
         }
-        let account = self.client.fast_account_identity(model, profile)?;
+        let account = self.client().fast_account_identity(model, profile)?;
         let policy = (self.fast_policy)()?;
         let (org, oauth) = self.fast_availability.observed(&account.profile, &policy);
         let inputs = policy.inputs(&account, org, oauth, !self.interactive_session_for_policy());
@@ -3872,21 +3864,22 @@ impl ApiService {
         model: &str,
         profile: Option<&str>,
     ) -> Result<(), LlmError> {
-        let identity = self.client.fast_account_identity(model, profile)?;
+        let identity = self.client().fast_account_identity(model, profile)?;
         let policy = (self.fast_policy)()?;
         if identity.first_party
             && !policy.no_user_account
             && !crate::structured_output::bool_environment(branding::DISABLE_FAST_MODE_ENV)
         {
             let account = self
-                .client
+                .client()
                 .load_fast_account(model, profile)
                 .await
                 .unwrap_or(identity);
             let ua = user_agent(&self.ua, &self.version);
             self.fast_availability
-                .refresh(&account, &policy, self.transport.as_ref(), &ua, || {
-                    self.client.refresh_fast_account(&account)
+                .refresh(&account, &policy, self.transport.as_ref(), &ua, || async {
+                    let client = self.client();
+                    client.refresh_fast_account(&account).await
                 })
                 .await;
             return self.validate_fast_snapshot(&account, &policy);
@@ -3924,7 +3917,7 @@ impl ApiService {
         request.profile = profile.map(str::to_owned);
         request.execution.resolve_native_effort = true;
         self.refresh_effort_settings(&mut request)?;
-        self.client.effort_command_snapshot(&request)
+        self.client().effort_command_snapshot(&request)
     }
 
     fn refresh_effort_settings(&self, request: &mut LlmRequest) -> Result<(), LlmError> {
@@ -4223,7 +4216,7 @@ impl ApiService {
     ) -> Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText> {
         use lingxi_llm_client::providers::anthropic::system_prompt as prompt_cache;
 
-        let route_profile = self.client.prompt_cache_profile(model, profile);
+        let route_profile = self.client().prompt_cache_profile(model, profile);
         let policy = prompt_cache::CachePolicy::from_process(
             lingxi_core::host::compliance_taints::is_tainted("hipaa"),
             agent_prompt_cache_ttl_override(),
@@ -4701,7 +4694,7 @@ impl ApiService {
     fn enforce_fast_route(&self, prepared: &mut crate::PreparedLlmCall) -> Result<(), LlmError> {
         let route = &prepared.route.resolved_route;
         let admitted = match self
-            .client
+            .client()
             .fast_account_identity(&route.request_model, Some(&route.profile_name))
         {
             Ok(account) => {
@@ -4809,7 +4802,7 @@ impl ApiService {
         {
             return false;
         }
-        let Some(profile) = self.client.prompt_cache_profile(
+        let Some(profile) = self.client().prompt_cache_profile(
             &prepared.route.resolved_route.request_model,
             Some(&prepared.route.resolved_route.profile_name),
         ) else {
@@ -4835,15 +4828,15 @@ impl ApiService {
             .native_anthropic_api_base_url
             .as_deref()
             .unwrap_or(NATIVE_ANTHROPIC_FIRST_PARTY_BASE_URL);
-        let route = self.client.resolve_media_route(model, profile).ok()?.main;
+        let route = self.client().resolve_media_route(model, profile).ok()?.main;
         if route.provider_id != crate::ProviderId::AnthropicFirstParty
-            || self.client.protocol_for_model(model, profile).ok()
+            || self.client().protocol_for_model(model, profile).ok()
                 != Some(crate::ProtocolFamily::AnthropicMessages)
         {
             return None;
         }
         let selected_profile = self
-            .client
+            .client()
             .prompt_cache_profile(model, Some(&route.profile_name))?;
         (selected_profile.base_url.trim_end_matches('/')
             == configured_base_url.trim_end_matches('/'))
@@ -4853,7 +4846,7 @@ impl ApiService {
     }
 
     fn native_api_system_route(&self, model: &str, profile: Option<&str>) -> bool {
-        self.client.native_api_system_route(model, profile)
+        self.client().native_api_system_route(model, profile)
             && self
                 .native_anthropic_endpoint_fingerprint(model, profile)
                 .is_some()
@@ -4861,7 +4854,7 @@ impl ApiService {
 
     fn native_per_turn_effort_route(&self, model: &str, profile: Option<&str>) -> bool {
         self.native_api_system_route(model, profile)
-            || self.client.protocol_for_model(model, profile).ok()
+            || self.client().protocol_for_model(model, profile).ok()
                 == Some(crate::ProtocolFamily::FoundryClaude)
     }
 
@@ -4877,11 +4870,11 @@ impl ApiService {
         if query_source_category(Some(source)) != Some(QuerySourceCategory::Main) {
             return false;
         }
-        self.client
+        self.client()
             .resolve_media_route(model, profile)
             .ok()
             .is_some_and(|route| {
-                self.client
+                self.client()
                     .protocol_for_model(model, Some(&route.main.profile_name))
                     .ok()
                     .is_some_and(|protocol| {
@@ -5172,7 +5165,7 @@ impl ApiService {
             == Some(ProviderRoute::FirstParty)
         {
             let route_base_url = self
-                .client
+                .client()
                 .prompt_cache_profile(
                     &prepared.route.resolved_route.request_model,
                     Some(&prepared.route.resolved_route.profile_name),
@@ -5342,12 +5335,12 @@ impl ApiService {
         }
 
         let route = self
-            .client
+            .client()
             .resolve_media_route(&request.input.model, request.profile.as_deref())?
             .main;
         let profile_name = route.profile_name.clone();
         let protocol = self
-            .client
+            .client()
             .protocol_for_model(&request.input.model, Some(&profile_name))?;
         if !is_native_main_anthropic_route(&route.provider_id, protocol) {
             return Ok(());
@@ -5428,7 +5421,7 @@ impl ApiService {
         }
 
         let resolved_output = self
-            .client
+            .client()
             .resolve_output_budget_in(
                 &request.input.model,
                 Some(&profile_name),
@@ -5439,7 +5432,7 @@ impl ApiService {
                 message: "Native Claude request has no resolved output-token budget".into(),
             })?;
         let selected_model_upper_limit = self
-            .client
+            .client()
             .output_token_limits_in(&request.input.model, Some(&profile_name))?
             .max_output_tokens;
         let budget = state.native_enabled_budget(resolved_output, selected_model_upper_limit);
@@ -7886,7 +7879,10 @@ impl ApiService {
                     req.execution.resolve_native_effort = true;
                 }
                 self.ensure_context_fit(&req).await?;
-                let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
+                let request_client = self.client();
+                let mut prepared = request_client
+                    .prepare_on(&req, self.transport.clone())
+                    .await?;
                 prepared.native_thinking_binding_controls_attempt = native_tbc_attempt.clone();
                 if suppress_context_1m_for_retry {
                     Self::remove_context_1m_beta(&mut prepared);
@@ -7896,7 +7892,7 @@ impl ApiService {
                 Self::log_deepseek_prepared_request(&req.input.model, &prepared, false);
                 let (dispatch_attempt, server_fallback_parameter_added) =
                     self.inject_headers(&mut prepared, dispatch)?;
-                self.client.seal_prepared(&mut prepared).await?;
+                request_client.seal_prepared(&mut prepared).await?;
                 Ok((prepared, dispatch_attempt, server_fallback_parameter_added))
             };
             let prepared = match timeout {
@@ -8463,7 +8459,7 @@ impl ApiService {
                                     Self::captured_request_credential(&req, profile)
                                 {
                                     if let Some(refreshed) = self
-                                        .client
+                                        .client()
                                         .refresh_rejected_anthropic_oauth(
                                             &req.input.model,
                                             Some(profile),
@@ -9330,8 +9326,12 @@ impl ApiService {
             false,
             PromptCacheQuerySource::Unspecified,
         )?;
-        crate::model::count_tokens::count_tokens(self.client.as_ref(), self.transport.clone(), &req)
-            .await
+        crate::model::count_tokens::count_tokens(
+            self.client().as_ref(),
+            self.transport.clone(),
+            &req,
+        )
+        .await
     }
 
     /// Return an exact provider token count when the resolved route supports
@@ -9359,11 +9359,15 @@ impl ApiService {
             PromptCacheQuerySource::Unspecified,
         )?;
         crate::model::count_tokens::try_count_tokens_exact(
-            self.client.as_ref(),
+            self.client().as_ref(),
             self.transport.clone(),
             &req,
         )
         .await
+    }
+
+    fn client(&self) -> Arc<ModelRuntime> {
+        crate::catalog_task::client(&self.client)
     }
 
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s list
@@ -9372,13 +9376,17 @@ impl ApiService {
     /// `OrchestratorApiClient::available_models`.
     #[must_use]
     pub fn available_models(&self) -> Vec<String> {
-        self.available_model_ids.clone()
+        self.client()
+            .available_models()
+            .into_iter()
+            .map(|m| m.display_model)
+            .collect()
     }
 
     /// Enumerate full provider-specific model metadata for picker surfaces.
     #[must_use]
     pub fn model_listings(&self) -> Vec<crate::ModelListing> {
-        self.model_listings.clone()
+        self.client().available_models()
     }
 
     /// Capture the configured pricing policy for one exact provider profile.
@@ -9386,7 +9394,7 @@ impl ApiService {
     /// declarations. It exposes no credentials and does not resolve a price.
     #[must_use]
     pub fn profile_pricing_config(&self, profile: &str) -> Option<crate::PricingConfig> {
-        self.client.profile_pricing_config(profile)
+        self.client().profile_pricing_config(profile)
     }
 
     /// Conservative rate ceilings for a model with contextual or scheduled prices.
@@ -9395,7 +9403,7 @@ impl ApiService {
         &self,
         route: &crate::ResolvedRoute,
     ) -> Result<Option<crate::AttemptPriceBounds>, LlmError> {
-        self.client.attempt_price_bounds(route)
+        self.client().attempt_price_bounds(route)
     }
 
     // ── OpenAI Responses WebSocket preconnect ────────────────────────────────
@@ -9414,7 +9422,7 @@ impl ApiService {
         request.profile = profile.map(str::to_string);
         request.stream = true;
         let mut session = self.responses_ws_session.lock().await;
-        self.client
+        self.client()
             .preconnect_websocket(&request, self.transport.clone(), &mut session)
             .await
     }
@@ -9437,7 +9445,7 @@ impl ApiService {
 
     /// Check startup prewarm eligibility before assembling the prompt and tools.
     pub fn supports_responses_websocket_prewarm(&self, model: &str, profile: Option<&str>) -> bool {
-        self.client
+        self.client()
             .supports_responses_websocket(model, profile)
             .unwrap_or(false)
     }
@@ -9468,12 +9476,15 @@ impl ApiService {
         )?;
         self.refresh_effort_settings(&mut req)?;
         req.execution.resolve_native_effort = true;
-        let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
+        let request_client = self.client();
+        let mut prepared = request_client
+            .prepare_on(&req, self.transport.clone())
+            .await?;
         // Responses-WebSocket prewarm only — never a first-party Anthropic
         // route, so the dispatch gate is inert here.
         self.inject_stream_headers(&mut prepared, DispatchHeaderState::default())?;
         let mut session = self.responses_ws_session.lock().await;
-        self.client
+        request_client
             .prewarm_prepared_websocket(prepared, self.transport.clone(), &mut session)
             .await
     }
@@ -9617,7 +9628,11 @@ impl ApiService {
             self.refresh_effort_settings(&mut req)?;
             req.execution.resolve_native_effort = true;
             self.ensure_context_fit(&req).await?;
-            let mut prepared = match self.client.prepare_on(&req, self.transport.clone()).await {
+            let request_client = self.client();
+            let mut prepared = match request_client
+                .prepare_on(&req, self.transport.clone())
+                .await
+            {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };
@@ -9680,7 +9695,7 @@ impl ApiService {
                 let preparing = tokio::time::Instant::now();
                 let prepared = crate::execution::first_byte_bound(
                     first_byte_timeout,
-                    self.client
+                    request_client
                         .prepare_shared_stream(prepared, responses_ws_session),
                 )
                 .await?;
@@ -9706,7 +9721,7 @@ impl ApiService {
                             message: "host rejected request dispatch admission".into(),
                         });
                     }
-                    self.client
+                    request_client
                         .open_shared_stream(prepared, responses_ws_session, &mut || {
                             if admission
                                 .as_ref()
@@ -11319,7 +11334,7 @@ impl ApiService {
 
         let mut msgs = msgs;
         let family = self
-            .client
+            .client()
             .protocol_for_model(model, profile)
             .ok()
             .unwrap_or(lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages);
@@ -11390,7 +11405,7 @@ impl ApiService {
                 admitted.set_effort(Some(effort))?;
             }
             if let Some(effort) = self
-                .client
+                .client()
                 .native_per_turn_effort_policy(&admitted)?
                 .filter(|policy| policy.supported)
                 .and_then(|policy| policy.value)

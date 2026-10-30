@@ -421,6 +421,7 @@ define_client_command! {
     // [`ModelList`](crate::protocol::events::ClientEvent::ModelList) event.
     ListModels,
 
+
     // ── Slash commands ────────────────────────────────────────────────────
     // Run a raw slash-command line. Local/display commands reply with
     // [`crate::protocol::events::ClientEvent::SlashCommandResult`]; prompt-expanding
@@ -929,6 +930,12 @@ define_client_command! {
     UpdateMediaSessionModes {
         modes: Vec<MediaSessionModeDto>,
     },
+
+    // App lifecycle or user refresh for the shared official provider directory.
+    RefreshProviderCatalog {
+        // startup, foreground, background, timer, network_restored, settings, manual.
+        trigger: String,
+    },
 }
 
 impl From<ClientCommandWire> for ClientCommand {
@@ -1032,6 +1039,9 @@ impl From<ClientCommandWire> for ClientCommand {
             },
             ClientCommandWire::SetModel { model } => Self::SetModel { model },
             ClientCommandWire::ListModels => Self::ListModels,
+            ClientCommandWire::RefreshProviderCatalog { trigger } => {
+                Self::RefreshProviderCatalog { trigger }
+            }
             ClientCommandWire::RunSlashCommand {
                 raw,
                 images,

@@ -197,9 +197,7 @@ pub fn catalog_from_profiles(profiles: Vec<wire::ProviderProfile>) -> BuiltinCat
             "gpt-6.1-sol",
             "gpt-6-sol",
             "gpt-6-luna",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
+            "gpt-6.1-terra",
         ];
         chatgpt
             .models

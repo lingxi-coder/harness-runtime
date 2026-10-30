@@ -175,6 +175,22 @@ impl ModelRegistry {
         }
     }
 
+    pub(crate) fn configuration(&self) -> &ClientConfig {
+        &self.config
+    }
+    pub(crate) fn model_disabled(&self, route: &ResolvedRoute) -> bool {
+        self.config
+            .providers
+            .iter()
+            .find(|p| p.profile_name == route.profile_name)
+            .and_then(|p| {
+                p.models
+                    .iter()
+                    .find(|m| m.request_model == route.request_model)
+            })
+            .is_some_and(|m| m.metadata.status.as_deref() == Some("disabled"))
+    }
+
     /// Build a registry from validated client config.
     pub fn from_config(config: ClientConfig) -> Result<Self, LlmError> {
         if config

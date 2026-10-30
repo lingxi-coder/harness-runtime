@@ -267,6 +267,9 @@ pub struct ModelDetailsDto {
 #[allow(missing_docs)]
 pub struct ProviderModelCatalogEntryDto {
     pub provider_id: String,
+    /// Complete official connection metadata. Derived user listings can omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<ProviderDirectoryDefinitionDto>,
     pub provider_label: String,
     pub models: Vec<ModelDetailsDto>,
     /// Vendor this entry is one connection of. `None` ⇒ it stands alone.
@@ -275,6 +278,19 @@ pub struct ProviderModelCatalogEntryDto {
     /// This connection's id within `group` (`"cn"`, `"intl"`, `"coding"`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+}
+
+/// Non-secret provider setup facts delivered with the official directory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[allow(missing_docs)]
+pub struct ProviderDirectoryDefinitionDto {
+    pub base_url: String,
+    pub protocol: String,
+    pub auth: String,
+    pub credential_env: Option<String>,
+    pub default_model_id: String,
+    pub description: String,
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────────────
