@@ -18,7 +18,7 @@ impl DesktopBuiltinSkillPromptFn {
 
 impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
     fn skip_shell_expansion(&self) -> bool {
-        matches!(self.name, "lingxi-api" | "docs")
+        matches!(self.name, "lingxi-api" | "document-authoring")
     }
 
     fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
@@ -34,7 +34,10 @@ mod tests {
     #[test]
     fn slash_bodies_share_the_registered_skill_source() {
         for (name, expected_marker) in [
-            ("docs", format!("Documents in {}", branding::PRODUCT_NAME)),
+            (
+                "document-authoring",
+                format!("Document authoring in {}", branding::PRODUCT_NAME),
+            ),
             (
                 "lingxi-api",
                 format!("{} API guide", branding::PRODUCT_NAME),

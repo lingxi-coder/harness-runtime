@@ -871,7 +871,10 @@ mod tests {
         let registry = Arc::new(RwLock::new(reg));
         for mode in [SessionMode::Chat, SessionMode::Code] {
             let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
-            for (name, args) in [("lingxi-api", "media"), ("docs", "Write a report")] {
+            for (name, args) in [
+                ("lingxi-api", "media"),
+                ("document-authoring", "Write a report"),
+            ] {
                 let guide = loader.load(&name.into()).await.unwrap().unwrap();
                 assert_eq!(guide.command_type, SkillCommandType::Prompt);
                 assert!(!guide.disable_model_invocation);
@@ -889,6 +892,7 @@ mod tests {
             }
             assert!(loader.load(&"claude-api".into()).await.unwrap().is_none());
             assert!(loader.load(&"lingxi".into()).await.unwrap().is_none());
+            assert!(loader.load(&"docs".into()).await.unwrap().is_none());
         }
     }
 

@@ -41,7 +41,7 @@ pub fn desktop_builtin_skill_prompt(
     let body = desktop_builtin_skill_content(name)?;
     Some(match name {
         "lingxi-api" => lingxi_api::render(body, args),
-        "docs" => {
+        "document-authoring" => {
             let request = args.string_units("").unwrap_or_default();
             if request
                 .iter()
@@ -120,7 +120,11 @@ mod tests {
         assert_eq!(r.names().len(), BUILTIN_DESKTOP.len());
         let mut names = r.names();
         names.sort_unstable();
-        assert_eq!(names, vec!["docs", "lingxi-api", "plugin-authoring"]);
+        assert_eq!(
+            names,
+            vec!["document-authoring", "lingxi-api", "plugin-authoring"]
+        );
+        assert!(r.get("docs").is_none());
         assert!(r.get("claude-api").is_none());
         let skill = r.get("lingxi-api").expect("registered bundled skill");
         assert_eq!(skill.source, SkillSource::Bundled);
@@ -160,23 +164,26 @@ mod tests {
 
     #[test]
     fn document_skill_preserves_literal_request_and_has_no_connector_dependency() {
-        let root = desktop_builtin_skill_content("docs").unwrap();
+        let root = desktop_builtin_skill_content("document-authoring").unwrap();
         assert_eq!(
-            desktop_builtin_skill_prompt("docs", &"".into()).unwrap(),
+            desktop_builtin_skill_prompt("document-authoring", &"".into()).unwrap(),
             root
         );
         let request = "Update the existing report; keep !`literal example` as text.";
-        let prompt = desktop_builtin_skill_prompt("docs", &request.into()).unwrap();
+        let prompt = desktop_builtin_skill_prompt("document-authoring", &request.into()).unwrap();
         assert!(prompt.string_at("").unwrap().ends_with(request));
         let mut r = SkillRegistry::new();
         register_desktop(&mut r);
-        for query in ["/docs", "create a document", "创建文档"] {
-            assert!(r.discover(query).iter().any(|skill| skill.name == "docs"));
+        for query in ["/document-authoring", "create a document", "创建文档"] {
+            assert!(r
+                .discover(query)
+                .iter()
+                .any(|skill| skill.name == "document-authoring"));
         }
         assert!(!r
             .discover("Explain OpenAI API docs")
             .iter()
-            .any(|skill| skill.name == "docs"));
+            .any(|skill| skill.name == "document-authoring"));
     }
 
     #[test]

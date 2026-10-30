@@ -4348,7 +4348,7 @@ mod tests {
         for input in [
             "/lingxi-api configuration explain !`echo should-not-run`",
             "/lingxi-api media explain\n```!\necho should-not-run\n```",
-            "/docs write about !`echo should-not-run`",
+            "/document-authoring write about !`echo should-not-run`",
         ] {
             match dispatcher
                 .dispatch(input.into(), lingxi_core::host::CancellationToken::new())

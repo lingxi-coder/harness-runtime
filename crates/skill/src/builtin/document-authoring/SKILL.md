@@ -1,14 +1,18 @@
 ---
-name: docs
-description: Create or edit requested documents in LingXi using workspace files or an available document service. Use for documents to keep or share; ordinary chat answers stay in chat.
+name: document-authoring
+description: Create, edit or export documents in LingXi using workspace files or an available document service. Use for saved deliverables; LingXi product/API questions use lingxi-api.
 ---
 
-# Documents in LingXi
+# Document authoring in LingXi
 
 Create the document the user requested, using their language, format and chosen
 location. An answer, comparison, summary or plan requested in chat stays in chat
 unless the user also asks to save it as a document. A document request does not
 require creating an empty shell before reading the user's sources.
+
+Use `lingxi-api` for LingXi capability, configuration or API questions. When the
+requested document is about LingXi, use that guide for product facts and this
+skill for authoring; keep product knowledge in the guide's references.
 
 ## Choose an available destination
 
