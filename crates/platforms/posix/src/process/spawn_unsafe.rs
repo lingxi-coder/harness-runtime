@@ -1,16 +1,13 @@
-//! The single module in `lingxi-platform-posix` that uses `unsafe`.
+//! Audited POSIX spawning and macOS Team process observation.
 //!
-//! `unsafe` here calls `libc::setsid(3)` from `CommandExt::pre_exec`.
-//! `pre_exec` runs in the forked child between `fork()` and `execve()` —
-//! the closure MUST be async-signal-safe (POSIX.1-2017 §2.4.3). `setsid` is
-//! in POSIX's async-signal-safe function list, so this is sound. No
-//! allocation, no logging, no tokio — only the syscall.
+//! Pre-exec callbacks run between fork and exec and use only async-signal-safe
+//! operations. Guardian observation uses waitid/libproc in ordinary runtime
+//! code, outside those callbacks.
 //!
-//! Why we need it: tree-kill in [`super::kill_tree`] sends `SIGTERM` /
-//! `SIGKILL` to a process group via `killpg(2)`. For that to terminate the
-//! entire descendant tree of a background process, the child must be a
-//! process-group leader (pid == pgid). Calling `setsid()` immediately after
-//! `fork()` makes the child the session and process-group leader.
+//! [`super::kill_tree`] signals a process group via killpg. Calling setsid
+//! before exec makes the child its initial session/group leader (PID == PGID).
+//! Descendants can leave ordinary groups; private Team shells additionally
+//! deny the system calls that change group/session membership.
 //!
 //! Matches claude-code's `detached: provider.detached` spawn option in
 //! `Shell.ts:334` — Node's `detached: true` invokes `setsid()` under the
@@ -26,10 +23,8 @@ use tokio::process::Command;
 /// syscall, so it is safe to compose with any other `pre_exec` callbacks
 /// callers may add later (later `pre_exec`s run after this one).
 ///
-/// Idempotent in behaviour: calling it twice installs two callbacks, but
-/// the second `setsid()` will fail harmlessly with `EPERM` in the child
-/// (already a session leader) and abort the spawn — so callers must call
-/// it at most once per `Command`.
+/// Install at most once per command: a second callback would fail with EPERM
+/// because the child is already a session leader, aborting the spawn.
 pub fn attach_setsid(cmd: &mut Command) {
     // SAFETY: setsid() is async-signal-safe per POSIX.1-2017 §2.4.3 Table
     // 2-5, and we make no other calls inside the closure. The closure runs
@@ -47,6 +42,104 @@ pub fn attach_setsid(cmd: &mut Command) {
             Ok(())
         });
     }
+}
+
+/// Observe a direct guardian child without reaping its PID/PGID identity anchor.
+#[cfg(target_os = "macos")]
+pub(super) fn team_child_exited_unreaped(pid: u32) -> io::Result<bool> {
+    // SAFETY: waitid writes only this initialized siginfo buffer. WNOWAIT
+    // explicitly retains the direct child for the later authoritative wait.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.si_pid != 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn team_child_exited_unreaped(_: u32) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Team guardian requires macOS",
+    ))
+}
+
+/// Inspect the known, anchored group, never reconstruct a parent/child tree.
+/// Its leader must remain an unreaped direct child while this function is used.
+#[cfg(target_os = "macos")]
+pub(super) fn team_group_has_live_members(pid: u32) -> io::Result<bool> {
+    const CAPACITY: usize = 65_536;
+    let mut members = vec![0i32; CAPACITY];
+    let bytes = (members.len() * std::mem::size_of::<i32>()) as i32;
+    // SAFETY: libproc receives a writable buffer with its exact byte length.
+    let count = unsafe {
+        *libc::__error() = 0;
+        libc::proc_listpgrppids(pid as i32, members.as_mut_ptr().cast(), bytes)
+    };
+    if count < 0 || (count == 0 && io::Error::last_os_error().raw_os_error() != Some(0)) {
+        return Err(io::Error::last_os_error());
+    }
+    // Unlike proc_listpids, this convenience API returns a PID count, not a
+    // byte count (the input buffer length is still in bytes).
+    if count as usize >= members.len() {
+        return Err(io::Error::other("Team group enumeration incomplete"));
+    }
+    for member in members
+        .into_iter()
+        .take(count as usize)
+        .filter(|pid| *pid > 0)
+    {
+        // SAFETY: proc_pidinfo writes only this native proc_bsdinfo object.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let copied = unsafe {
+            libc::proc_pidinfo(
+                member,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        if copied != size {
+            let error = io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ESRCH | libc::ENOENT)) {
+                // libproc can list an initializing process before pidinfo can
+                // inspect it. Only the direct leader has an independently
+                // verifiable zombie identity; every other unknown listed
+                // member conservatively keeps cleanup pending until it leaves
+                // the group snapshot. Never mistake a fork in progress for an
+                // empty group.
+                if member as u32 == pid && team_child_exited_unreaped(pid)? {
+                    continue;
+                }
+                return Ok(true);
+            }
+            return Err(error);
+        }
+        // SZOMB is 5 in Darwin's sys/proc.h. A zombie cannot fork; its PID is
+        // intentionally retained until all live members have disappeared.
+        if info.pbi_pgid == pid && info.pbi_status != 5 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn team_group_has_live_members(_: u32) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Team guardian requires macOS",
+    ))
 }
 
 /// Effective owner used to authenticate the private supervisor directory.

@@ -120,6 +120,9 @@ pub fn is_supervisor_invocation() -> bool {
 }
 pub fn enabled(command: &SandboxedCommand) -> bool {
     EXECUTABLE.get().is_some()
+        // A private shell must not lose its environment boundary across the
+        // ordinary background-supervisor handoff protocol.
+        && !command.clear_environment()
         && !IN_SUPERVISOR.load(Ordering::SeqCst)
         && command
             .background_task()

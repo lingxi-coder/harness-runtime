@@ -28,6 +28,11 @@ mod agent_skill_loader;
 pub mod app_invocation;
 pub mod auto_mode_propose;
 mod sdk;
+#[cfg(target_os = "macos")]
+pub mod team_connector;
+pub mod team_invocation;
+pub mod team_process;
+mod team_sandbox;
 pub use sdk::build_harness;
 
 /// Session-owned teammate registry shared with CLI hosts.
@@ -2527,6 +2532,8 @@ pub struct DesktopRuntime {
     pub provider_region: llm_runtime::Region,
     audio_services: llm_runtime::services::ProviderServices,
     audio_credential_ids: std::collections::BTreeMap<String, String>,
+    // Shared with ApiService; exporting a Team route never boots another client.
+    team_model_runtime: Arc<llm_runtime::ModelRuntime>,
     /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
     /// registries + compaction wired), bound to the supplied output stream and
     /// permission gate.
@@ -3022,6 +3029,18 @@ impl DesktopRuntime {
 
     /// Shared app-scoped service used by media tools and host UI/remote callers.
     #[must_use]
+    /// Nonsecret singleton routes from this runtime's exact SDK catalog and
+    /// credential-slot map. No credential read, request or second boot occurs.
+    pub fn team_model_routes(
+        &self,
+    ) -> std::collections::BTreeMap<(String, String), team_process::TeamModelRoute> {
+        team_process::model::routes(
+            &self.team_model_runtime,
+            &self.audio_credential_ids,
+            self.provider_region,
+        )
+    }
+
     pub fn media_service(&self) -> Option<Arc<dyn media_api::MediaService>> {
         self.media.clone()
     }
@@ -3201,6 +3220,9 @@ pub enum BuildError {
     /// A Local App invocation failed its host-owned isolation contract.
     #[error("invalid app invocation: {0}")]
     AppInvocation(#[from] app_invocation::AppInvocationError),
+    /// Host-owned Team scope or mandatory confinement is invalid.
+    #[error(transparent)]
+    TeamInvocation(#[from] team_invocation::TeamInvocationError),
     /// Settings layers could not be composed without discarding a source error.
     #[error("settings load failed: {0}")]
     Settings(#[from] lingxi_core::settings::SettingsError),
@@ -3863,7 +3885,7 @@ fn load_effective_settings_for_config_with_defaults(
 /// App invocations accept host-selected provider inputs and managed policy, not
 /// ambient model/prompt/settings overrides inherited by the desktop process.
 fn settings_environment_for_config(cfg: &DesktopConfig) -> BTreeMap<String, String> {
-    if cfg.app_invocation.is_some() {
+    if cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
         BTreeMap::new()
     } else {
         std::env::vars().collect()

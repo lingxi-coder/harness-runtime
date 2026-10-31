@@ -4365,11 +4365,19 @@ impl ConversationOrchestrator {
 /// ~202946760):
 /// `ie.some(msg => msg.content.some(b => b.type === "text" && b.text.trim().length > 0))`.
 ///
+/// A `false` return = a thinking-only (or otherwise text-empty) response. Only
+/// text blocks with a non-whitespace body count, including lossless UTF-16 and
+/// native text whose unknown fields are preserved. `Thinking`, `ToolUse`, etc.
+/// are not "visible output" for this gate. (Tool
+/// uses are indexed separately in `PumpedTurn::tool_uses`; recovered responses
+/// also keep their original tool blocks in `assistant_blocks`. This gate only
+/// fires on `end_turn`/`stop_sequence`.)
 pub(super) fn pumped_has_visible_text(blocks: &[lingxi_core::types::ContentBlock]) -> bool {
-    use lingxi_core::types::ContentBlock;
-    blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Text { text, .. } if !text.trim().is_empty()))
+    blocks.iter().any(|block| {
+        block
+            .visible_text()
+            .is_some_and(|text| !text.trim().is_empty())
+    })
 }
 
 /// App Chat's exact UTF-16 text remains visible even when an unpaired unit

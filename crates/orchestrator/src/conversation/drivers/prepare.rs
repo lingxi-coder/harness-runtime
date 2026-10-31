@@ -1005,7 +1005,7 @@ impl ConversationOrchestrator {
         let native_anthropic_request_context = if native_request_route {
             super::super::native_classifier_context::request_context(
                 self.perms.permission_policy_snapshot(),
-                native_classifier_route,
+                native_classifier_route && !self.prompt_runtime.host_environment_probes_disabled,
                 mid_conversation_tool_changes_route,
                 mid_conversation_tool_changes_feature_gate,
                 inline_tools_feature_gate,

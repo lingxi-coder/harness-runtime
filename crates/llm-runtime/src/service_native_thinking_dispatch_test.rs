@@ -238,6 +238,188 @@ fn retry_control(max_retries: u32) -> crate::model::retry::RetryControl {
     }
 }
 
+fn scope_quota(dispatches: u32) -> Arc<crate::ScopeOutputQuota> {
+    Arc::new(crate::ScopeOutputQuota::new(
+        std::num::NonZeroU32::new(4096).unwrap(),
+        std::num::NonZeroU32::new(dispatches).unwrap(),
+    ))
+}
+
+fn scope_request() -> LlmRequest {
+    main_request(
+        u32::MAX,
+        crate::model::thinking_state::ThinkingState::new(
+            crate::model::thinking::ThinkingConfig::Adaptive,
+        ),
+    )
+}
+
+#[tokio::test]
+async fn scope_quota_counts_retry_dispatches_and_clamps_explicit_output() {
+    let transport = NativeDispatchTransport::new(
+        vec![
+            ProviderResponse::json(
+                529,
+                serde_json::json!({
+                    "type": "error", "error": {"type": "overloaded_error", "message": "busy"}
+                }),
+            ),
+            native_success(),
+        ],
+        Vec::new(),
+    );
+    let quota = scope_quota(1);
+    let mut service =
+        native_service(transport.clone()).with_scope_output_quota(Some(quota.clone()));
+    service.settings_backoff_ms = Some(0);
+    let error = service
+        .drive_non_stream(
+            scope_request(),
+            retry_control(3),
+            DispatchHeaderState::default(),
+        )
+        .await
+        .expect_err("retry must not bypass scope quota");
+    assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(request_body(&requests[0])["max_tokens"], 4096);
+    assert_eq!(quota.remaining_dispatches(), 0);
+}
+
+#[tokio::test]
+async fn scope_quota_is_shared_by_main_auxiliary_and_forked_services() {
+    let transport =
+        NativeDispatchTransport::new(vec![native_success(), native_success()], Vec::new());
+    let quota = scope_quota(2);
+    let service = native_service(transport.clone()).with_scope_output_quota(Some(quota.clone()));
+    service
+        .drive_non_stream(
+            scope_request(),
+            retry_control(0),
+            DispatchHeaderState::default(),
+        )
+        .await
+        .unwrap();
+    service
+        .fork_independent()
+        .execute_side_query_request(scope_request())
+        .await
+        .unwrap();
+    let error = service
+        .fork_app_invocation()
+        .execute_classifier_request(scope_request(), 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+    assert_eq!(quota.remaining_dispatches(), 0);
+    assert_eq!(transport.requests().len(), 2);
+    for request in transport.requests() {
+        assert_eq!(request_body(&request)["max_tokens"], 4096);
+    }
+}
+
+#[tokio::test]
+async fn scope_quota_failed_prepare_does_not_charge() {
+    let transport = NativeDispatchTransport::new(Vec::new(), Vec::new());
+    let quota = scope_quota(1);
+    let service = native_service(transport.clone()).with_scope_output_quota(Some(quota.clone()));
+    let mut request = scope_request();
+    request.input.model = "missing-model".into();
+    assert!(service.execute_side_query_request(request).await.is_err());
+    assert_eq!(quota.remaining_dispatches(), 1);
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
+async fn scope_quota_preserves_the_separate_operation_budget_and_rolls_back() {
+    let transport = NativeDispatchTransport::new(vec![native_success()], Vec::new());
+    let quota = scope_quota(1);
+    let service = native_service(transport.clone()).with_scope_output_quota(Some(quota.clone()));
+    let mut request = scope_request();
+    request.execution.api_attempts_left = Some(crate::ApiAttemptsLeft::new(0));
+    assert!(matches!(
+        service.execute_side_query_request(request).await,
+        Err(LlmError::ApiAttemptsExhausted)
+    ));
+    assert_eq!(quota.remaining_dispatches(), 1);
+    service
+        .execute_side_query_request(scope_request())
+        .await
+        .unwrap();
+    let operation = crate::ApiAttemptsLeft::new(3);
+    let mut request = scope_request();
+    request.execution.api_attempts_left = Some(operation.clone());
+    assert!(matches!(
+        service.execute_side_query_request(request).await,
+        Err(LlmError::ApiAttemptsExhausted)
+    ));
+    assert_eq!(
+        operation.remaining(),
+        3,
+        "failed scope reservation refunds operation reservation"
+    );
+    assert_eq!(transport.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn scope_quota_revocation_at_late_admission_stops_transport_without_charge() {
+    let transport = NativeDispatchTransport::new(Vec::new(), Vec::new());
+    let quota = scope_quota(1);
+    let service = native_service(transport.clone()).with_scope_output_quota(Some(quota.clone()));
+    let mut request = scope_request();
+    let revoke = quota.clone();
+    request.execution.request_dispatch_admission =
+        Some(crate::RequestDispatchAdmission::new(move || {
+            revoke.revoke();
+            true
+        }));
+    assert!(matches!(
+        service.execute_side_query_request(request).await,
+        Err(LlmError::RequestDispatchRejected {
+            prior_dispatch: false
+        })
+    ));
+    assert!(quota.is_revoked());
+    assert_eq!(quota.remaining_dispatches(), 1);
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
+async fn scope_quota_stream_retry_cannot_reset_the_counter() {
+    let transport = NativeDispatchTransport::new(
+        Vec::new(),
+        vec![
+            StreamPlan {
+                status: 400,
+                headers: BTreeMap::new(),
+                frames: vec![serde_json::to_vec(&native_type_rejection("adaptive")).unwrap()],
+            },
+            StreamPlan {
+                status: 200,
+                headers: BTreeMap::new(),
+                frames: anthropic_success_frames(),
+            },
+        ],
+    );
+    let quota = scope_quota(1);
+    let service = native_service(transport.clone()).with_scope_output_quota(Some(quota.clone()));
+    let error = match service.stream_request(scope_request()).await {
+        Err(error) => error,
+        Ok(mut stream) => loop {
+            match stream.next().await {
+                Some(Err(error)) => break error,
+                Some(Ok(_)) => {}
+                None => panic!("expected exhausted retry"),
+            }
+        },
+    };
+    assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+    assert_eq!(quota.remaining_dispatches(), 0);
+    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(request_body(&transport.requests()[0])["max_tokens"], 4096);
+}
+
 #[tokio::test]
 async fn streaming_typed_thinking_400_retries_once_with_zero_ordinary_retries() {
     let transport = NativeDispatchTransport::new(

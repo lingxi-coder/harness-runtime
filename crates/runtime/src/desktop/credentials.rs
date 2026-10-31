@@ -375,6 +375,37 @@ pub async fn build_shared_credential_stack_with_policy(
 pub(super) async fn build_shared_credential_stack_for_config(
     cfg: &DesktopConfig,
 ) -> Result<SharedCredentialStack, BuildError> {
+    if cfg.team_invocation.is_some() {
+        let http = Arc::new(PosixHttp::new());
+        let clock = Arc::new(PosixClock::new());
+        let storage: Arc<dyn lingxi_core::host::SecureStorage> =
+            Arc::new(lingxi_core::host::InMemorySecureStorage::new());
+        let credentials = Arc::new(CredentialManager::new(
+            storage.clone(),
+            clock.clone(),
+            http.clone(),
+        ));
+        if let Some(model) = cfg
+            .team_invocation
+            .as_ref()
+            .and_then(|profile| profile.selected_model())
+        {
+            credentials
+                .set_provider_key_ephemeral(
+                    super::team_process::model::PRIVATE_CREDENTIAL,
+                    model.api_key(),
+                )
+                .await;
+        }
+        return Ok(SharedCredentialStack {
+            catalog_registry: FusionCatalogRegistry::default(),
+            http,
+            clock,
+            storage,
+            credentials,
+            openai_host_session: None,
+        });
+    }
     build_shared_credential_stack_with_policy(
         &cfg.lingxi_home,
         cfg.isolated_credential_storage,
@@ -425,6 +456,16 @@ pub(super) fn current_credential_user() -> String {
 /// environment and the network (the availability probe), but creates no
 /// session, no transcript and no hooks.
 pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildError> {
+    // Headless callers must receive the same frozen authority as full assembly.
+    // Do this before opening storage or constructing credential helpers.
+    let mut scoped;
+    let cfg = if cfg.team_invocation.is_some() {
+        scoped = cfg.clone();
+        super::team_invocation::enforce_team_config(&mut scoped)?;
+        &scoped
+    } else {
+        cfg
+    };
     let shared = build_shared_credential_stack_for_config(cfg).await?;
     resolve_llm_stack_with_credentials(cfg, shared, None).await
 }
@@ -434,6 +475,18 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     shared: SharedCredentialStack,
     proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
 ) -> Result<LlmStack, BuildError> {
+    if cfg.team_invocation.is_some()
+        && (shared.storage.backend() != lingxi_core::host::SecureStorageBackend::MemorySession
+            || shared.openai_host_session.is_some())
+    {
+        return Err(super::team_invocation::TeamInvocationError::Credentials.into());
+    }
+    let ambient_value = |name: &str| {
+        cfg.team_invocation
+            .is_none()
+            .then(|| std::env::var(name).ok())
+            .flatten()
+    };
     let _catalog_refresh = cfg.startup_catalog.as_ref().map(|source| source.prefetch());
     // Resolve the winning model setting from the canonical tier stack before
     // assembling provider profiles. Managed `settings.model` is the only
@@ -444,9 +497,12 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         load_effective_settings_for_config(cfg, Some(&managed_settings_for_model))?;
     let mut model_provenance =
         model_provenance_for_config(cfg, Some(&effective_settings_for_model));
-    let configured_model =
+    let configured_model = if cfg.team_invocation.is_some() {
+        cfg.default_model.clone()
+    } else {
         managed_model_setting_for_config(cfg, Some(&effective_settings_for_model))
-            .unwrap_or_else(|| cfg.default_model.clone());
+            .unwrap_or_else(|| cfg.default_model.clone())
+    };
     let main_model_source =
         effective_model_source_for_config(cfg, Some(&effective_settings_for_model));
     let main_model_setting = configured_model.clone();
@@ -556,16 +612,19 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // OAuth credential.
     let mut credential_origin = orchestrator::api_error_copy::CredentialOrigin::Other;
     let mut has_oauth_token = false;
-    let environment_oauth =
-        llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::capture();
+    let environment_oauth = if cfg.team_invocation.is_some() {
+        None
+    } else {
+        llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::capture()
+    };
     let environment_oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>>;
     if let Some(environment) = environment_oauth.as_ref() {
         let auth_source = llm_runtime::auth::anthropic::resolver::resolve(
             &llm_runtime::auth::anthropic::resolver::ResolverContext {
                 managed_oauth_only: cfg.managed_oauth_only
-                    || llm_runtime::auth::anthropic::resolver::host_managed_oauth_only(),
-                env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
-                    .ok()
+                    || (cfg.team_invocation.is_none()
+                        && llm_runtime::auth::anthropic::resolver::host_managed_oauth_only()),
+                env_auth_token: ambient_value("ANTHROPIC_AUTH_TOKEN")
                     .filter(|value| !value.is_empty()),
                 env_api_key: (!stored_anthropic_api_key)
                     .then(|| resolved_anthropic_api_key.clone())
@@ -633,10 +692,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                     // pass through the CLI's `build_runtime_from_config`
                     // (`mcp serve`, `auto-mode-setup`, bridge-server).
                     managed_oauth_only: cfg.managed_oauth_only
-                        || llm_runtime::auth::anthropic::resolver::host_managed_oauth_only(),
-                    env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
-                        .ok()
-                        .filter(|v| !v.is_empty()),
+                        || (cfg.team_invocation.is_none()
+                            && llm_runtime::auth::anthropic::resolver::host_managed_oauth_only()),
+                    env_auth_token: ambient_value("ANTHROPIC_AUTH_TOKEN").filter(|v| !v.is_empty()),
                     env_api_key: (!stored_anthropic_api_key)
                         .then(|| resolved_anthropic_api_key.clone())
                         .flatten(),
@@ -845,7 +903,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
     // PAT env  >  external-tokens env  >  OAuth login session. First hit wins.
     let mut openai_chatgpt_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = None;
-    if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
+    if let Some(pat) = ambient_value("OPENAI_PERSONAL_ACCESS_TOKEN") {
         if !pat.trim().is_empty() {
             match lingxi_llm_client::auth::oauth::openai::whoami(
                 llm_transport.as_ref(),
@@ -867,11 +925,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     }
     if openai_chatgpt_delegate.is_none() {
         match (
-            std::env::var("OPENAI_CHATGPT_ACCESS_TOKEN")
-                .ok()
+            ambient_value("OPENAI_CHATGPT_ACCESS_TOKEN")
                 .filter(|s| !s.trim().is_empty()),
-            std::env::var("OPENAI_CHATGPT_ACCOUNT_ID")
-                .ok()
+            ambient_value("OPENAI_CHATGPT_ACCOUNT_ID")
                 .filter(|s| !s.trim().is_empty()),
         ) {
             (Some(tok), Some(acc)) => {
@@ -996,7 +1052,28 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
     };
-    let assembled = provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
+    let mut assembled =
+        provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
+    if let Some(model) = cfg
+        .team_invocation
+        .as_ref()
+        .and_then(|profile| profile.selected_model())
+    {
+        let profile = model
+            .route()
+            .host_profile()
+            .map_err(|_| super::team_invocation::TeamInvocationError::Model)?;
+        assembled.credential_sources = vec![provider_config::CredentialSource {
+            provider_id: profile.provider_id.clone(),
+            profile_name: profile.profile_name.clone(),
+            credential_id: super::team_process::model::PRIVATE_CREDENTIAL.into(),
+            env_var: None,
+            kind: provider_config::CredentialKind::ApiKey,
+        }];
+        assembled.client_config.providers = vec![profile];
+        assembled.chains = Default::default();
+        assembled.warnings.clear();
+    }
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly");
     }
@@ -1410,7 +1487,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         })?;
     let session_provider_first_party = selected_model_context.route.provider
         == Some(agent::model_resolution::ModelProviderKind::FirstParty);
-    let first_party_environment_provider = match api_provider() {
+    let first_party_environment_provider = match if cfg.team_invocation.is_some() {
+        ApiProvider::FirstParty
+    } else {
+        api_provider()
+    } {
         ApiProvider::FirstParty => "firstParty",
         ApiProvider::Bedrock => "anthropicAws",
         ApiProvider::Vertex => "vertex",
@@ -1439,7 +1520,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         cfg.api_key_helper.clone(),
         oauth_delegates,
     )
-    .with_anthropic_api_key_source(cfg.api_key_source.clone());
+    .with_anthropic_api_key_source(cfg.api_key_source.clone())
+    .with_environment_fallback(cfg.team_invocation.is_none());
     // GitHub Copilot needs a short-lived token minted from the raw OAuth token
     // (api.githubcopilot.com rejects the raw token). Wrap the composite so the
     // `github-copilot` credential is exchanged + cached; every other credential
@@ -1628,6 +1710,14 @@ pub async fn build_api_service(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
 ) -> Result<Arc<llm_runtime::ApiService>, BuildError> {
+    let mut scoped;
+    let cfg = if cfg.team_invocation.is_some() {
+        scoped = cfg.clone();
+        super::team_invocation::enforce_team_config(&mut scoped)?;
+        &scoped
+    } else {
+        cfg
+    };
     let stack = resolve_llm_stack(cfg).await?;
     Ok(Arc::new(api_service_from_stack(cfg, cwd, stack)?))
 }
@@ -1643,6 +1733,14 @@ pub fn api_service_from_stack(
     cwd: &std::path::Path,
     stack: LlmStack,
 ) -> Result<llm_runtime::ApiService, BuildError> {
+    let mut scoped;
+    let cfg = if cfg.team_invocation.is_some() {
+        scoped = cfg.clone();
+        super::team_invocation::enforce_team_config(&mut scoped)?;
+        &scoped
+    } else {
+        cfg
+    };
     // Same CHAINS BRIDGE as `build`: the assembled per-model chain becomes the
     // adapter's `fallback_overrides`, keyed by model id.
     let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = stack
@@ -1664,7 +1762,11 @@ pub fn api_service_from_stack(
         stack.llm_runtime,
         stack.llm_transport,
         stack.subscriber_state,
-        UserAgentEnv::from_process_env(),
+        if cfg.team_invocation.is_some() {
+            UserAgentEnv::default()
+        } else {
+            UserAgentEnv::from_process_env()
+        },
         env!("CARGO_PKG_VERSION"),
         Some(analytics_bus.clone()),
         cfg.fallback_model.clone(),
@@ -1673,6 +1775,7 @@ pub fn api_service_from_stack(
         settings_max_retries,
         settings_backoff_ms,
     )
+    .with_scope_output_quota(cfg.scope_output_quota.clone())
     .with_subscription(stack.subscription)
     .with_custom_cli_betas(cfg.custom_betas.clone())
     .with_thinking(cfg.session_thinking)
@@ -1722,6 +1825,9 @@ pub(super) fn aws_auth_refresher(
     cwd: &std::path::Path,
     analytics_bus: Arc<telemetry::AnalyticsBus>,
 ) -> Result<Option<Arc<llm_runtime::AwsAuthRefresher>>, lingxi_core::settings::SettingsError> {
+    if cfg.team_invocation.is_some() {
+        return Ok(None);
+    }
     let aws_settings = if cfg.restricted {
         let snapshot = crate::desktop::settings_watch::managed_settings_snapshot_sync(cfg).ok_or(
             lingxi_core::settings::SettingsError::SourceUnavailable("managed policy snapshot"),

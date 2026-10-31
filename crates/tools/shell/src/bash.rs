@@ -2993,6 +2993,9 @@ impl Tool for BashTool {
         &self,
         opts: &PromptOptions,
     ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        if self.ctx.isolated_shell.is_some() {
+            return "Run a foreground shell command inside the private workspace and mandatory sandbox. The maximum timeout is 120000 ms. Network and files outside the private scope are unavailable. Each command starts in the workspace; directory changes do not persist. Background execution and promotion are unavailable. Ask the host for approval before each command.".into();
+        }
         if self.ctx.requires_inline_foreground() {
             return "Execute a shell command in the foreground. The default and maximum timeout are 120000 ms. Background execution and promotion are unavailable. Cancellation and timeout stop the command and wait for its process tree to be reaped. Prefer absolute paths; working-directory changes affect only this Chat.".into();
         }
@@ -3120,6 +3123,7 @@ impl Tool for BashTool {
         // Every failure answers `None` and the command proceeds: a diff is a
         // convenience, and a shell command must never fail because git did.
         let edit_diff_eligible = !self.ctx.requires_inline_foreground()
+            && self.ctx.isolated_shell.is_none()
             && !input
                 .at_pointer("/run_in_background")
                 .and_then(|value| value.as_bool())
@@ -3157,14 +3161,19 @@ impl Tool for BashTool {
         // claude-code `BashTool.tsx` sends the timeout as `timeout` (ms). Resolve
         // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
         // finite number > 0, else default), then clamp the execution budget.
-        if self.ctx.requires_inline_foreground()
+        if (self.ctx.requires_inline_foreground() || self.ctx.isolated_shell.is_some())
             && input
                 .at_pointer("/run_in_background")
                 .and_then(|value| value.as_bool())
                 == Some(true)
         {
             return Err(ToolError::InvalidInput(
-                "Background shell execution is unavailable in Side Chat".into(),
+                if self.ctx.isolated_shell.is_some() {
+                    "Background shell execution is unavailable in this private invocation"
+                } else {
+                    "Background shell execution is unavailable in Side Chat"
+                }
+                .into(),
             ));
         }
         if self.ctx.requires_inline_foreground()
@@ -3175,11 +3184,12 @@ impl Tool for BashTool {
                 "Side Chat shell owner is absent".into(),
             ));
         }
-        let timeout_ms = if self.ctx.requires_inline_foreground() {
-            input_timeout_ms(&input).unwrap_or(120_000).min(120_000)
-        } else {
-            resolve_timeout_ms(&input)
-        };
+        let timeout_ms =
+            if self.ctx.requires_inline_foreground() || self.ctx.isolated_shell.is_some() {
+                input_timeout_ms(&input).unwrap_or(120_000).min(120_000)
+            } else {
+                resolve_timeout_ms(&input)
+            };
         // claude-code gates the explicit-background branch on the same
         // background-tasks-disabled flag that removes the parameter from the
         // schema (`if (Oe === !0 && !It)`), so a call that carries the
@@ -3189,6 +3199,7 @@ impl Tool for BashTool {
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
             && !self.ctx.requires_inline_foreground()
+            && self.ctx.isolated_shell.is_none()
             && !crate::prompt::background_tasks_disabled();
         // Whether exceeding the timeout may move this command to the background
         // rather than kill it (claude-code `dn = !Dl() && $es(command)`). A
@@ -3196,6 +3207,7 @@ impl Tool for BashTool {
         // point of a sleep is to finish, so backgrounding it just hides it.
         let can_auto_background = request_owner.is_none()
             && !self.ctx.requires_inline_foreground()
+            && self.ctx.isolated_shell.is_none()
             && !crate::prompt::background_tasks_disabled()
             && !first_statement_is_sleep(&cmd_str);
         // BASH.5: optional `dangerouslyDisableSandbox` override.
@@ -3323,7 +3335,19 @@ impl Tool for BashTool {
             workspace.clone(),
         );
 
-        let shell = resolve_shell_path().to_string();
+        if self.ctx.isolated_shell.is_some()
+            && !matches!(&decision, SandboxDecision::Sandbox { .. })
+        {
+            return Err(ToolError::InvalidInput(
+                "Private invocation requires a working sandbox".into(),
+            ));
+        }
+        let shell = if self.ctx.isolated_shell.is_some() {
+            tool_api::isolated_shell::IsolatedShellPolicy::EXECUTABLE
+        } else {
+            resolve_shell_path()
+        }
+        .to_string();
 
         // BASH.2: defensively rewrite Windows CMD-style `2>nul` redirects to
         // POSIX `/dev/null` before the command is spawned (claude-code
@@ -3344,6 +3368,16 @@ impl Tool for BashTool {
             None => normalized_cmd,
         };
 
+        let cwd = if let Some(policy) = &self.ctx.isolated_shell {
+            if agent_cwd.is_some() {
+                return Err(ToolError::InvalidInput(
+                    "Nested private shell scopes are unavailable".into(),
+                ));
+            }
+            policy.workspace().to_path_buf()
+        } else {
+            cwd
+        };
         let inner_cmd = match decision {
             // HP-6: `sandbox.credentials` must hold even when THIS command is
             // not sandbox-wrapped. `excludedCommands` and
@@ -3640,7 +3674,13 @@ impl Tool for BashTool {
         // (bashProvider.ts:185-187). `&&` skips the readback when the user
         // command fails (cwd left unchanged — correct); `>|` overrides
         // noclobber and is valid in both bash and zsh.
-        let fg_cmd = format!("{inner_cmd} && pwd -P >| {q}");
+        // The ordinary readback suffix runs OUTSIDE the sandbox. A private
+        // invocation must never write or read that attacker-replaceable file.
+        let fg_cmd = if self.ctx.isolated_shell.is_some() {
+            inner_cmd
+        } else {
+            format!("{inner_cmd} && pwd -P >| {q}")
+        };
 
         let pcmd = SbxCommand {
             command: shell,
@@ -3651,9 +3691,17 @@ impl Tool for BashTool {
             // the snapshot mechanism is deferred here, so `lastSnapshotFilePath`
             // is always undefined ⇒ `skipLoginShell == false` ⇒ `-l` always
             // added (TS's no-snapshot login-shell fallback, `:88-93`).
-            args: vec!["-c".into(), "-l".into(), fg_cmd],
+            args: if self.ctx.isolated_shell.is_some() {
+                tool_api::isolated_shell::IsolatedShellPolicy::arguments(fg_cmd)
+            } else {
+                vec!["-c".into(), "-l".into(), fg_cmd]
+            },
             cwd: Some(cwd.clone()),
-            env: HashMap::new(),
+            env: self
+                .ctx
+                .isolated_shell
+                .as_ref()
+                .map_or_else(HashMap::new, |policy| policy.environment()),
             timeout: Some(Duration::from_millis(timeout_ms)),
             stdin: None,
         };
@@ -3661,6 +3709,7 @@ impl Tool for BashTool {
             .ctx
             .sandbox
             .bypass_with_audit(pcmd, "bash_tool_call")
+            .with_clear_environment(self.ctx.isolated_shell.is_some())
             .with_auto_background_on_timeout(can_auto_background)
             .with_background_timeout(
                 resolve_background_timeout_ms(&input, false).map(Duration::from_millis),
@@ -3692,7 +3741,8 @@ impl Tool for BashTool {
         // does the same, minting one identity per shell command in `vV`
         // regardless of whether it is ever backgrounded — and settle it as
         // completed when the command actually finishes in the foreground.
-        let fg_bound = if self.ctx.requires_inline_foreground() {
+        let fg_bound = if self.ctx.requires_inline_foreground() || self.ctx.isolated_shell.is_some()
+        {
             None
         } else {
             self.allocate_task_identity().await
@@ -3742,7 +3792,11 @@ impl Tool for BashTool {
             _ => None,
         };
 
-        let candidates = written_read_state_candidates(&self.ctx, &cwd, &cmd_str);
+        let candidates = if self.ctx.isolated_shell.is_some() {
+            Vec::new()
+        } else {
+            written_read_state_candidates(&self.ctx, &cwd, &cmd_str)
+        };
         let written_read_state = if candidates.is_empty() {
             candidates
         } else {
@@ -4118,7 +4172,8 @@ impl Tool for BashTool {
                 // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
                 // mutate the shared cwd — TS `preventCwdChanges = !isMainThread`.
                 // The main thread has no `agent_id`; a subagent call carries one.
-                let prevent_cwd_changes = ctx.agent_id.is_some();
+                let prevent_cwd_changes =
+                    ctx.agent_id.is_some() || self.ctx.isolated_shell.is_some();
                 // claude-code `J2n` (the cwd-reset gate): when the readback shows
                 // the shell navigated OUTSIDE the allowed dirs — or the
                 // `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR` env forces it — chdir
@@ -4219,7 +4274,9 @@ impl Tool for BashTool {
                     }
                 }
                 // Always clean up the tracking file (Shell.ts:415-419).
-                let _ = std::fs::remove_file(&cwd_file);
+                if self.ctx.isolated_shell.is_none() {
+                    let _ = std::fs::remove_file(&cwd_file);
+                }
 
                 let (stdout_clean, ansi_dropped_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, ansi_dropped_err) = strip_ansi_count(&out.stderr);

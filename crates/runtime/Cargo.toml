@@ -368,6 +368,41 @@ path = "tests/desktop/sandbox_startup_test.rs"
 required-features = ["desktop"]
 
 [[test]]
+name = "team_invocation_profile"
+path = "tests/desktop/team_invocation_profile.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "harness-team-worker"
+path = "src/bin/team_worker.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "team_invocation_process"
+path = "tests/desktop/team_invocation_process.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "team_connector"
+path = "tests/desktop/team_connector.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "team_sandbox_process_boundary"
+path = "tests/desktop/team_sandbox_process_boundary.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "team_process_interactions"
+path = "tests/desktop/team_process_interactions.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "harness-team-host"
+path = "src/bin/team_host.rs"
+required-features = ["desktop"]
+
+[[test]]
 name = "settings_watch_spawn"
 path = "tests/desktop/settings_watch_spawn.rs"
 required-features = ["desktop"]
