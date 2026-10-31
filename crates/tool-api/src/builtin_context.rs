@@ -81,6 +81,8 @@ pub struct BashEditDiffSetup {
 /// Cloning is cheap — every field is `Arc` or a small owned vec.
 #[derive(Clone)]
 pub struct BuiltinToolContext {
+    /// Trusted host-selected execution behavior, independent of permissions.
+    pub tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy,
     /// RAM-only side conversation: foreground execution and inline skills only.
     pub side_chat: bool,
     /// Latched when foreground work could not be reaped; keeps the side Closing.
@@ -349,6 +351,10 @@ pub struct BuiltinToolContext {
     /// bash tool's next command observes it via [`Self::effective_sandbox_runtime`].
     pub sandbox_enabled_override: Option<Arc<std::sync::atomic::AtomicBool>>,
 
+    /// Trusted private shell policy, never taken from tool input or settings.
+    /// When set, mutable settings and /sandbox cannot weaken confinement.
+    pub isolated_shell: Option<Arc<crate::isolated_shell::IsolatedShellPolicy>>,
+
     /// Mirror of `settings.skipWebFetchPreflight` (CC 2.1.207 zod:
     /// `skipWebFetchPreflight:E.boolean().optional().describe("Skip the WebFetch
     /// blocklist check for enterprise environments with restrictive security
@@ -383,10 +389,23 @@ pub struct BuiltinToolContext {
 }
 
 impl BuiltinToolContext {
+    /// Whether tool output and subprocesses must remain inline/foreground.
+    #[must_use]
+    pub fn is_persistent_app_chat(&self) -> bool {
+        self.tool_execution_policy
+            == lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat
+    }
+
+    #[must_use]
+    /// Whether this isolated execution must retain results inline and drain
+    /// all physical work before returning from the tool call.
+    pub fn requires_inline_foreground(&self) -> bool {
+        self.side_chat || self.is_persistent_app_chat()
+    }
     /// Record an explicit runner cleanup error, excluding ordinary command failures.
     pub fn note_side_chat_cleanup_failure(&self, error: &str) -> bool {
-        let failed =
-            self.side_chat && error.contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE);
+        let failed = self.requires_inline_foreground()
+            && error.contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE);
         if failed {
             if let Some(flag) = &self.side_chat_cleanup_failed {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -520,12 +539,23 @@ impl BuiltinToolContext {
         root: &std::path::Path,
         scope: sandbox::root::SandboxRootScope,
     ) -> SandboxRuntimeConfig {
+        if let Some(policy) = &self.isolated_shell {
+            // The generic Session root follows .git/commondir and grants its
+            // main repository writes. A private workspace is model-writable;
+            // its Git pointers must never expand host authority.
+            let mut cfg = policy.sandbox().clone();
+            sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
+            return cfg;
+        }
         let mut cfg = sandbox::root::rooted_at(&self.toggled_sandbox_runtime(), root, scope);
         sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
         cfg
     }
 
     fn toggled_sandbox_runtime(&self) -> SandboxRuntimeConfig {
+        if let Some(policy) = &self.isolated_shell {
+            return policy.sandbox().clone();
+        }
         match &self.sandbox_enabled_override {
             Some(cell) => {
                 let mut cfg = self.sandbox_runtime.clone();
@@ -825,6 +855,24 @@ mod tests {
         assert!(!failed.load(std::sync::atomic::Ordering::SeqCst));
         assert!(ctx
             .note_side_chat_cleanup_failure(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE));
+        assert!(failed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn local_app_cleanup_latches_a_raw_tree_reap_failure_without_side_chat() {
+        let mut ctx =
+            ctx_for_file_tools(make_dummy_fs(), Arc::new(AnalyticsBus::new()), Vec::new());
+        let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ctx.tool_execution_policy =
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat;
+        ctx.side_chat_cleanup_failed = Some(failed.clone());
+        assert!(!ctx.side_chat);
+        assert!(!ctx.note_side_chat_cleanup_failure("Shell command timed out"));
+        let error = format!(
+            "{} raw stdio process tree survived SIGKILL",
+            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+        );
+        assert!(ctx.note_side_chat_cleanup_failure(&error));
         assert!(failed.load(std::sync::atomic::Ordering::SeqCst));
     }
 

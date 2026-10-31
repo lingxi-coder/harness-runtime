@@ -42,6 +42,13 @@ impl FileSystemCacheIdentity {
 /// `std::fs` directly so the host can sandbox, virtualize, or audit access.
 #[async_trait]
 pub trait FileSystem: Send + Sync {
+    /// Underlying host-coordinate filesystem, when this handle decorates a
+    /// separate model-visible namespace. Only host-owned, already validated
+    /// paths may use it; model paths must continue through this handle.
+    fn host_filesystem(&self) -> Option<std::sync::Arc<dyn FileSystem>> {
+        None
+    }
+
     /// Stable cache identity for metadata-keyed read caches.
     ///
     /// The default disables cross-call caching. Virtual/decorated backends

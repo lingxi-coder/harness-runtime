@@ -17,8 +17,12 @@ impl DesktopBuiltinSkillPromptFn {
 }
 
 impl BundledPromptFn for DesktopBuiltinSkillPromptFn {
-    fn build(&self, _args: &Utf16JsonProjection) -> Utf16JsonProjection {
-        skill::desktop_builtin_skill_content(self.name)
+    fn skip_shell_expansion(&self) -> bool {
+        matches!(self.name, "lingxi-api" | "document-authoring")
+    }
+
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+        skill::desktop_builtin_skill_prompt(self.name, args)
             .expect("slash builtin is registered in the desktop SkillRegistry")
     }
 }
@@ -30,8 +34,18 @@ mod tests {
     #[test]
     fn slash_bodies_share_the_registered_skill_source() {
         for (name, expected_marker) in [
-            ("claude-api", "Anthropic 1.x SDK surface"),
-            ("plugin-authoring", ".lingxi-plugin/\n    plugin.json"),
+            (
+                "document-authoring",
+                format!("Document authoring in {}", branding::PRODUCT_NAME),
+            ),
+            (
+                "lingxi-api",
+                format!("{} API guide", branding::PRODUCT_NAME),
+            ),
+            (
+                "plugin-authoring",
+                ".lingxi-plugin/\n    plugin.json".to_owned(),
+            ),
         ] {
             let prompt = DesktopBuiltinSkillPromptFn::new(name).build(&"".into());
             let skill = skill::desktop_builtin_skill(name).expect("desktop builtin skill");
@@ -40,7 +54,7 @@ mod tests {
             assert!(
                 prompt
                     .string_at("")
-                    .is_some_and(|body| body.contains(expected_marker)),
+                    .is_some_and(|body| body.contains(expected_marker.as_str())),
                 "the shared body for {name} contains its expected content"
             );
         }

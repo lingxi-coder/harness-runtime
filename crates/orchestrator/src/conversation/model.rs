@@ -34,6 +34,42 @@ fn main_source_requires_model_carrier(
 }
 
 impl ConversationOrchestrator {
+    /// Keep request-wide App authority independent from per-source hook
+    /// authority. Both survive credential awaits and every physical retry.
+    pub(crate) fn main_request_dispatch_admission(
+        &self,
+        messages: &[ConversationMessage],
+        guards: &[(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)],
+        cancel: Option<&CancellationToken>,
+    ) -> Option<llm_runtime::RequestDispatchAdmission> {
+        Self::with_chat_dispatch_check(
+            crate::prompt::async_hook_response::request_dispatch_admission(messages, guards),
+            self.chat_dispatch_check(cancel),
+        )
+    }
+
+    pub(crate) fn chat_dispatch_check(
+        &self,
+        cancel: Option<&CancellationToken>,
+    ) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+        self.persistent_chat_context
+            .as_ref()
+            .map(|context| context.dispatch_check(cancel))
+    }
+
+    pub(crate) fn with_chat_dispatch_check(
+        admission: Option<llm_runtime::RequestDispatchAdmission>,
+        check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Option<llm_runtime::RequestDispatchAdmission> {
+        let Some(check) = check else {
+            return admission;
+        };
+        Some(match admission {
+            Some(admission) => admission.with_additional_global_check(move || check()),
+            None => llm_runtime::RequestDispatchAdmission::new(move || check()),
+        })
+    }
+
     /// Pair a configured or explicitly selected source with a known route.
     /// Native aliases are resolved against the supplied route context. An
     /// unresolved source stays exact and retains the existing known anchor.
@@ -2955,6 +2991,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         cwd: &std::path::Path,
     ) -> (Option<crate::prompt::GitStatus>, Option<String>) {
+        if self.prompt_runtime.host_environment_probes_disabled {
+            return (None, None);
+        }
         {
             let cache = self.prompt_runtime.git_status_snapshot.lock().await;
             if let Some(snap) = cache.as_ref() {
@@ -2983,6 +3022,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 let session = orchestrator.session.lock().await;
                 (session.model.clone(), session.model_profile.clone())
             };
+            if !orchestrator
+                .api
+                .supports_responses_websocket_prewarm(&model, profile.as_deref())
+            {
+                return;
+            }
             let system = match orchestrator.provider_system_prompt().await {
                 Ok(system) => system,
                 Err(error) => {
@@ -4367,6 +4412,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let settings = self.scheduled_turn_settings(model, reasoning)?;
         self.run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
             .await
+    }
+
+    /// Resolve the current session and the exact provider profile selected by
+    /// validated scheduled-turn settings, without changing session defaults.
+    /// Hosts use this to bind child media to the route the scheduled turn will
+    /// actually use rather than guessing from the saved model spelling.
+    pub async fn scheduled_audio_binding(
+        &self,
+        model: &str,
+        reasoning: lingxi_core::host::ReasoningSelection,
+    ) -> Result<(String, String), String> {
+        let settings = self.scheduled_turn_settings(model, reasoning)?;
+        let session = self.session.lock().await;
+        Ok((session.session_id.as_uuid().to_string(), settings.provider))
     }
 
     /// Pin a scheduled turn to an exact live session. The same gate protects

@@ -148,7 +148,7 @@ fn operation_target_schema_requires_host_identity_for_status_and_stop() {
         assert_required_fields(
             schema,
             pointer,
-            &["kind", "ref", "generation", "service_epoch"],
+            &["kind", "ref", "generation", "service_epoch", "incarnation"],
         );
     }
 
@@ -158,12 +158,23 @@ fn operation_target_schema_requires_host_identity_for_status_and_stop() {
         }));
         assert!(parse_operation(kind, &input).is_err());
 
-        let input = generated_projection(&json!({
+        let missing_incarnation = generated_projection(&json!({
             "target":{
                 "kind":"operation",
                 "ref":"operation-1",
                 "generation":42,
                 "service_epoch":7
+            }
+        }));
+        assert!(parse_operation(kind, &missing_incarnation).is_err());
+
+        let input = generated_projection(&json!({
+            "target":{
+                "kind":"operation",
+                "ref":"operation-1",
+                "generation":42,
+                "service_epoch":7,
+                "incarnation":media_api::MediaOperationIncarnation::new().as_string()
             }
         }));
         assert!(parse_operation(kind, &input).is_ok());

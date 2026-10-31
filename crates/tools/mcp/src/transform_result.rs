@@ -63,6 +63,74 @@ pub struct PersistContext<'a> {
 /// becomes an inline image block; anything else is persisted to disk.
 const IMAGE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+/// Local App Chat never calls the persistence transform. Unsupported content
+/// is rejected while still in memory, before a blob can create a file.
+pub fn transform_result_content_inline_source(content: &UJP, server: &str) -> Result<UJP, String> {
+    tool_api::persistent_chat::validate_inline_size(content).map_err(str::to_owned)?;
+    let Some(count) = content.array_len("") else {
+        return content
+            .string_units("")
+            .map(|_| content.clone())
+            .ok_or_else(|| tool_api::persistent_chat::INLINE_RESULT_ERROR.to_owned());
+    };
+    let mut out = Vec::new();
+    for index in 0..count {
+        let block = content
+            .subprojection(&format!("/{index}"))
+            .map_err(|error| error.to_string())?;
+        match block.string_at("/type") {
+            Some("text") => {
+                let text = source_string_field(&block, "text")
+                    .ok_or(tool_api::persistent_chat::INLINE_RESULT_ERROR)?;
+                out.push(text_block_source(text));
+            }
+            Some("image") => {
+                let data = strict_string_field(&block, "data")
+                    .ok_or(tool_api::persistent_chat::INLINE_RESULT_ERROR)?;
+                let mime = strict_string_field(&block, "mimeType");
+                if !is_image_mime(mime.as_deref()) {
+                    return Err(tool_api::persistent_chat::INLINE_RESULT_ERROR.into());
+                }
+                out.push(image_block_source(&data, mime.as_deref()));
+            }
+            Some("resource") => {
+                let resource = source_field(&block, "resource")
+                    .ok_or(tool_api::persistent_chat::INLINE_RESULT_ERROR)?;
+                let uri = source_string_field(&resource, "uri").unwrap_or_else(|| "".into());
+                let prefix = concat_text(&[
+                    &generated_text(&format!("[Resource from {server} at ")),
+                    &uri,
+                    &generated_text("] "),
+                ]);
+                if let Some(text) = source_string_field(&resource, "text") {
+                    out.push(text_block_source(concat_text(&[&prefix, &text])));
+                } else {
+                    let data = strict_string_field(&resource, "blob")
+                        .ok_or(tool_api::persistent_chat::INLINE_RESULT_ERROR)?;
+                    let mime = strict_string_field(&resource, "mimeType");
+                    out.push(text_block_source(prefix));
+                    if is_image_mime(mime.as_deref()) {
+                        out.push(image_block_source(&data, mime.as_deref()));
+                    } else if mime.as_deref() == Some("application/pdf") {
+                        out.push(UJP::plain(serde_json::json!({
+                            "type": "document", "source": {
+                                "type": "base64", "media_type": "application/pdf", "data": data
+                            }
+                        })));
+                    } else {
+                        return Err(tool_api::persistent_chat::INLINE_RESULT_ERROR.into());
+                    }
+                }
+            }
+            Some("resource_link") => out.push(text_block_source(resource_link_text_source(&block))),
+            _ => return Err(tool_api::persistent_chat::INLINE_RESULT_ERROR.into()),
+        }
+    }
+    let result = UJP::array(out).map_err(|error| error.to_string())?;
+    tool_api::persistent_chat::validate_inline_blocks(&result).map_err(str::to_owned)?;
+    Ok(result)
+}
+
 /// `Ara(mimeType)` (binary @198957564): `split(';')[0].trim().toLowerCase()`,
 /// normalize `image/jpg` → `image/jpeg`, then membership in [`IMAGE_MIME_TYPES`].
 /// A missing/empty mime is not an image. The `;`-strip drops params like
@@ -453,6 +521,29 @@ fn transform_result_content(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn local_app_inline_media_and_large_results_never_create_external_files() {
+        let root = tempfile::tempdir().unwrap();
+        let content = UJP::plain(json!([
+            {"type":"text", "text":"x".repeat(150_000)},
+            {"type":"image", "mimeType":"image/png", "data": b64(b"inline image")},
+            {"type":"resource", "resource":{"uri":"memory:report", "mimeType":"application/pdf", "blob":b64(b"%PDF-inline")}}
+        ]));
+        let transformed = transform_result_content_inline_source(&content, "server").unwrap();
+        assert_eq!(transformed.string_at("/1/type"), Some("image"));
+        assert_eq!(transformed.string_at("/3/type"), Some("document"));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+
+        let huge = UJP::plain(json!([{"type":"text", "text":"x".repeat(
+            lingxi_core::host::tool_invoker::LOCAL_APP_CHAT_MAX_INLINE_BYTES
+        )}]));
+        assert!(transform_result_content_inline_source(&huge, "server").is_err());
+        let audio =
+            UJP::plain(json!([{"type":"audio", "mimeType":"audio/wav", "data":b64(b"sound")} ]));
+        assert!(transform_result_content_inline_source(&audio, "server").is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     /// A fixed [`PersistContext`] writing into `dir` with a deterministic seed,
     /// so persisted filenames are predictable in assertions.

@@ -14,6 +14,20 @@ fn error(error: impl std::fmt::Display) -> ProcessError {
 }
 struct UnixPlatform;
 struct UnixSocket(UnixListener);
+
+#[cfg(test)]
+fn held_supervisor_liveness(pid: u32) -> Option<PathBuf> {
+    if std::env::var("LXS_TEST_HOLD_SUPERVISOR_PID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        != Some(pid)
+    {
+        return None;
+    }
+    let directory = PathBuf::from(std::env::var_os("LXS_TEST_DIR")?);
+    (!directory.join("recovery.allow_supervisor_death").exists()).then_some(directory)
+}
+
 #[async_trait::async_trait]
 impl Listener for UnixSocket {
     async fn accept(&self) -> Result<BoxStream, ProcessError> {
@@ -23,6 +37,26 @@ impl Listener for UnixSocket {
 #[async_trait::async_trait]
 impl Platform for UnixPlatform {
     fn process_is_alive(&self, pid: u32) -> Option<bool> {
+        #[cfg(test)]
+        if let Some(directory) = held_supervisor_liveness(pid) {
+            let child = std::env::var("LXS_TEST_HOLD_CHILD_PID")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok());
+            if child.is_some_and(|child| {
+                lingxi_core::host::live_sessions::process_start_identity(child).is_none()
+                    && i32::try_from(child).ok().is_some_and(|raw| {
+                        nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw), None)
+                            == Err(nix::errno::Errno::ESRCH)
+                    })
+            }) {
+                std::fs::write(
+                    directory.join("recovery.unknown_after_child_exit"),
+                    "checked",
+                )
+                .unwrap();
+            }
+            return None;
+        }
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 1)?;
         match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
             Ok(()) => Some(true),
@@ -33,10 +67,16 @@ impl Platform for UnixPlatform {
 
     #[cfg(test)]
     fn process_start_identity(&self, pid: u32) -> Option<String> {
+        if held_supervisor_liveness(pid).is_some() {
+            return None;
+        }
         if pid != std::process::id()
             && matches!(
                 std::env::var("LXS_TEST_MODE").as_deref(),
-                Ok("pre_cap") | Ok("pre_cap_delivery")
+                Ok("pre_cap")
+                    | Ok("pre_cap_delivery")
+                    | Ok("pre_cap_cancel")
+                    | Ok("pre_cap_cancel_bg")
             )
         {
             std::fs::write(
@@ -115,13 +155,26 @@ impl Platform for UnixPlatform {
 
         let stream = UnixStream::connect(endpoint).await.map_err(error)?;
         #[cfg(test)]
-        if std::env::var("LXS_TEST_MODE").as_deref() == Ok("pre_cap_delivery")
-            && std::env::var("LXS_TEST_ROLE").as_deref() == Ok("source")
+        if matches!(
+            std::env::var("LXS_TEST_MODE").as_deref(),
+            Ok("pre_cap_delivery") | Ok("pre_cap_cancel") | Ok("pre_cap_cancel_bg")
+        ) && std::env::var("LXS_TEST_ROLE").as_deref() == Ok("source")
         {
             static CONNECTIONS: std::sync::atomic::AtomicUsize =
                 std::sync::atomic::AtomicUsize::new(0);
             if CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                if matches!(
+                    std::env::var("LXS_TEST_MODE").as_deref(),
+                    Ok("pre_cap_cancel") | Ok("pre_cap_cancel_bg")
+                ) {
+                    let root = PathBuf::from(std::env::var_os("LXS_TEST_DIR").unwrap());
+                    std::fs::write(root.join("acceptance.waiting"), "waiting").unwrap();
+                    while !root.join("acceptance.release").exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
             }
         }
         Ok(Box::new(stream))
@@ -312,9 +365,9 @@ mod tests {
                 args: vec!["-c".into(), std::env::var("LXS_TEST_COMMAND").unwrap()],
                 cwd: Some(directory.clone()),
                 env: HashMap::new(),
-                timeout: matches!(mode.as_str(), "timeout" | "deadline")
+                timeout: matches!(mode.as_str(), "timeout" | "deadline" | "fg_timeout_failure")
                     .then_some(Duration::from_millis(150)),
-                stdin: None,
+                stdin: (mode == "fg_stdin_cancel").then(|| "x".repeat(1024 * 1024)),
             },
             SandboxedTag::BypassAuditedWithReason {
                 reason: "supervisor integration test".into(),
@@ -326,15 +379,49 @@ mod tests {
             on_exit: Some(sink),
             on_demand: Some(background.clone()),
         })
-        .with_auto_background_on_timeout(mode != "deadline");
+        .with_auto_background_on_timeout(!matches!(
+            mode.as_str(),
+            "deadline" | "fg_timeout_failure"
+        ));
         let runner = PosixProcess::new();
-        if matches!(mode.as_str(), "pre_cap" | "pre_cap_delivery") {
+        let command = if matches!(
+            mode.as_str(),
+            "request_stop" | "request_normal" | "request_stop_denied"
+        ) {
+            command
+                .with_process_owner(Some("host-request:test".into()))
+                .with_start_cancellation(Some(tokio_util::sync::CancellationToken::new()))
+        } else {
+            command
+        };
+        if matches!(
+            mode.as_str(),
+            "pre_cap" | "pre_cap_delivery" | "pre_cap_cancel" | "pre_cap_cancel_bg"
+        ) {
             std::env::set_var("LXS_TEST_PRECAP_RECORD", directory.join("gate.pid"));
-            let command = command.with_process_owner(Some("pre-cap".into()));
-            let run = tokio::spawn(async move {
-                PosixProcess::new()
-                    .run_foreground_with_output_limit(&command, Some(10))
-                    .await
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let command = command
+                .with_process_owner(Some("pre-cap".into()))
+                .with_start_cancellation(
+                    mode.starts_with("pre_cap_cancel").then_some(cancel.clone()),
+                );
+            let background = mode == "pre_cap_cancel_bg";
+            let mut run = tokio::spawn(async move {
+                if background {
+                    PosixProcess::new()
+                        .spawn_background(&command)
+                        .await
+                        .map(|handle| lingxi_core::host::ForegroundRunResult {
+                            outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(
+                                handle,
+                            ),
+                            output_file: None,
+                        })
+                } else {
+                    PosixProcess::new()
+                        .run_foreground_with_output_limit(&command, Some(10))
+                        .await
+                }
             });
             tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while !directory.join("gate.pid").exists() {
@@ -352,6 +439,42 @@ mod tests {
                 "source has no capability yet"
             );
             assert!(!directory.join("payload.started").exists());
+            if mode.starts_with("pre_cap_cancel") {
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while !directory.join("acceptance.waiting").exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("source reached capability admission gate");
+                let birth = lingxi_core::host::live_sessions::process_start_identity(child)
+                    .expect("pending child has a start identity");
+                cancel.cancel();
+                std::fs::write(directory.join("acceptance.release"), "release").unwrap();
+                let outcome = tokio::time::timeout(CROSS_PROCESS_WAIT, &mut run)
+                    .await
+                    .expect("cancelled start must settle")
+                    .unwrap();
+                let error = outcome.expect_err("cancelled start cannot run payload");
+                assert!(
+                    lingxi_core::host::shell_supervisor::is_settled_request_cancellation(&error),
+                    "{error}"
+                );
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while lingxi_core::host::live_sessions::process_start_identity(child).as_deref()
+                        == Some(birth.as_str())
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("pending child must be reaped");
+                assert!(
+                    !directory.join("payload.started").exists(),
+                    "cancelled capability must never start payload"
+                );
+                return;
+            }
             let supervisor = std::fs::read_to_string(directory.join("supervisor.pid"))
                 .unwrap()
                 .trim()
@@ -362,11 +485,19 @@ mod tests {
                 nix::sys::signal::Signal::SIGKILL,
             )
             .unwrap();
-            assert!(tokio::time::timeout(Duration::from_secs(3), run)
+            let outcome = tokio::time::timeout(Duration::from_secs(3), &mut run)
                 .await
-                .unwrap()
-                .unwrap()
-                .is_err());
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{mode}: source did not observe supervisor death; child={child}, \
+                         child_identity={:?}, supervisor={supervisor}, supervisor_identity={:?}, \
+                         payload_started={}",
+                        lingxi_core::host::live_sessions::process_start_identity(child),
+                        lingxi_core::host::live_sessions::process_start_identity(supervisor as u32),
+                        directory.join("payload.started").exists()
+                    )
+                });
+            assert!(outcome.unwrap().is_err());
             tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while lingxi_core::host::live_sessions::process_start_identity(child).is_some() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -380,8 +511,168 @@ mod tests {
             );
             return;
         }
-        if matches!(mode.as_str(), "fg_crash" | "fg_crash_abort") {
-            let command = command.with_process_owner(Some("fg-crash".into()));
+        if mode == "fg_timeout_failure" {
+            let command = command.with_process_owner(Some("fg-timeout-failure".into()));
+            let result = PosixProcess::new()
+                .run_foreground_with_output_limit(&command, Some(10))
+                .await
+                .unwrap();
+            assert!(
+                matches!(result.outcome, ForegroundOutcome::Completed(output) if output.timed_out && output.exit_code == 143)
+            );
+            let child = std::fs::read_to_string(directory.join("child.pid"))
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            let birth = UnixPlatform
+                .process_start_identity(child)
+                .expect("failed timeout kill must leave child owned");
+            let supervisor = std::fs::read_to_string(directory.join("supervisor.pid"))
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            let supervisor_birth = UnixPlatform
+                .process_start_identity(supervisor)
+                .expect("supervisor must retain cleanup");
+            assert_eq!(
+                UnixPlatform.process_start_identity(child).as_deref(),
+                Some(birth.as_str())
+            );
+            assert_eq!(
+                UnixPlatform.process_start_identity(supervisor).as_deref(),
+                Some(supervisor_birth.as_str())
+            );
+            std::fs::write(directory.join("foreground.retry.release"), "release").unwrap();
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                while UnixPlatform.process_start_identity(child).as_deref() == Some(birth.as_str())
+                    || UnixPlatform.process_start_identity(supervisor).as_deref()
+                        == Some(supervisor_birth.as_str())
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("timeout cleanup must reap child before supervisor exits");
+            return;
+        }
+        if matches!(mode.as_str(), "promotion_cancel" | "promotion_abort") {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let command = command
+                .with_process_owner(Some("promotion-race".into()))
+                .with_start_cancellation(Some(cancel.clone()));
+            let mut run =
+                tokio::spawn(async move { PosixProcess::new().spawn_background(&command).await });
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                while !directory.join("promotion.handoff.ready").exists()
+                    || !directory.join("child.pid").exists()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("background child and handoff must be ready");
+            let child = std::fs::read_to_string(directory.join("child.pid"))
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            let supervisor = std::fs::read_to_string(directory.join("supervisor.pid"))
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            let birth = UnixPlatform.process_start_identity(supervisor).unwrap();
+            if mode == "promotion_cancel" {
+                cancel.cancel();
+            } else {
+                run.abort();
+            }
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                while !directory.join("promotion.reaper.ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("stop must reach the held background reaper");
+            std::fs::write(directory.join("promotion.handoff.release"), "release").unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(
+                UnixPlatform.process_start_identity(supervisor).as_deref(),
+                Some(birth.as_str()),
+                "supervisor must stay alive until reaper settlement"
+            );
+            if mode == "promotion_cancel" {
+                assert!(
+                    !run.is_finished(),
+                    "cancellation cannot return while the reaper is held"
+                );
+            }
+            let supervisor_directory =
+                std::fs::read_to_string(directory.join("supervisor.directory")).unwrap();
+            let receipt = Path::new(supervisor_directory.trim()).join("receipt");
+            assert!(
+                !receipt.exists(),
+                "no terminal receipt before the reaper settles"
+            );
+            std::fs::write(directory.join("promotion.reaper.release"), "release").unwrap();
+            if mode == "promotion_cancel" {
+                let result = tokio::time::timeout(CROSS_PROCESS_WAIT, &mut run)
+                    .await
+                    .expect("cancel must finish after reap")
+                    .unwrap();
+                let cause = result.expect_err("cancelled start cannot return a background handle");
+                assert!(shared::is_settled_request_cancellation(&cause), "{cause}");
+            } else {
+                assert!(run.await.unwrap_err().is_cancelled());
+            }
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                while !receipt.exists()
+                    || lingxi_core::host::live_sessions::process_start_identity(child).is_some()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("stopped background child must be reaped with a receipt");
+            let proof: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+            assert_eq!(proof["handoff"]["pid"], child);
+            assert!(proof["exit_code"].is_null());
+            assert_eq!(
+                proof["stop_cause"],
+                if mode == "promotion_cancel" {
+                    "request_cancelled"
+                } else {
+                    "source_disconnected"
+                }
+            );
+            assert!(!std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains("[supervisor lost; task failed]"));
+            return;
+        }
+        if matches!(
+            mode.as_str(),
+            "fg_crash"
+                | "fg_crash_abort"
+                | "fg_crash_abort_unknown"
+                | "fg_abort_live"
+                | "fg_request_cancel"
+                | "fg_stdin_cancel"
+                | "fg_stop_failure"
+        ) {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let command = command
+                .with_process_owner(Some("fg-crash".into()))
+                .with_start_cancellation(
+                    matches!(
+                        mode.as_str(),
+                        "fg_request_cancel" | "fg_stdin_cancel" | "fg_stop_failure"
+                    )
+                    .then_some(cancel.clone()),
+                );
             let run = tokio::spawn(async move {
                 PosixProcess::new()
                     .run_foreground_with_output_limit(&command, Some(10))
@@ -401,12 +692,168 @@ mod tests {
                 .parse::<i32>()
                 .unwrap();
             let supervisor_birth = UnixPlatform.process_start_identity(supervisor as u32);
+            if matches!(
+                mode.as_str(),
+                "fg_abort_live" | "fg_request_cancel" | "fg_stdin_cancel" | "fg_stop_failure"
+            ) {
+                let payload_pid = tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    loop {
+                        if let Ok(contents) = std::fs::read_to_string(directory.join("child.pid")) {
+                            if let Ok(pid) = contents.trim().parse::<u32>() {
+                                break pid;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("foreground payload must start before abandonment");
+                assert_eq!(payload_pid, child);
+                assert!(supervisor_birth.is_some());
+                assert_eq!(
+                    UnixPlatform.process_start_identity(supervisor as u32),
+                    supervisor_birth,
+                    "the original supervisor is alive before abandonment"
+                );
+                if mode == "fg_stop_failure" {
+                    let child_birth = UnixPlatform.process_start_identity(child).unwrap();
+                    cancel.cancel();
+                    let result = tokio::time::timeout(CROSS_PROCESS_WAIT, run)
+                        .await
+                        .expect("failed stop must return promptly")
+                        .unwrap();
+                    let cause =
+                        result.expect_err("failed stop must not claim cancellation success");
+                    assert!(
+                        cause
+                            .to_string()
+                            .contains("injected foreground kill failure"),
+                        "{cause}"
+                    );
+                    assert!(!shared::is_settled_request_cancellation(&cause));
+                    assert_eq!(
+                        UnixPlatform.process_start_identity(child).as_deref(),
+                        Some(child_birth.as_str())
+                    );
+                    assert_eq!(
+                        UnixPlatform.process_start_identity(supervisor as u32),
+                        supervisor_birth,
+                        "supervisor must retain the pending cleanup"
+                    );
+                    let supervisor_directory =
+                        std::fs::read_to_string(directory.join("supervisor.directory")).unwrap();
+                    let receipt_path = Path::new(supervisor_directory.trim()).join("receipt");
+                    assert!(
+                        !receipt_path.exists(),
+                        "a failed stop cannot publish a settled receipt"
+                    );
+                    std::fs::write(directory.join("foreground.retry.release"), "release").unwrap();
+                    tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                        while UnixPlatform.process_start_identity(child).as_deref()
+                            == Some(child_birth.as_str())
+                            || !receipt_path.exists()
+                        {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("retained cleanup must reap child and permit loss recovery");
+                    let receipt: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+                    assert_eq!(
+                        receipt["runner_settled"], false,
+                        "loss recovery cannot claim physical settlement"
+                    );
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    assert!(text.contains("foreground body") && text.contains("foreground err"));
+                    assert!(text.contains("[supervisor lost; task failed]"));
+                    return;
+                }
+                if matches!(mode.as_str(), "fg_request_cancel" | "fg_stdin_cancel") {
+                    cancel.cancel();
+                    let outcome = tokio::time::timeout(CROSS_PROCESS_WAIT, run)
+                        .await
+                        .expect("foreground request cancellation must settle")
+                        .unwrap();
+                    let error = outcome.expect_err("cancelled request must return an error");
+                    assert!(shared::is_settled_request_cancellation(&error), "{error}");
+                } else {
+                    run.abort();
+                    assert!(run.await.unwrap_err().is_cancelled());
+                }
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while lingxi_core::host::live_sessions::process_start_identity(child).is_some()
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("abandoned foreground child must be reaped");
+                let supervisor_directory =
+                    std::fs::read_to_string(directory.join("supervisor.directory")).unwrap();
+                let receipt_path = Path::new(supervisor_directory.trim()).join("receipt");
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while !receipt_path.exists() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("graceful source disconnect must produce a terminal receipt");
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+                assert_eq!(receipt["handoff"]["pid"], child);
+                assert_eq!(receipt["handoff"]["supervisor_pid"], supervisor);
+                assert!(
+                    receipt["exit_code"].is_null(),
+                    "a SIGKILL has no numeric Unix exit status"
+                );
+                assert_eq!(
+                    receipt["stop_cause"],
+                    if matches!(mode.as_str(), "fg_request_cancel" | "fg_stdin_cancel") {
+                        "request_cancelled"
+                    } else {
+                        "source_disconnected"
+                    }
+                );
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while lingxi_core::host::live_sessions::process_start_identity(
+                        supervisor as u32,
+                    )
+                    .as_deref()
+                        == supervisor_birth.as_deref()
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("supervisor must exit after the child is joined");
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                assert!(
+                    text.contains("foreground body"),
+                    "drained stdout must be persisted after source disconnect"
+                );
+                assert!(
+                    text.contains("[stderr] foreground err"),
+                    "drained stderr must be persisted after source disconnect"
+                );
+                assert!(
+                    !text.contains("[supervisor lost; task failed]"),
+                    "graceful source abandonment must not be reported as writer loss"
+                );
+                return;
+            }
+            if mode == "fg_crash_abort_unknown" {
+                // Keep the source's writer-liveness probe inconclusive until
+                // the actual child is gone and the recovery guard has polled.
+                std::env::set_var("LXS_TEST_HOLD_SUPERVISOR_PID", supervisor.to_string());
+                std::env::set_var("LXS_TEST_HOLD_CHILD_PID", child.to_string());
+            }
             nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(supervisor),
                 nix::sys::signal::Signal::SIGKILL,
             )
             .unwrap();
-            if mode == "fg_crash_abort" {
+            if mode != "fg_crash" {
                 run.abort();
                 assert!(run.await.unwrap_err().is_cancelled());
             } else {
@@ -419,6 +866,39 @@ mod tests {
             })
             .await
             .unwrap();
+            if mode == "fg_crash_abort_unknown" {
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while !directory.join("recovery.unknown_after_child_exit").exists() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("guard must keep checking while writer liveness is unknown");
+                assert!(
+                    !std::fs::read_to_string(&path)
+                        .unwrap_or_default()
+                        .contains("[supervisor lost; task failed]"),
+                    "an unknown writer must retain its output"
+                );
+                let supervisor_directory =
+                    std::fs::read_to_string(directory.join("supervisor.directory")).unwrap();
+                let receipt_path = Path::new(supervisor_directory.trim()).join("receipt");
+                assert!(!receipt_path.exists(), "unknown writer cannot be replaced");
+                std::fs::write(directory.join("recovery.allow_supervisor_death"), "release")
+                    .unwrap();
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while !receipt_path.exists() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("proven writer death must produce a terminal receipt");
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+                assert_eq!(receipt["handoff"]["pid"], child);
+                assert_eq!(receipt["handoff"]["supervisor_pid"], supervisor);
+                assert_eq!(receipt["exit_code"], -1);
+            }
             let output_ready = tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while !std::fs::read_to_string(&path)
                     .unwrap_or_default()
@@ -463,6 +943,14 @@ mod tests {
                         .map_or_else(|| "<unknown>".to_owned(), bounded_tail),
                 );
             }
+            assert_eq!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .matches("[supervisor lost; task failed]")
+                    .count(),
+                1,
+                "recovery must append exactly one terminal footer"
+            );
             return;
         }
         if mode == "birthfail" {
@@ -476,7 +964,10 @@ mod tests {
             return;
         }
 
-        let handle = if matches!(mode.as_str(), "explicit" | "unregistered") {
+        let handle = if matches!(
+            mode.as_str(),
+            "explicit" | "unregistered" | "request_stop" | "request_normal" | "request_stop_denied"
+        ) {
             runner.spawn_background(&command).await.unwrap()
         } else {
             if mode == "demand" {
@@ -518,8 +1009,102 @@ mod tests {
             .unwrap();
             return;
         }
-        shared::acknowledge(&handle).await.unwrap();
+        runner.acknowledge_shell(&handle).await.unwrap();
         let handoff = export(&handle).unwrap();
+        if matches!(
+            mode.as_str(),
+            "request_stop" | "request_normal" | "request_stop_denied"
+        ) {
+            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                while !directory.join("payload.started").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("acknowledged payload must start");
+            let birth = handoff
+                .process_start_identity
+                .as_ref()
+                .expect("supervisor records the child birth identity");
+            assert_eq!(
+                lingxi_core::host::live_sessions::process_start_identity(handle.pid).as_deref(),
+                Some(birth.as_str()),
+                "the acknowledged child is running"
+            );
+            if mode == "request_stop_denied" {
+                let cause = tokio::time::timeout(
+                    CROSS_PROCESS_WAIT,
+                    runner.stop_request_background(&handle),
+                )
+                .await
+                .expect("stop failure must be reported without waiting for pipe EOF")
+                .unwrap_err();
+                assert!(
+                    cause
+                        .to_string()
+                        .contains("injected kill permission denied"),
+                    "{cause}"
+                );
+                assert_eq!(
+                    lingxi_core::host::live_sessions::process_start_identity(handle.pid).as_deref(),
+                    Some(birth.as_str())
+                );
+                assert!(
+                    !Path::new(&handoff.receipt_path).exists(),
+                    "a failed kill must not produce a settled receipt"
+                );
+                assert_eq!(
+                    UnixPlatform
+                        .process_start_identity(handoff.supervisor_pid)
+                        .as_deref(),
+                    handoff.supervisor_start_identity.as_deref(),
+                    "supervisor must retain the live child"
+                );
+                std::fs::write(directory.join("payload.release"), "release").unwrap();
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while lingxi_core::host::live_sessions::process_start_identity(handle.pid)
+                        .as_deref()
+                        == Some(birth.as_str())
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("held child must be reaped after natural exit");
+            } else if mode == "request_stop" {
+                tokio::time::timeout(CROSS_PROCESS_WAIT, runner.stop_request_background(&handle))
+                    .await
+                    .expect("request stop must settle")
+                    .expect("request stop must have an authenticated terminal receipt");
+                assert_ne!(
+                    lingxi_core::host::live_sessions::process_start_identity(handle.pid).as_deref(),
+                    Some(birth.as_str()),
+                    "stop must return only after the child is reaped"
+                );
+                assert!(!directory.join("payload.finished").exists());
+                std::fs::write(directory.join("payload.release"), "release").unwrap();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert!(
+                    !directory.join("payload.finished").exists(),
+                    "a released gate must not allow a stopped payload to continue"
+                );
+            } else {
+                std::fs::write(directory.join("payload.release"), "release").unwrap();
+                tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                    while !Path::new(&handoff.receipt_path).exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("normal acknowledged command must finish");
+                assert!(directory.join("payload.finished").exists());
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&handoff.receipt_path).unwrap()).unwrap();
+                assert_eq!(receipt["exit_code"], 0);
+                shared::release(&handoff).await.unwrap();
+            }
+            return;
+        }
         std::fs::write(
             directory.join("handoff.json"),
             serde_json::to_vec(&handoff).unwrap(),
@@ -673,6 +1258,7 @@ mod tests {
             .env("LXS_TEST_WRAPPER", wrapper)
             .env("LXS_TEST_COMMAND", command)
             .env("LXS_TEST_MODE", mode)
+            .env("LXS_TEST_BARRIER_DIR", directory)
             .spawn()
             .unwrap();
         let status = if matches!(mode, "cancel" | "deadline") {
@@ -977,6 +1563,72 @@ mod tests {
             launch_mode(directory.path(), "sleep 5", mode).await;
         }
     }
+
+    #[tokio::test]
+    async fn supervisor_cross_process_unknown_after_child_exit_then_death_recovers_output() {
+        let directory = tempfile::tempdir().unwrap();
+        launch_mode(directory.path(), "sleep 5", "fg_crash_abort_unknown").await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_cross_process_stop_during_promotion_waits_for_reaper() {
+        for mode in ["promotion_cancel", "promotion_abort"] {
+            let directory = tempfile::tempdir().unwrap();
+            launch_mode(directory.path(), "printf 'foreground body'; printf 'foreground err' >&2; echo $$ > child.pid; sleep 30", mode).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_cross_process_foreground_abandonment_and_cancellation_are_not_writer_loss()
+    {
+        for mode in ["fg_abort_live", "fg_request_cancel", "fg_stdin_cancel"] {
+            let directory = tempfile::tempdir().unwrap();
+            launch_mode(directory.path(), "printf 'foreground body'; printf 'foreground err' >&2; echo $$ > child.pid; sleep 30", mode).await;
+        }
+    }
+    #[tokio::test]
+    async fn supervisor_cross_process_failed_foreground_stop_retains_cleanup_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        launch_mode(
+            directory.path(),
+            "printf 'foreground body'; printf 'foreground err' >&2; echo $$ > child.pid; sleep 30",
+            "fg_stop_failure",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_cross_process_failed_timeout_keeps_cleanup_owner_and_public_143() {
+        let directory = tempfile::tempdir().unwrap();
+        launch_mode(
+            directory.path(),
+            "echo $$ > child.pid; sleep 30",
+            "fg_timeout_failure",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_cross_process_cancel_before_acceptance_never_starts_payload() {
+        for mode in ["pre_cap_cancel", "pre_cap_cancel_bg"] {
+            let directory = tempfile::tempdir().unwrap();
+            launch_mode(directory.path(), "touch payload.started; sleep 30", mode).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_cross_process_acknowledged_request_stop_reaps_child() {
+        for mode in ["request_stop", "request_normal", "request_stop_denied"] {
+            let directory = tempfile::tempdir().unwrap();
+            launch_mode(
+                directory.path(),
+                "touch payload.started; i=0; while [ ! -e payload.release ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done; [ -e payload.release ] && touch payload.finished",
+                mode,
+            )
+            .await;
+        }
+    }
+
     #[tokio::test]
     async fn supervisor_cross_process_pre_cap_death_never_starts_payload() {
         for mode in ["pre_cap", "pre_cap_delivery"] {

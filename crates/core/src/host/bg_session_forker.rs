@@ -62,6 +62,10 @@ pub enum BgForkError {
     /// failed.
     #[error("could not dispatch background session: {0}")]
     Dispatch(String),
+    /// The source cannot prove that an exported shell is either retained or
+    /// durably owned by the destination. Teardown must retain its dependencies.
+    #[error("background session ownership is uncertain: {0}")]
+    OwnershipUncertain(String),
 }
 
 /// Copies the current conversation into a new background session.
@@ -72,9 +76,9 @@ pub enum BgForkError {
 /// `ActionFailed` rather than panicking.
 #[async_trait]
 pub trait BgSessionForker: Send + Sync {
-    /// Shared permanent admission fence for every background launch path.
-    /// Each accepted publication keeps a claim through its owned completion,
-    /// including any uncertain shell handoff and recovery registration.
+    /// The foreground owner's permanent admission fence for every background
+    /// launch path. A claim covers owned publication and any recovery registration,
+    /// even when the original caller or another orchestrator reference disappears.
     fn lifecycle(&self) -> Arc<lifecycle::BackgroundLaunchLifecycle>;
 
     /// Late binding after the host has constructed its session registry.

@@ -76,6 +76,22 @@ impl WindowsProcess {
 
 #[async_trait]
 impl ProcessRunner for WindowsProcess {
+    fn supports_request_cancellation(&self, command: &SandboxedCommand) -> bool {
+        #[cfg(windows)]
+        {
+            super::supervisor::enabled(command)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = command;
+            false
+        }
+    }
+
+    async fn stop_request_background(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+        lingxi_core::host::shell_supervisor::stop_and_wait(handle).await
+    }
+
     async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
         let owned = lingxi_core::host::agent_processes::snapshot_entries(owner);
         for entry in &owned {

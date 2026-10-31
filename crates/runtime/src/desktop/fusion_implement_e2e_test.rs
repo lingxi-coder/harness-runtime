@@ -539,7 +539,12 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
                     got == paths
                 })
             })
-            .unwrap_or_else(|| panic!("no panel changed exactly {paths:?}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no panel changed exactly {paths:?}; panel materials: {:#?}",
+                    result.responses
+                )
+            })
     };
     let a = by_change(&["src/lib.rs", "src/retry.rs"]);
     let b = by_change(&["data.bin", "old.txt", "src/lib.rs"]);

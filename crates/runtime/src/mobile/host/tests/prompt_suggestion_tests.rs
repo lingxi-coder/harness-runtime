@@ -130,9 +130,12 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
         .await
         .unwrap();
 
-    // Mobile startup may load bundled resources before any model query. Start
-    // the provider deadline only once the runtime and attached UI are ready.
+    // Start each provider deadline at the corresponding test stage. Completing
+    // a foreground turn can take time after its HTTP response has arrived; a
+    // deadline started at the previous response can expire before the next
+    // turn or its post-turn suggestion has even been scheduled.
     let (requests_tx, requests_rx) = tokio::sync::oneshot::channel();
+    let (stage_tx, stage_rx) = std::sync::mpsc::channel();
     let server_thread = std::thread::spawn(move || {
         let mut requests = Vec::new();
         for (index, text) in [
@@ -143,6 +146,9 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
         .into_iter()
         .enumerate()
         {
+            if stage_rx.recv().is_err() {
+                return;
+            }
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut socket = loop {
                 match server.accept() {
@@ -163,6 +169,7 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
     });
 
     for prompt in ["Find the bug", "Fix it and then run the focused tests"] {
+        stage_tx.send(()).unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             runtime.orchestrator.run_turn_streaming(prompt),
@@ -176,6 +183,7 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
             ),
         }
     }
+    stage_tx.send(()).unwrap();
     let suggestion_result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let events = listener.received.lock().await;

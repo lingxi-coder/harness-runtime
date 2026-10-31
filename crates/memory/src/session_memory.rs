@@ -588,7 +588,7 @@ fn normalize_session_memory_document_source(
     if frontmatter.tags.is_empty() {
         frontmatter.tags.push("session".to_string());
     }
-    let yaml = serde_yaml::to_string(&frontmatter).unwrap_or_default();
+    let yaml = yaml_serde::to_string(&frontmatter).unwrap_or_default();
     let mut units = format!("---\n{yaml}---\n")
         .encode_utf16()
         .collect::<Vec<_>>();
@@ -619,7 +619,7 @@ fn parse_session_memory_source(units: &[u16]) -> (MemoryFrontmatter, Vec<u16>) {
     let Ok(yaml) = String::from_utf16(&units[yaml_start..yaml_end]) else {
         return (MemoryFrontmatter::default(), units.to_vec());
     };
-    let Ok(frontmatter) = serde_yaml::from_str::<MemoryFrontmatter>(&yaml) else {
+    let Ok(frontmatter) = yaml_serde::from_str::<MemoryFrontmatter>(&yaml) else {
         return (MemoryFrontmatter::default(), units.to_vec());
     };
     let body_start = yaml_end + DELIMITER.len();

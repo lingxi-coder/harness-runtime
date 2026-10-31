@@ -45,6 +45,23 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
         std::env::temp_dir(),
     ));
     let before = orch.session.lock().await.model.clone();
+    let expected_session = orch.session.lock().await.session_id.as_uuid().to_string();
+    assert_eq!(
+        orch.scheduled_audio_binding(
+            "test-provider/scheduled-model",
+            lingxi_core::host::ReasoningSelection::Automatic,
+        )
+        .await
+        .unwrap(),
+        (expected_session, "test-provider".to_owned()),
+    );
+    assert!(orch
+        .scheduled_audio_binding(
+            "missing-provider/model",
+            lingxi_core::host::ReasoningSelection::Automatic,
+        )
+        .await
+        .is_err());
     let reasoning = orch.current_reasoning_selection();
     orch.run_scheduled_turn(
         source_text("scheduled prompt"),

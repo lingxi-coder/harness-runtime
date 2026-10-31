@@ -4,8 +4,10 @@ use std::{
     collections::BTreeMap,
     fs::{self, DirBuilder},
     future::Future,
-    io::{Read, Seek, SeekFrom},
+    io::{ErrorKind, Read, Seek, SeekFrom},
+    net::SocketAddr,
     path::{Component, Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -22,6 +24,8 @@ const MAX_AGENT_CONTROL_BODY: usize = 32 * 1024;
 const MAX_AGENT_JSON_DEPTH: usize = 128;
 const MAX_STATIC_HTML_TRANSFORM_BYTES: u64 = 4 * 1024 * 1024;
 const WEBMCP_SCRIPT_ROUTE: &str = "__host/webmcp.js";
+const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 // Serialize large full-input transfers across Apps to bound inline file memory.
 static AGENT_REQUESTS: Semaphore = Semaphore::const_new(1);
 // Small polling and cancellation requests stay available while a large or slow
@@ -59,28 +63,153 @@ pub(super) struct Route {
     pub cancel: CancellationToken,
 }
 
+pub(super) type AcceptResult = std::io::Result<(TcpStream, SocketAddr)>;
+pub(super) type AcceptFuture = Pin<Box<dyn Future<Output = AcceptResult> + Send + 'static>>;
+pub(super) type AcceptFactory = Arc<dyn Fn(Arc<TcpListener>) -> AcceptFuture + Send + Sync>;
+type ConnectionFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type ConnectionHandler = Arc<dyn Fn(TcpStream, Arc<Route>) -> ConnectionFuture + Send + Sync>;
+pub(super) type FailureHandler = Arc<dyn Fn(ErrorKind) + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AcceptErrorAction {
+    Retry,
+    Backoff,
+    Fatal,
+}
+
+fn accept_error_action(error: &std::io::Error) -> AcceptErrorAction {
+    match error.kind() {
+        ErrorKind::Interrupted => AcceptErrorAction::Retry,
+        ErrorKind::ConnectionAborted
+        | ErrorKind::ConnectionRefused
+        | ErrorKind::ConnectionReset
+        | ErrorKind::NotConnected
+        | ErrorKind::WouldBlock => AcceptErrorAction::Retry,
+        ErrorKind::OutOfMemory => AcceptErrorAction::Backoff,
+        _ if is_file_descriptor_exhaustion(error) => AcceptErrorAction::Backoff,
+        _ => AcceptErrorAction::Fatal,
+    }
+}
+
+#[cfg(unix)]
+fn is_file_descriptor_exhaustion(error: &std::io::Error) -> bool {
+    // EMFILE and ENFILE have these values on the supported iOS, Android,
+    // macOS, and Linux targets. Avoid adding an OS-specific dependency to the
+    // mobile runtime just for this accept-loop classification.
+    matches!(error.raw_os_error(), Some(23) | Some(24))
+}
+
+#[cfg(windows)]
+fn is_file_descriptor_exhaustion(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(10024) // WSAEMFILE
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_file_descriptor_exhaustion(_error: &std::io::Error) -> bool {
+    false
+}
+
+fn tcp_acceptor() -> AcceptFactory {
+    Arc::new(|listener| Box::pin(async move { listener.accept().await }))
+}
+
+fn production_connection_handler() -> ConnectionHandler {
+    Arc::new(|socket, route| {
+        Box::pin(async move {
+            let _ = serve(socket, &route).await;
+        })
+    })
+}
+
+#[cfg(test)]
 pub(super) fn spawn(
     listener: impl Into<Arc<TcpListener>>,
     route: Route,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<Result<(), ErrorKind>> {
+    spawn_with_accept(listener, route, tcp_acceptor(), Arc::new(|_| {}))
+}
+
+pub(super) fn spawn_with_failure_handler(
+    listener: impl Into<Arc<TcpListener>>,
+    route: Route,
+    on_failure: FailureHandler,
+) -> tokio::task::JoinHandle<Result<(), ErrorKind>> {
+    spawn_with_accept(listener, route, tcp_acceptor(), on_failure)
+}
+
+pub(super) fn spawn_with_accept(
+    listener: impl Into<Arc<TcpListener>>,
+    route: Route,
+    accept: AcceptFactory,
+    on_failure: FailureHandler,
+) -> tokio::task::JoinHandle<Result<(), ErrorKind>> {
+    spawn_with_io(
+        listener,
+        route,
+        accept,
+        production_connection_handler(),
+        on_failure,
+    )
+}
+
+fn spawn_with_io(
+    listener: impl Into<Arc<TcpListener>>,
+    route: Route,
+    accept: AcceptFactory,
+    handle_connection: ConnectionHandler,
+    on_failure: FailureHandler,
+) -> tokio::task::JoinHandle<Result<(), ErrorKind>> {
     let listener = listener.into();
+    let route = Arc::new(route);
     tokio::spawn(async move {
-        let route = Arc::new(route);
         let permits = Arc::new(Semaphore::new(32));
+        let mut backoff = ACCEPT_BACKOFF_INITIAL;
         loop {
-            let socket = tokio::select! {
-                _ = route.cancel.cancelled() => break,
-                accepted = listener.accept() => match accepted { Ok((socket, peer)) if peer.ip().is_loopback() => socket, Ok(_) => continue, Err(_) => break },
+            let accepted = tokio::select! {
+                _ = route.cancel.cancelled() => return Ok(()),
+                accepted = accept(listener.clone()) => accepted,
+            };
+            let socket = match accepted {
+                Ok((socket, peer)) if peer.ip().is_loopback() => {
+                    backoff = ACCEPT_BACKOFF_INITIAL;
+                    socket
+                }
+                Ok(_) => {
+                    backoff = ACCEPT_BACKOFF_INITIAL;
+                    continue;
+                }
+                Err(error) => match accept_error_action(&error) {
+                    AcceptErrorAction::Retry => {
+                        // Yield after connection-scoped errors so a burst of
+                        // aborted peers cannot monopolize this runtime worker.
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    AcceptErrorAction::Backoff => {
+                        tokio::select! {
+                            _ = route.cancel.cancelled() => return Ok(()),
+                            _ = tokio::time::sleep(backoff) => {},
+                        }
+                        backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+                        continue;
+                    }
+                    AcceptErrorAction::Fatal => {
+                        let kind = error.kind();
+                        on_failure(kind);
+                        return Err(kind);
+                    }
+                },
             };
             let Ok(permit) = permits.clone().try_acquire_owned() else {
                 continue;
             };
             let route = route.clone();
+            let handle_connection = handle_connection.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 tokio::select! {
                     _ = route.cancel.cancelled() => {},
-                    _ = serve(socket, &route) => {},
+                    _ = handle_connection(socket, route.clone()) => {},
                 }
             });
         }
@@ -91,6 +220,31 @@ async fn error(socket: &mut TcpStream, code: u16, message: &str) -> std::io::Res
     let body = message.as_bytes();
     socket.write_all(format!("HTTP/1.1 {code} Error\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", body.len()).as_bytes()).await?;
     socket.write_all(body).await
+}
+
+fn create_agent_spool(directory: &Path) -> std::io::Result<std::fs::File> {
+    validate_private_spool_dir(directory)?;
+    // The host chooses a per-App directory inside its private library. This
+    // avoids Android's `/data/local/tmp` default and never accepts a page path.
+    let file = tempfile::tempfile_in(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // tempfile's Linux O_TMPFILE path uses OpenOptions' default mode, which
+        // can leave group/other read bits set. Restrict the opened inode before
+        // any body bytes or asynchronous writes can reach it.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        // The named-file fallback ignores unlink failures. Never write a body
+        // unless anonymity is confirmed on the same opened file handle.
+        if file.metadata()?.nlink() != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Agent request spool could not be unlinked",
+            ));
+        }
+    }
+    Ok(file)
 }
 
 async fn spool_fixed_body<R>(
@@ -108,12 +262,9 @@ where
             "body exceeds content length",
         ));
     }
-    validate_private_spool_dir(directory)?;
-    // The host chooses a per-App directory inside its private library. This
-    // avoids Android's `/data/local/tmp` default and never accepts a page path.
-    // tempfile_in creates an owner-private anonymous file (0600 on Unix); the
-    // entry is unlinked on close, including timeout/cancellation/error paths.
-    let file = tempfile::tempfile_in(directory)?;
+    // The file is private and already unlinked before receiving request bytes.
+    // Closing the last handle releases it on timeout/cancellation/error paths.
+    let file = create_agent_spool(directory)?;
     let mut writer = tokio::fs::File::from_std(file);
     writer.write_all(prefix).await?;
     let mut written = prefix.len();
@@ -306,11 +457,13 @@ fn is_page_method_allowed(method: &str) -> bool {
             | "agent.tasks.cancel"
             | "agent.tasks.events"
             | "agent.chats.create"
+            | "agent.chats.creationStatus"
             | "agent.chats.get"
             | "agent.chats.list"
             | "agent.chats.archive"
             | "agent.chats.delete"
             | "agent.chats.history"
+            | "agent.chats.attempts"
             | "agent.chats.send"
             | "agent.chats.cancel"
     )
@@ -323,6 +476,7 @@ fn is_small_control_method(method: &str) -> bool {
             | "agent.tasks.list"
             | "agent.tasks.cancel"
             | "agent.tasks.events"
+            | "agent.chats.creationStatus"
             | "agent.chats.get"
             | "agent.chats.list"
             | "agent.chats.cancel"
@@ -985,7 +1139,10 @@ where
             let path = relative.split('?').next().unwrap_or(relative);
             let target = if matches!(
                 path,
-                "__local_app_sdk.js" | "__host/sdk.js" | "__host/recovery-sw.js" | WEBMCP_SCRIPT_ROUTE
+                "__local_app_sdk.js"
+                    | "__host/sdk.js"
+                    | "__host/recovery-sw.js"
+                    | WEBMCP_SCRIPT_ROUTE
             ) {
                 relative.to_owned()
             } else if relative.is_empty() || relative.starts_with('?') {
@@ -1056,7 +1213,8 @@ where
         let Some(_host) = &route.host else {
             return error(&mut socket, 503, "application host unavailable").await;
         };
-        let script = include_str!("../../../../../packages/local-app-webmcp/dist/webmcp-polyfill.iife.js");
+        let script =
+            include_str!("../../../../../packages/local-app-webmcp/dist/webmcp-polyfill.iife.js");
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
         if method == "GET" {
             socket.write_all(script.as_bytes()).await?;
@@ -1076,7 +1234,7 @@ where
             "hostPlatform": host.platform
         });
         let script = include_str!("recovery_sw.js")
-            .replace("__LINGXI_RECOVERY_CONFIGURATION__", &config.to_string());
+            .replace("__LOCAL_APP_RECOVERY_CONFIGURATION__", &config.to_string());
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nService-Worker-Allowed: /\r\nX-Content-Type-Options: nosniff\r\n\r\n", script.len()).as_bytes()).await?;
         if method == "GET" {
             socket.write_all(script.as_bytes()).await?;
@@ -1166,6 +1324,9 @@ where
             Ok(Ok(spool)) => spool,
             Ok(Err(io_error)) if io_error.kind() == std::io::ErrorKind::InvalidData => {
                 return error(&mut socket, 400, "invalid request body").await;
+            }
+            Ok(Err(io_error)) if io_error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return error(&mut socket, 500, "Agent request storage unavailable").await;
             }
             Ok(Err(_)) => return error(&mut socket, 408, "incomplete Agent request").await,
             Err(_) => return error(&mut socket, 408, "Agent request timed out").await,
@@ -1510,6 +1671,7 @@ fn confined_file(root: &Path, raw: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn relative_base_preserves_the_mobile_http_origin() {
@@ -1537,6 +1699,18 @@ mod tests {
             .unwrap();
         output
     }
+
+    fn resource_exhaustion_error() -> std::io::Error {
+        #[cfg(unix)]
+        {
+            std::io::Error::from_raw_os_error(24) // EMFILE
+        }
+        #[cfg(not(unix))]
+        {
+            std::io::Error::new(ErrorKind::OutOfMemory, "injected resource exhaustion")
+        }
+    }
+
     #[tokio::test]
     async fn static_epoch_host_and_path_are_checked() {
         let temp = tempfile::tempdir().unwrap();
@@ -1577,7 +1751,157 @@ mod tests {
             assert!(String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}")));
         }
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_accept_retries_connection_aborted_then_serves_loopback_http() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("index.html"), "recovered fixture").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempt_counter = attempts.clone();
+        let accept: AcceptFactory = Arc::new(move |listener| {
+            let future: AcceptFuture = if attempt_counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Box::pin(async { Err(std::io::Error::from(ErrorKind::ConnectionAborted)) })
+            } else {
+                Box::pin(async move { listener.accept().await })
+            };
+            future
+        });
+        let task = spawn_with_accept(
+            listener,
+            Route {
+                host: None,
+                run_id: "recover-epoch".into(),
+                root: temp.path().into(),
+                spool_dir: temp.path().into(),
+                entry: "index.html".into(),
+                entry_service: None,
+                services: BTreeMap::new(),
+                port,
+                capabilities: vec![],
+                cancel: cancel.clone(),
+            },
+            accept,
+            Arc::new(|_| {}),
+        );
+
+        let response = exchange(
+            port,
+            format!("GET /__run/recover-epoch/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+                .into_bytes(),
+        )
+        .await;
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("recovered fixture"));
+        assert!(attempts.load(Ordering::SeqCst) >= 2);
+
+        cancel.cancel();
+        assert_eq!(task.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gateway_accept_resource_backoff_is_interrupted_by_cancellation() {
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                accept_error_action(&std::io::Error::from_raw_os_error(23)),
+                AcceptErrorAction::Backoff
+            );
+            assert_eq!(
+                accept_error_action(&std::io::Error::from_raw_os_error(24)),
+                AcceptErrorAction::Backoff
+            );
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempted = Arc::new(tokio::sync::Notify::new());
+        let accept_attempts = attempts.clone();
+        let accept_notify = attempted.clone();
+        let accept: AcceptFactory = Arc::new(move |_listener| {
+            accept_attempts.fetch_add(1, Ordering::SeqCst);
+            let accept_notify = accept_notify.clone();
+            let future: AcceptFuture = Box::pin(async move {
+                accept_notify.notify_one();
+                Err(resource_exhaustion_error())
+            });
+            future
+        });
+        let task = spawn_with_accept(
+            listener,
+            Route {
+                host: None,
+                run_id: "backoff-epoch".into(),
+                root: PathBuf::new(),
+                spool_dir: PathBuf::new(),
+                entry: "index.html".into(),
+                entry_service: None,
+                services: BTreeMap::new(),
+                port,
+                capabilities: vec![],
+                cancel: cancel.clone(),
+            },
+            accept,
+            Arc::new(|_| {}),
+        );
+
+        tokio::time::timeout(Duration::from_millis(200), attempted.notified())
+            .await
+            .expect("the resource error should be observed");
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("cancellation should interrupt the bounded backoff")
+            .unwrap();
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn gateway_accept_fatal_error_is_returned_without_details() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let accept: AcceptFactory = Arc::new(|_listener| {
+            let future: AcceptFuture = Box::pin(async {
+                Err(std::io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "sensitive OS detail",
+                ))
+            });
+            future
+        });
+        let failures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = failures.clone();
+        let task = spawn_with_accept(
+            listener,
+            Route {
+                host: None,
+                run_id: "fatal-epoch".into(),
+                root: PathBuf::new(),
+                spool_dir: PathBuf::new(),
+                entry: "index.html".into(),
+                entry_service: None,
+                services: BTreeMap::new(),
+                port,
+                capabilities: vec![],
+                cancel,
+            },
+            accept,
+            Arc::new(move |kind| {
+                assert_eq!(kind, ErrorKind::PermissionDenied);
+                observed.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        assert_eq!(task.await.unwrap(), Err(ErrorKind::PermissionDenied));
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1616,10 +1940,8 @@ mod tests {
         let response = String::from_utf8(
             exchange(
                 port,
-                format!(
-                    "GET /__run/current-run/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
-                )
-                .into_bytes(),
+                format!("GET /__run/current-run/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+                    .into_bytes(),
             )
             .await,
         )
@@ -1628,7 +1950,8 @@ mod tests {
         assert!(response.contains("Content-Security-Policy:"));
         assert!(response.contains("script-src 'self'"));
         let body = response.split_once("\r\n\r\n").unwrap().1;
-        let script = "<script src=\"/__run/current-run/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let script =
+            "<script src=\"/__run/current-run/__host/webmcp.js\" data-lingxi-webmcp></script>";
         assert_eq!(body.matches("data-lingxi-webmcp").count(), 1);
         assert!(body.find(script).unwrap() < body.find("id=\"app-start\"").unwrap());
         assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
@@ -1666,13 +1989,15 @@ mod tests {
 
         let stale = exchange(
             port,
-            format!("GET /__run/old-run/__host/webmcp.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
-                .into_bytes(),
+            format!(
+                "GET /__run/old-run/__host/webmcp.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+            )
+            .into_bytes(),
         )
         .await;
         assert!(String::from_utf8_lossy(&stale).starts_with("HTTP/1.1 410"));
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
     }
     #[tokio::test]
     async fn post_binary_bytes_and_sse_are_forwarded_without_buffering_response() {
@@ -1716,7 +2041,7 @@ mod tests {
         assert!(response.ends_with(b"data: ready\n\n"));
         server.await.unwrap();
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
     }
 }
 
@@ -1786,7 +2111,7 @@ mod stream_tests {
         assert_eq!(frame, [0x82, 2, 0, 0xff]);
         reached_rx.await.unwrap();
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
         let mut byte = [0; 1];
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(3), client.read(&mut byte))
@@ -1850,7 +2175,7 @@ mod stream_tests {
         assert_eq!(rest, b"data: last\n\n");
         server.await.unwrap();
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
         assert_eq!(
             rewrite_location("/login?next=home", "/__run/x/__service/api/", 32100),
             "/__run/x/__service/api/login?next=home"
@@ -1923,7 +2248,7 @@ mod admission_tests {
             }
         }
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
     }
 }
 
@@ -1988,7 +2313,7 @@ mod absolute_path_tests {
         assert!(response.starts_with("HTTP/1.1 307"));
         assert!(response.contains("Location: /__run/current/__host/webmcp.js?cache=1"));
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
     }
 }
 
@@ -2006,14 +2331,17 @@ mod webmcp_injection_tests {
 
         let no_head = "<!doctype html><script id=\"app-start\"></script>";
         let injected = inject_webmcp_script(no_head, "run-2").unwrap();
-        assert!(injected.starts_with("<!doctype html><script src=\"/__run/run-2/__host/webmcp.js\""));
+        assert!(
+            injected.starts_with("<!doctype html><script src=\"/__run/run-2/__host/webmcp.js\"")
+        );
         assert!(injected.find("webmcp.js").unwrap() < injected.find("id=\"app-start\"").unwrap());
 
         let no_document_tags = "<script id=\"app-start\"></script>";
         let injected = inject_webmcp_script(no_document_tags, "run-3").unwrap();
         assert!(injected.starts_with("<script src=\"/__run/run-3/__host/webmcp.js\""));
 
-        let already_loaded = "<html><head><script src=\"/__host/webmcp.js?cache=1\"></script></head></html>";
+        let already_loaded =
+            "<html><head><script src=\"/__host/webmcp.js?cache=1\"></script></head></html>";
         assert!(inject_webmcp_script(already_loaded, "run-4").is_none());
 
         let current_run_loaded = "<script src=\"/__run/run-5/__host/webmcp.js\"></script>";
@@ -2139,18 +2467,20 @@ mod webmcp_injection_tests {
             "<base href=\"http[\"><script src=\"/__host/webmcp.js\"></script>",
         ] {
             let html = format!("<!doctype html>{ignored_base}<script id=\"app-start\"></script>");
-            assert!(inject_webmcp_script(&html, "run-14").is_none(), "{ignored_base}");
+            assert!(
+                inject_webmcp_script(&html, "run-14").is_none(),
+                "{ignored_base}"
+            );
         }
 
-        for first_base in [
-            "data:text/html,",
-            "javascript:alert(1)",
-            "http://[",
-        ] {
+        for first_base in ["data:text/html,", "javascript:alert(1)", "http://["] {
             let html = format!(
                 "<!doctype html><base href=\"{first_base}\"><base href=\"https://example.invalid/assets/\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
             );
-            assert!(inject_webmcp_script(&html, "run-15").is_none(), "{first_base}");
+            assert!(
+                inject_webmcp_script(&html, "run-15").is_none(),
+                "{first_base}"
+            );
         }
 
         for valid_override in [
@@ -2162,7 +2492,10 @@ mod webmcp_injection_tests {
             let html = format!(
                 "<!doctype html><base href=\"{valid_override}\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
             );
-            assert!(inject_webmcp_script(&html, "run-16").is_some(), "{valid_override}");
+            assert!(
+                inject_webmcp_script(&html, "run-16").is_some(),
+                "{valid_override}"
+            );
         }
     }
 }
@@ -2171,6 +2504,131 @@ mod webmcp_injection_tests {
 mod agent_json_tests {
     use super::*;
     use base64::Engine as _;
+
+    #[test]
+    fn chat_creation_status_is_a_small_control_method() {
+        assert!(is_page_method_allowed("agent.chats.creationStatus"));
+        assert!(is_small_control_method("agent.chats.creationStatus"));
+        assert!(!is_small_control_method("agent.chats.create"));
+        assert!(!is_page_method_allowed("agent.chats.creationStatusOther"));
+    }
+
+    #[test]
+    fn request_spool_is_private_and_unlinked_before_any_body_is_written() {
+        let scratch = tempfile::tempdir().unwrap();
+        let spool_path = scratch.path().canonicalize().unwrap().join("spool");
+        ensure_host_directory(&spool_path, true).unwrap();
+        let file = create_agent_spool(&spool_path).unwrap();
+        let metadata = file.metadata().unwrap();
+        assert_eq!(metadata.len(), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            assert_eq!(metadata.nlink(), 0);
+            let alias = scratch.path().canonicalize().unwrap().join("spool-alias");
+            symlink(&spool_path, &alias).unwrap();
+            assert_eq!(
+                create_agent_spool(&alias).unwrap_err().kind(),
+                ErrorKind::PermissionDenied
+            );
+        }
+        assert_eq!(std::fs::read_dir(&spool_path).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pending_request_spools_are_private_and_close_after_timeout_eof_or_cancellation() {
+        use std::{
+            os::unix::fs::{MetadataExt, PermissionsExt},
+            task::{Context, Poll},
+        };
+
+        struct PendingBody {
+            started: Option<tokio::sync::oneshot::Sender<()>>,
+            finish: tokio::sync::oneshot::Receiver<()>,
+        }
+
+        impl tokio::io::AsyncRead for PendingBody {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                _buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if let Some(started) = self.started.take() {
+                    let _ = started.send(());
+                }
+                Pin::new(&mut self.finish).poll(cx).map(|_| Ok(()))
+            }
+        }
+
+        fn open_spools(directory: &Path) -> Vec<fs::Metadata> {
+            fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|entry| {
+                    let path = entry.unwrap().path();
+                    let target = fs::read_link(&path).ok()?;
+                    if !target.starts_with(directory) {
+                        return None;
+                    }
+                    match fs::metadata(path) {
+                        Ok(metadata) => Some(metadata),
+                        Err(error) if error.kind() == ErrorKind::NotFound => None,
+                        Err(error) => panic!("could not inspect open request spool: {error}"),
+                    }
+                })
+                .collect()
+        }
+
+        let scratch = tempfile::tempdir().unwrap();
+        let spool_path = scratch.path().canonicalize().unwrap().join("spool");
+        ensure_host_directory(&spool_path, true).unwrap();
+        for completion in ["timeout", "eof", "cancellation"] {
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let (finish, finished) = tokio::sync::oneshot::channel();
+            let mut reader = PendingBody {
+                started: Some(started),
+                finish: finished,
+            };
+            let mut body = Box::pin(spool_fixed_body(
+                &mut reader,
+                b"private-prefix",
+                1024,
+                &spool_path,
+            ));
+            tokio::select! {
+                result = &mut body => panic!("body finished before inspection: {result:?}"),
+                result = waiting => result.unwrap(),
+            }
+            let files = open_spools(&spool_path);
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].permissions().mode() & 0o777, 0o600);
+            assert_eq!(files[0].nlink(), 0);
+            assert_eq!(fs::read_dir(&spool_path).unwrap().count(), 0);
+            match completion {
+                "timeout" => assert!(tokio::time::timeout(Duration::from_millis(5), body)
+                    .await
+                    .is_err()),
+                "eof" => {
+                    finish.send(()).unwrap();
+                    assert_eq!(body.await.unwrap_err().kind(), ErrorKind::UnexpectedEof);
+                }
+                "cancellation" => drop(body),
+                _ => unreachable!(),
+            }
+            // Tokio's blocking write may briefly retain the last handle after
+            // its future is dropped. Check actual descriptor release, since an
+            // empty directory alone cannot detect leaked anonymous files.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !open_spools(&spool_path).is_empty() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("request spool handle leaked after body completion");
+            assert_eq!(fs::read_dir(&spool_path).unwrap().count(), 0);
+        }
+    }
 
     #[tokio::test]
     async fn request_body_spools_in_chunks_and_drops_tempfiles_on_timeout_or_eof() {
@@ -2369,6 +2827,8 @@ mod agent_json_tests {
         assert!(is_page_method_allowed("agent.tasks.events"));
         assert!(is_page_method_allowed("agent.tasks.start"));
         assert!(is_page_method_allowed("agent.chats.send"));
+        assert!(is_page_method_allowed("agent.chats.attempts"));
+        assert!(!is_page_method_allowed("agent.chats.attemptsOther"));
         assert!(!is_page_method_allowed("eventsNative"));
         assert!(!is_page_method_allowed("agent.eventsNative"));
         assert!(!is_page_method_allowed("agent.run"));
@@ -2503,44 +2963,27 @@ mod agent_control_lane_tests {
         route: Route,
         admission: Arc<TestAdmission>,
         agent: Arc<DelayedAgent>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let listener = Arc::new(listener);
-            let route = Arc::new(route);
-            let permits = Arc::new(Semaphore::new(32));
-            loop {
-                let socket = tokio::select! {
-                    _ = route.cancel.cancelled() => break,
-                    accepted = listener.accept() => match accepted {
-                        Ok((socket, peer)) if peer.ip().is_loopback() => socket,
-                        Ok(_) => continue,
-                        Err(_) => break,
+    ) -> tokio::task::JoinHandle<Result<(), ErrorKind>> {
+        let accept: AcceptFactory =
+            Arc::new(|listener| Box::pin(async move { listener.accept().await }));
+        let handle_connection: ConnectionHandler = Arc::new(move |socket, route| {
+            let admission = admission.clone();
+            let agent = agent.clone();
+            Box::pin(async move {
+                let _ = serve_with_agent_dispatch(
+                    socket,
+                    &route,
+                    &admission.heavy,
+                    &admission.control,
+                    move |host, run_id, method, arguments| {
+                        let agent = agent.clone();
+                        async move { agent.dispatch(host, run_id, method, arguments).await }
                     },
-                };
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    continue;
-                };
-                let route = route.clone();
-                let admission = admission.clone();
-                let agent = agent.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    tokio::select! {
-                        _ = route.cancel.cancelled() => {},
-                        _ = serve_with_agent_dispatch(
-                            socket,
-                            &route,
-                            &admission.heavy,
-                            &admission.control,
-                            move |host, run_id, method, arguments| {
-                                let agent = agent.clone();
-                                async move { agent.dispatch(host, run_id, method, arguments).await }
-                            },
-                        ) => {},
-                    }
-                });
-            }
-        })
+                )
+                .await;
+            })
+        });
+        spawn_with_io(listener, route, accept, handle_connection, Arc::new(|_| {}))
     }
 
     async fn post_body(port: u16, origin: &str, body: &str) -> String {
@@ -2595,6 +3038,71 @@ mod agent_control_lane_tests {
 
     fn json_body(response: &str) -> serde_json::Value {
         serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_spool_rejection_is_a_server_error_without_dispatch_or_sensitive_details() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let spool_dir = temp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("private-spool-path-must-not-appear");
+        ensure_host_directory(&spool_dir, true).unwrap();
+        fs::set_permissions(&spool_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let route = Route {
+            host: Some(BrowserHost {
+                owner: Weak::new(),
+                app_id: "authorized-app".into(),
+                name: "Test App".into(),
+                revision: 1,
+                platform: "android".into(),
+            }),
+            run_id: "epoch".into(),
+            root: temp.path().into(),
+            spool_dir: spool_dir.clone(),
+            entry: "index.html".into(),
+            entry_service: None,
+            services: BTreeMap::new(),
+            port,
+            capabilities: Vec::new(),
+            cancel: cancel.clone(),
+        };
+        let admission = Arc::new(TestAdmission {
+            heavy: Semaphore::new(1),
+            control: Semaphore::new(8),
+        });
+        let agent = Arc::new(DelayedAgent::new());
+        let server = spawn_test_gateway(listener, route, admission, agent.clone());
+        let response = post_json(
+            port,
+            "agent.tasks.list",
+            serde_json::json!({"secret":"private-request-body-must-not-appear"}),
+        )
+        .await;
+        assert_eq!(status(&response), 500);
+        assert_eq!(
+            response.split_once("\r\n\r\n").unwrap().1,
+            "Agent request storage unavailable"
+        );
+        assert!(!response.contains(spool_dir.to_str().unwrap()));
+        assert!(!response.contains("must-not-appear"));
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        fs::set_permissions(&spool_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let recovered = post_json(port, "agent.tasks.list", serde_json::json!({})).await;
+        assert_eq!(status(&recovered), 200);
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read_dir(&spool_dir).unwrap().count(), 0);
+        cancel.cancel();
+        server.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -2769,6 +3277,6 @@ mod agent_control_lane_tests {
         assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
 
         cancel.cancel();
-        server.await.unwrap();
+        server.await.unwrap().unwrap();
     }
 }

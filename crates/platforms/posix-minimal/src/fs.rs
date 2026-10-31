@@ -1,10 +1,9 @@
-//! `tokio::fs`-backed [`FileSystem`] for desktop hosts.
+//! `tokio::fs`-backed [`FileSystem`].
 //!
-//! Implements the engine's sandboxed filesystem trait using the real OS
-//! filesystem. Path containment is enforced via prefix-match against the
-//! workspace root supplied at construction; this is intentionally minimal —
-//! a hardened POSIX platform (Plan 17+) layers symlink-canonicalisation and
-//! sandbox-exec on top.
+//! The supplied workspace root is used by `is_within_workspace`; it does not
+//! confine file operations. Authorization and sandboxing are supplied by the
+//! composition root and OS. The watch method intentionally returns an empty
+//! stream; desktop platforms provide a native watcher.
 
 use async_trait::async_trait;
 use fs2::FileExt;

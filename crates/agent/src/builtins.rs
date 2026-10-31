@@ -35,6 +35,8 @@
 //!   deliberately NOT registered — LingXi is multi-provider and both agents
 //!   steer users to Claude-specific docs/products. Recorded in the
 //!   accepted-divergences ledger; do NOT re-add for byte parity.
+//!   LingXi supplies its own `lingxi-code-guide`, with offline product
+//!   references and an explicit Read/Grep/Glob-only tool policy.
 //! - **`color` / `background`**: now exist as `AgentDefinition` fields (parsed
 //!   from frontmatter / JSON by [`crate::catalog`]); built-ins leave them at
 //!   their defaults here (`color` is assigned at display time).
@@ -598,11 +600,11 @@ fn def(
 /// The built-in subagent definitions, byte-aligned with
 /// `claude-code/src/tools/AgentTool/built-in/*.ts` (3P/non-ant defaults).
 ///
-/// Returned in the upstream registration order (general-purpose,
-/// statusline-setup, Explore, Plan, [web-fetch], workflow-subagent). Five
-/// entries in a default install; SIX when [`web_fetch_agent_enabled`] is true
-/// (claude `vyt()`'s `if(xgi())t.push(Hlr)` arm, @287981417) — that gate is OFF
-/// by default, so the default roster is unchanged.
+/// Retains the upstream order (general-purpose, statusline-setup, Explore,
+/// Plan, [web-fetch], workflow-subagent), then adds LingXi's read-only guide.
+/// There are six entries by default and seven when [`web_fetch_agent_enabled`]
+/// is true (claude `vyt()`'s `if(xgi())t.push(Hlr)` arm, @287981417). The web-fetch
+/// gate is OFF by default.
 /// The caller indexes by `agent_type`, so order is cosmetic.
 ///
 /// NOTE (2.1.223 audit): the oracle's `verificationAgent` never existed in any
@@ -729,7 +731,29 @@ pub fn builtin_agent_definitions_with_gates(
     // support (it always sets disallowed_tools: vec![]). Use the dedicated
     // constructor instead.
     defs.push(workflow_subagent_definition());
+    defs.push(lingxi_code_guide_definition());
     defs
+}
+
+/// A documentation-only helper with its own offline reference context. The
+/// main session still loads API skill topics individually; the isolated guide
+/// receives the corpus so it never needs executable Skill/shell tools.
+fn lingxi_code_guide_definition() -> AgentDefinition {
+    let reference = skill::lingxi_api_guide_context();
+    let prompt = format!(
+        "{}\n\n# Packaged reference\n\n{}",
+        include_str!("builtins/lingxi_code_guide.md"),
+        reference
+            .string_at("")
+            .expect("compiled product references are UTF-8")
+    );
+    def(
+        "lingxi-code-guide",
+        "Read-only guidance for multi-part questions about LingXi usage, configuration, Bots, media, Local Apps and SDK integration. Returns version-aware explanations and next checks; the parent performs requested actions. Use ordinary coding agents for unrelated repository work.",
+        AgentToolPolicy::Explicit(vec!["Read".into(), "Grep".into(), "Glob".into()]),
+        AgentModel::Inherit,
+        &prompt,
+    )
 }
 
 /// Synthetic `FORK_AGENT` definition for the fork-subagent path (claude
@@ -986,12 +1010,12 @@ mod tests {
     }
 
     #[test]
-    fn has_five_builtins_with_unique_types() {
-        // The web-fetch built-in is gated OFF by default (claude `xgi()`), so the
-        // default roster is FIVE. Asserted through the gated arm so a sibling
+    fn has_six_builtins_with_unique_types() {
+        // Web fetch is off by default. The roster is Native's five entries
+        // plus LingXi's documentation guide. Use the gated arm so a sibling
         // test can never leak `LINGXI_WEB_FETCH_AGENT` into this one.
         let defs = builtin_agent_definitions_gated(false);
-        assert_eq!(defs.len(), 5);
+        assert_eq!(defs.len(), 6);
         let mut names: Vec<&str> = defs.iter().map(|d| d.agent_type.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
@@ -1000,6 +1024,7 @@ mod tests {
                 "Explore",
                 "Plan",
                 "general-purpose",
+                "lingxi-code-guide",
                 "statusline-setup",
                 "workflow-subagent",
             ]
@@ -1010,6 +1035,25 @@ mod tests {
         defs.iter()
             .find(|d| d.agent_type == ty)
             .expect("type present")
+    }
+
+    #[test]
+    fn lingxi_code_guide_has_offline_knowledge_without_execution_or_memory_tools() {
+        let defs = builtin_agent_definitions_gated(false);
+        let guide = find(&defs, "lingxi-code-guide");
+        assert!(matches!(&guide.tools, AgentToolPolicy::Explicit(tools)
+            if tools.as_slice() == ["Read", "Grep", "Glob"]));
+        assert!(matches!(guide.model, AgentModel::Inherit));
+        assert!(guide.memory.is_none());
+        assert!(guide.skills.is_empty());
+        assert!(guide.allowed_tools.is_empty());
+        assert!(guide.mcp_servers.is_empty());
+        assert!(guide.frontmatter_hooks.is_empty());
+        let prompt = guide.system_prompt.as_ref().unwrap().string_at("").unwrap();
+        assert!(prompt.contains(skill::lingxi_api_guide_context().string_at("").unwrap()));
+        assert!(!defs
+            .iter()
+            .any(|agent| agent.agent_type == "claude-code-guide"));
     }
 
     #[test]
@@ -1131,7 +1175,7 @@ mod tests {
         );
 
         let defs = builtin_agent_definitions_gated(true);
-        assert_eq!(defs.len(), 6, "gate ON adds exactly one built-in");
+        assert_eq!(defs.len(), 7, "gate ON adds exactly one built-in");
         let wf = find(&defs, WEB_FETCH_AGENT_TYPE);
         // `Hlr`: tools:[cm] / model:"inherit" / color:"blue" / source built-in.
         assert!(
@@ -1151,6 +1195,7 @@ mod tests {
                 "Plan",
                 "web-fetch",
                 "workflow-subagent",
+                "lingxi-code-guide",
             ]
         );
     }
@@ -1181,12 +1226,12 @@ mod tests {
     }
 
     #[test]
-    fn fork_agent_not_in_five_builtins() {
+    fn fork_agent_not_in_default_builtins() {
         // FORK_AGENT is NOT registered in builtInAgents (claude
-        // forkSubagent.ts:45) — the 5-element vec must not contain it.
+        // forkSubagent.ts:45). LingXi's added guide does not change that rule.
         let defs = builtin_agent_definitions_gated(false);
         assert!(!defs.iter().any(|d| d.agent_type == "fork"));
-        assert_eq!(defs.len(), 5);
+        assert_eq!(defs.len(), 6);
     }
 
     #[test]

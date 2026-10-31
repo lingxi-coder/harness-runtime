@@ -1228,6 +1228,7 @@ async fn process_mcp_call_result(
     output_dir: std::path::PathBuf,
     token_counter: Option<Arc<dyn tool_api::McpTokenCounter>>,
     default_model: String,
+    inline_chat: bool,
     server: String,
     tool: String,
     tool_use_id: Option<lingxi_core::types::ToolUseId>,
@@ -1261,6 +1262,76 @@ async fn process_mcp_call_result(
                     server: server.into(),
                     tool: tool.into(),
                     detail: error_details,
+                });
+            }
+
+            if inline_chat {
+                let transformed =
+                    if dto.structured_content.is_some() && dto.content.array_len("").is_none() {
+                        source_array(vec![])
+                    } else {
+                        crate::transform_result::transform_result_content_inline_source(
+                            &dto.content,
+                            &server,
+                        )
+                        .map_err(|error| ToolError::InvalidInput(error.into()))?
+                    };
+                let data = if let Some(structured) = &dto.structured_content {
+                    tool_api::persistent_chat::validate_inline_size(structured)
+                        .map_err(|error| ToolError::InvalidInput(error.into()))?;
+                    let text: UJP = structured
+                        .to_json_string()
+                        .map_err(|error| ToolError::Internal(error.to_string()))?
+                        .into();
+                    if transformed.array_len("").is_some() {
+                        let mut blocks = (0..transformed.array_len("").unwrap_or(0))
+                            .filter_map(|index| {
+                                transformed.subprojection(&format!("/{index}")).ok()
+                            })
+                            .filter(|block| block.string_at("/type") != Some("text"))
+                            .collect::<Vec<_>>();
+                        blocks.push(source_object(vec![
+                            ("type".into(), "text".into()),
+                            ("text".into(), text),
+                        ]));
+                        source_array(blocks)
+                    } else {
+                        text
+                    }
+                } else {
+                    transformed
+                };
+                if data.array_len("").is_some() {
+                    tool_api::persistent_chat::validate_inline_blocks(&data)
+                        .map_err(|error| ToolError::InvalidInput(error.into()))?;
+                } else {
+                    tool_api::persistent_chat::validate_inline_size(&data)
+                        .map_err(|error| ToolError::InvalidInput(error.into()))?;
+                }
+                // The canonical block array carries the media. Its plain-text
+                // companion must not duplicate base64 bytes as a JSON string.
+                let model_content = Some(if let Some(units) = data.string_units("") {
+                    source_text_units(units)
+                } else {
+                    let mut units = Vec::new();
+                    for index in 0..data.array_len("").unwrap_or(0) {
+                        if let Some(text) = data.string_units(&format!("/{index}/text")) {
+                            if !units.is_empty() {
+                                units.push(u16::from(b'\n'));
+                            }
+                            units.extend(text);
+                        }
+                    }
+                    source_text_units(units)
+                });
+                return Ok(ToolCallResult {
+                    data,
+                    model_content,
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                    subagent_hooks_fired: false,
                 });
             }
 
@@ -1518,6 +1589,10 @@ async fn process_mcp_call_result(
 
 #[async_trait]
 impl Tool for MCPTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn mcp_tool_identity(&self) -> Option<&tool_api::McpToolIdentity> {
         self.capability_identity.as_ref()
     }
@@ -1792,6 +1867,9 @@ impl Tool for MCPTool {
         progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
+        let inline_chat = self.ctx.is_persistent_app_chat()
+            || ctx.tool_execution_policy
+                == lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat;
         // Per-tool wire entry (Batch 3): the FQN is the bound `name()` and the
         // RAW `input` object is the tool arguments — there is NO
         // `{full_name, arguments}` envelope to unwrap (the model addressed this
@@ -1982,10 +2060,14 @@ impl Tool for MCPTool {
             Some(cfg) => auth_kind_from_spec(&cfg.spec).0.to_string(),
             None => String::new(),
         };
-        let auto_bg_ms = crate::auto_background::get_mcp_auto_background_ms(
-            &transport_kind,
-            ctx.options.is_non_interactive_session,
-        );
+        let auto_bg_ms = if inline_chat {
+            0
+        } else {
+            crate::auto_background::get_mcp_auto_background_ms(
+                &transport_kind,
+                ctx.options.is_non_interactive_session,
+            )
+        };
 
         // Owned handles for the post-call processing (bus/cwd off the shared
         // `BuiltinToolContext`), cloned so the future is `'static + Send` and
@@ -2019,6 +2101,7 @@ impl Tool for MCPTool {
                 output_dir,
                 token_counter,
                 default_model,
+                inline_chat,
                 server,
                 tool,
                 tool_use_id,
@@ -2107,6 +2190,7 @@ impl Tool for MCPTool {
                             output_dir,
                             token_counter,
                             default_model,
+                            false,
                             server,
                             tool,
                             tool_use_id,
@@ -2479,6 +2563,10 @@ impl Tool for McpAuthTool {
 
 #[async_trait]
 impl Tool for ListMcpResourcesTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         LIST_MCP_RESOURCES_TOOL_NAME
     }
@@ -3136,9 +3224,18 @@ impl Tool for ReadMcpResourceTool {
     async fn call(
         &self,
         input: UJP,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        if self.ctx.is_persistent_app_chat()
+            || ctx.tool_execution_policy
+                == lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat
+        {
+            return Err(ToolError::InvalidInput(
+                "ReadMcpResourceTool does not support the inline Local App Chat profile".into(),
+            ));
+        }
+
         let started = Instant::now();
         let server_name = source_string_at(&input, "/server_name").ok_or_else(|| {
             ToolError::InvalidInput("ReadMcpResourceTool: missing or invalid server_name".into())

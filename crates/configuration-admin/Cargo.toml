@@ -35,7 +35,7 @@ tracing.workspace = true
 [dev-dependencies]
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

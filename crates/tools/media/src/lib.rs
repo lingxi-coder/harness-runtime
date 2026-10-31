@@ -121,6 +121,7 @@ impl MediaTool {
                 .as_ref()
                 .map(|profile| format!("profile:{profile}")),
             profile_name,
+            attachment_id: self.service().and_then(|service| service.attachment_id()),
         })
     }
 
@@ -160,7 +161,9 @@ impl MediaTool {
         }
         let mode = request.mode;
         let capability_context = invocation
-            .media_agent_capability_context()
+            .media_agent_capability_context(
+                self.service().and_then(|service| service.attachment_id()),
+            )
             .await
             .ok_or_else(|| "conversation intent requires a trusted session context".to_owned())?;
         if self
@@ -199,12 +202,13 @@ fn schema_for(kind: MediaOperationKind, conversation_modes: &[MediaSessionMode])
             "kind": {"type":"string", "enum":["source","recording","session","media","operation"]},
             "ref": {"type":"string", "minLength":1},
             "generation":{"type":"integer","minimum":0},
-            "service_epoch":{"type":"integer","minimum":0}
+            "service_epoch":{"type":"integer","minimum":0},
+            "incarnation":{"type":"string","format":"uuid"}
         },
         "oneOf": [
             {
                 "properties":{"kind":{"const":"operation"}},
-                "required":["kind","ref","generation","service_epoch"]
+                "required":["kind","ref","generation","service_epoch","incarnation"]
             },
             {
                 "properties":{"kind":{"enum":["source","recording","session","media"]}},
@@ -342,10 +346,11 @@ fn schema_for(kind: MediaOperationKind, conversation_modes: &[MediaSessionMode])
                         "kind":{"type":"string","enum":["recording","session","operation"]},
                         "ref":{"type":"string","minLength":1},
                         "generation":{"type":"integer","minimum":0},
-                        "service_epoch":{"type":"integer","minimum":0}
+                        "service_epoch":{"type":"integer","minimum":0},
+                        "incarnation":{"type":"string","format":"uuid"}
                     },
                     "oneOf":[
-                        {"properties":{"kind":{"const":"operation"}},"required":["kind","ref","generation","service_epoch"]},
+                        {"properties":{"kind":{"const":"operation"}},"required":["kind","ref","generation","service_epoch","incarnation"]},
                         {"properties":{"kind":{"enum":["recording","session"]}},"required":["kind","ref"]}
                     ],
                     "required":["kind","ref"], "additionalProperties":false
@@ -537,11 +542,19 @@ fn parse_media_target(target: &Utf16JsonProjection) -> Result<MediaResourceRef, 
         "recording" => Ok(MediaResourceRef::Recording(recording_ref(reference))),
         "session" => Ok(MediaResourceRef::Session(session_ref(reference))),
         "media" => Ok(MediaResourceRef::Media(media_ref(reference))),
-        "operation" => Ok(MediaResourceRef::Operation(MediaOperationId {
-            id: reference,
-            generation: required_u64(target, "generation")?,
-            service_epoch: required_u64(target, "service_epoch")?,
-        })),
+        "operation" => {
+            let incarnation = required_string(target, "incarnation")?;
+            let incarnation = media_api::MediaOperationIncarnation::from_string(&incarnation)
+                .ok_or("`target.incarnation` is invalid")?;
+            Ok(MediaResourceRef::Operation {
+                identity: MediaOperationId {
+                    id: reference,
+                    generation: required_u64(target, "generation")?,
+                    service_epoch: required_u64(target, "service_epoch")?,
+                },
+                incarnation,
+            })
+        }
         _ => Err("`target.kind` must name a typed media resource".into()),
     }
 }
@@ -550,7 +563,7 @@ fn parse_stop_target(target: &Utf16JsonProjection) -> Result<MediaResourceRef, S
     match parse_media_target(target)? {
         target @ MediaResourceRef::Recording(_)
         | target @ MediaResourceRef::Session(_)
-        | target @ MediaResourceRef::Operation(_) => Ok(target),
+        | target @ MediaResourceRef::Operation { .. } => Ok(target),
         _ => Err("`media_stop` accepts only a recording, session, or operation reference".into()),
     }
 }
@@ -848,7 +861,7 @@ async fn execute_operation(
             "media operation has no remaining time budget",
         )));
     }
-    let identity = context.identity.clone();
+    let cancel_context = context.clone();
     let deadline = Duration::from_millis(budget);
     let call = service.execute(context, operation);
     let result = if let Some(cancel) = use_context.cancel.as_ref() {
@@ -856,11 +869,11 @@ async fn execute_operation(
             biased;
             result = call => result.map_err(map_media_error),
             _ = tokio::time::sleep(deadline) => {
-                let _ = service.cancel(identity).await;
+                let _ = service.cancel(cancel_context.clone()).await;
                 return Err(map_media_error(MediaError::new(MediaErrorKind::Timeout, "media operation exceeded its deadline")));
             }
             _ = cancel.cancelled() => {
-                let _ = service.cancel(identity).await;
+                let _ = service.cancel(cancel_context.clone()).await;
                 return Err(ToolError::Aborted);
             }
         }
@@ -868,7 +881,7 @@ async fn execute_operation(
         match tokio::time::timeout(deadline, call).await {
             Ok(result) => result.map_err(map_media_error),
             Err(_) => {
-                let _ = service.cancel(identity).await;
+                let _ = service.cancel(cancel_context).await;
                 return Err(map_media_error(MediaError::new(
                     MediaErrorKind::Timeout,
                     "media operation exceeded its deadline",
@@ -900,18 +913,18 @@ async fn read_media(
     .with_initiator(initiator)
     .with_timeout_budget_ms(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX))
     .with_max_payload_bytes(capabilities.max_payload_bytes);
-    let identity = context.identity.clone();
+    let cancel_context = context.clone();
     let future = service.read_media(context.clone(), asset.reference.clone());
     let content = if let Some(cancel) = use_context.cancel.as_ref() {
         tokio::select! {
             biased;
             result = future => result.map_err(map_media_error)?,
             _ = tokio::time::sleep(timeout) => {
-                let _ = service.cancel(identity.clone()).await;
+                let _ = service.cancel(cancel_context.clone()).await;
                 return Err(map_media_error(MediaError::new(MediaErrorKind::Timeout, "media read exceeded its deadline")));
             }
             _ = cancel.cancelled() => {
-                let _ = service.cancel(identity.clone()).await;
+                let _ = service.cancel(cancel_context.clone()).await;
                 return Err(ToolError::Aborted);
             }
         }
@@ -919,7 +932,7 @@ async fn read_media(
         match tokio::time::timeout(timeout, future).await {
             Ok(result) => result.map_err(map_media_error)?,
             Err(_) => {
-                let _ = service.cancel(identity).await;
+                let _ = service.cancel(cancel_context).await;
                 return Err(map_media_error(MediaError::new(
                     MediaErrorKind::Timeout,
                     "media read exceeded its deadline",
@@ -1060,21 +1073,36 @@ fn resource_json(resource: &MediaResourceRef) -> Value {
         MediaResourceRef::Recording(recording) => json!({"kind":"recording","ref":recording.0.0}),
         MediaResourceRef::Session(session) => json!({"kind":"session","ref":session.0.0}),
         MediaResourceRef::Media(media) => json!({"kind":"media","ref":media.0}),
-        MediaResourceRef::Operation(operation) => operation_ref_value(operation),
+        MediaResourceRef::Operation {
+            identity,
+            incarnation,
+        } => operation_ref_value(identity, *incarnation),
     }
 }
 
-fn operation_ref_value(operation: &MediaOperationId) -> Value {
+fn operation_ref_value(
+    operation: &MediaOperationId,
+    incarnation: media_api::MediaOperationIncarnation,
+) -> Value {
     json!({
         "kind":"operation",
         "ref":operation.id,
         "generation":operation.generation,
-        "service_epoch":operation.service_epoch
+        "service_epoch":operation.service_epoch,
+        "incarnation":incarnation.as_string()
     })
 }
 
 fn operation_ref_json(context: &MediaOperationContext) -> Value {
-    operation_ref_value(&context.identity)
+    operation_ref_value(&context.identity, context.operation_incarnation())
+}
+
+fn operation_id_value(operation: &MediaOperationId) -> Value {
+    json!({
+        "id":operation.id,
+        "generation":operation.generation,
+        "service_epoch":operation.service_epoch
+    })
 }
 
 fn resource_state_name(state: MediaResourceState) -> &'static str {
@@ -1148,7 +1176,7 @@ fn event_json(event: &media_api::MediaEvent) -> Value {
         "sequence":event.sequence,
         "occurred_at_unix_ms":event.occurred_at_unix_ms,
         "target":resource_json(&event.target),
-            "operation_id":event.operation_id.as_ref().map(operation_ref_value)
+            "operation_id":event.operation_id.as_ref().map(operation_id_value)
     });
     let detail = match &event.kind {
         MediaEventKind::StateChanged { resource, state } => json!({
@@ -1310,7 +1338,7 @@ fn execution_metadata(
             target:
                 MediaResourceRef::Recording(_)
                 | MediaResourceRef::Session(_)
-                | MediaResourceRef::Operation(_),
+                | MediaResourceRef::Operation { .. },
             ..
         }) => {}
         _ => {}
@@ -1648,7 +1676,12 @@ impl Tool for MediaTool {
                                 .to_owned(),
                         ),
                         Some(handoff) => {
-                            match use_context.media_agent_capability_context().await {
+                            match use_context
+                                .media_agent_capability_context(
+                                    service.attachment_id(),
+                                )
+                                .await
+                            {
                                 Some(current_context)
                                     if capability_context.as_ref().is_some_and(|initial| {
                                         initial == &current_context

@@ -328,6 +328,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         session: None,
         subagent_registry: None,
         cancel: None,
+        cancellation_scope: crate::context::ToolCancellationScope::ModelTurn,
         fork_parent_system_prompt: None,
         cwd: None,
         depth: 0,
@@ -829,6 +830,7 @@ pub fn ctx_for_file_tools(
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     super::BuiltinToolContext {
+        tool_execution_policy: Default::default(),
         side_chat: false,
         side_chat_cleanup_failed: None,
         host_git_root_cache: Arc::new(crate::HostGitRootCache::new()),
@@ -846,6 +848,7 @@ pub fn ctx_for_file_tools(
         clock: make_stub_clock(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
         sandbox_enabled_override: None,
+        isolated_shell: None,
         skip_web_fetch_preflight: false,
         ask_user_question_timeout: None,
         sandbox_runner: crate::sandbox_runner::default_sandbox_runner(),
@@ -911,6 +914,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     use telemetry::AnalyticsBus;
 
     super::BuiltinToolContext {
+        tool_execution_policy: Default::default(),
         side_chat: false,
         side_chat_cleanup_failed: None,
         host_git_root_cache: Arc::new(crate::HostGitRootCache::new()),
@@ -923,6 +927,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         clock: make_stub_clock(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
         sandbox_enabled_override: None,
+        isolated_shell: None,
         skip_web_fetch_preflight: false,
         ask_user_question_timeout: None,
         sandbox_runner: crate::sandbox_runner::default_sandbox_runner(),
@@ -994,6 +999,7 @@ pub fn shell_test_ctx_in(
     let ctx = shell_test_ctx(out);
     let trusted = ctx.trusted_dirs();
     super::BuiltinToolContext {
+        tool_execution_policy: Default::default(),
         side_chat: false,
         side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.

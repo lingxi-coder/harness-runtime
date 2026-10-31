@@ -276,8 +276,8 @@ define_client_command! {
     },
     /// Stop capture, provider generation, and native realtime tools.
     StopRealtimeAudio,
-    /// Read the current session's exact, non-secret audio provider binding.
-    GetAudioSessionContext,
+    /// Read the current session's exact, non-secret audio/media binding.
+    GetAudioSessionContext { request_id: String },
     // ── Turn driving ──────────────────────────────────────────────────────
     // Submit a user prompt to drive a turn. Carries the text, an optional
     // [`PromptModeDto`], inline image bytes (decision §0.8), and an optional
@@ -420,6 +420,7 @@ define_client_command! {
     // Request the available-model catalog. Replied with a
     // [`ModelList`](crate::protocol::events::ClientEvent::ModelList) event.
     ListModels,
+
 
     // ── Slash commands ────────────────────────────────────────────────────
     // Run a raw slash-command line. Local/display commands reply with
@@ -929,13 +930,17 @@ define_client_command! {
     UpdateMediaSessionModes {
         modes: Vec<MediaSessionModeDto>,
     },
+    // App lifecycle or user refresh for the shared official provider directory.
+    RefreshProviderCatalog {
+        // startup, foreground, background, timer, network_restored, settings, manual.
+        trigger: String,
+    },
     // Behavior selection is independent of tool permission and model settings.
     SetSessionMode {
         mode: crate::protocol::listings::SessionModeDto,
     },
     // Inspect host-side context metadata without a model call or prompt bodies.
     GetContextManifest,
-
 }
 
 impl From<ClientCommandWire> for ClientCommand {
@@ -970,7 +975,9 @@ impl From<ClientCommandWire> for ClientCommand {
                 Self::RealtimeAudioInput { input_json }
             }
             ClientCommandWire::StopRealtimeAudio => Self::StopRealtimeAudio,
-            ClientCommandWire::GetAudioSessionContext => Self::GetAudioSessionContext,
+            ClientCommandWire::GetAudioSessionContext { request_id } => {
+                Self::GetAudioSessionContext { request_id }
+            }
             ClientCommandWire::SendPrompt {
                 text,
                 prompt_mode,
@@ -1041,6 +1048,9 @@ impl From<ClientCommandWire> for ClientCommand {
             },
             ClientCommandWire::SetModel { model } => Self::SetModel { model },
             ClientCommandWire::ListModels => Self::ListModels,
+            ClientCommandWire::RefreshProviderCatalog { trigger } => {
+                Self::RefreshProviderCatalog { trigger }
+            }
             ClientCommandWire::RunSlashCommand {
                 raw,
                 images,
@@ -1410,7 +1420,9 @@ impl<'de> Deserialize<'de> for ClientCommand {
         match tag.as_str() {
             // Unit variants have no raw payload to decode.
             "stop_realtime_audio" => Ok(Self::StopRealtimeAudio),
-            "get_audio_session_context" => Ok(Self::GetAudioSessionContext),
+            "get_audio_session_context" => Ok(Self::GetAudioSessionContext {
+                request_id: command_raw_required(&mut fields, "request_id")?,
+            }),
             "list_models" => Ok(Self::ListModels),
             "list_session_agents" => Ok(Self::ListSessionAgents),
             "login" => Ok(Self::Login),

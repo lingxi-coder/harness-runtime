@@ -383,3 +383,93 @@ async fn message_display_failing_hook_falls_back_to_original_text() {
         "a failing display hook falls back to the original joined text"
     );
 }
+
+/// A host receives the already-computed display result with the canonical
+/// surviving message ID, without invoking the hook a second time.
+#[tokio::test]
+async fn managed_display_observer_receives_canonical_message_and_override() {
+    use lingxi_core::host::{CostSnapshot, OutputStream};
+    use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId, ToolUseId};
+
+    #[derive(Default)]
+    struct ObservedOutput {
+        displayed: Mutex<Vec<String>>,
+        overrides: Mutex<Vec<(MessageId, String)>>,
+    }
+    #[async_trait]
+    impl OutputStream for ObservedOutput {
+        async fn emit_text(&self, text: &Utf16JsonProjection) {
+            self.displayed
+                .lock()
+                .unwrap()
+                .push(text.string_at("").unwrap().to_owned());
+        }
+        async fn observe_assistant_display_text(&self, id: &MessageId, text: &Utf16JsonProjection) {
+            self.overrides
+                .lock()
+                .unwrap()
+                .push((*id, text.string_at("").unwrap().to_owned()));
+        }
+        async fn emit_tool_call(&self, _: &ToolUseId, _: &str, _: &Utf16JsonProjection) {}
+        async fn emit_tool_result(
+            &self,
+            _: &ToolUseId,
+            _: &str,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
+            _: Option<&Utf16JsonProjection>,
+        ) {
+        }
+        async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {}
+    }
+    let calls: FiredLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let mut managed = builtin_hook("record-message-display", HookEventType::MessageDisplay);
+    managed.source = HookSource::Settings(lingxi_core::types::SettingsScope::Managed);
+    registry.write().await.register(managed);
+    let mut hooks = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    hooks.register_builtin(Arc::new(RecordingHandler {
+        log: calls.clone(),
+        display: Some("[redacted]".into()),
+        fail: false,
+    }));
+    let hooks = Arc::new(hooks);
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![single_text_turn()]));
+    let output = Arc::new(ObservedOutput::default());
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        api,
+        Arc::new(ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        PathBuf::from("/tmp"),
+    ));
+    orch.run_turn_streaming("say hi")
+        .await
+        .expect("turn succeeds");
+    let history = orch.snapshot_history().await;
+    let native_id = history
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            lingxi_core::types::ConversationMessage::Assistant { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("accepted assistant message");
+    assert_eq!(
+        *output.overrides.lock().unwrap(),
+        vec![(native_id, "[redacted]".into())]
+    );
+    assert_eq!(
+        *output.displayed.lock().unwrap(),
+        vec!["[redacted]".to_owned()]
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        2,
+        "no extra MessageDisplay hook invocation"
+    );
+}

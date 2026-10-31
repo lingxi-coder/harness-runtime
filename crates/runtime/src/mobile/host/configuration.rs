@@ -25,6 +25,8 @@ pub struct MobileConfig {
     pub brand_runtime_profile: mobile_linux_api::BrandRuntimeProfile,
     /// Private model/tool service bootstrap for Local Apps; never a chat.
     pub app_agent_host: bool,
+    /// Host-authorized task memory, never the whole branded data directory.
+    pub scheduled_memory_directory: Option<std::path::PathBuf>,
     /// Host-scoped official catalog delivery; never inferred from credentials.
     pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
@@ -92,6 +94,15 @@ pub struct MobileConfig {
     /// App-scoped facade shared by media tools, native UI and remote media
     /// callers. Hosts compose device ports, connectors and storage once.
     pub media_service: Option<Arc<dyn media_api::MediaService>>,
+    /// Host-issued scope for this engine's media calls. When present, the
+    /// assembly replaces `media_service` with this handle's scoped service and
+    /// retains the handle through teardown. Native app hosts keep their own
+    /// copy so an unconfirmed revoke remains isolated after engine destruction.
+    pub media_attachment_handle: Option<media_runtime::MediaAttachmentHandle>,
+    /// Called only after the attachment drain is confirmed. App hosts use this
+    /// to release provider routes retained for this attachment; Unknown leaves
+    /// those routes and the host-owned attachment intact.
+    pub media_attachment_confirmed_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Host adapter that opens native Agent realtime IO for conversation-mode
     /// media sessions. Observation-only sessions do not use this callback.
     pub media_conversation_attachment: Option<Arc<dyn super::MediaConversationAttachment>>,
@@ -174,6 +185,21 @@ impl std::fmt::Debug for MobileConfig {
                 },
             )
             .field(
+                "media_attachment_handle",
+                &self
+                    .media_attachment_handle
+                    .as_ref()
+                    .map(|handle| handle.id()),
+            )
+            .field(
+                "media_attachment_confirmed_callback",
+                if self.media_attachment_confirmed_callback.is_some() {
+                    &"Some(<callback>)"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
                 "media_conversation_attachment",
                 if self.media_conversation_attachment.is_some() {
                     &"Some(<attachment>)"
@@ -215,6 +241,7 @@ impl Default for MobileConfig {
         Self {
             brand_runtime_profile: mobile_linux_api::BrandRuntimeProfile::default(),
             app_agent_host: false,
+            scheduled_memory_directory: None,
             startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             build_info: command_api::builtins::BuildInfo::default(),
@@ -236,6 +263,8 @@ impl Default for MobileConfig {
             android_git: None,
             android_git_secret: None,
             media_service: None,
+            media_attachment_handle: None,
+            media_attachment_confirmed_callback: None,
             media_conversation_attachment: None,
             // P0.2: default to NO memory provider (empty, deterministic). The
             // production FFI entry points inject `Some(real_provider())`.

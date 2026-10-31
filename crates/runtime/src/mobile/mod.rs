@@ -50,6 +50,8 @@ mod directories;
 #[cfg(feature = "mobile")]
 mod host;
 #[cfg(feature = "mobile")]
+mod media_owner_dto;
+#[cfg(feature = "mobile")]
 pub use directories::{mobile_user_directories, MobileUserDirectories};
 
 // Audit fix (#14): the disk-backed Skill loader the FFI host wires so the mobile
@@ -92,7 +94,8 @@ pub use client::protocol::listings::{
 #[cfg(feature = "mobile")]
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
-    parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
+    initialize_mobile_lifecycle_runtime, parse_mobile_provider_config_json,
+    spawn_mobile_lifecycle_task, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
     FiredCronJobDto, MediaAgentHandoffRequest, MediaConversationAttachment, MediaSessionContext,
     MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
     MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime, MobileSessionDiscoveryScope,
@@ -125,6 +128,10 @@ pub use audio_service::{
 };
 #[cfg(feature = "mobile")]
 pub use client::adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
+#[cfg(feature = "mobile")]
+pub use media_runtime::{
+    MediaAttachmentHandle, MediaAttachmentHost, MediaAttachmentPhase, MediaAttachmentRevocation,
+};
 
 /// Mobile engine knobs.
 #[derive(Clone, Debug)]

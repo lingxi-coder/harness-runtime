@@ -278,7 +278,9 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
 mod tests {
     use super::*;
     use sandbox::runtime_config::NetworkRestrictionConfig;
+    #[cfg(target_os = "macos")]
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(target_os = "macos")]
     use std::sync::Arc;
     use tool_api::SandboxRunner as _;
 

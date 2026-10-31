@@ -177,6 +177,9 @@
 /// media-device and media-connection request/response variants and introduce
 /// new DTO families. They do not retype or remove an existing field/variant;
 /// host routing keeps these control messages outside model history and AG-UI.
-// Session-mode selection and context-manifest commands/events append to their
-// respective variant lists without changing existing ordinals or fields.
-pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";
+/// Version 30 adds attachment-scoped media/audio owners and requires an opaque
+/// operation incarnation in media references, responses, and cancellation.
+/// Native bindings and bridge peers must be regenerated together.
+/// Session-mode selection and context-manifest commands/events append after
+/// the current command/event variants without changing their ordinals.
+pub const CLIENT_PROTOCOL_VERSION: &str = "30.0.0";

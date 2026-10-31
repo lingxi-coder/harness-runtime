@@ -30,7 +30,7 @@
 //!   [`load_command_markdown_files`] is ported in shape: when the nearest `.git`
 //!   is a *file* (worktree marker) pointing at a `gitdir`, the resolved main
 //!   repo's `.lingxi/<subdir>` is added iff the worktree itself lacks one.
-//! * Frontmatter parsing reuses the existing `serde_yaml` dependency and the
+//! * Frontmatter parsing reuses the existing `yaml_serde` dependency and the
 //!   `---`/`\n---\n` splitter pattern from `skill::frontmatter`
 //!   (`parse_skill_markdown`) without depending on `skill`. It mirrors the
 //!   Native YAML repair retry for selected plain scalars and leading tabs; a
@@ -107,7 +107,7 @@ struct RawFrontmatter {
     /// Native `X8t` display-name source. Its JS `String(...)` coercion is
     /// applied before the 256 UTF-16-unit cap.
     #[serde(default)]
-    name: Option<serde_yaml::Value>,
+    name: Option<yaml_serde::Value>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default, rename = "allowed-tools")]
@@ -190,7 +190,7 @@ impl EffortField {
 #[serde(untagged)]
 enum Boolish {
     Bool(bool),
-    Num(serde_yaml::Number),
+    Num(yaml_serde::Number),
     Str(String),
 }
 
@@ -939,8 +939,8 @@ fn parse_skill_frontmatter(raw: &str) -> (CommandFrontmatter, Option<Utf16JsonPr
 }
 
 /// JS `String(value)` coercion used by Native `X8t(frontmatter.name, …)`.
-fn native_frontmatter_name(value: serde_yaml::Value) -> Option<String> {
-    use serde_yaml::Value;
+fn native_frontmatter_name(value: yaml_serde::Value) -> Option<String> {
+    use yaml_serde::Value;
 
     match value {
         Value::Null => None,
@@ -959,9 +959,9 @@ fn native_frontmatter_name(value: serde_yaml::Value) -> Option<String> {
     }
 }
 
-fn native_array_element_string(value: serde_yaml::Value) -> Option<String> {
+fn native_array_element_string(value: yaml_serde::Value) -> Option<String> {
     match value {
-        serde_yaml::Value::Null => None,
+        yaml_serde::Value::Null => None,
         value => native_frontmatter_name(value),
     }
 }
@@ -982,14 +982,14 @@ fn native_effective_user_facing_name(
 /// quoted values (including an escaped lone surrogate) remain invalid, so a
 /// failed retry returns no metadata to [`parse_frontmatter`].
 fn parse_frontmatter_yaml(yaml: &str) -> Option<RawFrontmatter> {
-    if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml) {
-        return serde_yaml::from_value(value).ok();
+    if let Ok(value) = yaml_serde::from_str::<yaml_serde::Value>(yaml) {
+        return yaml_serde::from_value(value).ok();
     }
 
     let repaired = quote_native_yaml_sensitive_scalars(yaml);
     let repaired = expand_native_yaml_leading_tabs(&repaired);
-    let value = serde_yaml::from_str::<serde_yaml::Value>(&repaired).ok()?;
-    serde_yaml::from_value(value).ok()
+    let value = yaml_serde::from_str::<yaml_serde::Value>(&repaired).ok()?;
+    yaml_serde::from_value(value).ok()
 }
 
 /// Native 2.1.295's `I` helper. It quotes unquoted top-level-looking lines
@@ -1017,8 +1017,8 @@ fn quote_native_yaml_sensitive_scalars(yaml: &str) -> String {
         }
         if value.starts_with('[')
             && value.ends_with(']')
-            && serde_yaml::from_str::<serde_yaml::Value>(value)
-                .is_ok_and(|parsed| matches!(parsed, serde_yaml::Value::Sequence(_)))
+            && yaml_serde::from_str::<yaml_serde::Value>(value)
+                .is_ok_and(|parsed| matches!(parsed, yaml_serde::Value::Sequence(_)))
         {
             output.push_str(line);
             continue;

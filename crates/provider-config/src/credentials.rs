@@ -31,6 +31,7 @@ pub struct MultiCredentialProvider {
     anthropic_api_key_helper: Option<String>,
     anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache,
     oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
+    allow_environment_fallback: bool,
 }
 
 // `credentials` (an `Arc<secret::CredentialManager>`) is intentionally omitted —
@@ -78,6 +79,7 @@ impl MultiCredentialProvider {
             anthropic_api_key_helper,
             anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache::new(),
             oauth_delegates,
+            allow_environment_fallback: true,
         }
     }
 
@@ -85,6 +87,14 @@ impl MultiCredentialProvider {
     #[must_use]
     pub fn with_anthropic_api_key_source(mut self, source: Source) -> Self {
         self.anthropic_api_key_source = source;
+        self
+    }
+
+    /// A trusted isolated host supplies explicit credentials only. Ordinary
+    /// sessions retain their environment fallback unless the host disables it.
+    #[must_use]
+    pub fn with_environment_fallback(mut self, allowed: bool) -> Self {
+        self.allow_environment_fallback = allowed;
         self
     }
 
@@ -199,7 +209,11 @@ impl MultiCredentialProvider {
             .get(credential_id)
             .and_then(|s| s.env_var.as_deref())
         {
-            if let Ok(val) = std::env::var(var) {
+            if let Some(val) = self
+                .allow_environment_fallback
+                .then(|| std::env::var(var).ok())
+                .flatten()
+            {
                 return (
                     Some(Credential::ApiKey(val)),
                     Source::Environment {
@@ -731,6 +745,60 @@ mod tests {
 
     /// Serialize env mutation across tests (process-global env).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn isolated_provider_refuses_ambient_keys_but_keeps_explicit_memory_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let variable = "ISOLATED_PROVIDER_FIXTURE_KEY";
+        struct Restore(&'static str, Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(value) => std::env::set_var(self.0, value),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let _restore = Restore(variable, std::env::var_os(variable));
+        std::env::set_var(variable, "synthetic-ambient-key");
+        let credentials = manager();
+        let make = || {
+            MultiCredentialProvider::new(
+                credentials.clone(),
+                vec![source(
+                    ProviderId::OpenAI,
+                    "isolated-fixture",
+                    Some(variable),
+                    crate::CredentialKind::ApiKey,
+                )],
+                None,
+                None,
+                Default::default(),
+            )
+        };
+        let selected = scope(ProviderId::OpenAI, "isolated-fixture", "isolated-fixture");
+        // The control proves that the synthetic environment fixture is valid.
+        assert_eq!(
+            make().load(&selected).await.unwrap(),
+            Credential::ApiKey("synthetic-ambient-key".into())
+        );
+        let isolated = make().with_environment_fallback(false);
+        assert!(matches!(
+            isolated.load(&selected).await,
+            Err(LlmError::Authentication { .. })
+        ));
+        assert_eq!(isolated.source(&selected).await.unwrap(), Source::None);
+        credentials
+            .set_provider_key("isolated-fixture", "synthetic-selected-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            isolated.load(&selected).await.unwrap(),
+            Credential::ApiKey("synthetic-selected-key".into())
+        );
+        assert_eq!(isolated.source(&selected).await.unwrap(), Source::Stored);
+    }
 
     #[derive(Debug)]
     struct LiveOAuth(std::sync::atomic::AtomicBool);

@@ -117,12 +117,14 @@ pub use conversation::{
     realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, NativeProactivityRemountState, PendingPromptIdentity,
     QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledLoopFire,
+    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledLoopFire, ScheduledMediaChild,
+    ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
-    OrchestratorApiClient, OrchestratorApiRequest, QueryUserInterruptionKind, SessionMemoryHandle,
-    SideChatParentSnapshot, StreamingApiClient, TurnExecutionMetrics, TurnOutcome,
+    OrchestratorApiClient, OrchestratorApiRequest, PersistentChatContextConfig,
+    QueryUserInterruptionKind, SessionMemoryHandle, SideChatParentSnapshot, StreamingApiClient,
+    TurnExecutionMetrics, TurnOutcome,
 };
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;

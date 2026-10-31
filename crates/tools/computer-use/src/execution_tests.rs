@@ -354,6 +354,11 @@ pub(super) fn ctx() -> ToolUseContext {
 
 #[tokio::test]
 async fn typed_tabs_obey_held_key_grants_before_any_text_is_emitted() {
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "alt"
+    };
     for text in [
         "\t".to_owned(),
         format!("{}\t", "a".repeat(20)),
@@ -361,19 +366,22 @@ async fn typed_tabs_obey_held_key_grants_before_any_text_is_emitted() {
     ] {
         let backend = Arc::new(RecordingBackend::default());
         let tool = make_tool(backend.clone());
-        invoke(&tool, json!({"action":"key_down","text":"cmd"}), ctx())
+        invoke(&tool, json!({"action":"key_down","text":modifier}), ctx())
             .await
             .unwrap();
         let result = invoke(&tool, json!({"action":"type","text":text}), ctx()).await;
         assert!(matches!(result, Err(ToolError::PermissionDenied(_))));
-        assert_eq!(backend.events(), ["down:cmd", "up:cmd"]);
+        assert_eq!(
+            backend.events(),
+            [format!("down:{modifier}"), format!("up:{modifier}")]
+        );
     }
-    for command_held in [false, true] {
+    for modifier_held in [false, true] {
         let backend = Arc::new(RecordingBackend::default());
         let tool = make_tool(backend.clone());
-        if command_held {
+        if modifier_held {
             tool.state.lock().unwrap().grant_flags.system_key_combos = true;
-            invoke(&tool, json!({"action":"key_down","text":"cmd"}), ctx())
+            invoke(&tool, json!({"action":"key_down","text":modifier}), ctx())
                 .await
                 .unwrap();
         }
@@ -736,11 +744,16 @@ async fn cleanup_releases_inputs_even_when_generation_update_fails_and_quarantin
 
 #[tokio::test]
 async fn key_aliases_cannot_bypass_grants_or_split_held_key_identity() {
-    for (modifier, main) in [
-        ("cmd", "spacebar"),
-        ("ctrl", "uparrow"),
-        ("ctrl", "downarrow"),
-    ] {
+    let system_shortcuts = if cfg!(target_os = "macos") {
+        [
+            ("cmd", "spacebar"),
+            ("ctrl", "uparrow"),
+            ("ctrl", "downarrow"),
+        ]
+    } else {
+        [("control", "esc"), ("option", "f4"), ("windows", "l")]
+    };
+    for (modifier, main) in system_shortcuts {
         for split in [false, true] {
             let backend = Arc::new(RecordingBackend::default());
             let tool = make_tool(backend.clone());

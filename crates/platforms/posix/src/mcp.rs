@@ -1038,7 +1038,7 @@ impl McpTransport for PosixMcpTransport {
                 // implementation below.
                 return self.remote.connect(spec).await;
             }
-            other => return Err(McpError::UnsupportedTransport(map_kind(other))),
+            other => return Err(McpError::UnsupportedTransport(other.transport_kind())),
         }
         if let Err(error) = self.set_elicitation(
             id,
@@ -1630,19 +1630,6 @@ impl McpTransport for PosixMcpTransport {
             McpTransportKind::SseIde,
             McpTransportKind::WsIde,
         ]
-    }
-}
-
-fn map_kind(spec: &McpTransportSpec) -> McpTransportKind {
-    match spec {
-        McpTransportSpec::Stdio { .. } => McpTransportKind::Stdio,
-        McpTransportSpec::Sse { .. } => McpTransportKind::Sse,
-        McpTransportSpec::Http { .. } => McpTransportKind::Http,
-        McpTransportSpec::WebSocket { .. } => McpTransportKind::WebSocket,
-        McpTransportSpec::InProcess { .. } => McpTransportKind::InProcess,
-        McpTransportSpec::SseIde { .. } => McpTransportKind::SseIde,
-        McpTransportSpec::WsIde { .. } => McpTransportKind::WsIde,
-        McpTransportSpec::SdkControl { .. } => McpTransportKind::SdkControl,
     }
 }
 

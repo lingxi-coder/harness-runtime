@@ -795,6 +795,10 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 
 #[async_trait]
 impl Tool for AskUserQuestionTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         ASK_USER_QUESTION_TOOL_NAME
     }

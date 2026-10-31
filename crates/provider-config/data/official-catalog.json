@@ -1,0 +1,1194 @@
+{
+  "releaseId": "embedded",
+  "publishedAt": 0,
+  "schemaVersion": 2,
+  "providers": [
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "description": "First-party Claude models over the Messages API.",
+      "baseUrl": "https://api.anthropic.com",
+      "protocol": "anthropic_messages",
+      "enabled": true,
+      "order": 0,
+      "regions": [
+        "international"
+      ],
+      "defaultModelId": "claude-sonnet-5",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.anthropic_messages"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "connection = { protocol_profiles = { open_ai_chat = \"anthropic-chat\" } }\n# First-party Anthropic. Wire IDs are checked against the Claude API;\n# catalog metadata and prices retain their aggregator provenance.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"anthropic\", fast = \"speed\", enabled_requires_budget = true, fast_beta = \"fast-mode-2026-02-01\" }\nfeatures = { thinking = \"supported\", mode_support = { enabled = { forced_tool_choice = \"unsupported\" } }, budget = { support = \"supported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"supported\", sources = [\"https://platform.claude.com/docs/en/build-with-claude/thinking\"], requirements = [\"Fast mode requires preview access and an eligible model.\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [\"https://platform.claude.com/docs/en/about-claude/pricing\"] }\n\nregions = [\"international\"]\nprovider_id = \"anthropic\"\nbase_url = \"https://api.anthropic.com\"\nprotocol = \"anthropic_messages\"\ndecisions = { implementation = \"structured_output\", text = true, image = true }\nauth = \"api_key\"\ncredential_env = \"ANTHROPIC_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"Anthropic\"\ndescription = \"First-party Claude models over the Messages API.\"\nconsole_url = \"https://console.anthropic.com\"\napi_key_url = \"https://console.anthropic.com/settings/keys\"\ndocs_url = \"https://platform.claude.com/docs\"\ncredential_hint = \"sk-ant-\"\n# IDs/lifecycle checked 2026-09-23:\n# https://platform.claude.com/docs/en/about-claude/model-deprecations\n# Prices and descriptive metadata: models.dev via aggregator.\n# Old aggregator IDs are local aliases, never sent to the first-party endpoint.\n\nextra = { web_search = \"anthropic\" }\n\n[[model]]\nid = \"claude-sonnet-5\"\nname = \"Claude Sonnet 5\"\ndescription = \"Sonnet 5 is Anthropic's most capable Sonnet-class model, with frontier performance across coding, agents, and professional work. It supports adaptive thinking with selectable reasoning effort levels (low, medium, high, max,...\"\nrelease_date = \"2026-06-30\"\ncontext_window = 1000000\ncontext = { sharedWindow = true }\nmax_output = 128000\ninput_modalities = [\"text\", \"image\", \"file\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\n\n[model.pricing]\ninput_per_million = 2\noutput_per_million = 10\ncache_read_per_million = 0.19999999999999998\ncache_write_per_million = 2.5\nsource = \"models.dev via aggregator\"\ncache_write_1h_per_million = 4\n\n[model.pricing.batch]\ninput_per_million = 1\noutput_per_million = 5\ncache_read_per_million = 0.09999999999999999\ncache_write_per_million = 1.25\n\n[model.features]\ndefault_mode = \"adaptive\"\nmode_support = { adaptive = { forced_tool_choice = \"supported\" } }\nthinking = \"supported\"\nfast = \"unsupported\"\nsources = [\"https://platform.claude.com/docs/en/build-with-claude/thinking\"]\nmodes = [\"adaptive\", \"disabled\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\", hard_limit = false }\neffort = { support = \"supported\", levels = [\"low\", \"medium\", \"high\", \"xhigh\", \"max\"], default = \"high\" }\n[[model]]\nid = \"claude-opus-5-5\"\nname = \"Claude Opus 5.5\"\ndescription = \"Claude Opus 5.5 is Anthropic's model for long-running agentic coding and knowledge work.\"\nrelease_date = \"2026-09-22\"\ncontext_window = 1000000\ncontext = { sharedWindow = true }\nmax_output = 128000\ninput_modalities = [\"text\", \"image\", \"file\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\n\n[model.pricing]\ninput_per_million = 4\noutput_per_million = 20\ncache_read_per_million = 0.2\ncache_write_per_million = 5\ncache_write_1h_per_million = 8\nsource = \"https://platform.claude.com/docs/en/models/opus-5-5/overview\"\nverified_at = \"2026-09-24\"\n\n[model.pricing.batch]\ninput_per_million = 2\noutput_per_million = 10\ncache_read_per_million = 0.1\ncache_write_per_million = 2.5\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nsource = \"https://platform.claude.com/docs/en/models/opus-5-5/overview\"\nverified_at = \"2026-09-24\"\n\n[model.features]\ndefault_mode = \"adaptive\"\nmode_support = { adaptive = { forced_tool_choice = \"unsupported\" } }\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://platform.claude.com/docs/en/models/opus-5-5/overview\"]\nmodes = [\"adaptive\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\", hard_limit = false }\neffort = { support = \"supported\", levels = [\"low\", \"medium\", \"high\", \"xhigh\", \"max\"], default = \"medium\" }\n[[model]]\nid = \"claude-haiku-5-5\"\nname = \"Claude Haiku 5.5\"\ndescription = \"Claude Haiku 5.5 is tuned for high-volume, latency-sensitive work and supports adaptive thinking with effort controls.\"\nrelease_date = \"2026-10-07\"\nknowledge_cutoff = \"2026-06\"\ncontext_window = 1000000\ncontext = { sharedWindow = true }\nmax_output = 128000\ninput_modalities = [\"text\", \"image\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\ntemperature = false\n\n[model.pricing]\ninput_per_million = 0.10\noutput_per_million = 0.50\ncache_read_per_million = 0.01\ncache_write_per_million = 0.125\ncache_write_1h_per_million = 0.20\nweb_search_per_request = 0.01\nsource = \"Claude Code 2.1.293 embedded catalog and Claude Platform docs\"\nverified_at = \"2026-10-07\"\n\n[model.pricing.batch]\ninput_per_million = 0.05\noutput_per_million = 0.25\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"interactive\"\nmax_input_tokens = 100000\nrates = { input_per_million = 0.10, output_per_million = 0.50, cache_read_per_million = 0.01, cache_write_per_million = 0.125, cache_write_1h_per_million = 0.20, web_search_per_request = 0.01 }\nsource = \"Claude Code 2.1.293 embedded catalog and Claude Platform docs\"\nverified_at = \"2026-10-07\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"interactive\"\nmin_input_tokens = 100001\nrates = { input_per_million = 0.50, output_per_million = 2.50, cache_read_per_million = 0.05, cache_write_per_million = 0.625, cache_write_1h_per_million = 1.0, web_search_per_request = 0.01 }\nsource = \"Claude Code 2.1.293 embedded catalog and Claude Platform docs\"\nverified_at = \"2026-10-07\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmax_input_tokens = 100000\nrates = { input_per_million = 0.05, output_per_million = 0.25, cache_read_per_million = 0.01, cache_write_per_million = 0.125, cache_write_1h_per_million = 0.20 }\nsource = \"Claude Code 2.1.293 embedded catalog and Claude Platform docs\"\nverified_at = \"2026-10-07\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmin_input_tokens = 100001\nrates = { input_per_million = 0.25, output_per_million = 1.25, cache_read_per_million = 0.05, cache_write_per_million = 0.625, cache_write_1h_per_million = 1.0 }\nsource = \"Claude Code 2.1.293 embedded catalog and Claude Platform docs\"\nverified_at = \"2026-10-07\"\n\n[model.features]\ndefault_mode = \"adaptive\"\nmode_support = { adaptive = {} }\nthinking = \"supported\"\nfast = \"unsupported\"\nsources = [\"https://platform.claude.com/docs/en/models/haiku-5-5/overview\"]\nmodes = [\"adaptive\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\", hard_limit = false }\neffort = { support = \"supported\", levels = [\"low\", \"medium\", \"high\", \"xhigh\", \"max\"], default = \"medium\" }\n\n",
+        "sha256": "e8f4092c585aa3cf072c7c51d43f176c049b4bc75e4732ad91f84f7bced1cf95"
+      }
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "description": "First-party OpenAI models over the Responses API.",
+      "baseUrl": "https://api.openai.com/v1",
+      "protocol": "open_ai_responses",
+      "enabled": true,
+      "order": 1,
+      "regions": [
+        "international"
+      ],
+      "defaultModelId": "gpt-6.1-sol",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_responses"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "connection = { protocol_profiles = { open_ai_chat = \"openai-chat\" } }\nembeddings = { mode = \"enabled\", value = { api = \"open_ai\", endpoint = \"https://api.openai.com/v1/embeddings\", models_endpoint = \"https://api.openai.com/v1/models\", auth = { type = \"bearer\" }, max_inputs = 2048 } }\nretrieval = { mode = \"enabled\", value = { api = \"open_ai\", endpoint = \"https://api.openai.com/v1/vector_stores\", auth = { type = \"bearer\" } } }\nbatches = { mode = \"enabled\", value = { api = \"open_ai\", endpoint = \"https://api.openai.com/v1/batches\", files_endpoint = \"https://api.openai.com/v1/files\", auth = { type = \"bearer\" } } }\nbackground = { mode = \"enabled\", value = { endpoint = \"https://api.openai.com/v1/responses\", auth = { type = \"bearer\" } } }\naudio = { mode = \"enabled\", value = { transcriptions_endpoint = \"https://api.openai.com/v1/audio/transcriptions\", translations_endpoint = \"https://api.openai.com/v1/audio/translations\", speech_endpoint = \"https://api.openai.com/v1/audio/speech\", auth = { type = \"bearer\" } } }\n# First-party OpenAI speaks the Responses API; the Chat Completions wire is what\n# the compatible providers use, not this one.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"open_ai_responses\", fast = \"fast\" }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"supported\", sources = [\"https://developers.openai.com/api/docs/guides/reasoning\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [\"https://developers.openai.com/api/docs/pricing\"] }\n\nregions = [\"international\"]\nprovider_id = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nprotocol = \"open_ai_responses\"\ndecisions = { implementation = \"structured_output\", text = true, image = true }\n# The completion wire and the model directory are different things here:\n# this vendor serves one shared model list for both of its wires, in the\n# other one's shape. Left unstated, a refresh would look for a directory in\n# this wire's shape, which is not published at all.\nmodel_list = \"open_ai_chat\"\nauth = \"bearer\"\ncredential_env = \"OPENAI_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"OpenAI\"\ndescription = \"First-party OpenAI models over the Responses API.\"\nconsole_url = \"https://platform.openai.com\"\napi_key_url = \"https://platform.openai.com/api-keys\"\ndocs_url = \"https://developers.openai.com/api/docs\"\ncredential_hint = \"sk-\"\n\n# OpenAI stores Responses objects and accepts their ids to continue a chain.\n# This is opt-in because several otherwise Responses-compatible endpoints\n# accept the field but ignore it.\nextra = { supports_previous_response_id = true, web_search = \"openai_responses\", code_interpreter = \"openai_responses\", remote_mcp = \"openai_responses\" }\n\n[[model]]\nid = \"gpt-6.1-sol\"\nname = \"GPT-6.1 Sol\"\ndescription = \"Near-Astra performance for complex coding, computer use, and professional work at a lower cost.\"\nfamily = \"gpt-sol\"\nknowledge_cutoff = \"2026-04-30\"\nrelease_date = \"2026-09-29\"\nlast_updated = \"2026-10-08\"\ncontext_window = 1050000\ncontext = { sharedWindow = true }\nmax_input = 922000\nmax_output = 128000\ninput_modalities = [\"text\", \"image\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 2\ncache_read_per_million = 0.1\ncache_write_per_million = 2.5\noutput_per_million = 10\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"\nverified_at = \"2026-10-09\"\n\n[model.pricing.batch]\ninput_per_million = 1\ncache_read_per_million = 0.05\ncache_write_per_million = 1.25\noutput_per_million = 5\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"low\", \"medium\", \"high\", \"xhigh\", \"max\"], default = \"medium\" }\nmodes = [\"enabled\"]\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmax_input_tokens = 272000\nrates = { input_per_million = 2, cache_read_per_million = 0.1, cache_write_per_million = 2.5, output_per_million = 10 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"\nverified_at = \"2026-10-09\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmin_input_tokens = 272001\nrates = { input_per_million = 4, cache_read_per_million = 0.2, cache_write_per_million = 5, output_per_million = 15 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"\nverified_at = \"2026-10-09\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmax_input_tokens = 272000\nrates = { input_per_million = 4, cache_read_per_million = 0.2, cache_write_per_million = 5, output_per_million = 20 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"\nverified_at = \"2026-10-09\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmin_input_tokens = 272001\nrates = { input_per_million = 8, cache_read_per_million = 0.4, cache_write_per_million = 10, output_per_million = 30 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"\nverified_at = \"2026-10-09\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmax_input_tokens = 272000\nrates = { input_per_million = 1, cache_read_per_million = 0.05, cache_write_per_million = 1.25, output_per_million = 5 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"\nverified_at = \"2026-10-09\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmin_input_tokens = 272001\nrates = { input_per_million = 2, cache_read_per_million = 0.1, cache_write_per_million = 2.5, output_per_million = 7.5 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-sol\"\nverified_at = \"2026-10-09\"\n\n[[model]]\nid = \"gpt-6.1-terra\"\nname = \"GPT-6.1 Terra\"\ndescription = \"OpenAI's fast, efficient model for visual reasoning, computer use, and writing.\"\nfamily = \"gpt-terra\"\nknowledge_cutoff = \"2026-06-01\"\nrelease_date = \"2026-10-26\"\nlast_updated = \"2026-10-26\"\ncontext_window = 1050000\ncontext = { sharedWindow = true }\nmax_input = 922000\nmax_output = 128000\ninput_modalities = [\"text\", \"image\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 1\ncache_read_per_million = 0.05\ncache_write_per_million = 1.25\noutput_per_million = 5\nsource = \"https://developers.openai.com/api/docs/models/gpt-6.1-terra\"\nverified_at = \"2026-10-29\"\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://developers.openai.com/api/docs/models/gpt-6.1-terra\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"none\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"], default = \"medium\" }\nmodes = [\"enabled\", \"disabled\"]\n\n[[model]]\nid = \"gpt-6-astra\"\nname = \"GPT-6 Astra\"\ndescription = \"GPT-6 Astra is OpenAI's most capable model for complex reasoning, coding, computer use, research, and document creation.\"\nfamily = \"gpt-astra\"\nknowledge_cutoff = \"2026-04-30\"\nrelease_date = \"2026-09-04\"\nlast_updated = \"2026-09-04\"\ncontext_window = 1050000\ncontext = { sharedWindow = true }\nmax_input = 922000\nmax_output = 128000\ninput_modalities = [\"text\", \"image\", \"pdf\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 10\ncache_read_per_million = 1\ncache_write_per_million = 12.5\noutput_per_million = 50\nsource = \"https://developers.openai.com/api/docs/pricing\"\nverified_at = \"2026-09-24\"\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://developers.openai.com/api/docs/guides/reasoning\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"none\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"] }\nmodes = [\"enabled\", \"disabled\"]\n\n\n[model.pricing.batch]\ninput_per_million = 5\ncache_read_per_million = 0.5\ncache_write_per_million = 6.25\noutput_per_million = 25\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmax_input_tokens = 272000\nrates = { input_per_million = 10, cache_read_per_million = 1, cache_write_per_million = 12.5, output_per_million = 50 }\nsource = \"https://developers.openai.com/api/docs/pricing\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmin_input_tokens = 272001\nrates = { input_per_million = 20, cache_read_per_million = 2, cache_write_per_million = 25.0, output_per_million = 75.0 }\nsource = \"https://developers.openai.com/api/docs/pricing\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmax_input_tokens = 272000\nrates = { input_per_million = 20, cache_read_per_million = 2, cache_write_per_million = 25, output_per_million = 100 }\nsource = \"https://developers.openai.com/api/docs/pricing\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmin_input_tokens = 272001\nrates = { input_per_million = 40, cache_read_per_million = 4, cache_write_per_million = 50, output_per_million = 150.0 }\nsource = \"https://developers.openai.com/api/docs/pricing\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmax_input_tokens = 272000\nrates = { input_per_million = 5, cache_read_per_million = 0.5, cache_write_per_million = 6.25, output_per_million = 25 }\nsource = \"https://developers.openai.com/api/docs/pricing\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmin_input_tokens = 272001\nrates = { input_per_million = 10, output_per_million = 37.5, cache_read_per_million = 1, cache_write_per_million = 12.5 }\nsource = \"https://developers.openai.com/api/docs/pricing\"\nverified_at = \"2026-09-24\"\n[[model]]\nid = \"gpt-6-luna\"\nname = \"GPT-6 Luna\"\ndescription = \"OpenAI's efficient model for focused, high-volume tasks.\"\nfamily = \"gpt-luna\"\nknowledge_cutoff = \"2026-05-18\"\nrelease_date = \"2026-09-22\"\nlast_updated = \"2026-09-22\"\ncontext_window = 1050000\ncontext = { sharedWindow = true }\nmax_input = 922000\nmax_output = 128000\ninput_modalities = [\"text\", \"image\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 0.1\ncache_read_per_million = 0.01\ncache_write_per_million = 0.125\noutput_per_million = 0.5\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-luna\"\nverified_at = \"2026-09-24\"\n\n[model.pricing.batch]\ninput_per_million = 0.05\ncache_read_per_million = 0.005\ncache_write_per_million = 0.0625\noutput_per_million = 0.25\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://developers.openai.com/api/docs/models/gpt-6-luna\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"none\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"], default = \"medium\" }\nmodes = [\"enabled\", \"disabled\"]\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmax_input_tokens = 272000\nrates = { input_per_million = 0.1, cache_read_per_million = 0.01, cache_write_per_million = 0.125, output_per_million = 0.5 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-luna\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmin_input_tokens = 272001\nrates = { input_per_million = 0.2, cache_read_per_million = 0.02, cache_write_per_million = 0.25, output_per_million = 0.75 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-luna\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmax_input_tokens = 272000\nrates = { input_per_million = 0.2, cache_read_per_million = 0.02, cache_write_per_million = 0.25, output_per_million = 1.0 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-luna\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmin_input_tokens = 272001\nrates = { input_per_million = 0.4, cache_read_per_million = 0.04, cache_write_per_million = 0.5, output_per_million = 1.5 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-luna\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmax_input_tokens = 272000\nrates = { input_per_million = 0.05, cache_read_per_million = 0.005, cache_write_per_million = 0.0625, output_per_million = 0.25 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-luna\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmin_input_tokens = 272001\nrates = { input_per_million = 0.1, cache_read_per_million = 0.01, cache_write_per_million = 0.125, output_per_million = 0.375 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-luna\"\nverified_at = \"2026-09-24\"\n\n[[model]]\nid = \"gpt-6-sol\"\nname = \"GPT-6 Sol\"\ndescription = \"OpenAI's model for complex coding and agentic workflows.\"\nfamily = \"gpt-sol\"\nknowledge_cutoff = \"2026-04-20\"\nrelease_date = \"2026-09-22\"\nlast_updated = \"2026-09-22\"\ncontext_window = 1050000\ncontext = { sharedWindow = true }\nmax_input = 922000\nmax_output = 128000\ninput_modalities = [\"text\", \"image\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 2\ncache_read_per_million = 0.2\ncache_write_per_million = 2.5\noutput_per_million = 10\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-sol\"\nverified_at = \"2026-09-24\"\n\n[model.pricing.batch]\ninput_per_million = 1\ncache_read_per_million = 0.1\ncache_write_per_million = 1.25\noutput_per_million = 5\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://developers.openai.com/api/docs/models/gpt-6-sol\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"none\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"], default = \"medium\" }\nmodes = [\"enabled\", \"disabled\"]\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmax_input_tokens = 272000\nrates = { input_per_million = 2, cache_read_per_million = 0.2, cache_write_per_million = 2.5, output_per_million = 10 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-sol\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmin_input_tokens = 272001\nrates = { input_per_million = 4, cache_read_per_million = 0.4, cache_write_per_million = 5, output_per_million = 15 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-sol\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmax_input_tokens = 272000\nrates = { input_per_million = 4, cache_read_per_million = 0.4, cache_write_per_million = 5, output_per_million = 20 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-sol\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmin_input_tokens = 272001\nrates = { input_per_million = 8, cache_read_per_million = 0.8, cache_write_per_million = 10, output_per_million = 30 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-sol\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmax_input_tokens = 272000\nrates = { input_per_million = 1, cache_read_per_million = 0.1, cache_write_per_million = 1.25, output_per_million = 5 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-sol\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nmin_input_tokens = 272001\nrates = { input_per_million = 2, cache_read_per_million = 0.2, cache_write_per_million = 2.5, output_per_million = 7.5 }\nsource = \"https://developers.openai.com/api/docs/models/gpt-6-sol\"\nverified_at = \"2026-09-24\"\n\n",
+        "sha256": "09d9dcd913fc4603ef2cc9e484b4f490a12d5c75ff509387988f02fb07295c07"
+      }
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "description": "First-party DeepSeek models; charges less outside peak hours.",
+      "baseUrl": "https://api.deepseek.com",
+      "protocol": "open_ai_chat",
+      "enabled": true,
+      "order": 2,
+      "regions": [
+        "china_mainland",
+        "international"
+      ],
+      "defaultModelId": "deepseek-flash",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_chat"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "# Routing is hand-authored; the `[[model]]` blocks below are a snapshot of the\n# upstream catalog. Refresh model blocks from upstream data without replacing\n# route metadata above the first `[[model]]`.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"thinking_type\", fast = \"unavailable\" }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"unsupported\", sources = [\"https://api-docs.deepseek.com/guides/thinking_mode/\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [] }\n\nregions = [\"china_mainland\", \"international\"]\nprovider_id = \"deepseek\"\nbase_url = \"https://api.deepseek.com\"\nprotocol = \"open_ai_chat\"\nconnection = { group = \"deepseek\", connection_id = \"chat\", order = 0, protocol_profiles = { anthropic_messages = \"deepseek-search\", open_ai_responses = \"deepseek-responses\" } }\nauth = \"api_key\"\ncredential_env = \"DEEPSEEK_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"DeepSeek\"\ndescription = \"First-party DeepSeek models; charges less outside peak hours.\"\nconsole_url = \"https://platform.deepseek.com\"\napi_key_url = \"https://platform.deepseek.com/api_keys\"\ndocs_url = \"https://api-docs.deepseek.com\"\ncredential_hint = \"sk-\"\n\n# Thinking is on by default here, and the endpoint rejects a later turn that\n# omits that turn's reasoning. With thinking on it also answers 400 to a forced\n# tool choice — `required` or a named function — while `none`, `auto` and the\n# tools themselves are all accepted. Incompatible forced choices are rejected.\nextra = { preserve_reasoning_content = true, thinking_rejects_forced_tool_choice = true }\n\n# This vendor charges half rate outside published peak hours, which is most of\n# the week. The prices on each model below are the peak rates, because that is\n# how the vendor publishes them and how the catalog records them — so a cost\n# estimate that ignores this schedule is wrong by 2x for most of the week.\n# https://api-docs.deepseek.com/quick_start/pricing\n#\n# This table header must stay last in the route: every bare key after it would\n# belong to it instead of to the route.\n[pricing.peak]\nutc_windows = [\"01:00-04:00\", \"06:00-10:00\"]\nweekdays_only = true\noff_peak_multiplier = 0.5\n\n[[model]]\nid = \"deepseek-flash\"\nname = \"DeepSeek V4.1 Flash\"\ndescription = \"DeepSeek V4.1 Flash model for reasoning and agentic coding\"\nfamily = \"deepseek-flash\"\nknowledge_cutoff = \"2025-05\"\nrelease_date = \"2026-09-10\"\nlast_updated = \"2026-09-10\"\ncontext_window = 1000000\n# API integer ceiling verified 2026-10-14: https://api-docs.deepseek.com/api/create-chat-completion\nmax_output = 393216\ninput_modalities = [\"text\", \"image\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\nopen_weights = true\n\n[model.pricing]\ninput_per_million = 0.3\noutput_per_million = 1.2\ncache_read_per_million = 0.006\nreasoning_per_million = 1.2\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unsupported\"\nsources = [\"https://api-docs.deepseek.com/guides/thinking_mode/\"]\nmodes = [\"enabled\", \"disabled\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"low\", \"high\", \"max\"], default = \"high\" }\n\n[[model]]\nid = \"deepseek-v4-pro\"\nname = \"DeepSeek V4 Pro\"\ndescription = \"DeepSeek V4 Pro snapshot with million-token context and support for thinking and non-thinking modes\"\nfamily = \"deepseek-thinking\"\nrelease_date = \"2026-08-12\"\nlast_updated = \"2026-08-22\"\ncontext_window = 1000000\n# API integer ceiling verified 2026-10-14: https://api-docs.deepseek.com/api/create-chat-completion\nmax_output = 393216\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = false\nopen_weights = true\n\n[model.pricing]\ninput_per_million = 1.32\noutput_per_million = 3.96\ncache_read_per_million = 0.044\nreasoning_per_million = 3.96\nsource = \"models.dev\"\n\n[model.features]\nthinking = \"supported\"\nfast = \"unsupported\"\nsources = [\"https://api-docs.deepseek.com/guides/thinking_mode/\"]\nmodes = [\"enabled\", \"disabled\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"low\", \"high\", \"max\"], default = \"high\" }\n",
+        "sha256": "5b12319ceb0e94599cf5ad8e20e0fb82709e89c5104eb6917bac533b5f08ecee"
+      }
+    },
+    {
+      "id": "gemini",
+      "name": "Google Gemini",
+      "description": "First-party Gemini models over the generateContent API.",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "protocol": "gemini_generate_content",
+      "enabled": true,
+      "order": 3,
+      "regions": [
+        "international"
+      ],
+      "defaultModelId": "gemini-3.8-flash",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.gemini_generate_content"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "connection = { protocol_profiles = { open_ai_chat = \"gemini-chat\" } }\nembeddings = { mode = \"enabled\", value = { api = \"gemini\", endpoint = \"https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents\", models_endpoint = \"https://generativelanguage.googleapis.com/v1beta/models\", auth = { type = \"api_key\", header = \"x-goog-api-key\" }, max_inputs = 100 } }\ninteractions = { mode = \"enabled\", value = { endpoint = \"https://generativelanguage.googleapis.com/v1beta/interactions\", auth = { type = \"api_key\", header = \"x-goog-api-key\" } } }\ngemini_file_search = { mode = \"enabled\", value = { endpoint = \"https://generativelanguage.googleapis.com/v1beta/fileSearchStores\", auth = { type = \"api_key\", header = \"x-goog-api-key\" } } }\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"gemini\", fast = \"priority\", tier_response_header = \"x-gemini-service-tier\" }\nfeatures = { thinking = \"supported\", budget = { support = \"supported\", dynamic = \"supported\" }, effort = { support = \"supported\" }, fast = \"supported\", sources = [\"https://ai.google.dev/gemini-api/docs/generate-content/thinking\"], requirements = [\"Priority inference requires a supported paid usage tier and model.\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [\"https://ai.google.dev/gemini-api/docs/pricing\"] }\n\nregions = [\"international\"]\nprovider_id = \"google\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\nprotocol = \"gemini_generate_content\"\ndecisions = { implementation = \"structured_output\", text = true, image = true }\nauth = \"api_key\"\ncredential_env = \"GEMINI_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"Google Gemini\"\ndescription = \"First-party Gemini models over the generateContent API.\"\nconsole_url = \"https://aistudio.google.com\"\napi_key_url = \"https://aistudio.google.com/app/apikey\"\ndocs_url = \"https://ai.google.dev/api\"\ncredential_hint = \"AIza\"\n\nextra = { web_search = \"gemini\" }\n\n[[model]]\nid = \"gemini-3.8-flash\"\nname = \"Gemini 3.8 Flash\"\ndescription = \"High-efficiency Gemini model for agentic workflows, coding, and multimodal reasoning\"\nfamily = \"gemini-flash\"\nrelease_date = \"2026-09-02\"\nlast_updated = \"2026-09-02\"\ncontext_window = 1048576\nmax_input = 1048576\ncontext = { sharedWindow = false }\nmax_output = 65536\ninput_modalities = [\"text\", \"image\", \"video\", \"audio\", \"pdf\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 0.75\noutput_per_million = 3.75\ncache_read_per_million = 0.075\nsource = \"https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://ai.google.dev/gemini-api/docs/generate-content/thinking\"]\nmodes = [\"enabled\", \"adaptive\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"supported\", levels = [\"low\", \"medium\", \"high\"], default = \"medium\" }\n\n\n\n[[model]]\nid = \"gemini-3.1-pro-preview\"\nname = \"Gemini 3.1 Pro Preview\"\ndescription = \"Reasoning-first Gemini preview for agentic coding and complex problem solving\"\nfamily = \"gemini-pro\"\nknowledge_cutoff = \"2025-01\"\nrelease_date = \"2026-02-19\"\nlast_updated = \"2026-02-19\"\ncontext_window = 1048576\nmax_input = 1048576\ncontext = { sharedWindow = false }\nmax_output = 65536\ninput_modalities = [\"text\", \"image\", \"video\", \"audio\", \"pdf\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 2\noutput_per_million = 12\ncache_read_per_million = 0.2\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://ai.google.dev/gemini-api/docs/generate-content/thinking\"]\nmodes = [\"enabled\", \"adaptive\"]\nbudget = { support = \"supported\", dynamic = \"supported\", hard_limit = false }\neffort = { support = \"supported\", levels = [\"low\", \"medium\", \"high\"] }\n\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"interactive\"\nrates = { input_per_million = 2.0, output_per_million = 12.0, cache_read_per_million = 0.2 }\nsource = \"https://ai.google.dev/gemini-api/docs/pricing\"\nverified_at = \"2026-09-24\"\nmax_input_tokens = 200000\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"interactive\"\nrates = { input_per_million = 4.0, output_per_million = 18.0, cache_read_per_million = 0.4 }\nsource = \"https://ai.google.dev/gemini-api/docs/pricing\"\nverified_at = \"2026-09-24\"\nmin_input_tokens = 200001\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nsubmission = \"interactive\"\nrates = { input_per_million = 3.6, output_per_million = 21.6, cache_read_per_million = 0.36 }\nsource = \"https://ai.google.dev/gemini-api/docs/pricing\"\nverified_at = \"2026-09-24\"\nmax_input_tokens = 200000\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nsubmission = \"interactive\"\nrates = { input_per_million = 7.2, output_per_million = 32.4, cache_read_per_million = 0.72 }\nsource = \"https://ai.google.dev/gemini-api/docs/pricing\"\nverified_at = \"2026-09-24\"\nmin_input_tokens = 200001\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nrates = { input_per_million = 1.0, output_per_million = 6.0, cache_read_per_million = 0.2 }\nsource = \"https://ai.google.dev/gemini-api/docs/pricing\"\nverified_at = \"2026-09-24\"\nmax_input_tokens = 200000\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nsubmission = \"batch\"\nrates = { input_per_million = 2.0, output_per_million = 9.0, cache_read_per_million = 0.4 }\nsource = \"https://ai.google.dev/gemini-api/docs/pricing\"\nverified_at = \"2026-09-24\"\nmin_input_tokens = 200001\n",
+        "sha256": "e7b3c8b42767cf6126e43ae0b0b61bd1e2ae87b7524bfafde116bd9868810db9"
+      }
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "description": "First-party Kimi models over an OpenAI-compatible wire.",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "protocol": "open_ai_chat",
+      "enabled": true,
+      "order": 4,
+      "regions": [
+        "china_mainland"
+      ],
+      "defaultModelId": "kimi-k3",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_chat"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "# The open platform, pay as you go. Grouped with the membership service so the\n# two are connections of one provider rather than two providers.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"thinking_type\", fast = \"unavailable\" }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"unknown\", sources = [\"https://platform.kimi.com/docs/guide/use-reasoning-effort\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [] }\n\nregions = [\"china_mainland\"]\nprovider_id = \"kimi\"\nbase_url = \"https://api.moonshot.cn/v1\"\nprotocol = \"open_ai_chat\"\nauth = \"api_key\"\ncredential_env = \"MOONSHOT_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"Kimi\"\ndescription = \"First-party Kimi models over an OpenAI-compatible wire.\"\nconsole_url = \"https://platform.kimi.com\"\napi_key_url = \"https://platform.kimi.com/console/api-keys\"\nconnection = { group = \"kimi\", connection_id = \"open\", order = 1, protocol_profiles = { open_ai_responses = \"kimi-search\" } }\n\n# The terminal usage object is omitted from SSE unless it is asked for, which\n# would otherwise leave the transcript and every token counter at zero.\nextra = { stream_usage_opt_in = true, preserve_reasoning_content = true, max_tokens_field = \"max_completion_tokens\" }\n\n[[model]]\nid = \"kimi-k3\"\nname = \"Kimi K3\"\ndescription = \"Multimodal Kimi model with 1M context and toggleable max-effort thinking for long-horizon agent work\"\nfamily = \"kimi-k3\"\nrelease_date = \"2026-07-16\"\nlast_updated = \"2026-07-16\"\ncontext_window = 1048576\nmax_output = 131072\ninput_modalities = [\"text\", \"image\", \"video\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = true\nopen_weights = true\n\n[model.pricing]\ninput_per_million = 3\noutput_per_million = 15\ncache_read_per_million = 0.3\nsource = \"models.dev\"\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://platform.kimi.com/docs/guide/use-reasoning-effort\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = []\neffort = { support = \"supported\", levels = [\"low\", \"high\", \"max\"], default = \"max\" }\n",
+        "sha256": "c6b4f6c78dd68ae74b8444a1568424d75d90fca9ff70f91813adbcc6b5f54eed"
+      }
+    },
+    {
+      "id": "kimi-code",
+      "name": "Kimi Code",
+      "description": "Kimi models covered by a coding subscription.",
+      "baseUrl": "https://api.kimi.com/coding/v1",
+      "protocol": "open_ai_chat",
+      "enabled": true,
+      "order": 5,
+      "regions": [
+        "china_mainland",
+        "international"
+      ],
+      "defaultModelId": "k3",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_chat"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "# A distinct membership-backed service: its keys, model ids, quotas and endpoint\n# are not interchangeable with the platform it is grouped with, which is why the\n# billing mode differs and the failover chain will not cross between them.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"thinking_type\", fast = \"unavailable\" }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"unknown\", sources = [\"https://www.kimi.com/code/docs/en/kimi-code/models\"] }\npricing_info = { currencies = [], units = [\"subscription_quota\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [] }\n\nregions = [\"china_mainland\", \"international\"]\nprovider_id = \"kimi\"\nbase_url = \"https://api.kimi.com/coding/v1\"\nprotocol = \"open_ai_chat\"\nauth = \"api_key\"\ncredential_env = \"KIMI_API_KEY\"\nbilling_mode = \"subscription\"\n\ndisplay_name = \"Kimi Code\"\ndescription = \"Kimi models covered by a coding subscription.\"\nconsole_url = \"https://www.kimi.com/code/console\"\napi_key_url = \"https://www.kimi.com/code/console\"\nconnection = { group = \"kimi\", connection_id = \"code\", order = 0, protocol_profiles = { open_ai_responses = \"kimi-code-responses\", anthropic_messages = \"kimi-code-anthropic\" } }\nextra = { stream_usage_opt_in = true, preserve_reasoning_content = true, max_tokens_field = \"max_completion_tokens\" }\n\n[[model]]\nid = \"k3\"\nname = \"Kimi K3\"\ndescription = \"Multimodal Kimi model with 1M context and toggleable max-effort thinking for long-horizon agent work\"\nfamily = \"kimi-k3\"\nrelease_date = \"2026-07-16\"\nlast_updated = \"2026-07-16\"\ncontext_window = 1048576\nmax_output = 131072\ninput_modalities = [\"text\", \"image\", \"video\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = false\nopen_weights = true\n\n[model.pricing]\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://www.kimi.com/code/docs/en/kimi-code/models\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"supported\", levels = [\"none\", \"low\", \"high\", \"max\"], default = \"high\" }\n\n[[model]]\nid = \"k3-256k\"\nname = \"Kimi K3-256K\"\ndescription = \"256K-context version of Kimi K3, reducing token consumption for shorter coding sessions\"\nfamily = \"kimi-k3\"\nrelease_date = \"2026-07-16\"\nlast_updated = \"2026-07-16\"\ncontext_window = 262144\nmax_output = 131072\ninput_modalities = [\"text\", \"image\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = false\nattachment = false\nopen_weights = true\n\n[model.pricing]\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://www.kimi.com/code/docs/en/kimi-code/models\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"supported\", levels = [\"none\", \"low\", \"high\", \"max\"], default = \"high\" }\n\n",
+        "sha256": "10234146a010f0c6748a8813f472faa9c0e5fdbd92d9649dc3c574af2903a0a2"
+      }
+    },
+    {
+      "id": "zai",
+      "name": "Z.AI",
+      "description": "GLM models over an OpenAI-compatible wire.",
+      "baseUrl": "https://api.z.ai/api/paas/v4",
+      "protocol": "open_ai_chat",
+      "enabled": true,
+      "order": 6,
+      "regions": [
+        "international"
+      ],
+      "defaultModelId": "glm-5.3",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_chat"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "# The international endpoint. A separate env var from its sibling: they are\n# separate accounts, and cross-wiring the keys silently bills the wrong one.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"thinking_type\", fast = \"unavailable\" }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"unknown\", sources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [] }\n\nregions = [\"international\"]\nprovider_id = \"zhipu\"\nbase_url = \"https://api.z.ai/api/paas/v4\"\nprotocol = \"open_ai_chat\"\nauth = \"api_key\"\ncredential_env = \"ZAI_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"Z.AI\"\ndescription = \"GLM models over an OpenAI-compatible wire.\"\nconsole_url = \"https://z.ai\"\napi_key_url = \"https://z.ai/manage-apikey/apikey-list\"\nconnection = { group = \"zhipu\", connection_id = \"api\", order = 1 }\nextra = { web_search = \"glm\", web_search_engine = \"search-prime\" }\n\n[[model]]\nid = \"glm-5.3\"\nname = \"GLM-5.3\"\ndescription = \"Flagship GLM model for long-horizon coding, agents, and complex project delivery\"\nfamily = \"glm\"\nrelease_date = \"2026-08-14\"\nlast_updated = \"2026-08-14\"\ncontext_window = 1000000\nmax_output = 131072\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = false\nopen_weights = true\n\n[model.pricing]\ninput_per_million = 1.4\noutput_per_million = 4.4\ncache_read_per_million = 0.26\ncache_write_per_million = 0\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"supported\", levels = [\"low\", \"high\", \"max\"] }\n\n[[model]]\nid = \"glm-5.3-flash\"\nname = \"GLM-5.3-Flash\"\ndescription = \"Native multimodal GLM model for efficient coding and long-horizon agent tasks\"\nfamily = \"glm\"\nrelease_date = \"2026-08-26\"\nlast_updated = \"2026-08-26\"\ncontext_window = 1000000\nmax_output = 131072\ninput_modalities = [\"text\", \"image\", \"video\", \"pdf\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 0.075\noutput_per_million = 0.25\ncache_read_per_million = 0.015\ncache_write_per_million = 0\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"supported\", levels = [\"low\", \"high\", \"max\"] }\n\n[[model]]\nid = \"glm-5v-turbo\"\nname = \"GLM-5V-Turbo\"\ndescription = \"Fast GLM vision model for screenshots, documents, and multimodal agent tasks\"\nfamily = \"glm\"\nrelease_date = \"2026-04-01\"\nlast_updated = \"2026-04-01\"\ncontext_window = 200000\nmax_output = 131072\ninput_modalities = [\"text\", \"image\", \"video\", \"pdf\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\ntemperature = true\nattachment = true\nopen_weights = false\n\n[model.pricing]\ninput_per_million = 1.2\noutput_per_million = 4\ncache_read_per_million = 0.24\ncache_write_per_million = 0\nsource = \"models.dev\"\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"unknown\" }\n\n[images.routes.primary]\napi = \"zai\"\nbase_url = \"https://api.z.ai/api/paas/v4\"\n\n[[images.models]]\ndisplay_model = \"glm-image\"\nrequest_model = \"glm-image\"\nroute = \"primary\"\n\n[images.models.capabilities]\ntext_to_image = true\nasync_generate = true\nmax_outputs = 1\n",
+        "sha256": "b0b0b14bd3876db4c892f9f732e85c4b65a36f908acf9df32641cbcc2fb037c2"
+      }
+    },
+    {
+      "id": "glm-coding",
+      "name": "GLM Coding Plan",
+      "description": "GLM models over an Anthropic-compatible wire, covered by a coding plan.",
+      "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+      "protocol": "anthropic_messages",
+      "enabled": true,
+      "order": 7,
+      "regions": [
+        "china_mainland"
+      ],
+      "defaultModelId": "glm-5.3",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.anthropic_messages"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "# This vendor publishes an Anthropic-compatible endpoint alongside its\n# OpenAI-compatible one, so the two connections of this group speak different\n# wires. Neither is \"the compatible one\", and the catalog's advisory `api` field\n# describes the other — which is why routing stays hand-authored.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"anthropic\", fast = \"unavailable\", enabled_requires_budget = false }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"unknown\", sources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"] }\npricing_info = { currencies = [], units = [\"subscription_quota\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [] }\n\nregions = [\"china_mainland\"]\nprovider_id = \"zhipu\"\nbase_url = \"https://open.bigmodel.cn/api/anthropic\"\nprotocol = \"anthropic_messages\"\n# The compatibility shim in front of this endpoint serves completions and\n# nothing else; its /v1/models is a 404. Saying so is not the same as saying\n# nothing: a 404 decoded as a list would look like a vendor that had\n# withdrawn every model it publishes.\nmodel_list = \"none\"\nauth = \"api_key\"\ncredential_env = \"ZHIPU_API_KEY\"\nbilling_mode = \"subscription\"\n\ndisplay_name = \"GLM Coding Plan\"\ndescription = \"GLM models over an Anthropic-compatible wire, covered by a coding plan.\"\nconsole_url = \"https://bigmodel.cn\"\napi_key_url = \"https://bigmodel.cn/usercenter/proj-mgmt/apikeys\"\nconnection = { group = \"zhipu\", connection_id = \"coding\", order = 0 }\n\n[[model]]\nid = \"glm-5.3\"\napplication_output_tokens = 131072 # Application policy, not provider default.\nname = \"GLM-5.3\"\ndescription = \"Flagship GLM model for long-horizon coding, agents, and complex project delivery\"\nfamily = \"glm\"\nrelease_date = \"2026-08-14\"\nlast_updated = \"2026-08-14\"\ncontext_window = 1000000\nmax_output = 131072\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = false\nopen_weights = true\n\n[model.pricing]\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"unknown\", levels = [\"low\", \"high\", \"max\"] }\n\n[[model]]\nid = \"glm-5.3-highspeed\"\napplication_output_tokens = 131072 # Application policy, not provider default.\nname = \"GLM-5.3 Highspeed\"\ndescription = \"Flagship GLM model for long-horizon coding, agents, and complex project delivery\"\nfamily = \"glm\"\nrelease_date = \"2026-08-14\"\nlast_updated = \"2026-08-14\"\ncontext_window = 1000000\nmax_output = 131072\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = false\nopen_weights = true\n\n[model.pricing]\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"unknown\", levels = [\"low\", \"high\", \"max\"] }\n\n[[model]]\nid = \"glm-5.3-flash\"\napplication_output_tokens = 131072 # Application policy, not provider default.\nname = \"GLM-5.3-Flash\"\ndescription = \"Native multimodal GLM model for efficient coding and long-horizon agent tasks\"\nfamily = \"glm\"\nrelease_date = \"2026-08-26\"\nlast_updated = \"2026-08-26\"\ncontext_window = 1000000\nmax_output = 131072\ninput_modalities = [\"text\", \"image\", \"video\", \"pdf\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\nopen_weights = false\n\n[model.pricing]\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://docs.z.ai/api-reference/llm/chat-completion\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\nmodes = [\"enabled\", \"disabled\"]\neffort = { support = \"unknown\", levels = [\"low\", \"high\", \"max\"] }\n\n",
+        "sha256": "28a418af3fa633a111a7888e99b7522883e6f4810edd7177a30443ffffbb7081"
+      }
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen Beijing",
+      "description": "Qwen models in the China (Beijing) region.",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "protocol": "open_ai_chat",
+      "enabled": true,
+      "order": 8,
+      "regions": [
+        "china_mainland"
+      ],
+      "defaultModelId": "qwen3.8-max",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_chat"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"enable_thinking\", fast = \"unavailable\" }\nfeatures = { thinking = \"supported\", budget = { support = \"supported\", dynamic = \"unsupported\" }, effort = { support = \"unknown\" }, fast = \"unknown\", sources = [\"https://www.alibabacloud.com/help/en/model-studio/deep-thinking\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [] }\n\nregions = [\"china_mainland\"]\nprovider_id = \"qwen\"\nbase_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"\nprotocol = \"open_ai_chat\"\ndecisions = { implementation = \"structured_output\", text = true, image = false }\nauth = \"bearer\"\ncredential_env = \"DASHSCOPE_API_KEY\"\nbilling_mode = \"per_token\"\ndisplay_name = \"Qwen Beijing\"\ndescription = \"Qwen models in the China (Beijing) region.\"\nconsole_url = \"https://bailian.console.aliyun.com/\"\napi_key_url = \"https://bailian.console.aliyun.com/?tab=model#/api-key\"\nconnection = { group = \"qwen-cn\", connection_id = \"chat\", order = 0, protocol_profiles = { anthropic_messages = \"qwen-anthropic\", open_ai_responses = \"qwen-search\" } }\nextra = { file_adapter = \"qwen\" }\n\n[[model]]\nid = \"qwen3.8-max\"\nname = \"Qwen3.8 Max\"\ncontext_window = 1048576\nmax_output = 131072\ninput_modalities = [\"text\", \"image\", \"video\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nattachment = true\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://www.alibabacloud.com/help/en/model-studio/deep-thinking\"]\nmodes = [\"enabled\", \"disabled\"]\nbudget = { support = \"supported\", dynamic = \"unsupported\" }\neffort = { support = \"unknown\" }\n\n[images.routes.primary]\napi = \"qwen\"\nbase_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"\ntask_base_url = \"https://dashscope.aliyuncs.com/api/v1\"\n\n[[images.models]]\ndisplay_model = \"qwen-image-3.0-pro\"\nrequest_model = \"qwen-image-3.0-pro\"\nroute = \"primary\"\n\n[images.models.capabilities]\ntext_to_image = true\nreference_generation = true\nediting = true\nasync_generate = true\nasync_edit = true\nmax_inputs = 3\nmax_outputs = 6\n\n[[images.models]]\ndisplay_model = \"qwen-image-3.0\"\nrequest_model = \"qwen-image-3.0\"\nroute = \"primary\"\n\n[images.models.capabilities]\ntext_to_image = true\nreference_generation = true\nediting = true\nasync_generate = true\nasync_edit = true\nmax_inputs = 3\nmax_outputs = 6\n[[model]]\nid = \"qwen3.8-flash\"\nname = \"Qwen3.8 Flash\"\ncontext_window = 1048576\nmax_output = 131072\ninput_modalities = [\"text\", \"image\", \"video\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nattachment = true\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://www.alibabacloud.com/help/en/model-studio/deep-thinking\"]\nmodes = [\"enabled\", \"disabled\"]\nbudget = { support = \"supported\", dynamic = \"unsupported\" }\neffort = { support = \"unknown\" }\n\n",
+        "sha256": "fa7f2d8eb9c0d315f5b9f856fe7fe24ddce9e72b0f218f76921be9401be93121"
+      }
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax China",
+      "description": "MiniMax Anthropic-compatible Messages API in China.",
+      "baseUrl": "https://api.minimaxi.com/anthropic",
+      "protocol": "anthropic_messages",
+      "enabled": true,
+      "order": 9,
+      "regions": [
+        "china_mainland"
+      ],
+      "defaultModelId": "MiniMax-M3",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.anthropic_messages"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"anthropic\", fast = \"priority\", enabled_requires_budget = false }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"unsupported\" }, fast = \"supported\", sources = [\"https://platform.minimax.io/docs/api-reference/text-anthropic-api\"] }\npricing_info = { currencies = [\"CNY\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\"], sources = [\"https://platform.minimax.cn/docs/guides/pricing-paygo\"] }\n\nregions = [\"china_mainland\"]\nprovider_id = \"minimax\"\nbase_url = \"https://api.minimaxi.com/anthropic\"\nprotocol = \"anthropic_messages\"\nmodel_list = \"none\"\nauth = \"bearer\"\ncredential_env = \"MINIMAX_CN_API_KEY\"\nbilling_mode = \"per_token\"\ndisplay_name = \"MiniMax China\"\ndescription = \"MiniMax Anthropic-compatible Messages API in China.\"\nconsole_url = \"https://platform.minimaxi.com\"\napi_key_url = \"https://platform.minimaxi.com/user-center/basic-information/interface-key\"\ndocs_url = \"https://platform.minimaxi.com/docs\"\nconnection = { group = \"minimax-cn\", connection_id = \"messages\", order = 0, protocol_profiles = { open_ai_responses = \"minimax-responses\", open_ai_chat = \"minimax-chat\" } }\nextra = { web_search = \"minimax\" }\n\n[[model]]\nid = \"MiniMax-M3\"\napplication_output_tokens = 524288 # Application policy, not provider default.\nname = \"MiniMax M3\"\ncontext_window = 1048576\nmax_output = 524288\ninput_modalities = [\"text\", \"image\", \"video\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nattachment = true\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://platform.minimax.io/docs/api-reference/text-anthropic-api\"]\nmodes = [\"adaptive\", \"disabled\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\neffort = { support = \"unsupported\" }\n\n\n[model.pricing]\ncurrency = \"CNY\"\nsource = \"https://platform.minimax.cn/docs/guides/pricing-paygo\"\nverified_at = \"2026-09-24\"\ninput_per_million = 2.1\noutput_per_million = 8.4\ncache_read_per_million = 0.42\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmax_input_tokens = 512000\nrates = { input_per_million = 2.1, output_per_million = 8.4, cache_read_per_million = 0.42 }\nsource = \"https://platform.minimax.cn/docs/guides/pricing-paygo\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"standard\"\nmin_input_tokens = 512001\nrates = { input_per_million = 4.2, output_per_million = 16.8, cache_read_per_million = 0.84 }\nsource = \"https://platform.minimax.cn/docs/guides/pricing-paygo\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmax_input_tokens = 512000\nmultiplier = { factor = 1.5, buckets = [\"input\", \"output\", \"cache_read\"] }\nsource = \"https://platform.minimax.cn/docs/guides/pricing-paygo\"\nverified_at = \"2026-09-24\"\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmin_input_tokens = 512001\nmultiplier = { factor = 1.5, buckets = [\"input\", \"output\", \"cache_read\"] }\nsource = \"https://platform.minimax.cn/docs/guides/pricing-paygo\"\nverified_at = \"2026-09-24\"\n\n[images.routes.primary]\napi = \"minimax\"\nbase_url = \"https://api.minimaxi.com/v1\"\n\n[[images.models]]\ndisplay_model = \"image-01\"\nrequest_model = \"image-01\"\nroute = \"primary\"\n\n[images.models.capabilities]\ntext_to_image = true\nreference_generation = true\nmax_inputs = 1\nmax_outputs = 9\n",
+        "sha256": "db373181409dd662d6c5595d44520add784b9b09cadf33261fdca52023bd3244"
+      }
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "description": "An aggregator: one key, many vendors' models, one wire.",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "protocol": "open_ai_chat",
+      "enabled": true,
+      "order": 10,
+      "regions": [
+        "international"
+      ],
+      "defaultModelId": "openrouter/auto",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_chat"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "connection = { protocol_profiles = { open_ai_responses = \"openrouter-responses\", anthropic_messages = \"openrouter-anthropic\" } }\nembeddings = { mode = \"enabled\", value = { api = \"open_router\", endpoint = \"https://openrouter.ai/api/v1/embeddings\", models_endpoint = \"https://openrouter.ai/api/v1/embeddings/models\", auth = { type = \"bearer\" } } }\n# An aggregator: one key, many vendors' models, all over one OpenAI-compatible\n# wire. Its catalog is by far the largest here, which is the nature of the thing\n# rather than a mistake.\n#\n# Read `[model.pricing.batch]` here with more care than on a first-party preset.\n# An aggregator quotes the cheapest host it can route to, and the batch rate it\n# publishes may come from a different host than the listed one — for eleven\n# models here the \"batch\" rate is dearer than the interactive rate, up to 4x on\n# the open-weights ones. Those pairs are not a discount, they are two sellers.\n# The numbers are carried as published; nothing here assumes batch is cheaper.\n#\n# A `:free` id is this vendor's own marker for a model served at no charge, and\n# unlike `:batch` it is a real wire id. Those models carry\n# `billing_mode = \"free\"` so failover will not quietly move a free request onto\n# a metered sibling. The route's `per_token` below is the default for everything\n# that does not say otherwise.\n#\n# \"Free\" is not inferred from a zero price anywhere, and must not be: several\n# models here and on other presets are priced at zero because a subscription\n# already covers them. Those are covered, not free.\n#\n# What this does not model: the free tier carries its own request-rate caps,\n# which the catalog does not publish.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"reasoning_object\", fast = \"priority\" }\nfeatures = { thinking = \"supported\", budget = { support = \"supported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"supported\", sources = [\"https://openrouter.ai/docs/guides/best-practices/reasoning-tokens\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [\"https://openrouter.ai/docs/guides/features/service-tiers\"] }\n\nregions = [\"international\"]\nprovider_id = \"openrouter\"\nbase_url = \"https://openrouter.ai/api/v1\"\nprotocol = \"open_ai_chat\"\nauth = \"api_key\"\ncredential_env = \"OPENROUTER_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"OpenRouter\"\ndescription = \"An aggregator: one key, many vendors' models, one wire.\"\nconsole_url = \"https://openrouter.ai\"\napi_key_url = \"https://openrouter.ai/settings/keys\"\ndocs_url = \"https://openrouter.ai/docs\"\ncredential_hint = \"sk-or-\"\n\nextra = { web_search = \"openrouter\" }\n\n[[model]]\nid = \"openrouter/auto\"\nname = \"Auto Router\"\ndescription = \"The Auto Router automatically selects the best model for your prompt, powered by the wisdom of the market. It routes you based on what the OpenRouter community collectively spends on...\"\nrelease_date = \"2023-11-08\"\ninput_modalities = [\"text\", \"image\", \"audio\", \"file\", \"video\"]\noutput_modalities = [\"text\", \"image\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\n\n[model.pricing]\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://openrouter.ai/docs/guides/best-practices/reasoning-tokens\"]\n\n",
+        "sha256": "e92bad2c9a57ac3cd974603a5bbc57f6994ad64dcb7c2631a8ddcf1c43805e80"
+      }
+    }
+  ],
+  "models": [
+    {
+      "providerId": "anthropic",
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "description": "Sonnet 5 is Anthropic's most capable Sonnet-class model, with frontier performance across coding, agents, and professional work. It supports adaptive thinking with selectable reasoning effort levels (low, medium, high, max,...",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 0,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "file"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 2,
+        "outputPerMillion": 10,
+        "cacheReadPerMillion": 0.19999999999999998,
+        "cacheWritePerMillion": 2.5
+      }
+    },
+    {
+      "providerId": "anthropic",
+      "id": "claude-opus-5-5",
+      "name": "Claude Opus 5.5",
+      "description": "Claude Opus 5.5 is Anthropic's model for long-running agentic coding and knowledge work.",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 1,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "file"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 4,
+        "outputPerMillion": 20,
+        "cacheReadPerMillion": 0.2,
+        "cacheWritePerMillion": 5
+      }
+    },
+    {
+      "providerId": "anthropic",
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "description": "Claude Haiku 5.5 is tuned for high-volume, latency-sensitive work and supports adaptive thinking with effort controls.",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 2,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 0.1,
+        "outputPerMillion": 0.5,
+        "cacheReadPerMillion": 0.01,
+        "cacheWritePerMillion": 0.125
+      }
+    },
+    {
+      "providerId": "openai",
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1 Sol",
+      "description": "Near-Astra performance for complex coding, computer use, and professional work at a lower cost.",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 3,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1050000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 2,
+        "outputPerMillion": 10,
+        "cacheReadPerMillion": 0.1,
+        "cacheWritePerMillion": 2.5
+      }
+    },
+    {
+      "providerId": "openai",
+      "id": "gpt-6.1-terra",
+      "name": "GPT-6.1 Terra",
+      "description": "OpenAI's fast, efficient model for visual reasoning, computer use, and writing.",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 4,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1050000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 1,
+        "outputPerMillion": 5,
+        "cacheReadPerMillion": 0.05,
+        "cacheWritePerMillion": 1.25
+      }
+    },
+    {
+      "providerId": "openai",
+      "id": "gpt-6-astra",
+      "name": "GPT-6 Astra",
+      "description": "GPT-6 Astra is OpenAI's most capable model for complex reasoning, coding, computer use, research, and document creation.",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 5,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1050000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 10,
+        "outputPerMillion": 50,
+        "cacheReadPerMillion": 1,
+        "cacheWritePerMillion": 12.5
+      }
+    },
+    {
+      "providerId": "openai",
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "description": "OpenAI's efficient model for focused, high-volume tasks.",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 6,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1050000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 0.1,
+        "outputPerMillion": 0.5,
+        "cacheReadPerMillion": 0.01,
+        "cacheWritePerMillion": 0.125
+      }
+    },
+    {
+      "providerId": "openai",
+      "id": "gpt-6-sol",
+      "name": "GPT-6 Sol",
+      "description": "OpenAI's model for complex coding and agentic workflows.",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 7,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1050000,
+      "maxOutputTokens": 128000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 2,
+        "outputPerMillion": 10,
+        "cacheReadPerMillion": 0.2,
+        "cacheWritePerMillion": 2.5
+      }
+    },
+    {
+      "providerId": "deepseek",
+      "id": "deepseek-flash",
+      "name": "DeepSeek V4.1 Flash",
+      "description": "DeepSeek V4.1 Flash model for reasoning and agentic coding",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 8,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 393216,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 0.3,
+        "outputPerMillion": 1.2,
+        "cacheReadPerMillion": 0.006
+      }
+    },
+    {
+      "providerId": "deepseek",
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "description": "DeepSeek V4 Pro snapshot with million-token context and support for thinking and non-thinking modes",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 9,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 393216,
+      "capabilities": {
+        "tools": true,
+        "vision": false,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 1.32,
+        "outputPerMillion": 3.96,
+        "cacheReadPerMillion": 0.044
+      }
+    },
+    {
+      "providerId": "gemini",
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash",
+      "description": "High-efficiency Gemini model for agentic workflows, coding, and multimodal reasoning",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 10,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 65536,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": true
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 0.75,
+        "outputPerMillion": 3.75,
+        "cacheReadPerMillion": 0.075
+      }
+    },
+    {
+      "providerId": "gemini",
+      "id": "gemini-3.1-pro-preview",
+      "name": "Gemini 3.1 Pro Preview",
+      "description": "Reasoning-first Gemini preview for agentic coding and complex problem solving",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 11,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 65536,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": true
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 2,
+        "outputPerMillion": 12,
+        "cacheReadPerMillion": 0.2
+      }
+    },
+    {
+      "providerId": "kimi",
+      "id": "kimi-k3",
+      "name": "Kimi K3",
+      "description": "Multimodal Kimi model with 1M context and toggleable max-effort thinking for long-horizon agent work",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 12,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 3,
+        "outputPerMillion": 15,
+        "cacheReadPerMillion": 0.3
+      }
+    },
+    {
+      "providerId": "kimi-code",
+      "id": "k3",
+      "name": "Kimi K3",
+      "description": "Multimodal Kimi model with 1M context and toggleable max-effort thinking for long-horizon agent work",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 13,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": null
+    },
+    {
+      "providerId": "kimi-code",
+      "id": "k3-256k",
+      "name": "Kimi K3-256K",
+      "description": "256K-context version of Kimi K3, reducing token consumption for shorter coding sessions",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 14,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 262144,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": null
+    },
+    {
+      "providerId": "zai",
+      "id": "glm-5.3",
+      "name": "GLM-5.3",
+      "description": "Flagship GLM model for long-horizon coding, agents, and complex project delivery",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 15,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": false,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 1.4,
+        "outputPerMillion": 4.4,
+        "cacheReadPerMillion": 0.26,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "providerId": "zai",
+      "id": "glm-5.3-flash",
+      "name": "GLM-5.3-Flash",
+      "description": "Native multimodal GLM model for efficient coding and long-horizon agent tasks",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 16,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 0.075,
+        "outputPerMillion": 0.25,
+        "cacheReadPerMillion": 0.015,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "providerId": "zai",
+      "id": "glm-5v-turbo",
+      "name": "GLM-5V-Turbo",
+      "description": "Fast GLM vision model for screenshots, documents, and multimodal agent tasks",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 17,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 200000,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 1.2,
+        "outputPerMillion": 4,
+        "cacheReadPerMillion": 0.24,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "providerId": "glm-coding",
+      "id": "glm-5.3",
+      "name": "GLM-5.3",
+      "description": "Flagship GLM model for long-horizon coding, agents, and complex project delivery",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 18,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": false,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": null
+    },
+    {
+      "providerId": "glm-coding",
+      "id": "glm-5.3-highspeed",
+      "name": "GLM-5.3 Highspeed",
+      "description": "Flagship GLM model for long-horizon coding, agents, and complex project delivery",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 19,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": false,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": null
+    },
+    {
+      "providerId": "glm-coding",
+      "id": "glm-5.3-flash",
+      "name": "GLM-5.3-Flash",
+      "description": "Native multimodal GLM model for efficient coding and long-horizon agent tasks",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 20,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": null
+    },
+    {
+      "providerId": "qwen",
+      "id": "qwen3.8-max",
+      "name": "Qwen3.8 Max",
+      "description": "",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 21,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": null
+    },
+    {
+      "providerId": "qwen",
+      "id": "qwen3.8-flash",
+      "name": "Qwen3.8 Flash",
+      "description": "",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 22,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 131072,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": null
+    },
+    {
+      "providerId": "minimax",
+      "id": "MiniMax-M3",
+      "name": "MiniMax M3",
+      "description": "",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 23,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 524288,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "CNY",
+        "inputPerMillion": 2.1,
+        "outputPerMillion": 8.4,
+        "cacheReadPerMillion": 0.42
+      }
+    },
+    {
+      "providerId": "openrouter",
+      "id": "openrouter/auto",
+      "name": "Auto Router",
+      "description": "The Auto Router automatically selects the best model for your prompt, powered by the wisdom of the market. It routes you based on what the OpenRouter community collectively spends on...",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 24,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 128000,
+      "maxOutputTokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": true
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "audio",
+        "file",
+        "video"
+      ],
+      "outputModalities": [
+        "text",
+        "image"
+      ],
+      "pricing": null
+    }
+  ]
+}

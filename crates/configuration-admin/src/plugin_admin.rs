@@ -1215,13 +1215,11 @@ mod tests {
                 last_scope_removed: true,
             })
         );
-        assert!(
-            credentials
-                .get_plugin_secret("secure@acme", "TOKEN")
-                .await
-                .expect("read deleted credential")
-                .is_none()
-        );
+        assert!(credentials
+            .get_plugin_secret("secure@acme", "TOKEN")
+            .await
+            .expect("read deleted credential")
+            .is_none());
         let installed: Value = serde_json::from_slice(
             &fs::read(
                 context
@@ -1283,13 +1281,11 @@ mod tests {
                 last_scope_removed: false,
             })
         );
-        assert!(
-            credentials
-                .get_plugin_secret("secure@acme", "TOKEN")
-                .await
-                .expect("read retained credential")
-                .is_some()
-        );
+        assert!(credentials
+            .get_plugin_secret("secure@acme", "TOKEN")
+            .await
+            .expect("read retained credential")
+            .is_some());
         let installed: Value =
             serde_json::from_slice(&fs::read(&registry_path).unwrap()).expect("registry JSON");
         assert_eq!(installed["plugins"]["secure@acme"][0]["scope"], "project");

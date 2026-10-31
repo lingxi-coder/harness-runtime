@@ -66,6 +66,23 @@ pub struct ShellMobileTool {
 }
 
 impl ShellMobileTool {
+    async fn reject_unexpected_detach(
+        &self,
+        owner: &str,
+        handle: &lingxi_core::host::ProcessHandle,
+    ) -> ToolError {
+        let _ = self.ctx.process.kill(handle).await;
+        self.ctx.process.kill_owner_processes(owner).await;
+        // A detached handle has no foreground reap receipt. A successful kill
+        // request alone cannot authorize deleting the scope used by the child.
+        let error = format!(
+            "{} mobile shell detached unexpectedly; foreground reap is unconfirmed",
+            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+        );
+        self.ctx.note_side_chat_cleanup_failure(&error);
+        ToolError::Internal(error)
+    }
+
     /// Construct from the builtin tool context.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
@@ -132,12 +149,16 @@ fn map_process_err(e: &ProcessError, timeout_ms: u64) -> ToolError {
 
 #[async_trait]
 impl Tool for ShellMobileTool {
+    fn supports_persistent_chat(&self) -> bool {
+        self.ctx.process.supports_inline_foreground()
+    }
+
     fn name(&self) -> &str {
         TOOL_NAME
     }
 
     fn input_schema(&self) -> &Utf16JsonProjection {
-        if self.ctx.side_chat {
+        if self.ctx.requires_inline_foreground() {
             &SIDE_INPUT_SCHEMA
         } else {
             &INPUT_SCHEMA
@@ -376,7 +397,7 @@ impl Tool for ShellMobileTool {
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        if self.ctx.side_chat
+        if self.ctx.requires_inline_foreground()
             && ctx
                 .cancel
                 .as_ref()
@@ -394,7 +415,7 @@ impl Tool for ShellMobileTool {
         if command.is_empty() {
             return Err(ToolError::InvalidInput("command must not be empty".into()));
         }
-        if self.ctx.side_chat
+        if self.ctx.requires_inline_foreground()
             && input
                 .at_pointer("/run_in_background")
                 .and_then(|value| value.as_bool())
@@ -415,7 +436,7 @@ impl Tool for ShellMobileTool {
                     .then_some(number as u64)
             })
             .map(|timeout| {
-                if self.ctx.side_chat {
+                if self.ctx.requires_inline_foreground() {
                     timeout.min(120_000)
                 } else {
                     timeout
@@ -501,12 +522,12 @@ impl Tool for ShellMobileTool {
             .as_ref()
             .map(ToString::to_string)
             .or_else(|| self.ctx.session_id.map(|id| id.to_string()));
-        if self.ctx.side_chat && owner.is_none() {
+        if self.ctx.requires_inline_foreground() && owner.is_none() {
             return Err(ToolError::InvalidInput(
                 "Side Chat shell owner is absent".into(),
             ));
         }
-        let agent_owner = match (self.ctx.side_chat, owner) {
+        let agent_owner = match (self.ctx.requires_inline_foreground(), owner) {
             (true, Some(owner)) => format!("side:{owner}"),
             (false, Some(owner)) => owner,
             (false, None) => "main".to_string(),
@@ -522,10 +543,22 @@ impl Tool for ShellMobileTool {
         // raw stdio session is closed and the guest process tree is reaped.
         // Dropping this future would abandon the runtime-owned session.
         let output_limit_bytes = Some(self.max_result_size_chars().saturating_mul(4));
-        let run = self
-            .ctx
-            .process
-            .run_foreground_with_output_limit(&sandboxed, output_limit_bytes);
+        let run = async {
+            if self.ctx.is_persistent_app_chat() {
+                self.ctx
+                    .process
+                    .run_inline_foreground(
+                        &sandboxed,
+                        lingxi_core::host::tool_invoker::LOCAL_APP_CHAT_MAX_SHELL_OUTPUT_BYTES,
+                    )
+                    .await
+            } else {
+                self.ctx
+                    .process
+                    .run_foreground_with_output_limit(&sandboxed, output_limit_bytes)
+                    .await
+            }
+        };
         tokio::pin!(run);
         let foreground = if let Some(cancel) = ctx.cancel.as_ref() {
             if cancel.is_cancelled() {
@@ -547,8 +580,16 @@ impl Tool for ShellMobileTool {
                     biased;
                     () = cancel.cancelled() => {
                         self.ctx.process.kill_owner_processes(&process_owner).await;
-                        if let Err(error) = run.await {
-                            if self.ctx.side_chat {
+                        let drained = run.await;
+                        if let Ok(lingxi_core::host::ForegroundRunResult {
+                            outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(handle), ..
+                        }) = &drained {
+                            if self.ctx.requires_inline_foreground() {
+                                return Err(self.reject_unexpected_detach(&process_owner, handle).await);
+                            }
+                        }
+                        if let Err(error) = drained {
+                            if self.ctx.requires_inline_foreground() {
                                 self.ctx.note_side_chat_cleanup_failure(&error.to_string());
                                 if error.to_string().contains(
                                     lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
@@ -566,14 +607,17 @@ impl Tool for ShellMobileTool {
             run.await
         }
         .map_err(|e| {
-            if self.ctx.side_chat {
+            if self.ctx.requires_inline_foreground() {
                 self.ctx.note_side_chat_cleanup_failure(&e.to_string());
             }
             map_process_err(&e, effective_timeout)
         })?;
         let out = match foreground.outcome {
             lingxi_core::host::ForegroundOutcome::Completed(output) => output,
-            lingxi_core::host::ForegroundOutcome::MovedToBackground(_) => {
+            lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => {
+                if self.ctx.requires_inline_foreground() {
+                    return Err(self.reject_unexpected_detach(&process_owner, &handle).await);
+                }
                 return Err(ToolError::Internal(
                     "mobile shell runner unexpectedly detached a foreground command".into(),
                 ));
@@ -907,6 +951,82 @@ mod tests {
             .is_err());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(*sandbox.last_network.lock().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn local_app_or_side_unexpected_detach_keeps_cleanup_failed_until_a_reap_is_confirmed() {
+        struct DetachedRunner(Arc<AtomicBool>);
+        #[async_trait]
+        impl ProcessRunner for DetachedRunner {
+            fn supports_inline_foreground(&self) -> bool {
+                true
+            }
+            async fn run_inline_foreground(
+                &self,
+                command: &SandboxedCommand,
+                limit: usize,
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+                self.run_foreground_with_output_limit(command, Some(limit))
+                    .await
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(
+                        ProcessHandle {
+                            task_id: "unexpected".into(),
+                            pid: 999,
+                        },
+                    ),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        for side_chat in [false, true] {
+            let killed = Arc::new(AtomicBool::new(false));
+            let failed = Arc::new(AtomicBool::new(false));
+            let (mut context, _, _) = enabled_ctx(ok_output(""));
+            context.side_chat = side_chat;
+            if !side_chat {
+                context.tool_execution_policy =
+                    lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat;
+            }
+            context.session_id = Some(lingxi_core::types::SessionId::new());
+            context.side_chat_cleanup_failed = Some(failed.clone());
+            context.process = Arc::new(DetachedRunner(killed.clone()));
+            let error = ShellMobileTool::new(context)
+                .call(
+                    source_input(&json!({"command":"echo inline"})),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE));
+            assert!(killed.load(Ordering::SeqCst));
+            assert!(failed.load(Ordering::SeqCst));
+        }
     }
 
     #[test]

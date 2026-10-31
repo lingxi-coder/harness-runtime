@@ -26,11 +26,12 @@ mod streaming;
 pub use realtime::{
     realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentSessionIo,
+    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledMediaChild, ScheduledMediaChildRoute,
+    ScheduledMediaParentCheck,
 };
 
-use super::hooks_impl::ModPromptScreen;
 use super::context_state_impl::ProfileTurnGuard;
+use super::hooks_impl::ModPromptScreen;
 use super::*;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
 use loop_state::{StepExit, TurnEndVerdict};
@@ -187,6 +188,7 @@ fn user_message_from_projection(
     text: &Utf16JsonProjection,
     is_meta: bool,
     images: Vec<lingxi_core::types::ImageSource>,
+    persistent_app_chat: bool,
 ) -> ConversationMessage {
     let display = text.string_at("").unwrap_or_default().to_owned();
     let mut message = if images.is_empty() {
@@ -206,10 +208,26 @@ fn user_message_from_projection(
     {
         *meta = is_meta;
         if let Some(block) = content.first_mut() {
-            *block = ContentBlock::TextJsUtf16 {
-                text: text.string_at("").unwrap_or_default().to_owned(),
-                utf16_code_units: text.string_units("").unwrap_or_default(),
-                citations: None,
+            let units = text.string_units("").unwrap_or_default();
+            // App Chat checkpoints compare the exact live and replayed
+            // histories. JSONL decodes valid UTF-16 text as Text; keep this
+            // profile's admitted row in the same canonical representation.
+            // Ordinary Native Chat/Code retains its source carrier contract.
+            let canonical_text = if persistent_app_chat {
+                String::from_utf16(&units).ok()
+            } else {
+                None
+            };
+            *block = match canonical_text {
+                Some(text) => ContentBlock::Text {
+                    text,
+                    citations: None,
+                },
+                _ => ContentBlock::TextJsUtf16 {
+                    text: text.string_at("").unwrap_or_default().to_owned(),
+                    utf16_code_units: units,
+                    citations: None,
+                },
             };
         }
     }
@@ -415,12 +433,16 @@ impl ConversationOrchestrator {
         input: &QueuedPromptInput,
         message: &ConversationMessage,
     ) -> Result<(), OrchestratorError> {
-        let skill = input.skill_identity.as_ref().expect("Skill companion identity");
+        let skill = input
+            .skill_identity
+            .as_ref()
+            .expect("Skill companion identity");
         let accepted = if let Some(identity) = &input.pending_prompt_identity {
             let accepted = self
                 .persist_pending_prompt_queued_message_once(message, input, &identity.prompt_id)
                 .await?;
-            self.append_pending_prompt_message_to_history_once(&accepted).await?;
+            self.append_pending_prompt_message_to_history_once(&accepted)
+                .await?;
             accepted
         } else {
             let accepted = self.persist_admitted_skill_prompt(message, input).await?;
@@ -431,11 +453,16 @@ impl ConversationOrchestrator {
         // source order without inventing separators. Match it here, including
         // exact UTF-16 units from a multi-block session.append rewrite.
         let units = match &accepted {
-            ConversationMessage::User { content, .. } => content.iter().flat_map(|block| match block {
-                ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
-                ContentBlock::TextJsUtf16 { utf16_code_units, .. } => utf16_code_units.clone(),
-                _ => Vec::new(),
-            }).collect::<Vec<_>>(),
+            ConversationMessage::User { content, .. } => content
+                .iter()
+                .flat_map(|block| match block {
+                    ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
+                    ContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } => utf16_code_units.clone(),
+                    _ => Vec::new(),
+                })
+                .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
         let body = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
@@ -443,7 +470,12 @@ impl ConversationOrchestrator {
         let session_id = self.session.lock().await.session_id.to_string();
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
         compaction::invoked_skills::register_activation_with_message(
-            &skill.name, &skill.path, &body, None, scope, accepted.id(),
+            &skill.name,
+            &skill.path,
+            &body,
+            None,
+            scope,
+            accepted.id(),
         );
         Ok(())
     }
@@ -756,7 +788,13 @@ impl ConversationOrchestrator {
         is_meta: bool,
         images: Vec<lingxi_core::types::ImageSource>,
     ) {
-        let msg = user_message_from_projection(MessageId::new(), text, is_meta, images);
+        let msg = user_message_from_projection(
+            MessageId::new(),
+            text,
+            is_meta,
+            images,
+            self.is_persistent_app_chat(),
+        );
         {
             let mut session = self.session.lock().await;
             session.history.push(msg.clone());
@@ -782,7 +820,13 @@ impl ConversationOrchestrator {
             }),
             ..QueuedPromptInput::default()
         };
-        let message = user_message_from_projection(identity.message_id, text, false, images);
+        let message = user_message_from_projection(
+            identity.message_id,
+            text,
+            false,
+            images,
+            self.is_persistent_app_chat(),
+        );
         let stored = self
             .persist_pending_prompt_queued_message_once(&message, &input, &identity.prompt_id)
             .await?;
@@ -984,55 +1028,60 @@ impl ConversationOrchestrator {
         &self,
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        let prompt = prompt.into();
-        self.cancel_idle_compaction();
-        let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
-        self.begin_turn_metrics();
-        let _activity_guard = self.main_loop_activity(true);
-        tracing::info!(
-            event = orch_events::CONVERSATION_STARTED,
-            prompt_len = prompt.string_at("").unwrap_or_default().len()
-        );
-        let result = crate::request_context::scope_if_missing(
-            self,
-            crate::server_fallback::scope_query_and_flush(
+        llm_runtime::catalog_task::scope(async {
+            let prompt = prompt.into();
+            self.cancel_idle_compaction();
+            let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
+            self.begin_turn_metrics();
+            let _activity_guard = self.main_loop_activity(true);
+            tracing::info!(
+                event = orch_events::CONVERSATION_STARTED,
+                prompt_len = prompt.string_at("").unwrap_or_default().len()
+            );
+            let result = crate::request_context::scope_if_missing(
                 self,
-                telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
-                    self.scope_api_session(
-                        !self.prompt_is_interactive(),
-                        crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt, &turn_guard)),
-                    )
-                    .await
-                }),
-            ),
-        )
-        .await;
-        let cleanup = crate::native_computer::cleanup(self).await;
-        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
-        self.fire_mod_turn_complete(false, result.is_err()).await;
-        self.complete_turn_metrics(result.as_ref().ok());
-        self.emit_terminal_rate_limit_if_changed(&result).await;
-        let result = result.map_err(|e| self.enrich_api_error(e));
-        // ConversationOutcome is #[non_exhaustive] so future variants will
-        // also log as Completed when the only existing variant is EndTurn.
-        match &result {
-            Ok(
-                ConversationOutcome::EndTurn { turn_count, .. }
-                | ConversationOutcome::StopHookPrevented { turn_count, .. },
-            ) => {
-                tracing::info!(
-                    event = orch_events::CONVERSATION_COMPLETED,
-                    turn_count = *turn_count
-                );
+                crate::server_fallback::scope_query_and_flush(
+                    self,
+                    telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
+                        self.scope_api_session(
+                            !self.prompt_is_interactive(),
+                            crate::turn_loop::boxed_turn_future(|| {
+                                self.try_run_turn(&prompt, &turn_guard)
+                            }),
+                        )
+                        .await
+                    }),
+                ),
+            )
+            .await;
+            let cleanup = crate::native_computer::cleanup(self).await;
+            let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            self.fire_mod_turn_complete(false, result.is_err()).await;
+            self.complete_turn_metrics(result.as_ref().ok());
+            self.emit_terminal_rate_limit_if_changed(&result).await;
+            let result = result.map_err(|e| self.enrich_api_error(e));
+            // ConversationOutcome is #[non_exhaustive] so future variants will
+            // also log as Completed when the only existing variant is EndTurn.
+            match &result {
+                Ok(
+                    ConversationOutcome::EndTurn { turn_count, .. }
+                    | ConversationOutcome::StopHookPrevented { turn_count, .. },
+                ) => {
+                    tracing::info!(
+                        event = orch_events::CONVERSATION_COMPLETED,
+                        turn_count = *turn_count
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        event = orch_events::CONVERSATION_FAILED,
+                        reason = %err
+                    );
+                }
             }
-            Err(err) => {
-                tracing::error!(
-                    event = orch_events::CONVERSATION_FAILED,
-                    reason = %err
-                );
-            }
-        }
-        result
+            result
+        })
+        .await
     }
 
     async fn try_run_turn(
@@ -1075,8 +1124,13 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear_idle_checkins();
-        let mut user_msg =
-            user_message_from_projection(MessageId::new(), &screened_text, false, Vec::new());
+        let mut user_msg = user_message_from_projection(
+            MessageId::new(),
+            &screened_text,
+            false,
+            Vec::new(),
+            self.is_persistent_app_chat(),
+        );
         let native_source = crate::native_user_message_source::current().unwrap_or_default();
         self.apply_native_user_message_source(&mut user_msg, &native_source)
             .await;
@@ -1204,66 +1258,71 @@ impl ConversationOrchestrator {
         &self,
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        let prompt = prompt.into();
-        let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
-        let ambient_origin = crate::mod_prompt_origin::current();
-        let mod_origin = streaming::external_receive_kind(&ambient_origin)
-            .is_some()
-            .then_some(ambient_origin);
-        self.cancel_idle_compaction();
-        let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
-        let _activity_guard = self.main_loop_activity(true);
-        tracing::info!(
-            event = orch_events::TURN_STREAMING_STARTED,
-            prompt_len = prompt.string_at("").unwrap_or_default().len()
-        );
-        // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
-        // user-interrupt token → `None` (behaviour byte-identical to before).
-        let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
-            self.scope_api_session(
-                !self.prompt_is_interactive(),
-                Box::pin(self.try_run_turn_streaming_inputs(
-                    prompt.string_at("").unwrap_or_default(),
-                    Vec::new(),
-                    None,
-                    None,
-                    false,
-                    true,
-                    Some(vec![QueuedPromptInput {
-                        text: prompt.clone(),
-                        mod_origin,
-                        message_origin: native_user_source.message_origin,
-                        prompt_source: native_user_source.prompt_source,
-                        ..Default::default()
-                    }]),
-                    None,
-                    None,
-                    &turn_guard,
-                )),
-            )
-            .await
+        llm_runtime::catalog_task::scope(async {
+            let prompt = prompt.into();
+            let native_user_source =
+                crate::native_user_message_source::current().unwrap_or_default();
+            let ambient_origin = crate::mod_prompt_origin::current();
+            let mod_origin = streaming::external_receive_kind(&ambient_origin)
+                .is_some()
+                .then_some(ambient_origin);
+            self.cancel_idle_compaction();
+            let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
+            let _activity_guard = self.main_loop_activity(true);
+            tracing::info!(
+                event = orch_events::TURN_STREAMING_STARTED,
+                prompt_len = prompt.string_at("").unwrap_or_default().len()
+            );
+            // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
+            // user-interrupt token → `None` (behaviour byte-identical to before).
+            let result =
+                telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
+                    self.scope_api_session(
+                        !self.prompt_is_interactive(),
+                        Box::pin(self.try_run_turn_streaming_inputs(
+                            prompt.string_at("").unwrap_or_default(),
+                            Vec::new(),
+                            None,
+                            None,
+                            false,
+                            true,
+                            Some(vec![QueuedPromptInput {
+                                text: prompt.clone(),
+                                mod_origin,
+                                message_origin: native_user_source.message_origin,
+                                prompt_source: native_user_source.prompt_source,
+                                ..Default::default()
+                            }]),
+                            None,
+                            None,
+                            &turn_guard,
+                        )),
+                    )
+                    .await
+                })
+                .await;
+            self.emit_terminal_rate_limit_if_changed(&result).await;
+            let result = result.map_err(|e| self.enrich_api_error(e));
+            match &result {
+                Ok(
+                    ConversationOutcome::EndTurn { turn_count, .. }
+                    | ConversationOutcome::StopHookPrevented { turn_count, .. },
+                ) => {
+                    tracing::info!(
+                        event = orch_events::TURN_STREAMING_COMPLETED,
+                        turn_count = *turn_count
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        event = orch_events::CONVERSATION_FAILED,
+                        reason = %err
+                    );
+                }
+            }
+            result
         })
-        .await;
-        self.emit_terminal_rate_limit_if_changed(&result).await;
-        let result = result.map_err(|e| self.enrich_api_error(e));
-        match &result {
-            Ok(
-                ConversationOutcome::EndTurn { turn_count, .. }
-                | ConversationOutcome::StopHookPrevented { turn_count, .. },
-            ) => {
-                tracing::info!(
-                    event = orch_events::TURN_STREAMING_COMPLETED,
-                    turn_count = *turn_count
-                );
-            }
-            Err(err) => {
-                tracing::error!(
-                    event = orch_events::CONVERSATION_FAILED,
-                    reason = %err
-                );
-            }
-        }
-        result
+        .await
     }
 
     /// Start a model turn solely to deliver completed async-hook responses.
@@ -1364,7 +1423,15 @@ impl ConversationOrchestrator {
         let result = self
             .scope_api_session(
                 !self.prompt_is_interactive(),
-                Box::pin(self.try_run_turn_streaming("", Vec::new(), cancel, None, true, false, turn_guard)),
+                Box::pin(self.try_run_turn_streaming(
+                    "",
+                    Vec::new(),
+                    cancel,
+                    None,
+                    true,
+                    false,
+                    turn_guard,
+                )),
             )
             .await;
         // The outer boundary emits the MaxTurns/error terminal after the inner
@@ -1740,17 +1807,22 @@ impl ConversationOrchestrator {
                     tool_completion_id,
                 } => {
                     if *persist {
-                        let accepted = self.persist_preappended_stream_row(
-                            stored,
-                            parent_uuid.clone(),
-                            timestamp,
-                            settlement.publication_guard.clone(),
-                            tool_completion_id.clone(),
-                        )
-                        .await;
-                        if !accepted && compaction::invoked_skills::is_individual_skill_activation(stored) {
+                        let accepted = self
+                            .persist_preappended_stream_row(
+                                stored,
+                                parent_uuid.clone(),
+                                timestamp,
+                                settlement.publication_guard.clone(),
+                                tool_completion_id.clone(),
+                            )
+                            .await;
+                        if !accepted
+                            && compaction::invoked_skills::is_individual_skill_activation(stored)
+                        {
                             let rejected_id = stored.id();
-                            settlement.query_rows.retain(|(row, _)| row.id() != rejected_id);
+                            settlement
+                                .query_rows
+                                .retain(|(row, _)| row.id() != rejected_id);
                         }
                     }
                 }
@@ -1777,10 +1849,16 @@ impl ConversationOrchestrator {
             // Skill rows were durably accepted and activated under their
             // publication lease. Put them back in JE order after K without
             // publishing a second copy.
-            let skill_ids = rows.iter().filter_map(|(message, _)|
-                compaction::invoked_skills::is_individual_skill_activation(message).then_some(message.id())
-            ).collect::<std::collections::HashSet<_>>();
-            session.history.retain(|message| !skill_ids.contains(&message.id()));
+            let skill_ids = rows
+                .iter()
+                .filter_map(|(message, _)| {
+                    compaction::invoked_skills::is_individual_skill_activation(message)
+                        .then_some(message.id())
+                })
+                .collect::<std::collections::HashSet<_>>();
+            session
+                .history
+                .retain(|message| !skill_ids.contains(&message.id()));
             for (message, source_tool_use_id) in rows {
                 if let Some(tool_use_id) = source_tool_use_id {
                     session
@@ -2796,7 +2874,10 @@ impl ConversationOrchestrator {
                 // `Err(..)` upstream of this match. Once nudged, a still-empty
                 // continuation falls through to the normal end.
                 if !loop_state.thinking_only_nudged
-                    && !pumped_has_visible_text(&pumped.assistant_blocks)
+                    && !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    )
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
@@ -2952,7 +3033,10 @@ impl ConversationOrchestrator {
                         )
                     });
                 if (!pumped.tool_input_issues.is_empty()
-                    || !pumped_has_visible_text(&pumped.assistant_blocks))
+                    || !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    ))
                     && can_repeat_original
                     && no_hosted_effects
                     && !loop_state.recovery.max_output_tokens_escalated
@@ -3033,7 +3117,10 @@ impl ConversationOrchestrator {
             // the generic terminal arm; once nudged it falls through.
             Some("stop_sequence")
                 if !loop_state.thinking_only_nudged
-                    && !pumped_has_visible_text(&pumped.assistant_blocks)
+                    && !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    )
                     && !prior_structured_output =>
             {
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
@@ -3094,7 +3181,10 @@ impl ConversationOrchestrator {
                 // thinking-only nudge applies here on the same terms and,
                 // like the `end_turn` arm, fires BEFORE the Stop hooks.
                 if !loop_state.thinking_only_nudged
-                    && !pumped_has_visible_text(&pumped.assistant_blocks)
+                    && !pumped_has_visible_text_for_profile(
+                        &pumped.assistant_blocks,
+                        self.is_persistent_app_chat(),
+                    )
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
@@ -3177,7 +3267,8 @@ impl ConversationOrchestrator {
         projected_content: Option<ProjectedUserContent>,
         turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        self.admit_streaming_query(in_human_turn, turn_guard).await?;
+        self.admit_streaming_query(in_human_turn, turn_guard)
+            .await?;
         self.run_admitted_streaming_query(
             prompt,
             images,
@@ -3205,65 +3296,68 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        // Internal retries and tool continuations stay in this admitted query.
-        self.prompt_runtime.begin_native_query();
-        let suggestion_origin = queued_inputs
-            .as_ref()
-            .and_then(|inputs| inputs.iter().rev().find(|input| !input.is_meta))
-            .and_then(|input| input.mod_origin.as_ref())
-            .and_then(|origin| origin.get("kind"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|kind| !matches!(*kind, "user" | "human"))
-            .map(str::to_owned)
-            .or_else(|| (!in_human_turn).then(|| "task_notification".into()));
-        self.begin_prompt_suggestion_turn(prompt, in_human_turn, suggestion_origin)
-            .await;
-        if !transient_rewake {
-            self.begin_turn_metrics();
-        }
-        let completion_cancel = user_cancel.clone();
-        let result = crate::request_context::scope_if_missing(
-            self,
-            crate::server_fallback::scope_query_and_flush(
-                self,
-                Box::pin(
-                    StreamingTurnDriver {
-                        orch: self,
-                        prompt,
-                        images,
-                        user_cancel,
-                        message_id,
-                        transient_rewake,
-                        in_human_turn,
-                        queued_inputs,
-                        row_token,
-                        projected_content,
-                    }
-                    .run(),
-                ),
-            ),
-        )
-        .await;
-        let cleanup = crate::native_computer::cleanup(self).await;
-        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
-        self.fire_mod_turn_complete(
-            completion_cancel
+        llm_runtime::catalog_task::scope(async {
+            // Internal retries and tool continuations stay in this admitted query.
+            self.prompt_runtime.begin_native_query();
+            let suggestion_origin = queued_inputs
                 .as_ref()
-                .is_some_and(CancellationToken::is_cancelled),
-            result.is_err(),
-        )
-        .await;
-        if !transient_rewake {
-            self.complete_turn_metrics(result.as_ref().ok());
-            if matches!(&result, Ok(ConversationOutcome::EndTurn { .. }))
-                && !completion_cancel
-                    .as_ref()
-                    .is_some_and(CancellationToken::is_cancelled)
-            {
-                self.spawn_prompt_suggestion().await;
+                .and_then(|inputs| inputs.iter().rev().find(|input| !input.is_meta))
+                .and_then(|input| input.mod_origin.as_ref())
+                .and_then(|origin| origin.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|kind| !matches!(*kind, "user" | "human"))
+                .map(str::to_owned)
+                .or_else(|| (!in_human_turn).then(|| "task_notification".into()));
+            self.begin_prompt_suggestion_turn(prompt, in_human_turn, suggestion_origin)
+                .await;
+            if !transient_rewake {
+                self.begin_turn_metrics();
             }
-        }
-        result
+            let completion_cancel = user_cancel.clone();
+            let result = crate::request_context::scope_if_missing(
+                self,
+                crate::server_fallback::scope_query_and_flush(
+                    self,
+                    Box::pin(
+                        StreamingTurnDriver {
+                            orch: self,
+                            prompt,
+                            images,
+                            user_cancel,
+                            message_id,
+                            transient_rewake,
+                            in_human_turn,
+                            queued_inputs,
+                            row_token,
+                            projected_content,
+                        }
+                        .run(),
+                    ),
+                ),
+            )
+            .await;
+            let cleanup = crate::native_computer::cleanup(self).await;
+            let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            self.fire_mod_turn_complete(
+                completion_cancel
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled),
+                result.is_err(),
+            )
+            .await;
+            if !transient_rewake {
+                self.complete_turn_metrics(result.as_ref().ok());
+                if matches!(&result, Ok(ConversationOutcome::EndTurn { .. }))
+                    && !completion_cancel
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                {
+                    self.spawn_prompt_suggestion().await;
+                }
+            }
+            result
+        })
+        .await
     }
 
     // Race cancellation only before execution starts. Dropping a running turn
@@ -3351,7 +3445,10 @@ impl ConversationOrchestrator {
         images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
     ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
-        self.run_turn_with_cancel_image_sources_and_message_id(prompt, images, cancel, None)
+        let future = {
+            self.run_turn_with_cancel_image_sources_and_message_id(prompt, images, cancel, None)
+        };
+        Box::pin(llm_runtime::catalog_task::scope(future))
     }
 
     pub(crate) fn run_turn_with_cancel_image_sources_and_message_id<'a>(
@@ -3361,12 +3458,85 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
         message_id: Option<MessageId>,
     ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
-        let prompt = prompt.into();
-        Box::pin(async move {
+        let future = {
+            let prompt = prompt.into();
+            Box::pin(async move {
+                let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                    self.record_pre_admission_shutdown_interruption().await;
+                    return Ok(TurnOutcome::Cancelled);
+                };
+                self.begin_turn_metrics();
+                let _activity_guard = self.main_loop_activity(true);
+                tracing::info!(
+                    event = orch_events::CONVERSATION_STARTED,
+                    prompt_len = prompt.string_at("").unwrap_or_default().len()
+                );
+                let result = crate::request_context::scope_if_missing(
+                    self,
+                    crate::server_fallback::scope_query_and_flush(
+                        self,
+                        telemetry::otel::with_turn_span(
+                            "lingxi.orchestrator.turn.cancelable",
+                            async {
+                                self.scope_api_session(
+                                    !self.prompt_is_interactive(),
+                                    crate::turn_loop::boxed_turn_future(|| {
+                                        self.try_run_turn_cancelable(
+                                            &prompt,
+                                            images,
+                                            message_id,
+                                            cancel.clone(),
+                                            None,
+                                            &turn_guard,
+                                        )
+                                    }),
+                                )
+                                .await
+                            },
+                        ),
+                    ),
+                )
+                .await;
+                let cleanup = crate::native_computer::cleanup(self).await;
+                let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+                self.fire_mod_turn_complete(
+                    cancel.is_cancelled()
+                        || result
+                            .as_ref()
+                            .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
+                    result.is_err(),
+                )
+                .await;
+                self.emit_terminal_rate_limit_if_changed(&result).await;
+                self.complete_turn_metrics(None);
+                result.map_err(|e| self.enrich_api_error(e))
+            })
+        };
+        Box::pin(llm_runtime::catalog_task::scope(future))
+    }
+
+    /// Deliver source-projected queued entries through the non-streaming turn
+    /// driver. This is the batched twin used by SDK/headless callers that have
+    /// disabled streaming; it preserves the same ordered transcript rows as
+    /// [`Self::run_queued_prompt_batch`].
+    pub async fn run_queued_prompt_batch_batched(
+        &self,
+        mut inputs: Vec<QueuedPromptInput>,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        llm_runtime::catalog_task::scope(async {
+            if inputs.is_empty() {
+                return Ok(TurnOutcome::EndTurn);
+            }
+            apply_current_native_user_source(&mut inputs);
+            if inputs.iter().any(|input| !input.is_meta) {
+                self.reset_goal_interruption();
+            }
             let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-                self.record_pre_admission_shutdown_interruption().await;
                 return Ok(TurnOutcome::Cancelled);
             };
+            let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
+            let prompt = inputs[primary].text.clone();
             self.begin_turn_metrics();
             let _activity_guard = self.main_loop_activity(true);
             tracing::info!(
@@ -3377,22 +3547,25 @@ impl ConversationOrchestrator {
                 self,
                 crate::server_fallback::scope_query_and_flush(
                     self,
-                    telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
-                        self.scope_api_session(
-                            !self.prompt_is_interactive(),
-                            crate::turn_loop::boxed_turn_future(|| {
-                                self.try_run_turn_cancelable(
-                                    &prompt,
-                                    images,
-                                    message_id,
-                                    cancel.clone(),
-                                    None,
-                                    &turn_guard,
-                                )
-                            }),
-                        )
-                        .await
-                    }),
+                    telemetry::otel::with_turn_span(
+                        "lingxi.orchestrator.turn.cancelable_batch",
+                        async {
+                            self.scope_api_session(
+                                !self.prompt_is_interactive(),
+                                crate::turn_loop::boxed_turn_future(|| {
+                                    self.try_run_turn_cancelable(
+                                        &prompt,
+                                        Vec::new(),
+                                        None,
+                                        cancel.clone(),
+                                        Some(inputs),
+                                        &turn_guard,
+                                    )
+                                }),
+                            )
+                            .await
+                        },
+                    ),
                 ),
             )
             .await;
@@ -3408,76 +3581,9 @@ impl ConversationOrchestrator {
             .await;
             self.emit_terminal_rate_limit_if_changed(&result).await;
             self.complete_turn_metrics(None);
-            result.map_err(|e| self.enrich_api_error(e))
+            result.map_err(|error| self.enrich_api_error(error))
         })
-    }
-
-    /// Deliver source-projected queued entries through the non-streaming turn
-    /// driver. This is the batched twin used by SDK/headless callers that have
-    /// disabled streaming; it preserves the same ordered transcript rows as
-    /// [`Self::run_queued_prompt_batch`].
-    pub async fn run_queued_prompt_batch_batched(
-        &self,
-        mut inputs: Vec<QueuedPromptInput>,
-        cancel: CancellationToken,
-    ) -> Result<TurnOutcome, OrchestratorError> {
-        if inputs.is_empty() {
-            return Ok(TurnOutcome::EndTurn);
-        }
-        apply_current_native_user_source(&mut inputs);
-        if inputs.iter().any(|input| !input.is_meta) {
-            self.reset_goal_interruption();
-        }
-        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-            return Ok(TurnOutcome::Cancelled);
-        };
-        let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
-        let prompt = inputs[primary].text.clone();
-        self.begin_turn_metrics();
-        let _activity_guard = self.main_loop_activity(true);
-        tracing::info!(
-            event = orch_events::CONVERSATION_STARTED,
-            prompt_len = prompt.string_at("").unwrap_or_default().len()
-        );
-        let result = crate::request_context::scope_if_missing(
-            self,
-            crate::server_fallback::scope_query_and_flush(
-                self,
-                telemetry::otel::with_turn_span(
-                    "lingxi.orchestrator.turn.cancelable_batch",
-                    async {
-                        self.scope_api_session(
-                            !self.prompt_is_interactive(),
-                            crate::turn_loop::boxed_turn_future(|| {
-                                self.try_run_turn_cancelable(
-                                    &prompt,
-                                    Vec::new(),
-                                    None,
-                                    cancel.clone(),
-                                    Some(inputs),
-                                    &turn_guard,
-                                )
-                            }),
-                        )
-                        .await
-                    },
-                ),
-            ),
-        )
-        .await;
-        let cleanup = crate::native_computer::cleanup(self).await;
-        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
-        self.fire_mod_turn_complete(
-            cancel.is_cancelled()
-                || result
-                    .as_ref()
-                    .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
-            result.is_err(),
-        )
-        .await;
-        self.emit_terminal_rate_limit_if_changed(&result).await;
-        self.complete_turn_metrics(None);
-        result.map_err(|error| self.enrich_api_error(error))
+        .await
     }
 
     /// Internal implementation of the REPL turn loop with cancellation.
@@ -3540,7 +3646,9 @@ impl ConversationOrchestrator {
                     ModPromptScreen::Drop(reason) => self.emit_mod_prompt_drop(&reason).await,
                 }
             }
-            if admitted.is_empty() || (requires_skill_header && !admitted.iter().any(|(_, input, _)| !input.is_meta)) {
+            if admitted.is_empty()
+                || (requires_skill_header && !admitted.iter().any(|(_, input, _)| !input.is_meta))
+            {
                 return Ok(TurnOutcome::EndTurn);
             }
             let primary = admitted
@@ -3561,6 +3669,7 @@ impl ConversationOrchestrator {
                     &input.text,
                     input.is_meta,
                     message_images,
+                    self.is_persistent_app_chat(),
                 );
                 if input.turn_companion {
                     if let ConversationMessage::User { turn_companion, .. } = &mut message {
@@ -3674,6 +3783,7 @@ impl ConversationOrchestrator {
                         &screened_text,
                         false,
                         images,
+                        self.is_persistent_app_chat(),
                     ),
                     true,
                 ),
@@ -4121,26 +4231,29 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
         on_admitted: Box<dyn FnOnce() + Send + 'static>,
     ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
-        let prompt = prompt.into();
-        Box::pin(async move {
-            if in_human_turn {
-                self.reset_goal_interruption();
-            }
-            let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-                return Ok(TurnOutcome::Cancelled);
-            };
-            self.run_turn_streaming_source_with_origin_locked_and_admission(
-                &turn_guard,
-                prompt,
-                images,
-                cancel,
-                message_id,
-                in_human_turn,
-                row_token,
-                Some(on_admitted),
-            )
-            .await
-        })
+        let future = {
+            let prompt = prompt.into();
+            Box::pin(async move {
+                if in_human_turn {
+                    self.reset_goal_interruption();
+                }
+                let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                    return Ok(TurnOutcome::Cancelled);
+                };
+                self.run_turn_streaming_source_with_origin_locked_and_admission(
+                    &turn_guard,
+                    prompt,
+                    images,
+                    cancel,
+                    message_id,
+                    in_human_turn,
+                    row_token,
+                    Some(on_admitted),
+                )
+                .await
+            })
+        };
+        Box::pin(llm_runtime::catalog_task::scope(future))
     }
 
     /// Deliver a queued batch as separate transcript messages in one model turn.
@@ -4310,19 +4423,26 @@ impl ConversationOrchestrator {
             !inputs.is_empty() && inputs.iter().all(|input| input.goal_retry_id.is_some())
         }) {
             let mut valid = false;
-            for id in inputs.iter().filter_map(|input| input.goal_retry_id.as_deref()) {
+            for id in inputs
+                .iter()
+                .filter_map(|input| input.goal_retry_id.as_deref())
+            {
                 if self.goal_retry_is_valid(id).await {
                     valid = true;
                     break;
                 }
             }
             if !valid {
-                for id in inputs.iter().filter_map(|input| input.goal_retry_id.as_deref()) {
+                for id in inputs
+                    .iter()
+                    .filter_map(|input| input.goal_retry_id.as_deref())
+                {
                     valid |= self.recheck_goal_retry_or_discard_stale(id).await;
                 }
             }
             if !valid {
-                self.emit_turn_terminal("end_turn", &self.snapshot_cost_real().await).await;
+                self.emit_turn_terminal("end_turn", &self.snapshot_cost_real().await)
+                    .await;
                 return Ok(TurnOutcome::EndTurn);
             }
         }
@@ -4518,16 +4638,32 @@ impl ConversationOrchestrator {
 /// `ie.some(msg => msg.content.some(b => b.type === "text" && b.text.trim().length > 0))`.
 ///
 /// A `false` return = a thinking-only (or otherwise text-empty) response. Only
-/// [`lingxi_core::types::ContentBlock::Text`] blocks with a non-whitespace body count;
-/// `Thinking`, `ToolUse`, etc. are not "visible output" for this gate. (Tool
+/// text blocks with a non-whitespace body count, including lossless UTF-16 and
+/// native text whose unknown fields are preserved. `Thinking`, `ToolUse`, etc.
+/// are not "visible output" for this gate. (Tool
 /// uses are indexed separately in `PumpedTurn::tool_uses`; recovered responses
 /// also keep their original tool blocks in `assistant_blocks`. This gate only
 /// fires on `end_turn`/`stop_sequence`.)
 pub(super) fn pumped_has_visible_text(blocks: &[lingxi_core::types::ContentBlock]) -> bool {
+    blocks.iter().any(|block| {
+        block
+            .visible_text()
+            .is_some_and(|text| !text.trim().is_empty())
+    })
+}
+
+/// App Chat's exact UTF-16 text remains visible even when an unpaired unit
+/// requires the JS carrier. Native Chat/Code keeps its original predicate.
+fn pumped_has_visible_text_for_profile(
+    blocks: &[lingxi_core::types::ContentBlock],
+    persistent_app_chat: bool,
+) -> bool {
     use lingxi_core::types::ContentBlock;
-    blocks
-        .iter()
-        .any(|b| matches!(b, ContentBlock::Text { text, .. } if !text.trim().is_empty()))
+    pumped_has_visible_text(blocks)
+        || (persistent_app_chat
+            && blocks.iter().any(|block| {
+                matches!(block, ContentBlock::TextJsUtf16 { text, .. } if !text.trim().is_empty())
+            }))
 }
 
 pub(super) fn llm_response_to_pumped_turn(

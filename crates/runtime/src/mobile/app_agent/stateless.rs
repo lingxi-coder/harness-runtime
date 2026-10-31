@@ -1,13 +1,15 @@
 //! Independent stateless Local App understanding requests.
-use super::{AppAgentFactory, STRUCTURED_OUTPUT_TOOL_NAME, schema::NativeSchema};
+use super::{schema::NativeSchema, AppAgentFactory, STRUCTURED_OUTPUT_TOOL_NAME};
 use crate::app_agent_input;
-use cost::{CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId};
+use cost::{
+    CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId,
+};
 use lingxi_core::{
     host::json_schema_validator::{CompiledJsonSchema, JsonSchemaValidation},
-    types::{ContentBlock, ConversationMessage, MessageId, utf16_json::Utf16JsonProjection},
+    types::{utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId},
 };
 use local_app::v2::agent::{Admission, Input, TaskResult};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sidequery::{
     ProviderSideQueryClient, QuerySource, SideQueryClient, SideQueryRequest,
     StrictStructuredQueryRequest,

@@ -1017,7 +1017,9 @@ impl RegistrySlashDispatcher {
                     // prompt's frontmatter supplies both the command allow
                     // list and shell selector; user/config text is escaped by
                     // its prompt factory before reaching this path.
-                    let content = if contains_embedded_shell_commands(&content) {
+                    let content = if !pf.skip_shell_expansion()
+                        && contains_embedded_shell_commands(&content)
+                    {
                         match self.shell_expansion.as_ref() {
                             Some(provider) => {
                                 let allowed_tools =
@@ -1854,9 +1856,9 @@ mod tests {
     use super::*;
     use crate::builtin_support::names::{core_description, BUILTIN_COMMAND_NAMES};
     use crate::builtin_support::unimplemented::UnimplementedCommandHandler;
-    use crate::model::{
-        BuiltinCommandHandler, CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
-    };
+    #[cfg(feature = "builtin-handlers")]
+    use crate::model::BuiltinCommandHandler;
+    use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use crate::registry::CommandRegistry;
     use std::path::PathBuf;
 
@@ -2350,7 +2352,7 @@ mod tests {
         }
 
         fn description(&self) -> &str {
-            "LingXi command fixture"
+            "Command fixture"
         }
 
         fn supports_non_interactive(&self) -> bool {
@@ -4390,6 +4392,34 @@ mod tests {
             &[vec!["Bash(echo:*)".to_string()]],
             "the frontmatter allow-list must reach the provider"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "builtin-handlers")]
+    async fn product_guide_never_executes_shell_markup_in_questions() {
+        let mut registry = CommandRegistry::new();
+        crate::builtins::register_bundled_skills(&mut registry, false);
+        let provider = Arc::new(FakeProvider::new(false));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_shell_expansion(provider.clone());
+        for input in [
+            "/lingxi-api configuration explain !`echo should-not-run`",
+            "/lingxi-api media explain\n```!\necho should-not-run\n```",
+            "/document-authoring write about !`echo should-not-run`",
+        ] {
+            match dispatcher
+                .dispatch(input.into(), lingxi_core::host::CancellationToken::new())
+                .await
+            {
+                SlashDispatchResult::RunSkillAsTurn { body, .. } => {
+                    assert!(prompt_text(&body).contains("should-not-run"));
+                    assert!(!prompt_text(&body).contains("OUT["));
+                }
+                other => panic!("expected literal guide prompt, got {other:?}"),
+            }
+        }
+        assert!(provider.seen_allowed.lock().unwrap().is_empty());
+        assert!(provider.shell_commands.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

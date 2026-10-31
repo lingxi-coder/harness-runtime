@@ -47,6 +47,21 @@ pub trait HookOutputObserver: Send + Sync {
 /// pipeline has already been consulted.
 #[async_trait]
 pub trait ProcessRunner: Send + Sync {
+    /// Whether this runner can collect bounded output entirely in memory and
+    /// confirm foreground process-tree cleanup without a task spool.
+    fn supports_inline_foreground(&self) -> bool {
+        false
+    }
+
+    /// Strict Local App Chat execution. Unsupported runners refuse before
+    /// spawning; falling back to a spool-producing runner is never implicit.
+    async fn run_inline_foreground(
+        &self,
+        _cmd: &SandboxedCommand,
+        _max_output_bytes: usize,
+    ) -> Result<ForegroundRunResult, ProcessError> {
+        Err(ProcessError::Unsupported)
+    }
     /// Export a supervised shell without changing its current owner.
     async fn export_shell(
         &self,
@@ -75,6 +90,19 @@ pub trait ProcessRunner: Send + Sync {
     /// and can detach the existing OS child without respawning it.
     fn supports_foreground_backgrounding(&self) -> bool {
         false
+    }
+
+    /// Whether this command will use the supervised pre-exec cancellation
+    /// fence and an identity-checked terminal receipt. Unwired runners must
+    /// decline request-owned execution before starting a child.
+    fn supports_request_cancellation(&self, _command: &SandboxedCommand) -> bool {
+        false
+    }
+
+    /// Stop an unacknowledged request-owned background launch and wait for an
+    /// identity-checked terminal receipt. Unsupported runners fail closed.
+    async fn stop_request_background(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+        Err(ProcessError::Unsupported)
     }
 
     /// SIGKILL the live process groups launched by one agent. Returns the
@@ -393,6 +421,20 @@ pub trait BackgroundExitSink: Send + Sync {
     }
     /// Output ownership moved to an independent supervisor before handle publication.
     async fn on_supervised_start(&self, _task_id: &str) {}
+    /// Report the held runner's settlement independently of its presentation
+    /// callback. `Ok` requires a reaped child and completed output drain/flush;
+    /// `Err` retains a stop, wait, drain, or output failure.
+    async fn on_supervised_runner_settled(
+        &self,
+        _task_id: &str,
+        _settlement: Result<Option<i32>, ProcessError>,
+    ) {
+    }
+    /// A detached cleanup task now owns a child after stop failed. The
+    /// supervisor must stay alive until it reports that the child is reaped.
+    async fn on_supervised_cleanup_pending(&self, _task_id: &str) {}
+    /// The retained cleanup task has finished its physical wait and drain.
+    async fn on_supervised_cleanup_finished(&self, _task_id: &str) {}
     /// Completion from a supervisor that owns the terminal output trailer.
     async fn on_supervised_exit(&self, task_id: &str, code: Option<i32>) {
         self.on_exit(task_id, code).await;

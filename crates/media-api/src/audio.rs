@@ -308,8 +308,14 @@ pub trait AudioService: Send + Sync {
         ))
     }
 
-    /// Cancel only the matching in-flight operation.
-    async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError>;
+    /// Cancel only the matching in-flight operation incarnation.
+    ///
+    /// The context carries a host-minted opaque handle in addition to its
+    /// public ID. Returning `Ok(())` is a completion receipt: this service has
+    /// resolved that handle, and this request can no longer affect another
+    /// context that reuses the public ID. Implementations that cannot confirm
+    /// that must return an error and retain the handle as unresolved.
+    async fn cancel(&self, context: AudioOperationContext) -> Result<(), AudioError>;
 }
 
 impl AudioOperation {

@@ -1438,21 +1438,7 @@ fn native_home_is_automount() -> bool {
         if has_home_entry {
             return Ok(true);
         }
-        let home = match std::fs::metadata("/home") {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-            Err(_) => return Err(()),
-        };
-        // Native Dt does not catch the /Users stat; any failure escapes Ft's
-        // outer try/catch and therefore must not be memoized.
-        let users = std::fs::metadata("/Users").map_err(|_| ())?;
-        match (
-            native_metadata_device(&home),
-            native_metadata_device(&users),
-        ) {
-            (Some(home), Some(users)) => Ok(home != users),
-            _ => Err(()),
-        }
+        native_home_has_own_device(Path::new("/home"), Path::new("/Users"))
     })();
 
     match result {
@@ -1464,21 +1450,47 @@ fn native_home_is_automount() -> bool {
     }
 }
 
+fn native_home_has_own_device(home: &Path, users: &Path) -> Result<bool, ()> {
+    let home = match native_path_device(home) {
+        Ok(device) => device,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Err(()),
+    };
+    // Native Dt does not catch the /Users stat; any failure escapes Ft's
+    // outer try/catch and therefore must not be memoized.
+    let users = native_path_device(users).map_err(|_| ())?;
+    match (home, users) {
+        (Some(home), Some(users)) => Ok(home != users),
+        _ => Err(()),
+    }
+}
+
 #[cfg(unix)]
-fn native_metadata_device(metadata: &std::fs::Metadata) -> Option<u64> {
+fn native_path_device(path: &Path) -> std::io::Result<Option<u64>> {
     use std::os::unix::fs::MetadataExt;
-    Some(metadata.dev())
+    Ok(Some(std::fs::metadata(path)?.dev()))
 }
 
 #[cfg(windows)]
-fn native_metadata_device(metadata: &std::fs::Metadata) -> Option<u64> {
-    use std::os::windows::fs::MetadataExt;
-    metadata.volume_serial_number().map(u64::from)
+fn native_path_device(path: &Path) -> std::io::Result<Option<u64>> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Match std::fs::metadata: no requested access rights, all share modes,
+    // and directory opens allowed. Without OPEN_REPARSE_POINT the handle
+    // follows symlinks, so its volume is that of the metadata target.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    Ok(Some(
+        winapi_util::file::information(&file)?.volume_serial_number(),
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn native_metadata_device(_metadata: &std::fs::Metadata) -> Option<u64> {
-    None
+fn native_path_device(path: &Path) -> std::io::Result<Option<u64>> {
+    std::fs::metadata(path).map(|_| None)
 }
 
 fn native_path_units(path: &Path) -> Vec<u16> {
@@ -1823,6 +1835,50 @@ mod tests {
             Arc::new(AnalyticsBus::new()),
             vec![PathBuf::from("/tmp")],
         )
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_home_device_checks_existing_and_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let users = temp.path().join("users");
+        let absent = temp.path().join("missing");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&users).unwrap();
+
+        let home_device = native_path_device(&home).unwrap().unwrap();
+        assert_eq!(native_path_device(&users).unwrap(), Some(home_device));
+        assert_eq!(native_home_has_own_device(&home, &users), Ok(false));
+        assert_eq!(native_home_has_own_device(&absent, &users), Ok(true));
+        assert_eq!(native_home_has_own_device(&home, &absent), Err(()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_device_follows_directory_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        std::fs::create_dir(&target).unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_dir(&target, &link) {
+            // Windows may deny symlink creation without Developer Mode or the
+            // relevant privilege; the directory/device test still runs.
+            if error.raw_os_error() == Some(1314) {
+                eprintln!("directory symlink test unavailable: {error}");
+                return;
+            }
+            panic!("create directory symlink: {error}");
+        }
+        assert_eq!(
+            native_path_device(&link).unwrap(),
+            native_path_device(&target).unwrap()
+        );
+        std::fs::remove_dir(&target).unwrap();
+        assert_eq!(
+            native_path_device(&link).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[cfg(unix)]

@@ -678,6 +678,10 @@ fn text_array_projection(values: impl IntoIterator<Item = String>) -> Utf16JsonP
 
 #[async_trait]
 impl Tool for ToolSearchTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         TOOL_SEARCH_TOOL_NAME
     }
@@ -759,7 +763,7 @@ impl Tool for ToolSearchTool {
     async fn call(
         &self,
         input: Utf16JsonProjection,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -810,6 +814,30 @@ impl Tool for ToolSearchTool {
                 query_type: "keyword",
             },
         };
+
+        if self.ctx.is_persistent_app_chat()
+            || ctx.tool_execution_policy
+                == lingxi_core::host::tool_invoker::ToolExecutionPolicy::LocalAppChat
+        {
+            let text: Utf16JsonProjection = if matches.is_empty() {
+                "No matching tool in the current Local App Chat catalog.".into()
+            } else {
+                format!(
+                    "Tools available in this Local App Chat: {}",
+                    matches.join(", ")
+                )
+                .into()
+            };
+            return Ok(ToolCallResult {
+                data: text.clone(),
+                model_content: Some(text),
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+                subagent_hooks_fired: false,
+            });
+        }
 
         // Lifecycle: record discovery so the next request includes each schema
         // with `defer_loading:true` and resume/compaction retain the state.

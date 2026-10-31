@@ -275,6 +275,10 @@ static OUTPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
 
 #[async_trait]
 impl Tool for GlobTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         TOOL_NAME
     }

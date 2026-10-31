@@ -428,3 +428,213 @@ async fn concurrent_close_and_claim_have_one_admission_order() {
         );
     }
 }
+
+#[tokio::test]
+async fn uncertain_handoff_without_recovery_keeps_shutdown_incomplete() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let error = lifecycle
+        .claim()
+        .unwrap()
+        .run_owned(async {
+            Err::<(), _>(BgForkError::OwnershipUncertain(
+                "export fence failed".into(),
+            ))
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("export fence failed"));
+    for _ in 0..2 {
+        let report = lifecycle.close_and_drain().await;
+        assert!(report
+            .unconfirmed_recoveries
+            .iter()
+            .any(|error| error.contains("export fence failed")));
+    }
+}
+
+#[tokio::test]
+async fn uncertain_handoff_with_recovery_can_settle_on_a_later_drain() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(RetryRecovery {
+        attempts: AtomicUsize::new(0),
+        may_recover: AtomicBool::new(false),
+    });
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(recovery.clone());
+    assert!(claim
+        .run_owned(async move {
+            drop(ticket);
+            Err::<(), _>(BgForkError::OwnershipUncertain(
+                "export fence failed".into(),
+            ))
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        lifecycle
+            .close_and_drain()
+            .await
+            .unconfirmed_recoveries
+            .len(),
+        1
+    );
+    recovery.may_recover.store(true, Ordering::SeqCst);
+    assert!(lifecycle
+        .close_and_drain()
+        .await
+        .unconfirmed_recoveries
+        .is_empty());
+}
+
+#[tokio::test]
+async fn rejected_duplicate_does_not_block_an_active_owner_or_shutdown() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let first = tokio::spawn({
+        let claim = lifecycle.claim().unwrap();
+        let started = started.clone();
+        let release = release.clone();
+        async move {
+            claim
+                .run_owned(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+                .await
+        }
+    });
+    started.notified().await;
+    assert!(lifecycle
+        .claim()
+        .unwrap()
+        .run_owned(async {
+            Err::<(), _>(BgForkError::Dispatch(
+                "shell transfer already pending".into(),
+            ))
+        })
+        .await
+        .is_err());
+    let mut drain = Box::pin(lifecycle.close_and_drain());
+    assert_pending(drain.as_mut()).await;
+    release.notify_one();
+    first.await.unwrap().unwrap();
+    let report = drain.await;
+    assert!(report.unconfirmed_recoveries.is_empty());
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|s| s.contains("already pending")));
+}
+
+#[test]
+fn runtime_shutdown_drops_publication_before_releasing_its_claim() {
+    struct PendingPublication {
+        started: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+    impl Future for PendingPublication {
+        type Output = Result<(), BgForkError>;
+        fn poll(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+            self.started.notify_one();
+            Poll::Pending
+        }
+    }
+    impl Drop for PendingPublication {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let claim = lifecycle.claim().unwrap();
+        drop(tokio::spawn(claim.run_owned(PendingPublication {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        })));
+        started.notified().await;
+    });
+    lifecycle.close();
+    runtime.shutdown_background();
+    let waiter = tokio::runtime::Runtime::new().unwrap();
+    waiter.block_on(async {
+        let report = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            lifecycle.close_and_drain(),
+        )
+        .await
+        .unwrap();
+        assert!(report
+            .unconfirmed_recoveries
+            .iter()
+            .any(|s| s.contains("before ownership settled")));
+        assert!(dropped.load(Ordering::Acquire));
+    });
+}
+
+#[test]
+fn cancelled_recovery_runtime_releases_attempt_before_retry() {
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    struct InterruptedRecovery {
+        attempts: AtomicUsize,
+        started: tokio::sync::Notify,
+        first_dropped: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl BackgroundLaunchRecovery for InterruptedRecovery {
+        fn description(&self) -> String {
+            "interrupted recovery".into()
+        }
+        async fn recover(&self) -> Result<(), String> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _dropped = DropFlag(self.first_dropped.clone());
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            assert!(self.first_dropped.load(Ordering::Acquire));
+            Ok(())
+        }
+    }
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(InterruptedRecovery {
+        attempts: AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
+        first_dropped: Arc::new(AtomicBool::new(false)),
+    });
+    let claim = lifecycle.claim().unwrap();
+    drop(claim.register_recovery(recovery.clone()));
+    drop(claim);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        drop(tokio::spawn({
+            let lifecycle = lifecycle.clone();
+            async move { lifecycle.close_and_drain().await }
+        }));
+        recovery.started.notified().await;
+    });
+    runtime.shutdown_background();
+    let waiter = tokio::runtime::Runtime::new().unwrap();
+    waiter.block_on(async {
+        let report = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            lifecycle.close_and_drain(),
+        )
+        .await
+        .unwrap();
+        assert!(report.unconfirmed_recoveries.is_empty());
+        assert_eq!(recovery.attempts.load(Ordering::SeqCst), 2);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|s| s.contains("stopped before settlement")));
+    });
+}

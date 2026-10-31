@@ -330,6 +330,15 @@ pub(super) async fn build_mobile_inner_with_ask(
     media_agent_handoffs: Option<Arc<MobileMediaAgentHandoffQueue>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let mut cfg = cfg;
+    if cfg.app_agent_host && cfg.media_attachment_handle.is_some() {
+        return Err(MobileBuildError::Orchestrator(
+            "Local App Agent engines cannot own a media attachment".into(),
+        ));
+    }
+    if let Some(attachment) = cfg.media_attachment_handle.as_ref() {
+        super::initialize_mobile_lifecycle_runtime().map_err(MobileBuildError::Orchestrator)?;
+        cfg.media_service = Some(attachment.service());
+    }
     if cfg.app_agent_host {
         cfg.cwd = cfg.lingxi_home.join("local-apps/v2/agent/host");
         std::fs::create_dir_all(&cfg.cwd).map_err(|_| {
@@ -360,6 +369,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     let http = platform.http();
     let clock = platform.clock();
     let fs = platform.filesystem();
+    let host_fs = fs.host_filesystem().unwrap_or_else(|| fs.clone());
     let storage: Arc<dyn lingxi_core::host::SecureStorage> = platform
         .secure_storage()
         .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
@@ -508,7 +518,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         &main_session_uuid,
     );
     let session_writer = Arc::new(
-        session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), fs.clone())
+        session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), host_fs.clone())
             .with_durable_lock(transcript_authority),
     );
     if !cfg.app_agent_host {
@@ -654,18 +664,17 @@ pub(super) async fn build_mobile_inner_with_ask(
         .as_ref()
         .map(|catalog| provider_catalog_from_profiles(catalog.providers.clone()))
         .unwrap_or_else(builtin_provider_catalog);
-    let mut assembled = provider_config::assemble_for_region(
-        provider_config::AssembleInputs {
-            official_catalog,
-            anthropic_api_base: cfg.api_base.clone(),
-            anthropic_models: anthropic_models(&cfg.default_model),
-            anthropic_has_api_key: has_api_key,
-            anthropic_has_oauth: has_anthropic_oauth,
-            user_providers: provider_settings.providers.unwrap_or_default(),
-            routing: provider_settings.routing.clone(),
-        },
-        provider_region,
-    );
+    let catalog_inputs = provider_config::AssembleInputs {
+        official_catalog,
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: anthropic_models(&cfg.default_model),
+        anthropic_has_api_key: has_api_key,
+        anthropic_has_oauth: has_anthropic_oauth,
+        user_providers: provider_settings.providers.unwrap_or_default(),
+        routing: provider_settings.routing.clone(),
+    };
+    let mut assembled =
+        provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
     let full_provider_model_catalog =
         provider_model_catalog_from_listings(&model_listings(&assembled.client_config.providers));
     apply_mobile_profile_allowlist(&mut assembled, provider_settings.routing.as_ref());
@@ -709,6 +718,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     let model_resolution_client_config = assembled.client_config.clone();
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-runtime config: {e}")))?;
+    if let Some(source) = &cfg.startup_catalog {
+        client = client.with_catalog_source(source.runtime_source(catalog_inputs, provider_region));
+    }
     // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
     // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
     // Swift; API-key profiles retain the existing keychain → env fallback.
@@ -1141,55 +1153,59 @@ pub(super) async fn build_mobile_inner_with_ask(
         _ => None,
     };
     let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
-    let permission_cwd = match workspace_mounts.as_slice() {
-        [mount] => {
-            // BOTH sides must be canonicalized or the containment tests below
-            // compare different spellings of the same directory. `cfg.cwd`
-            // arrives from Swift without `resolvingSymlinksInPath()`, so on
-            // device it can read `/var/mobile/...` while the mount canonicalizes
-            // to `/private/var/mobile/...`. `Path::starts_with` is
-            // component-wise, so the very first component already differs, all
-            // three tests go false, and a NESTED pair takes the disjoint arm —
-            // re-rooting the permission root upward (the case the comment below
-            // says must be refused) and turning
-            // the profile no longer recognising `roots.cwd`, which disables
-            // `denies_host_owned_for_workspace` and `escapes_workspace`
-            // outright.
-            // Canonical forms are used ONLY to decide. BOTH returned values are
-            // raw, and that is load-bearing: `translate_model_path` resolves a
-            // guest path to `mount.host_path.join(rest)` with NO
-            // canonicalization (`mobile_linux_api::find_guest_mount` is
-            // pure path math). Returning the canonicalized spelling here would
-            // leave `FsRoots.cwd` as `/private/var/...` while every translated
-            // path arrives as `/var/...`; `path_matches_rule_pattern`
-            // relativizes component-wise, so the first component would differ
-            // and EVERY rule would miss — the guest/host fix would be inert in
-            // exactly the disjoint case it exists for.
-            let host_canon =
-                std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone());
-            let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            // Which root the rules resolve against.
-            //
-            // A WIDER root is not "more deny coverage": the workspace write
-            // guards are all-or-nothing on the profile recognising
-            // `roots.cwd`. Widening turns them OFF.
-            if cwd_canon == host_canon {
-                // Identical — cwd already IS the workspace. No-op.
-                cwd.clone()
-            } else if cwd_canon.starts_with(&host_canon) {
-                // cwd is INSIDE the mount. Re-rooting would move the rule root
-                // UPWARD, widening every `./**` pattern. Keep the narrower cwd.
-                cwd.clone()
-            } else {
-                // Either disjoint (the `.global` sibling case the on-device
-                // diagnostic printed) or cwd is an ANCESTOR of the mount. Both
-                // re-root onto the workspace: it is the directory the model
-                // actually writes into, and it is the only spelling under which
-                // the workspace guards engage at all.
-                mount.host_path.clone()
+    let permission_cwd = if cfg.cwd.starts_with(cfg.lingxi_home.join("workspaces")) {
+        cwd.clone()
+    } else {
+        match workspace_mounts.as_slice() {
+            [mount] => {
+                // BOTH sides must be canonicalized or the containment tests below
+                // compare different spellings of the same directory. `cfg.cwd`
+                // arrives from Swift without `resolvingSymlinksInPath()`, so on
+                // device it can read `/var/mobile/...` while the mount canonicalizes
+                // to `/private/var/mobile/...`. `Path::starts_with` is
+                // component-wise, so the very first component already differs, all
+                // three tests go false, and a NESTED pair takes the disjoint arm —
+                // re-rooting the permission root upward (the case the comment below
+                // says must be refused) and turning
+                // the profile no longer recognising `roots.cwd`, which disables
+                // `denies_host_owned_for_workspace` and `escapes_workspace`
+                // outright.
+                // Canonical forms are used ONLY to decide. BOTH returned values are
+                // raw, and that is load-bearing: `translate_model_path` resolves a
+                // guest path to `mount.host_path.join(rest)` with NO
+                // canonicalization (`mobile_linux_api::find_guest_mount` is
+                // pure path math). Returning the canonicalized spelling here would
+                // leave `FsRoots.cwd` as `/private/var/...` while every translated
+                // path arrives as `/var/...`; `path_matches_rule_pattern`
+                // relativizes component-wise, so the first component would differ
+                // and EVERY rule would miss — the guest/host fix would be inert in
+                // exactly the disjoint case it exists for.
+                let host_canon = std::fs::canonicalize(&mount.host_path)
+                    .unwrap_or_else(|_| mount.host_path.clone());
+                let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+                // Which root the rules resolve against.
+                //
+                // A WIDER root is not "more deny coverage": the workspace write
+                // guards are all-or-nothing on the profile recognising
+                // `roots.cwd`. Widening turns them OFF.
+                if cwd_canon == host_canon {
+                    // Identical — cwd already IS the workspace. No-op.
+                    cwd.clone()
+                } else if cwd_canon.starts_with(&host_canon) {
+                    // cwd is INSIDE the mount. Re-rooting would move the rule root
+                    // UPWARD, widening every `./**` pattern. Keep the narrower cwd.
+                    cwd.clone()
+                } else {
+                    // Either disjoint (the `.global` sibling case the on-device
+                    // diagnostic printed) or cwd is an ANCESTOR of the mount. Both
+                    // re-root onto the workspace: it is the directory the model
+                    // actually writes into, and it is the only spelling under which
+                    // the workspace guards engage at all.
+                    mount.host_path.clone()
+                }
             }
+            _ => cwd.clone(),
         }
-        _ => cwd.clone(),
     };
 
     let (perms, permission_policy_gate): (
@@ -1352,6 +1368,12 @@ pub(super) async fn build_mobile_inner_with_ask(
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
+        if let Some(memory) = cfg.scheduled_memory_directory.as_ref() {
+            additional_working_dirs.insert(
+                memory.clone(),
+                permission::rule::PermissionRuleSource::Session,
+            );
+        }
         let roots = permission::FsRoots {
             cwd: permission_cwd.clone(),
             home: if mobile_linux.is_some() {
@@ -1640,6 +1662,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // containment. Legacy/unavailable runtimes serve an empty table, so this
     // adds nothing off mobile-linux.
     let mut trusted_dirs = vec![cwd.clone(), logical_cwd.clone()];
+    trusted_dirs.extend(cfg.scheduled_memory_directory.iter().cloned());
     trusted_dirs.extend(mobile_linux_mounts.iter().map(|m| m.host_path.clone()));
     // PathAtlas S3: the MODEL-VISIBLE cwd is the guest workspace when one is
     // mounted — the same coordinate the shell already uses, so file tools and
@@ -1747,7 +1770,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         fs.clone(),
         Arc::new(tasks::output_manager::TaskOutputManager::new(
             task_output_dir,
-            fs.clone(),
+            host_fs.clone(),
         )),
     )
     // `tengu_agent_tool_terminated` (async twin): the registry is where
@@ -1925,7 +1948,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             Some(main_subagents_dir.clone()),
         )
         .with_subagents_dir_provider(subagents_dir_provider)
-        .with_transcript_fs(fs.clone())
+        .with_transcript_fs(host_fs.clone())
         .with_spawn_observer(session_agent_observer)
         .with_new_diagnostics_source_factory(Arc::new({
             let workspace_leases = mobile_lsp_workspace_leases.clone();
@@ -2062,8 +2085,20 @@ pub(super) async fn build_mobile_inner_with_ask(
     task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
+    let audio_service = platform
+        .audio_service()
+        .map(|audio| match cfg.media_attachment_handle.as_ref() {
+            Some(attachment) => attachment.audio_service(audio).map_err(|error| {
+                MobileBuildError::Orchestrator(format!(
+                    "mobile audio attachment is unavailable: {error}"
+                ))
+            }),
+            None => Ok(audio),
+        })
+        .transpose()?;
     let tool_ctx = BuiltinToolContext {
         host_git_root_cache: cfg.host_git_root_cache.clone(),
+        tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         side_chat: false,
         side_chat_cleanup_failed: None,
         // No session: this context never persists tool output.
@@ -2087,6 +2122,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         // Mobile has no interactive `/sandbox` toggle (no live TUI); the frozen
         // `sandbox_runtime` above governs — full Android/iOS sandboxing intact.
         sandbox_enabled_override: None,
+        isolated_shell: None,
         // (P2-14) `settings.skipWebFetchPreflight`, read from the settings.json
         // tiers in the perms loop above (scalar-override, local wins).
         skip_web_fetch_preflight,
@@ -2155,7 +2191,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: platform.camera(),
-        audio: platform.audio_service(),
+        audio: audio_service,
         media: if cfg.app_agent_host {
             None
         } else {
@@ -3321,6 +3357,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     Ok(MobileRuntime {
         session_cwd,
         provider_catalog,
+        official_catalog: cfg.startup_catalog.clone(),
+        catalog_refresh: _catalog_refresh,
+        catalog_observer: StdMutex::new(None),
         plugin_archive_session,
         side_chat_factory,
         app_agent_factory,
@@ -3329,6 +3368,16 @@ pub(super) async fn build_mobile_inner_with_ask(
             None
         } else {
             cfg.media_service.clone()
+        },
+        media_attachment_handle: if cfg.app_agent_host {
+            None
+        } else {
+            cfg.media_attachment_handle.clone()
+        },
+        media_attachment_confirmed_callback: if cfg.app_agent_host {
+            None
+        } else {
+            cfg.media_attachment_confirmed_callback.clone()
         },
         media_conversation_attachment: if cfg.app_agent_host {
             None
@@ -3469,6 +3518,15 @@ fn build_mobile_engine_on_worker(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let mut cfg = cfg;
     let app_agent_host = cfg.app_agent_host;
+    if app_agent_host && cfg.media_attachment_handle.is_some() {
+        return Err(MobileEngineError::Internal(
+            "Local App Agent engines cannot own a media attachment".into(),
+        ));
+    }
+    if let Some(attachment) = cfg.media_attachment_handle.as_ref() {
+        super::initialize_mobile_lifecycle_runtime().map_err(MobileEngineError::Internal)?;
+        cfg.media_service = Some(attachment.service());
+    }
     if app_agent_host {
         cfg.cwd = cfg.lingxi_home.join("local-apps/v2/agent/host");
     }
@@ -3497,6 +3555,7 @@ fn build_mobile_engine_on_worker(
     // reads the on-disk catalog with these (the SAME `fs` the tools use).
     let lingxi_home = cfg.lingxi_home.clone();
     let fs = platform.filesystem();
+    let host_fs = fs.host_filesystem().unwrap_or_else(|| fs.clone());
     // Capture the build recipe + platform BEFORE they move into
     // `build_mobile_inner`, so the cron firing path can rebuild a fresh throwaway
     // runtime per fired job (the same pattern as `lingxi_home`/`session_cwd`/`fs`).
@@ -3547,6 +3606,7 @@ fn build_mobile_engine_on_worker(
 
     let skill_count = 0;
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
+    let turn_tasks = tokio_util::task::TaskTracker::new();
     let initial_session_uuid = inner
         .active_session_uuid
         .lock()
@@ -3589,7 +3649,9 @@ fn build_mobile_engine_on_worker(
                 fs.clone(),
                 firer_platform.clock(),
                 Arc::new(platform_posix_minimal::runtime::PosixRuntime::new()),
-                cron::tasks_file::session_scheduled_tasks_path(&firer_cfg.cwd),
+                cron::tasks_file::session_scheduled_tasks_path(
+                    firer_cfg.logical_cwd.as_deref().unwrap_or(&firer_cfg.cwd),
+                ),
             )
             .with_session_id(initial_session_key.clone()),
         );
@@ -3642,7 +3704,7 @@ fn build_mobile_engine_on_worker(
     // Use the native turn slot and permission owner, exactly like SendPrompt.
     // Capture runtime components, never the handle itself: retaining/upgrading
     // the FFI Arc on a runtime worker can make that worker drop its own Runtime.
-    let task_notification_watcher = {
+    let task_notification_watcher_join = {
         let registry = inner.task_registry.clone();
         let orch = inner.orchestrator.clone();
         let permission_gate = inner.permission_gate.clone();
@@ -3659,8 +3721,9 @@ fn build_mobile_engine_on_worker(
         let loop_scheduler = loop_scheduler.clone();
         let loop_transition = loop_transition.clone();
         let queued_slash_handle = queued_slash_handle.clone();
+        let child_turn_tasks = turn_tasks.clone();
         runtime
-            .spawn(async move {
+            .spawn(turn_tasks.track_future(async move {
                 if app_agent_host { return; }
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -4083,7 +4146,7 @@ fn build_mobile_engine_on_worker(
                     // machine. Box it at the spawn boundary so the worker does
                     // not materialize the full queued-turn future inline while
                     // creating the Tokio task.
-                    let task = tokio::spawn(Box::pin(async move {
+                    let task = tokio::spawn(child_turn_tasks.track_future(Box::pin(async move {
                         let result = if let Some((_, inputs)) = mobile_delivery {
                             orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone()).await
                         } else {
@@ -4166,12 +4229,12 @@ fn build_mobile_engine_on_worker(
                         }
                         message_queue.clear_active_turn().await;
                         task_turn.mark_completed();
-                    }));
+                    })));
                     turn.set_task_handle(task);
                 }
-            })
-            .abort_handle()
+            }))
     };
+    let task_notification_watcher = task_notification_watcher_join.abort_handle();
     let settings_paths = ::configuration_admin::settings_bridge::SettingsPaths {
         lingxi_home: lingxi_home.clone(),
         project_dir: firer_cfg.cwd.clone(),
@@ -4198,6 +4261,8 @@ fn build_mobile_engine_on_worker(
         scheduled_reload: std::sync::atomic::AtomicBool::new(false),
         settings,
         task_notification_watcher,
+        task_notification_watcher_join: Some(task_notification_watcher_join),
+        turn_tasks,
         runtime: Some(runtime),
         inner,
         event_sink,
@@ -4215,9 +4280,30 @@ fn build_mobile_engine_on_worker(
         session_lifecycle_tx,
         fs,
         initialized_session_anchor: Mutex::new(None),
+        host_fs,
         firer_cfg,
         firer_platform,
     });
+    if let Some(source) = &handle.inner.official_catalog {
+        let mut updates = source.subscribe();
+        let weak = Arc::downgrade(&handle);
+        let task = handle.runtime().spawn(async move {
+            while updates.changed().await.is_ok() {
+                let Some(handle) = weak.upgrade() else {
+                    break;
+                };
+                handle
+                    .emit_listing(client::protocol::commands::ListingKindDto::Models)
+                    .await;
+            }
+        });
+        *handle
+            .inner
+            .catalog_observer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            Some(provider_config::startup_catalog::CatalogRefreshGuard(task));
+    }
     let _ = queued_slash_handle.set(Arc::downgrade(&handle));
     if !app_agent_host {
         // This runs on every scope switch / reconnect within one process, not

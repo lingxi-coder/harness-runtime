@@ -230,6 +230,19 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
         }
         let id = pu.profile.profile_name.clone();
         let mut profile = pu.profile;
+        if inputs.official_catalog.is_some() {
+            if let Some(official) = catalog.providers.iter().find(|p| {
+                p.profile_name == profile.profile_name
+                    && p.base_url.trim_end_matches('/') == profile.base_url.trim_end_matches('/')
+            }) {
+                profile.models = official.models.clone();
+                if let (Some(target), Some(source)) =
+                    (&mut profile.wire_profile, &official.wire_profile)
+                {
+                    target.models = source.models.clone();
+                }
+            }
+        }
         for model in &mut profile.models {
             model.metadata.catalog_offered = true;
         }

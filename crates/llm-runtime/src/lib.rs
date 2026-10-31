@@ -39,6 +39,7 @@ mod codec_tests;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
 pub mod catalog;
+pub mod catalog_task;
 #[allow(missing_docs)]
 pub mod client;
 pub mod cloud_provider_env;
@@ -51,6 +52,8 @@ mod dispatch_header;
 pub mod error;
 mod execution;
 mod execution_context;
+mod scope_output_quota;
+pub use scope_output_quota::ScopeOutputQuota;
 mod structured_output;
 pub use execution_context::{
     ApiAttemptsLeft, ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext,

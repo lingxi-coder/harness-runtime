@@ -1439,7 +1439,7 @@ impl PluginManager {
                         // into an `AgentDefinition` by
                         // `parse_agent_markdown` two lines below (its
                         // `Frontmatter` target is strictly less permissive
-                        // than `serde_yaml::Value`), so nothing from this
+                        // than `yaml_serde::Value`), so nothing from this
                         // file can reach execution state. Failing the load
                         // here would take the WHOLE plugin down over one
                         // unparseable agent file, which §19.1 forbids: warn

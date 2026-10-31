@@ -5,6 +5,7 @@
 //! execution rules live in the device-local AudioService; the core::host
 //! domain types are mapped explicitly at their host boundaries.
 
+use super::media::{validate_attachment_identity, MediaOwnerKindDto};
 use serde::{Deserialize, Serialize};
 
 /// Existing bridge frame ceiling. Kept here because this leaf contract cannot
@@ -55,6 +56,47 @@ pub enum AudioOwnerDto {
         /// Stable host instance identifier.
         instance_id: String,
     },
+    /// Host-issued attachment scope plus its independent logical owner.
+    Attached {
+        /// Stable ID of the issuing media host.
+        attachment_host_id: String,
+        /// Monotonic attachment generation issued by that host.
+        attachment_generation: u64,
+        /// Kind of the owner inside the attachment.
+        logical_kind: MediaOwnerKindDto,
+        /// Stable logical owner ID, separate from attachment identity.
+        logical_owner_id: String,
+    },
+}
+
+impl AudioOwnerDto {
+    /// Check DTO shape and bounds; this does not authenticate an attachment ID.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Session { session_id } => {
+                if session_id.is_empty() || session_id.len() > 256 {
+                    return Err("audio session owner is invalid".into());
+                }
+            }
+            Self::Ui { instance_id } | Self::System { instance_id } => {
+                if instance_id.is_empty() || instance_id.len() > 256 {
+                    return Err("audio owner is invalid".into());
+                }
+            }
+            Self::Attached {
+                attachment_host_id,
+                attachment_generation,
+                logical_owner_id,
+                ..
+            } => {
+                validate_attachment_identity(attachment_host_id, *attachment_generation)?;
+                if logical_owner_id.is_empty() || logical_owner_id.len() > 256 {
+                    return Err("audio logical owner is invalid".into());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Trusted call attribution kept separate from the stable resource owner.
@@ -296,8 +338,15 @@ pub enum AudioOperationResultDto {
     },
     /// The request owner was ended.
     OwnerEnded,
-    /// The operation failed.
+    /// The operation failed and its resource state is unknown.
     Failed {
+        /// Structured error class and detail.
+        error: AudioErrorDto,
+    },
+    /// This exact request failed with authoritative proof that it owns no
+    /// native resource or in-flight resource callback. This says nothing
+    /// about resources owned by earlier requests, even for the same owner.
+    FailedWithoutResource {
         /// Structured error class and detail.
         error: AudioErrorDto,
     },
@@ -370,6 +419,38 @@ pub struct AudioCapabilitySnapshotDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attached_audio_owner_keeps_host_scope_and_logical_owner_separate() {
+        let owner = AudioOwnerDto::Attached {
+            attachment_host_id: "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f".into(),
+            attachment_generation: 17,
+            logical_kind: MediaOwnerKindDto::Ui,
+            logical_owner_id: "ui-1".into(),
+        };
+        assert!(owner.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(owner).unwrap(),
+            serde_json::json!({
+                "type": "attached",
+                "attachment_host_id": "4c1ca0d5-61cd-4c9d-9d9a-23c8832ebc8f",
+                "attachment_generation": 17,
+                "logical_kind": "ui",
+                "logical_owner_id": "ui-1"
+            })
+        );
+    }
+
+    #[test]
+    fn attached_audio_owner_rejects_malformed_identity_shape() {
+        let owner = AudioOwnerDto::Attached {
+            attachment_host_id: "host-1".into(),
+            attachment_generation: 1,
+            logical_kind: MediaOwnerKindDto::Session,
+            logical_owner_id: "session-1".into(),
+        };
+        assert!(owner.validate().is_err());
+    }
 
     #[test]
     fn audio_payload_limit_is_frame_derived_and_pcm16_aligned() {

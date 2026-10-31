@@ -261,9 +261,42 @@ impl MobileLocalAppServiceHandle {
                 }
                 previous.listener.lock().await.take();
             }
-            *run.gateway.lock().await = Some(gateway::spawn(listener, route));
+            let service = Arc::downgrade(&owner);
+            let failed_run = Arc::downgrade(&run);
+            let failed_app_id = record.app_id.clone();
+            let on_gateway_failure: gateway::FailureHandler = Arc::new(move |kind| {
+                let (Some(service), Some(run)) = (service.upgrade(), failed_run.upgrade()) else {
+                    return;
+                };
+                *run.gateway_failure.lock().unwrap() = Some(kind);
+                let app_id = failed_app_id.clone();
+                let cleanup = tokio::spawn(async move {
+                    service.gateway_failed(app_id, run, kind).await;
+                });
+                drop(cleanup);
+            });
+            #[cfg(test)]
+            let acceptor = { owner.gateway_acceptor.lock().unwrap().clone() };
+            #[cfg(test)]
+            let gateway_task = match acceptor {
+                Some(acceptor) => {
+                    gateway::spawn_with_accept(listener, route, acceptor, on_gateway_failure)
+                }
+                None => gateway::spawn_with_failure_handler(listener, route, on_gateway_failure),
+            };
+            #[cfg(not(test))]
+            let gateway_task =
+                gateway::spawn_with_failure_handler(listener, route, on_gateway_failure);
+            *run.gateway.lock().await = Some(gateway_task);
             *run.url.lock().unwrap() = url.clone();
             *run.record.lock().unwrap() = record.clone();
+            #[cfg(test)]
+            let start_gate = { owner.gateway_start_gate.lock().unwrap().take() };
+            #[cfg(test)]
+            if let Some(gate) = start_gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             if let Some(previous) = previous {
                 match owner
                     .stop_chain(&record.app_id, previous, RunPhase::Stopped, true)

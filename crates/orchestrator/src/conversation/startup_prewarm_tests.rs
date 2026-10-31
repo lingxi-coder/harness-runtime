@@ -130,6 +130,29 @@ async fn completed_panic_remains_diagnostic_without_blocking_drain() {
     started.notified().await;
     let report = prewarm.close_and_drain().await;
     assert_eq!(report.diagnostics.len(), 1);
-    assert!(report.diagnostics[0].contains("startup prewarm failed"));
+    assert!(report.diagnostics[0].contains("startup prewarm task panicked"));
     assert_eq!(prewarm.close_and_drain().await, report);
+}
+
+#[test]
+fn runtime_shutdown_releases_the_work_claim_without_a_join_task() {
+    let prewarm = StartupPrewarm::default();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (work, started, dropped) = blocking_prewarm();
+    runtime.block_on(async {
+        prewarm.spawn(work);
+        started.notified().await;
+    });
+    prewarm.close();
+    runtime.shutdown_background();
+    let waiter = tokio::runtime::Runtime::new().unwrap();
+    waiter.block_on(async {
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), prewarm.close_and_drain())
+                .await
+                .unwrap(),
+            StartupPrewarmDrainReport::default()
+        );
+    });
+    assert!(dropped.load(Ordering::Acquire));
 }

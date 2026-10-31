@@ -542,6 +542,7 @@ struct ForegroundOwner {
 
 struct OwnedRawStdio {
     handle: RawStdioSessionHandle,
+    strict_cleanup: bool,
     close_state: AsyncMutex<RawStdioCloseState>,
     close_notify: Notify,
 }
@@ -628,6 +629,16 @@ impl MobileLinuxProcessRunner {
     }
 
     async fn close_raw_session(&self, session: &OwnedRawStdio) -> Result<(), ProcessError> {
+        let close_error = |error: String| {
+            ProcessError::Io(if session.strict_cleanup {
+                format!(
+                    "{} {error}",
+                    lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                )
+            } else {
+                error
+            })
+        };
         loop {
             let notified = session.close_notify.notified();
             tokio::pin!(notified);
@@ -640,8 +651,14 @@ impl MobileLinuxProcessRunner {
                         true
                     }
                     RawStdioCloseState::Closing => false,
+                    RawStdioCloseState::Closed(Err(_)) if session.strict_cleanup => {
+                        // A failed reap is not a terminal session state. A
+                        // later owner-stop must be able to confirm cleanup.
+                        *state = RawStdioCloseState::Closing;
+                        true
+                    }
                     RawStdioCloseState::Closed(result) => {
-                        return result.clone().map_err(ProcessError::Io);
+                        return result.clone().map_err(&close_error);
                     }
                 }
             };
@@ -656,7 +673,7 @@ impl MobileLinuxProcessRunner {
                 .map_err(|error| error.to_string());
             *session.close_state.lock().await = RawStdioCloseState::Closed(result.clone());
             session.close_notify.notify_waiters();
-            return result.map_err(ProcessError::Io);
+            return result.map_err(&close_error);
         }
     }
 
@@ -740,11 +757,50 @@ impl MobileLinuxProcessRunner {
         Ok(plan)
     }
 
+    async fn run_foreground_owned(
+        &self,
+        cmd: &SandboxedCommand,
+        max_output_bytes: Option<usize>,
+        strict_cleanup: bool,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        let plan = self.admitted_plan(cmd)?;
+        if plan.request.stdin.is_some() {
+            // Refuse before opening any child because the pinned raw-stdio
+            // contract cannot currently feed a complete stdin payload and EOF.
+            return Err(ProcessError::Unsupported);
+        }
+        let owner = cmd.process_owner().map(str::to_string).unwrap_or_else(|| {
+            format!(
+                "mobile-linux-unowned:{}",
+                NEXT_UNOWNED_FOREGROUND_ID.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+        self.begin_foreground_owner(&owner)?;
+        let result = self
+            .run_raw_stdio_foreground(&plan, &owner, max_output_bytes, strict_cleanup)
+            .await;
+        let mut owners = self
+            .foreground_owners
+            .lock()
+            .expect("mobile-linux foreground owner map poisoned");
+        if owners
+            .get(&owner)
+            .is_some_and(|owner_state| owner_state.sessions.is_empty())
+        {
+            owners.remove(&owner);
+        }
+        result.map(|output| lingxi_core::host::ForegroundRunResult {
+            outcome: lingxi_core::host::ForegroundOutcome::Completed(output),
+            output_file: None,
+        })
+    }
+
     async fn run_raw_stdio_foreground(
         &self,
         plan: &MobileLinuxSandboxPlan,
         owner: &str,
         max_output_bytes: Option<usize>,
+        strict_cleanup: bool,
     ) -> Result<ProcessOutput, ProcessError> {
         if plan.request.stdin.is_some() {
             // Raw-stdio's current pinned API has no stdin EOF/write mode. Do
@@ -776,22 +832,48 @@ impl MobileLinuxProcessRunner {
             })
             .await
             .map_err(to_process_error)?;
-        if let Err(error) = opened
-            .enforcement
-            .ensure_for(requested.network, requested.resource_limits)
-        {
-            let _ = self.runtime.close_raw_stdio(&opened).await;
-            return Err(to_process_error(error));
-        }
-
         let session_id = opened.id.clone();
         let session = Arc::new(OwnedRawStdio {
             handle: opened,
+            strict_cleanup,
             close_state: AsyncMutex::new(RawStdioCloseState::Open),
             close_notify: Notify::new(),
         });
+        if let Err(error) = session
+            .handle
+            .enforcement
+            .ensure_for(requested.network, requested.resource_limits)
+        {
+            if strict_cleanup {
+                self.foreground_owners
+                    .lock()
+                    .expect("mobile-linux foreground owner map poisoned")
+                    .entry(owner.to_owned())
+                    .or_default()
+                    .sessions
+                    .insert(session_id.clone(), session.clone());
+                self.close_raw_session(&session).await?;
+                self.unregister_foreground_session(owner, &session_id);
+            } else {
+                let _ = self.runtime.close_raw_stdio(&session.handle).await;
+            }
+            return Err(to_process_error(error));
+        }
+
         if let Err(error) = self.register_foreground_session(owner, session.clone()) {
-            let _ = self.close_raw_session(&session).await;
+            if strict_cleanup {
+                self.foreground_owners
+                    .lock()
+                    .expect("mobile-linux foreground owner map poisoned")
+                    .entry(owner.to_owned())
+                    .or_default()
+                    .sessions
+                    .insert(session_id.clone(), session.clone());
+                self.close_raw_session(&session).await?;
+                self.unregister_foreground_session(owner, &session_id);
+            } else {
+                let _ = self.close_raw_session(&session).await;
+            }
             return Err(error);
         }
 
@@ -863,7 +945,9 @@ impl MobileLinuxProcessRunner {
             Err(_) => Err(ProcessError::Timeout),
         };
         let close_result = self.close_raw_session(&session).await;
-        self.unregister_foreground_session(owner, &session_id);
+        if close_result.is_ok() || !strict_cleanup {
+            self.unregister_foreground_session(owner, &session_id);
+        }
         if let Err(error) = close_result {
             return Err(error);
         }
@@ -882,6 +966,19 @@ fn append_bounded(target: &mut Vec<u8>, bytes: &[u8], limit: usize, truncated: &
 
 #[async_trait]
 impl ProcessRunner for MobileLinuxProcessRunner {
+    fn supports_inline_foreground(&self) -> bool {
+        true
+    }
+
+    async fn run_inline_foreground(
+        &self,
+        cmd: &SandboxedCommand,
+        max_output_bytes: usize,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        self.run_foreground_owned(cmd, Some(max_output_bytes), true)
+            .await
+    }
+
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
         if let Some(owner) = cmd
             .process_owner()
@@ -921,36 +1018,11 @@ impl ProcessRunner for MobileLinuxProcessRunner {
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
     ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
-        let plan = self.admitted_plan(cmd)?;
-        if plan.request.stdin.is_some() {
-            // Refuse before opening any child because the pinned raw-stdio
-            // contract cannot currently feed a complete stdin payload and EOF.
-            return Err(ProcessError::Unsupported);
-        }
-        let owner = cmd.process_owner().map(str::to_string).unwrap_or_else(|| {
-            format!(
-                "mobile-linux-unowned:{}",
-                NEXT_UNOWNED_FOREGROUND_ID.fetch_add(1, Ordering::Relaxed)
-            )
-        });
-        self.begin_foreground_owner(&owner)?;
-        let result = self
-            .run_raw_stdio_foreground(&plan, &owner, max_output_bytes)
-            .await;
-        let mut owners = self
-            .foreground_owners
-            .lock()
-            .expect("mobile-linux foreground owner map poisoned");
-        if owners
-            .get(&owner)
-            .is_some_and(|owner_state| owner_state.sessions.is_empty())
-        {
-            owners.remove(&owner);
-        }
-        result.map(|output| lingxi_core::host::ForegroundRunResult {
-            outcome: lingxi_core::host::ForegroundOutcome::Completed(output),
-            output_file: None,
-        })
+        let strict_cleanup = cmd
+            .process_owner()
+            .is_some_and(|owner| owner.starts_with("side:"));
+        self.run_foreground_owned(cmd, max_output_bytes, strict_cleanup)
+            .await
     }
 
     async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
@@ -967,15 +1039,26 @@ impl ProcessRunner for MobileLinuxProcessRunner {
                             .strip_prefix(owner)
                             .is_some_and(|suffix| suffix.starts_with('/'))
                 })
-                .flat_map(|(_, state)| {
+                .flat_map(|(owner, state)| {
                     state.cancelled = true;
-                    state.sessions.values().cloned().collect::<Vec<_>>()
+                    state
+                        .sessions
+                        .values()
+                        .cloned()
+                        .map(|session| (owner.clone(), session))
+                        .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
         };
-        for session in sessions {
-            if let Err(error) = self.close_raw_session(&session).await {
-                tracing::warn!(%error, session_id = %session.handle.id, "mobile-linux foreground reap failed");
+        for (owner, session) in sessions {
+            match self.close_raw_session(&session).await {
+                Err(error) => {
+                    tracing::warn!(%error, session_id = %session.handle.id, "mobile-linux foreground reap failed")
+                }
+                Ok(()) if session.strict_cleanup => {
+                    self.unregister_foreground_session(&owner, &session.handle.id)
+                }
+                Ok(()) => {}
             }
         }
         // Raw stdio deliberately does not expose a host PID. Its close method
@@ -1100,6 +1183,7 @@ mod tests {
         raw_stdio_requests: Mutex<Vec<RawStdioOpenRequest>>,
         raw_stdio_reads: Mutex<VecDeque<RawStdioReadResult>>,
         raw_stdio_closed: Mutex<Vec<String>>,
+        raw_stdio_close_error: Mutex<Option<MobileLinuxError>>,
         raw_stdio_never_close: AtomicBool,
         raw_stdio_open_gate: Mutex<Option<Arc<Notify>>>,
         raw_stdio_open_started: Notify,
@@ -1130,6 +1214,7 @@ mod tests {
                 raw_stdio_requests: Mutex::new(Vec::new()),
                 raw_stdio_reads: Mutex::new(VecDeque::new()),
                 raw_stdio_closed: Mutex::new(Vec::new()),
+                raw_stdio_close_error: Mutex::new(None),
                 raw_stdio_never_close: AtomicBool::new(false),
                 raw_stdio_open_gate: Mutex::new(None),
                 raw_stdio_open_started: Notify::new(),
@@ -1328,6 +1413,14 @@ mod tests {
             &self,
             handle: &RawStdioSessionHandle,
         ) -> Result<(), MobileLinuxError> {
+            if let Some(error) = self
+                .raw_stdio_close_error
+                .lock()
+                .expect("raw close failure mutex")
+                .clone()
+            {
+                return Err(error);
+            }
             self.raw_stdio_never_close.store(false, Ordering::Release);
             self.raw_closed.store(true, Ordering::Release);
             self.raw_stdio_closed
@@ -1551,13 +1644,11 @@ mod tests {
                 .await,
             Err(ProcessError::Unsupported)
         ));
-        assert!(
-            runtime
-                .raw_stdio_requests
-                .lock()
-                .expect("raw requests")
-                .is_empty()
-        );
+        assert!(runtime
+            .raw_stdio_requests
+            .lock()
+            .expect("raw requests")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1937,6 +2028,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_app_raw_close_failure_retains_owner_until_confirmed_reap() {
+        let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        *runtime.raw_stdio_close_error.lock().unwrap() = Some(MobileLinuxError::Io(
+            "raw stdio process tree survived SIGKILL".into(),
+        ));
+        let owner = "local-app-chat:failed-reap";
+        let (runner, command) = foreground_fixture(
+            runtime.clone(),
+            None,
+            std::time::Duration::from_secs(1),
+            owner,
+        );
+        let error = runner
+            .run_inline_foreground(&command, 4096)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE));
+        assert!(error
+            .to_string()
+            .contains("raw stdio process tree survived SIGKILL"));
+        assert_eq!(
+            runner
+                .foreground_owners
+                .lock()
+                .unwrap()
+                .get(owner)
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+        runner.kill_owner_processes(owner).await;
+        assert_eq!(
+            runner
+                .foreground_owners
+                .lock()
+                .unwrap()
+                .get(owner)
+                .unwrap()
+                .sessions
+                .len(),
+            1,
+            "a failed stop cannot discard the unresolved raw session"
+        );
+        assert!(!runtime.raw_closed.load(Ordering::Acquire));
+        *runtime.raw_stdio_close_error.lock().unwrap() = None;
+        runner.kill_owner_processes(owner).await;
+        assert!(!runner.foreground_owners.lock().unwrap().contains_key(owner));
+        assert!(runtime.raw_closed.load(Ordering::Acquire));
+        assert_eq!(runtime.raw_stdio_closed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn mobile_linux_process_runner_maps_run_and_streaming() {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::create_dir_all(temp.path().join("workspace")).expect("workspace");
@@ -2012,11 +2158,9 @@ mod tests {
             .kill(&foreign)
             .await
             .expect_err("unknown handles must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("unknown background process handle")
-        );
+        assert!(error
+            .to_string()
+            .contains("unknown background process handle"));
         assert!(runtime_impl.killed.lock().expect("kill mutex").is_empty());
     }
 

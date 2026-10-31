@@ -4,9 +4,12 @@
 //! storage roots, credentials and grants are resolved by the trusted host; the
 //! app supplies only input and may request limits lower than its host grant.
 
-use super::{
-    CustomizationGates, DesktopConfig, DesktopSessionComposition, DesktopSessionResumeSnapshot,
-};
+#[cfg(test)]
+use super::DesktopSessionResumeSnapshot;
+use super::{CustomizationGates, DesktopConfig, DesktopSessionComposition};
+#[path = "app_chat.rs"]
+pub(super) mod chat;
+pub use chat::AppChatCleanupReceipt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,6 +57,110 @@ pub struct AppChatProfile {
     pub chat_id: String,
     pub session_id: String,
     pub session_directory: PathBuf,
+    pub generation_id: String,
+    pub native_user_message_id: String,
+    pub cleanup_nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_checkpoint: Option<AppChatGenerationCheckpoint>,
+}
+
+impl AppChatProfile {
+    /// Bind the incoming user row to this one host-owned task generation.
+    /// Public AG-UI message identifiers are opaque and must not replace this
+    /// canonical Harness identity when admitting the model-facing row.
+    pub fn native_message_id(&self) -> Result<lingxi_core::types::MessageId, AppInvocationError> {
+        let generation = uuid::Uuid::parse_str(&self.generation_id)
+            .map_err(|_| AppInvocationError::InvalidChat)?;
+        let message = lingxi_core::types::MessageId::parse_prefixed(&self.native_user_message_id)
+            .ok_or(AppInvocationError::InvalidChat)?;
+        if generation.to_string() != self.generation_id
+            || message.as_uuid() != generation
+            || message.to_string() != self.native_user_message_id
+        {
+            return Err(AppInvocationError::InvalidChat);
+        }
+        Ok(message)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppChatGenerationCheckpoint {
+    pub generation_id: String,
+    pub session_id: String,
+    pub byte_len: u64,
+    pub sha256: String,
+}
+
+/// Validate the actual, policy-filtered tool implementations before a Chat
+/// can issue its first model request. A granted but unsupported tool is an
+/// explicit error, rather than a silent downgrade or an unchecked handle.
+pub fn validate_app_chat_tools(
+    runtime: &super::DesktopRuntime,
+    policy: &SessionToolPolicy,
+) -> Result<(), AppInvocationError> {
+    let tools = runtime
+        .tools
+        .available_tools(&tool_api::tool_trait::ToolStaticContext::default());
+    for tool in &tools {
+        if !tool.supports_persistent_chat() {
+            return Err(AppInvocationError::ChatUnsupportedTool);
+        }
+    }
+    for name in &policy.builtin_tools {
+        if !tools.iter().any(|tool| tool.name() == name) {
+            return Err(AppInvocationError::ChatUnsupportedTool);
+        }
+    }
+    for grant in &policy.mcp_tools {
+        if !tools
+            .iter()
+            .any(|tool| tool.mcp_tool_identity() == Some(grant))
+        {
+            return Err(AppInvocationError::ChatUnsupportedTool);
+        }
+    }
+    Ok(())
+}
+
+/// Seal only after the host's resource drain succeeded. This proves the
+/// current generation's exact canonical history, including this admitted user
+/// and the assistant identity returned over the private child transport.
+pub async fn checkpoint_app_chat(
+    runtime: &super::DesktopRuntime,
+    chat: &AppChatProfile,
+    assistant_id: &str,
+) -> Result<AppChatGenerationCheckpoint, &'static str> {
+    let captured = runtime
+        .orchestrator
+        .verify_persistent_chat_checkpoint(true)
+        .await
+        .map_err(|_| "chat_transcript_unavailable")?;
+    let expected_path = chat
+        .session_directory
+        .join(&chat.generation_id)
+        .join(format!("{}.jsonl", chat.session_id));
+    if captured.path() != expected_path || captured.session_id().to_string() != chat.session_id {
+        return Err("chat_transcript_unavailable");
+    }
+    let replayed =
+        orchestrator::ConversationOrchestrator::replay_persistent_chat_snapshot(&captured)
+            .map_err(|_| "chat_transcript_unavailable")?;
+    let user_id = chat.native_message_id().map_err(|_| "invalid_chat")?;
+    let assistant_id =
+        lingxi_core::types::MessageId::parse_prefixed(assistant_id).ok_or("invalid_result")?;
+    if replayed.state.history.iter().filter(|message| message.id() == user_id).count() != 1
+        || !replayed.state.history.iter().any(|message| matches!(message, lingxi_core::types::ConversationMessage::User { id, .. } if *id == user_id))
+        || replayed.state.history.iter().rev().find(|message| matches!(message, lingxi_core::types::ConversationMessage::Assistant { .. })).map(|message| message.id()) != Some(assistant_id)
+    {
+        return Err("chat_transcript_unavailable");
+    }
+    Ok(AppChatGenerationCheckpoint {
+        generation_id: chat.generation_id.clone(),
+        session_id: chat.session_id.clone(),
+        byte_len: captured.checkpoint().byte_len,
+        sha256: captured.checkpoint().sha256.clone(),
+    })
 }
 
 /// Trusted host-approved capability snapshot for exactly one task.
@@ -69,6 +176,10 @@ pub struct AppInvocationProfile {
     /// Verified instructions returned by app_agent_skills::materialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_instructions: Option<String>,
+    /// Native cleanup evidence shared with the actual tool contexts. This is
+    /// not part of the child DTO and cannot be supplied by an App page.
+    #[serde(skip)]
+    pub tool_cleanup_failed: Option<Arc<std::sync::atomic::AtomicBool>>,
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
     #[serde(default = "default_timeout_ms")]
@@ -91,6 +202,7 @@ impl AppInvocationProfile {
             tool_policy,
             app_chat: None,
             skill_instructions: None,
+            tool_cleanup_failed: None,
             max_turns: DEFAULT_MAX_TURNS,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
@@ -126,7 +238,26 @@ impl AppInvocationProfile {
         }
         if let Some(chat) = self.app_chat.as_ref() {
             if uuid::Uuid::parse_str(&chat.chat_id).is_err()
-                || lingxi_core::types::SessionId::parse_prefixed(&chat.session_id).is_none()
+                || !uuid::Uuid::parse_str(&chat.session_id)
+                    .is_ok_and(|id| id.to_string() == chat.session_id)
+                || chat.native_message_id().is_err()
+                || chat.cleanup_nonce.len() != 64
+                || !chat
+                    .cleanup_nonce
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || chat.base_checkpoint.as_ref().is_some_and(|checkpoint| {
+                    uuid::Uuid::parse_str(&checkpoint.generation_id).is_err()
+                        || checkpoint.generation_id == chat.generation_id
+                        || checkpoint.session_id != chat.session_id
+                        || checkpoint.byte_len == 0
+                        || checkpoint.byte_len > 64 * 1024 * 1024
+                        || checkpoint.sha256.len() != 64
+                        || !checkpoint
+                            .sha256
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
                 || !chat.session_directory.is_absolute()
                 || chat.session_directory.components().any(|part| {
                     matches!(
@@ -156,6 +287,8 @@ pub enum AppInvocationError {
     InvalidLimits,
     #[error("this tool does not support isolated app invocations: {0}")]
     UnsupportedTool(String),
+    #[error("a requested tool cannot be preserved safely in App Chat")]
+    ChatUnsupportedTool,
     #[error("app invocations require a trusted host permission gate")]
     MissingPermissionGate,
     #[error("app invocations require absolute, host-owned working and config directories")]
@@ -164,6 +297,8 @@ pub enum AppInvocationError {
     MissingModel,
     #[error("App Chat requires a host-owned UUID and an isolated app chat directory")]
     InvalidChat,
+    #[error("App Chat transcript could not be opened under its exclusive generation owner")]
+    ChatTranscriptUnavailable,
     #[error("App Skills must be unique, bounded, and host-copied into the isolated workspace")]
     InvalidSkills,
 }
@@ -453,6 +588,9 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     config.inline_visualization = false;
     config.local_apps = false;
     config.audio = None;
+    config.media_service = None;
+    config.media_conversation_attachment = None;
+    config.media_agent_handoffs = None;
     config.default_model_explicit = true;
     config.default_model_env_pinned = false;
     config.fallback_model = None;
@@ -483,46 +621,31 @@ fn apply_app_chat(
         .lingxi_home
         .join("local-apps/v2/apps")
         .join(&identity.app_id)
-        .join("agent/chats")
+        .join("agent/agui-v1/chats")
         .join(&chat.chat_id);
-    if chat.session_directory != expected {
+    let workspace = config
+        .lingxi_home
+        .join("local-apps/v2/apps")
+        .join(&identity.app_id)
+        .join("agent/agui-v1/workspaces")
+        .join(&chat.chat_id);
+    if chat.session_directory != expected || config.cwd != workspace {
         return Err(AppInvocationError::InvalidChat);
     }
-    let directory = std::fs::symlink_metadata(&chat.session_directory)
+    lingxi_core::host::rooted_fs::root_identity(&chat.session_directory)
         .map_err(|_| AppInvocationError::InvalidChat)?;
-    if directory.file_type().is_symlink() || !directory.is_dir() {
-        return Err(AppInvocationError::InvalidChat);
-    }
-    let session_id = lingxi_core::types::SessionId::parse_prefixed(&chat.session_id)
-        .ok_or(AppInvocationError::InvalidChat)?;
-    let session_id = session_id.as_uuid().to_string();
-    let transcript = chat.session_directory.join(format!("{session_id}.jsonl"));
-    let snapshot = match std::fs::symlink_metadata(&transcript) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || metadata.len() > 128 * 1024 * 1024
-            {
-                return Err(AppInvocationError::InvalidChat);
-            }
-            let content = std::fs::read_to_string(&transcript)
-                .map_err(|_| AppInvocationError::InvalidChat)?;
-            (!content.is_empty()).then(|| DesktopSessionResumeSnapshot {
-                source_session_id: session_id.clone(),
-                content: Arc::from(content),
-            })
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(AppInvocationError::InvalidChat),
-    };
-    config.cwd = chat.session_directory.clone();
-    config.session_id_override = Some(session_id);
-    config.session_transcript_path = Some(transcript);
-    config.session_resume_snapshot = snapshot;
-    config.session_resume_cost = None;
-    config.session_writer_lease = None;
+    lingxi_core::host::rooted_fs::root_identity(&config.cwd)
+        .map_err(|_| AppInvocationError::InvalidDirectories)?;
+    config.session_id_override = Some(chat.session_id.clone());
+    config.session_transcript_path = Some(
+        chat.session_directory
+            .join(&chat.generation_id)
+            .join(format!("{}.jsonl", chat.session_id)),
+    );
     config.session_persistence = true;
-    config.idle_compaction_enabled = true;
+    // App Chat restores only its strict capture below, before any model turn.
+    // Generic startup hooks and ordinary resume loaders have no authority here.
+    config.defer_session_start = true;
     Ok(())
 }
 
@@ -531,6 +654,65 @@ mod tests {
     use super::*;
     use lingxi_core::host::OrchestratorHandle as _;
     use std::sync::Arc;
+
+    struct TestMediaService;
+
+    #[async_trait::async_trait]
+    impl media_api::MediaService for TestMediaService {
+        fn capabilities(&self) -> media_api::MediaCapabilities {
+            media_api::MediaCapabilities {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: vec![media_api::MediaOperationKind::Capture],
+                supported_media_kinds: vec![media_api::MediaKind::Image],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _: media_api::MediaOperationContext,
+            _: media_api::MediaOperation,
+        ) -> Result<media_api::MediaResult, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "test",
+            ))
+        }
+
+        async fn read_media(
+            &self,
+            _: media_api::MediaOperationContext,
+            _: media_api::MediaRef,
+        ) -> Result<media_api::MediaContent, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "test",
+            ))
+        }
+
+        async fn cancel(
+            &self,
+            _: media_api::MediaOperationContext,
+        ) -> Result<(), media_api::MediaError> {
+            Ok(())
+        }
+    }
+
+    struct TestMediaAttachment;
+
+    #[async_trait::async_trait]
+    impl orchestrator::MediaConversationAttachment for TestMediaAttachment {
+        async fn open(
+            &self,
+            _: tool_api::MediaAgentHandoffRequest,
+            _: orchestrator::RealtimeAgentContext,
+            _: Arc<dyn media_api::MediaAudioChannel>,
+        ) -> Result<orchestrator::RealtimeAgentSessionIo, String> {
+            Err("test attachment is never opened".into())
+        }
+    }
 
     fn profile() -> AppInvocationProfile {
         AppInvocationProfile::new(
@@ -590,6 +772,77 @@ mod tests {
     }
 
     #[test]
+    fn app_isolation_clears_media_while_preserving_granted_mcp_lease() {
+        let media: Arc<dyn media_api::MediaService> = Arc::new(TestMediaService);
+        let attachment: Arc<dyn orchestrator::MediaConversationAttachment> =
+            Arc::new(TestMediaAttachment);
+        let queue = Arc::new(super::super::DesktopMediaAgentHandoffQueue::default());
+        let mut host = config();
+        host.media_service = Some(media.clone());
+        host.media_conversation_attachment = Some(attachment.clone());
+        host.media_agent_handoffs = Some(queue.clone());
+        enforce_app_config(&mut host).unwrap();
+        assert!(host.media_service.is_some());
+        assert!(host.media_conversation_attachment.is_some());
+        assert!(host.media_agent_handoffs.is_some());
+
+        let mcp = tool_api::McpToolIdentity {
+            server_config_id: "server".into(),
+            config_revision: "revision".into(),
+            raw_tool_name: "lookup".into(),
+            definition_fingerprint: "definition".into(),
+        };
+        let mut profile = profile();
+        profile.tool_policy.builtin_tools.insert("Read".into());
+        profile.tool_policy.mcp_tools.insert(mcp.clone());
+        let mut isolated = prepare_app_config(host, profile).unwrap();
+        assert!(isolated.media_service.is_none());
+        assert!(isolated.media_conversation_attachment.is_none());
+        assert!(isolated.media_agent_handoffs.is_none());
+        let lease = isolated.session_tool_grant_lease.clone().unwrap();
+        assert!(lease.allows_builtin("Read"));
+        assert!(lease.allows_mcp(&mcp));
+        assert!(!lease.allows_builtin("media_capture"));
+
+        // Even a captured media tool from the host cannot bypass a lease that
+        // separately authorizes an MCP tool.
+        let mut ctx = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.media = Some(media.clone());
+        let mut registry = tool_api::ToolRegistry::new();
+        tool_media::register_all(&mut registry, ctx);
+        let captured = registry.find_by_name("media_capture").unwrap();
+        registry.set_session_tool_policy(lease.clone());
+        assert!(registry.find_by_name("media_capture").is_none());
+        assert!(registry
+            .check_session_tool_access(captured.as_ref())
+            .is_err());
+        assert!(registry
+            .available_tools(&tool_api::ToolStaticContext::default())
+            .iter()
+            .all(|tool| tool.name() != "media_capture"));
+
+        // Assembly re-enforces isolation without replacing the revocable lease.
+        isolated.media_service = Some(media);
+        isolated.media_conversation_attachment = Some(attachment);
+        isolated.media_agent_handoffs = Some(queue);
+        enforce_app_config(&mut isolated).unwrap();
+        assert!(isolated.media_service.is_none());
+        assert!(isolated.media_conversation_attachment.is_none());
+        assert!(isolated.media_agent_handoffs.is_none());
+        lease.revoke();
+        assert!(isolated
+            .session_tool_grant_lease
+            .as_ref()
+            .unwrap()
+            .is_revoked());
+    }
+
+    #[test]
     fn required_schema_tool_is_internal_and_revocation_survives_assembly() {
         let mut config = config();
         config.json_schema = Some(
@@ -602,13 +855,11 @@ mod tests {
         assert!(!lease.allows_builtin("Bash"));
         lease.revoke();
         enforce_app_config(&mut config).unwrap();
-        assert!(
-            config
-                .session_tool_grant_lease
-                .as_ref()
-                .unwrap()
-                .is_revoked()
-        );
+        assert!(config
+            .session_tool_grant_lease
+            .as_ref()
+            .unwrap()
+            .is_revoked());
     }
 
     #[test]
@@ -662,18 +913,22 @@ mod tests {
     }
 
     #[test]
-    fn app_chat_pins_only_its_own_transcript_and_enables_the_normal_writer() {
+    fn app_chat_selects_current_generation_without_importing_ambient_history() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("config");
         let chat_id = uuid::Uuid::new_v4().to_string();
         let session_id = uuid::Uuid::new_v4().to_string();
         let chat_directory = home
-            .join("local-apps/v2/apps/food/agent/chats")
+            .join("local-apps/v2/apps/food/agent/agui-v1/chats")
             .join(&chat_id);
         std::fs::create_dir_all(&chat_directory).unwrap();
         let transcript = chat_directory.join(format!("{session_id}.jsonl"));
         std::fs::write(&transcript, "app-owned chat transcript\n").unwrap();
         let mut config = config();
+        config.cwd = home
+            .join("local-apps/v2/apps/food/agent/agui-v1/workspaces")
+            .join(&chat_id);
+        std::fs::create_dir_all(&config.cwd).unwrap();
         config.lingxi_home = home;
         config.session_id_override = Some("creator-session-must-not-survive".into());
         config.session_transcript_path = Some(directory.path().join("creator.jsonl"));
@@ -684,22 +939,30 @@ mod tests {
             chat_id,
             session_id: session_id.clone(),
             session_directory: chat_directory.clone(),
+            generation_id: session_id.clone(),
+            cleanup_nonce: "b".repeat(64),
+            native_user_message_id: format!("msg:{session_id}"),
+            base_checkpoint: None,
         });
-
-        let prepared = prepare_app_config(config, profile).unwrap();
-        assert_eq!(prepared.cwd, chat_directory);
+        let config = prepare_app_config(config, profile).unwrap();
+        assert!(config.session_persistence && config.defer_session_start);
         assert_eq!(
-            prepared.session_id_override.as_deref(),
+            config.session_id_override.as_deref(),
             Some(session_id.as_str())
         );
         assert_eq!(
-            prepared.session_transcript_path.as_deref(),
-            Some(transcript.as_path())
+            config.session_transcript_path,
+            Some(
+                chat_directory
+                    .join(&session_id)
+                    .join(format!("{session_id}.jsonl"))
+            )
         );
-        assert!(prepared.session_persistence && prepared.idle_compaction_enabled);
-        let snapshot = prepared.session_resume_snapshot.unwrap();
-        assert_eq!(snapshot.source_session_id, session_id);
-        assert_eq!(&*snapshot.content, "app-owned chat transcript\n");
+        assert!(config.session_resume_snapshot.is_none() && config.session_resume_cost.is_none());
+        assert_eq!(
+            std::fs::read_to_string(transcript).unwrap(),
+            "app-owned chat transcript\n"
+        );
     }
 
     #[test]
@@ -717,11 +980,41 @@ mod tests {
             chat_id,
             session_id,
             session_directory: chat_directory,
+            generation_id: uuid::Uuid::nil().to_string(),
+            cleanup_nonce: "b".repeat(64),
+            native_user_message_id: format!("msg:{}", uuid::Uuid::nil()),
+            base_checkpoint: None,
         });
         assert!(matches!(
             prepare_app_config(config, profile),
             Err(AppInvocationError::InvalidChat)
         ));
+    }
+
+    #[test]
+    fn chat_native_message_identity_is_canonical_and_belongs_to_its_generation() {
+        let generation = uuid::Uuid::new_v4();
+        let mut chat = AppChatProfile {
+            chat_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            session_directory: PathBuf::from("/host-owned-chat"),
+            generation_id: generation.to_string(),
+            cleanup_nonce: "b".repeat(64),
+            native_user_message_id: format!("msg:{generation}"),
+            base_checkpoint: None,
+        };
+        assert_eq!(chat.native_message_id().unwrap().as_uuid(), generation);
+        for invalid in [
+            format!("msg_{generation}"),
+            generation.to_string(),
+            format!("msg:{}", uuid::Uuid::new_v4()),
+        ] {
+            chat.native_user_message_id = invalid;
+            assert!(matches!(
+                chat.native_message_id(),
+                Err(AppInvocationError::InvalidChat)
+            ));
+        }
     }
 
     struct SilentPermissions;
@@ -768,24 +1061,20 @@ mod tests {
             runtime.orchestrator.tool_names(),
             vec!["StructuredOutput".to_string()]
         );
-        assert!(
-            runtime
-                .structured_output_slot
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .is_none()
-        );
+        assert!(runtime
+            .structured_output_slot
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_none());
         assert!(runtime.plugin_runtime.is_none());
         assert!(!runtime.coordinator_mode.is_enabled());
-        assert!(
-            runtime
-                .orchestrator
-                .conversation_transcript()
-                .await
-                .is_empty()
-        );
+        assert!(runtime
+            .orchestrator
+            .conversation_transcript()
+            .await
+            .is_empty());
         assert_eq!(runtime.orchestrator.snapshot_cost().await.api_calls, 0);
         let context = runtime
             .orchestrator

@@ -14,9 +14,21 @@ use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, AgentId, McpConnectionId, MessageId, SessionId, ToolUseId,
 };
 use lingxi_core::SessionState;
-use media_api::{MediaOperationId, MediaSessionRef};
+use media_api::{MediaAttachmentId, MediaOperationId, MediaSessionRef};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// Meaning of the cancellation token for a tool invocation.
+///
+/// A model-turn interruption may hand a foreground Bash process to a background
+/// task. A host request instead owns its work until it is stopped and settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCancellationScope {
+    /// Streaming/model turn cancellation retains the ordinary handoff behavior.
+    ModelTurn,
+    /// Cancellation of an external host request must terminate its owned work.
+    HostRequest,
+}
 
 /// Per-invocation context passed to every [`crate::Tool`] method that needs
 /// to reason about the current call (validation, permission, execution).
@@ -112,6 +124,8 @@ pub struct ToolUseContext {
     /// the Bash/subprocess tools observe it in Phase 2 to kill in-flight work.
     /// `None` for batched/legacy call sites.
     pub cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Trusted origin that determines whether cancellation may hand work off.
+    pub cancellation_scope: ToolCancellationScope,
     /// The parent agent's already-rendered system prompt bytes, threaded onto a
     /// fork-subagent spawn so the child replays the parent's exact prompt (TS
     /// `forkContextMessages` / `override.systemPrompt = forkParentSystemPrompt`).
@@ -179,6 +193,8 @@ pub struct MediaAgentCapabilityContext {
     pub profile_name: Option<String>,
     /// Account scope derived from the pinned profile.
     pub account_scope: Option<String>,
+    /// Host-issued engine attachment from the trusted media service, if scoped.
+    pub attachment_id: Option<MediaAttachmentId>,
 }
 
 /// Narrow callback that asks the current turn owner to continue as an Agent
@@ -230,7 +246,10 @@ impl ToolUseContext {
     /// Snapshot trusted media routing identity from the exact current
     /// conversation state. This awaits the session lock so normal lock
     /// contention does not masquerade as an unsupported provider.
-    pub async fn media_agent_capability_context(&self) -> Option<MediaAgentCapabilityContext> {
+    pub async fn media_agent_capability_context(
+        &self,
+        attachment_id: Option<MediaAttachmentId>,
+    ) -> Option<MediaAgentCapabilityContext> {
         let session = self.session.as_ref()?.lock().await;
         // ToolUseOptions is captured by the owning request builder. Prefer its
         // resolved route profile so a trusted default route remains usable
@@ -247,6 +266,7 @@ impl ToolUseContext {
                 .as_ref()
                 .map(|profile| format!("profile:{profile}")),
             profile_name,
+            attachment_id,
         })
     }
 
@@ -276,14 +296,12 @@ impl ToolUseContext {
             request_id: None,
         };
 
-        Ok(AudioOperationContext {
-            identity,
-            owner: AudioOwner::Session { session_id },
-            initiator: (initiator.agent_id.is_some() || initiator.tool_use_id.is_some())
-                .then_some(initiator),
-            timeout_budget_ms,
-            max_payload_bytes,
-        })
+        let mut context = AudioOperationContext::new(identity, AudioOwner::Session { session_id })
+            .with_max_payload_bytes(max_payload_bytes);
+        context.timeout_budget_ms = timeout_budget_ms;
+        context.initiator =
+            (initiator.agent_id.is_some() || initiator.tool_use_id.is_some()).then_some(initiator);
+        Ok(context)
     }
 
     /// Build a minimal context that carries ONLY `main_loop_model`; every other
@@ -330,6 +348,7 @@ impl ToolUseContext {
             session: None,
             subagent_registry: None,
             cancel: None,
+            cancellation_scope: ToolCancellationScope::ModelTurn,
             fork_parent_system_prompt: None,
             cwd: None,
             // Inert seed; model-only context is never handed to a tool.
@@ -349,6 +368,7 @@ mod tests {
     fn tool_use_context_carries_optional_cancel_token() {
         let mut ctx = ToolUseContext::model_seed("opus".into());
         assert!(ctx.cancel.is_none());
+        assert_eq!(ctx.cancellation_scope, ToolCancellationScope::ModelTurn);
         ctx.cancel = Some(tokio_util::sync::CancellationToken::new());
         assert!(ctx.cancel.is_some());
     }

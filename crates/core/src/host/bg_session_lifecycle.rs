@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 /// A recovery operation owns the resources and evidence needed to determine
 /// whether an interrupted handoff is settled. Returning `Ok(())` confirms the
@@ -47,6 +49,9 @@ struct State {
     settling: usize,
     recoveries: HashMap<u64, RecoveryEntry>,
     diagnostics: Vec<String>,
+    // An explicitly uncertain or interrupted handoff without a registered
+    // recovery cannot be proven safe by merely waiting for its worker to stop.
+    unconfirmed_without_recovery: Vec<String>,
 }
 
 /// Closure and claims use one lock. Work accepted before closure transfers its
@@ -86,6 +91,8 @@ impl BackgroundLaunchLifecycle {
         Ok(BackgroundLaunchClaim {
             lifecycle: self.clone(),
             id,
+            started: false,
+            settled: false,
         })
     }
 
@@ -157,6 +164,8 @@ impl BackgroundLaunchLifecycle {
                                 None => entry.description.clone(),
                             })
                             .collect();
+                        unconfirmed_recoveries
+                            .extend(state.unconfirmed_without_recovery.iter().cloned());
                         unconfirmed_recoveries.sort();
                         return BackgroundLaunchDrainReport {
                             diagnostics: state.diagnostics.clone(),
@@ -168,43 +177,96 @@ impl BackgroundLaunchLifecycle {
             };
 
             for (id, recovery) in retries {
-                let owner = self.clone();
-                tokio::spawn(async move {
-                    let result = std::panic::AssertUnwindSafe(recovery.recover())
-                        .catch_unwind()
-                        .await
-                        .unwrap_or_else(|_| Err("recovery owner panicked".into()));
-                    // The worker's clone must be released before drain can
-                    // observe successful settlement and tear dependencies down.
-                    drop(recovery);
-                    let mut state = owner.state.lock().unwrap_or_else(|p| p.into_inner());
-                    let removed = match result {
-                        Ok(()) => {
-                            let removed = state.recoveries.remove(&id);
-                            if removed.is_some() {
-                                state.settling += 1;
-                            }
-                            removed
-                        }
-                        Err(error) => {
-                            if let Some(entry) = state.recoveries.get_mut(&id) {
-                                entry.retrying = false;
-                                entry.last_error = Some(error.clone());
-                                let description = entry.description.clone();
-                                state.diagnostics.push(format!(
-                                    "background recovery {description} failed: {error}"
-                                ));
-                            }
-                            None
-                        }
-                    };
-                    drop(state);
-                    owner.finish_removal(removed);
-                    owner.changed.notify_waiters();
-                });
+                drop(tokio::spawn(OwnedRecovery {
+                    lifecycle: self.clone(),
+                    id,
+                    work: Some(Box::pin(
+                        std::panic::AssertUnwindSafe(async move { recovery.recover().await })
+                            .catch_unwind(),
+                    )),
+                    finished: false,
+                }));
             }
             changed.await;
         }
+    }
+
+    fn finish_recovery(&self, id: u64, result: Result<(), String>) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let removed = match result {
+            Ok(()) => {
+                let removed = state.recoveries.remove(&id);
+                if removed.is_some() {
+                    state.settling += 1;
+                }
+                removed
+            }
+            Err(error) => {
+                if let Some(entry) = state.recoveries.get_mut(&id) {
+                    entry.retrying = false;
+                    entry.last_error = Some(error.clone());
+                    let description = entry.description.clone();
+                    state
+                        .diagnostics
+                        .push(format!("background recovery {description} failed: {error}"));
+                }
+                None
+            }
+        };
+        drop(state);
+        self.finish_removal(removed);
+        self.changed.notify_waiters();
+    }
+}
+
+type CaughtRecoveryFuture =
+    Pin<Box<dyn Future<Output = Result<Result<(), String>, Box<dyn std::any::Any + Send>>> + Send>>;
+
+/// Keep retrying set until the attempt's future, including its recovery clone,
+/// has been dropped. A cancelled runtime can then retry on another executor.
+struct OwnedRecovery {
+    lifecycle: Arc<BackgroundLaunchLifecycle>,
+    id: u64,
+    work: Option<CaughtRecoveryFuture>,
+    finished: bool,
+}
+
+impl Future for OwnedRecovery {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let outcome = match self.work.as_mut().expect("recovery work").as_mut().poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(result) => result,
+        };
+        let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(self.work.take());
+        }));
+        let result = if released.is_err() {
+            Err("recovery owner panicked while releasing work".into())
+        } else {
+            outcome.unwrap_or_else(|_| Err("recovery owner panicked".into()))
+        };
+        self.finished = true;
+        self.lifecycle.finish_recovery(self.id, result);
+        Poll::Ready(())
+    }
+}
+
+impl Drop for OwnedRecovery {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(self.work.take());
+        }));
+        let error = if released.is_err() {
+            "recovery owner panicked while releasing work"
+        } else {
+            "recovery owner stopped before settlement"
+        };
+        self.lifecycle.finish_recovery(self.id, Err(error.into()));
     }
 }
 
@@ -213,6 +275,88 @@ impl BackgroundLaunchLifecycle {
 pub struct BackgroundLaunchClaim {
     lifecycle: Arc<BackgroundLaunchLifecycle>,
     id: u64,
+    started: bool,
+    settled: bool,
+}
+
+type CaughtLaunchFuture<T> = Pin<
+    Box<dyn Future<Output = Result<Result<T, BgForkError>, Box<dyn std::any::Any + Send>>> + Send>,
+>;
+
+struct OwnedLaunch<T> {
+    work: Option<CaughtLaunchFuture<T>>,
+    claim: Option<BackgroundLaunchClaim>,
+    reply: Option<tokio::sync::oneshot::Sender<Result<T, BgForkError>>>,
+}
+
+impl<T> Unpin for OwnedLaunch<T> {}
+
+impl<T> Future for OwnedLaunch<T> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        this.claim.as_mut().expect("launch claim").started = true;
+        let outcome = match this.work.as_mut().expect("launch work").as_mut().poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(result) => result,
+        };
+        // The owned future can hold registry or rollback resources. Drop all of
+        // it before releasing the claim and allowing shutdown to continue.
+        let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(this.work.take());
+        }));
+        let claim = this.claim.as_mut().expect("launch claim");
+        let outcome = if released.is_err() {
+            Err(BgForkError::Dispatch(
+                "background launch owner panicked while releasing work".into(),
+            ))
+        } else {
+            outcome.unwrap_or_else(|_| {
+                Err(BgForkError::Dispatch(
+                    "background launch owner panicked".into(),
+                ))
+            })
+        };
+        if let Err(error) = &outcome {
+            let mut state = claim
+                .lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            state.diagnostics.push(error.to_string());
+            if matches!(error, BgForkError::OwnershipUncertain(_))
+                && !state
+                    .recoveries
+                    .values()
+                    .any(|entry| entry.producer_id == claim.id)
+            {
+                state.unconfirmed_without_recovery.push(error.to_string());
+            }
+        }
+        // A panicking destructor cannot prove the work's resources were
+        // released; Drop will retain the unresolved state or recovery object.
+        claim.settled = released.is_ok();
+        drop(this.claim.take());
+        if let Some(reply) = this.reply.take() {
+            let _ = reply.send(outcome);
+        }
+        Poll::Ready(())
+    }
+}
+
+impl<T> Drop for OwnedLaunch<T> {
+    fn drop(&mut self) {
+        let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(self.work.take());
+        }));
+        if released.is_err() {
+            if let Some(claim) = self.claim.as_mut() {
+                claim.started = true;
+            }
+        }
+        drop(self.claim.take());
+    }
 }
 
 impl BackgroundLaunchClaim {
@@ -258,26 +402,13 @@ impl BackgroundLaunchClaim {
         F: Future<Output = Result<T, BgForkError>> + Send + 'static,
     {
         let (reply, result) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let outcome = std::panic::AssertUnwindSafe(operation)
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| {
-                    Err(BgForkError::Dispatch(
-                        "background launch owner panicked".into(),
-                    ))
-                });
-            if let Err(error) = &outcome {
-                self.lifecycle
-                    .state
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .diagnostics
-                    .push(error.to_string());
-            }
-            drop(self);
-            let _ = reply.send(outcome);
-        });
+        drop(tokio::spawn(OwnedLaunch {
+            work: Some(Box::pin(
+                std::panic::AssertUnwindSafe(operation).catch_unwind(),
+            )),
+            claim: Some(self),
+            reply: Some(reply),
+        }));
         result
             .await
             .map_err(|_| BgForkError::Dispatch("background launch owner stopped".into()))?
@@ -291,6 +422,17 @@ impl Drop for BackgroundLaunchClaim {
             .state
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        if self.started && !self.settled {
+            let message = "background launch stopped before ownership settled".to_string();
+            state.diagnostics.push(message.clone());
+            if !state
+                .recoveries
+                .values()
+                .any(|entry| entry.producer_id == self.id)
+            {
+                state.unconfirmed_without_recovery.push(message);
+            }
+        }
         assert!(
             state.active.remove(&self.id),
             "background launch claim missing"

@@ -761,7 +761,7 @@ impl WebFetchTool {
     /// was adding one field, not re-plumbing. Until then every persisted binary
     /// was written inside the user's repository.
     fn persist_binary(&self, content_type: &str, body: &[u8]) -> (Option<String>, Option<usize>) {
-        if self.ctx.side_chat || !is_binary_content_type(content_type) {
+        if self.ctx.requires_inline_foreground() || !is_binary_content_type(content_type) {
             return (None, None);
         }
         let unix_ms = std::time::SystemTime::now()
@@ -967,6 +967,10 @@ mod native_output_293_tests;
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    fn supports_persistent_chat(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         TOOL_NAME
     }
@@ -1161,6 +1165,8 @@ Usage notes:\n\
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let policy = ctx.tool_execution_policy;
+        let inline_chat =
+            self.ctx.is_persistent_app_chat() || policy == ToolExecutionPolicy::LocalAppChat;
         let parsed_input = (|| -> Result<WebFetchInput, String> {
             Ok(WebFetchInput {
                 url: source::string_field(&input, "url")?,
@@ -1272,7 +1278,7 @@ Usage notes:\n\
         // upgrade — mirrors `utils.ts:392-404`, which short-circuits on a hit
         // ahead of the upgrade block at `utils.ts:406-416`. Repeat fetches of
         // the same URL return instantly without a second network round-trip.
-        if let Some(hit) = (!self.ctx.side_chat)
+        if let Some(hit) = (!inline_chat && !self.ctx.side_chat)
             .then(|| crate::cache::cache_get(&parsed_input.url))
             .flatten()
         {
@@ -1668,6 +1674,11 @@ Usage notes:\n\
                 } else {
                     &resp.body_bytes
                 };
+                if inline_chat && is_binary_content_type(&content_type) {
+                    return Err(ToolError::InvalidInput(
+                        "Local App Chat WebFetch supports inline text responses; binary responses require an inline media tool".into(),
+                    ));
+                }
                 let (persisted_path, persisted_size) = self.persist_binary(&content_type, raw_body);
 
                 // HTML->markdown (claude-code converts HTML; non-HTML is used as-is).
@@ -1687,7 +1698,7 @@ Usage notes:\n\
                 // the body exceeds the apply-step cap.
                 let truncated = body_exceeds_markdown_cap(&content);
 
-                if !self.ctx.side_chat {
+                if !inline_chat && !self.ctx.side_chat {
                     crate::cache::cache_set(
                         parsed_input.url.clone(),
                         crate::cache::CachedFetch {

@@ -100,8 +100,7 @@ impl AgentTool {
 /// `Agent` — canonical tool name (claude-code `AGENT_TOOL_NAME`).
 pub const AGENT_TOOL_NAME: &str = "Agent";
 
-/// Four built-in subagent types — byte-aligned with upstream
-/// `claude-code/src/tools/AgentTool/built-in/*.ts`.
+/// Native subagent types plus LingXi's own read-only documentation guide.
 ///
 /// ADVISORY ONLY. `AgentTool` no longer rejects a `subagent_type` outside this
 /// list: the catalog-aware [`lingxi_core::host::subagent_spawn::SubagentSpawner`] resolves
@@ -115,8 +114,13 @@ pub const AGENT_TOOL_NAME: &str = "Agent";
 /// leaked-TS, 0-hit in every local oracle) was removed, and the Claude-branded
 /// `claude-code-guide` + `claude` catch-all are deliberately excluded — the
 /// multi-provider divergence (user-confirmed 2026-08-06).
-pub const BUILTIN_SUBAGENT_TYPES: &[&str] =
-    &["general-purpose", "Plan", "Explore", "statusline-setup"];
+pub const BUILTIN_SUBAGENT_TYPES: &[&str] = &[
+    "general-purpose",
+    "Plan",
+    "Explore",
+    "statusline-setup",
+    "lingxi-code-guide",
+];
 
 /// Prefix locked by M3-05 (`cost/src/budget.rs` budget-exceeded test fixtures).
 /// Production constructs the full string via

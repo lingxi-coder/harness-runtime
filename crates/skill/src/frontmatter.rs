@@ -54,20 +54,20 @@ pub fn parse_skill_markdown(
     })
 }
 
-fn parse_frontmatter_yaml(yaml: &str) -> Result<SkillFrontmatter, serde_yaml::Error> {
+fn parse_frontmatter_yaml(yaml: &str) -> Result<SkillFrontmatter, yaml_serde::Error> {
     // The reusable SkillFrontmatter DTO uses raw JSON serde for its source
     // description. YAML skill files are UTF-8 text, so extract that one scalar
     // at the file boundary, deserialize the remaining YAML fields normally,
     // and install the scalar directly into the source carrier.
-    let mut value = serde_yaml::from_str::<serde_yaml::Value>(yaml)?;
+    let mut value = yaml_serde::from_str::<yaml_serde::Value>(yaml)?;
     let description = match &mut value {
-        serde_yaml::Value::Mapping(mapping) => mapping
-            .remove(serde_yaml::Value::String("description".to_owned()))
-            .map(serde_yaml::from_value::<String>)
+        yaml_serde::Value::Mapping(mapping) => mapping
+            .remove(yaml_serde::Value::String("description".to_owned()))
+            .map(yaml_serde::from_value::<String>)
             .transpose()?,
         _ => None,
     };
-    let mut frontmatter: SkillFrontmatter = serde_yaml::from_value(value)?;
+    let mut frontmatter: SkillFrontmatter = yaml_serde::from_value(value)?;
     if let Some(description) = description {
         frontmatter.description = description.into();
     }

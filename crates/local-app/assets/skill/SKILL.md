@@ -23,7 +23,9 @@ Inspect the actual platform and available runtime with the `{{SHELL_TOOL}}` tool
 
 ## Project manifest
 
-Use the current schema only. A minimal project looks like:
+Use schema 2 and only the current host contract. Do not generate old API aliases,
+fallback decoders, old Agent-data migrations or old-pending cleanup hooks. A
+minimal project looks like:
 
 ```json
 {
@@ -44,7 +46,15 @@ Use the current schema only. A minimal project looks like:
 
 Static apps do not require Linux processes. A Node/Python app needs a compatible execution target and the user's exact-release consent in the native Apps page. On mobile, require an available Mobile Linux runtime rather than assuming Desktop commands or arbitrary native executables will run. Check architecture, runtime/channel and capability support. Do not modify the shared Linux toolchain. Package only declared source/build outputs and lockfiles; exclude credentials, local grants, user data, browser stores and dependency caches.
 
-For services, `venv` and step `cwd` are app-relative. Install/build commands terminate; named processes stay alive until stopped. `dependsOn` sets startup order and readiness uses an HTTP `path` or exact `output`. Use `window.localApp.serviceUrl()` and `serviceSocketUrl()` rather than hardcoded ports or saved run URLs; restart revokes the old run's service access. Declare only needed native capabilities and handle denial visibly. An `agent.tools` declaration is a capability requirement, not a grant. App pages never receive general host tools or provider credentials. App processes run with this device user's access; they are not isolated by a per-app Linux security sandbox.
+For services, `venv` and step `cwd` are app-relative. Install/build commands terminate; named processes can run until stopped, fail, or their host ends, subject to the platform's lifecycle. `dependsOn` sets startup order and readiness uses an HTTP `path` or exact `output`. Obtain URLs with `await window.localApp.serviceUrl(serviceName)` and `await window.localApp.serviceSocketUrl(serviceName)` rather than hardcoded ports or saved run URLs; use the manifest's service name, and restart revokes the old run's service access. Declare only needed native capabilities and handle denial visibly. An `agent.tools` declaration is a capability requirement, not a grant. App pages never receive general host tools or provider credentials. App processes run with this device user's access; they are not isolated by a per-app Linux security sandbox.
+
+## Mobile service lifecycle and recovery
+
+On iOS, opening an App prepares its runtime in the foreground; it does not make an idle service permanently runnable. The system can suspend the host, leaving its process unable to serve requests, or terminate it and its processes. User-initiated Agent work may receive a finite continued-processing lease that the system can cancel. A user force quit generally prevents background relaunch until the user opens the host again. After termination or device restart, do not promise an immediate relaunch or that any in-flight work continues. Do not use idle timers, audio, location or another unrelated background mode as a keepalive.
+
+Design a visible unavailable/reopen state. When the native host is available again, obtain fresh service URLs from its current App session; a previous process, port or URL may no longer be valid. Store durable backend records in `LOCAL_APP_DATA_DIR` and browser records in localStorage/IndexedDB as appropriate, validate them on read, and preserve user data when recovery fails. Browser storage belongs to its browser context and may be unavailable or cleared. Do not claim every browser can reach a suspended host or that reopening automatically restores an in-flight task.
+
+For an existing Agent task, keep its `threadId` and `runId` and inspect that same task read-only with `tasks.get`, events or `connectAgent` when the host is reachable. A host restart marks unfinished runs interrupted; it does not resume their execution. Surface the actual terminal or unavailable state, including uncertain side effects. Never automatically replay a request or tool action; let the user explicitly choose a new attempt after reviewing the input and any effects. The SDK's initial delivery during an authorized iOS handoff is part of starting the original request, not permission to submit it again during recovery. Restore or reconnect only within the existing App and authorization boundaries.
 
 ## Page tools with WebMCP
 
@@ -104,8 +114,11 @@ host-injected `window.localApp.agent` and the official AG-UI 1.0 message/event
 contract, backed by the bundled official SDK 1.0.3. Never embed a provider key,
 reuse the creating conversation, or expose a Remote Control chat endpoint.
 
-For an independent request, construct one standard user message and fresh run
-and thread IDs. The File helper creates the standard image/document content part:
+For a short-lived independent request where losing the browser session is
+acceptable, construct one standard user message and fresh run and thread IDs.
+For an independent Mobile run or any independent request that needs recovery,
+prefer the durable `tasks.start` flow below and save those IDs before submission.
+The File helper creates the standard image/document content part:
 
 ```js
 const content = [{type: "text", text: "Describe the selected file."}];
@@ -134,17 +147,79 @@ normalized `onRunFinishedEvent({outcome})` rather than treating Promise settleme
 alone as success. `abortRun` requests cancellation; a terminal cancelled outcome
 confirms it. A new independent request needs a fresh client/thread and exactly
 one user message. For multiple turns create/open an App Chat, use its handle ID
-as `threadId`, and send a fresh `runId` for each turn. Chat history is paged as
-`{messages: Message[], nextCursor?}`. The host owns the real Harness transcript;
-client-provided history must match canonical messages.
+as `threadId`, and send a fresh `runId` for each new user turn. Chat history is
+paged as `{messages: Message[], nextCursor?}` for display. Each new run supplies
+only its new user Message, with image/document parts from `agent.file(file)`;
+do not resend historical text, tool messages or file bytes.
 
-For durable recovery use `tasks.start` with the same official input, then
+The host saves original successful Chat history and its assets. Tool calls and
+results continue the same Agent run; they never become new user turns. When the
+conversation grows, the host prepares controlled summaries for bounded model
+context while retaining the original transcript. App code does not compress,
+splice or reconstruct tool history. Context, asset, turn, duration and OS limits
+still apply; do not promise unlimited long chats or background execution.
+
+Chat creation is a LingXi host operation, separate from the AG-UI
+run protocol. Generate a lowercase UUIDv4 `requestId` and persist it with the
+exact creation options before calling `chats.create({requestId, title?})`.
+Omitted title and an explicitly supplied title are distinct inputs; the returned
+handle ID equals `requestId`. A lost response or timeout does not prove that
+creation failed. On reopening the same App revision in the same browser origin,
+recover saved options with `chats.pendingCreations()` and use only
+`chats.creationStatus({requestId, title?})` to check; `null` means not currently
+observed and the original request may still arrive. Never automatically replay
+create. Only an explicit user retry may call `create` with the same saved ID and
+unchanged options. A different input conflicts, and a deleted Chat cannot be
+recreated with the same ID. `chats.forgetCreation(requestId)` removes a resolved
+browser receipt, not the Chat. Receipts are partitioned by App and revision.
+On Mobile, the SDK shows a dismissible recovery prompt when Chat creation is
+still waiting or an Agent read cannot reach the host. Its Open LingXi button
+requires a user action and opens trusted App review; the user may need to reopen
+the App in the browser. It does not complete the request or preserve its Promise
+across reload. On a fresh page, Mobile may check saved pending creation IDs
+read-only, sequentially and within the current App and revision; it does not
+select a Chat or submit another creation. Read `pendingCreations()` again to
+observe any updated receipts. An unavailable host leaves them pending. Mobile
+coalesces same-page creation calls. For an existing receipt it first checks
+status; if the outcome remains unknown, only a user click on the SDK's retry
+button sends the same request again. A waiting attempt can likewise be retried
+through that button. If the earlier browser wait stops, its host request may
+still arrive; cancellation does not prove that creation failed. Never infer
+failure from `creationStatus` returning null. If the SDK cannot show its
+confirmation, or confirmation expires, it fails without submitting the retry
+and retains the unknown outcome. Browser suspension can delay timers.
+If the App revision changes, browser storage is cleared, or the original ID is
+lost, show the Chat list for the user to inspect rather than guessing a match.
+If `chats.list` reports `unavailableChats`, show those IDs as unavailable
+without deleting or replacing them automatically. Its `nextCursor` covers both
+available and unavailable Chats; `hasUncertainChats: true` reports an issue
+anywhere in the App, not just the current page. An absent flag means the host
+did not report that detail, not that every Chat was verified.
+If existing Agent or Chat storage has an unsupported or unverifiable format,
+or a required marker is missing, show it as unavailable, preserve the existing
+data, and never automatically delete or recreate it.
+
+For a Mobile independent Agent task or any independent request that needs
+recovery, use `tasks.start` with the same official input, then
 `tasks.get/list/events/subscribe/cancel`. Task metadata includes `threadId` and
-`runId`. Persist those IDs, then reconnect read-only with
+`runId`; persist those IDs before submission, so they remain available if the
+page switches or the response is lost. For a persistent Chat, send through its
+Chat handle instead of `tasks.start`; persist the handle ID (`threadId`) and
+the fresh `runId` before sending, and use `chats.open(threadId)` on return.
+Then reconnect read-only with
 `createClient({threadId}).connectAgent({runId})`; a reload never submits another
 model request. Identical input with the same `runId` is idempotent; changed input
-under that ID is rejected. Do not use the retired prompt/attachments/requestId
-or custom state-event protocol. Old Agent records are discarded, not converted.
+under that ID is rejected. Use only the current AG-UI input and Agent persistence
+format. Do not decode, convert, migrate or automatically clean up old Agent,
+Chat or pending records.
+
+Treat an immediate `tasks.get` `task_not_found` as a lookup miss, not a model
+outcome. Keep the exact saved input and `runId`; retry only read-only lookup or
+reconnection, never `run` or Chat `send`. Await `connectAgent` or the task-event
+subscription until the standard terminal `RUN_FINISHED` or `RUN_ERROR` event;
+a history refresh or running-state snapshot is not completion. After successful
+completion, validate any structured `RunAgentResult.result` against the declared
+`outputSchema` and app-specific rules before side effects.
 
 The creating chat can call `LocalApp({"action":"agent_catalog"})` to discover
 exact public tool IDs. Discovery grants nothing. Declare tool and Skill IDs in
@@ -155,6 +230,10 @@ cannot grant host tools. The current host profile rejects unsupported frontend
 tools, state, context and resume features explicitly. Pages cannot approve tools
 or questions. MCP grants bind the exact connection, configuration revision, raw
 tool name and definition; Skills add instructions, not execution permission.
+Select Skills independently for every run, including each persistent Chat turn.
+Omitting a Skill does not retain its previous instructions or grants. Historical
+messages are conversation data, not active Skill authority; an exact retry keeps
+its original selected IDs.
 
 Use standard browser File/camera selection with user confirmation before model
 submission. Files are limited to eight per new message, 25 MiB each and 50 MiB
@@ -168,11 +247,18 @@ Mobile pages open in the operating system's resolved external browser, including
 OEM/third-party browsers. Do not choose a browser package or embed WebView.
 Android uses its user-visible foreground runtime. iOS26 uses an explicit native
 foreground handoff and a finite continued-processing lease; iOS27 user-invoked
-Intents require complete standard input. The SDK handles handoff/recovery; App
-code keeps the standard run contract. No path promises indefinite execution or
-automatic replay. Stop/revocation/release replacement cancel work; default limits
-are one active task per App, 20 turns and ten minutes, and an App may only lower
-native limits. Background Agent permission is separate from process permission.
+Intents require complete standard input. The SDK handles supported handoff and
+read-only reconnection; App code keeps the standard run contract. No path
+promises indefinite execution or automatic replay. Stop/revocation/release
+replacement cancel work; default limits are one active task per App, 20 turns and
+ten minutes, and an App may only lower native limits. Background Agent
+permission is separate from process permission.
+Listen for `localApp:agent-handoff-error`. When `detail.code` is
+`pending_request_missing`, use its `runId` to explain that this browser storage
+context cannot access the saved input; direct the user to the original tab or a
+browser context that shares its storage. Never resend or replace the `runId`
+automatically, label it a model failure, or infer a browser brand or private mode.
+A new request requires the user's explicit choice after reviewing the input.
 
 Use the current Local App Builder examples for one-shot file understanding and
 persistent attachment Chat. Keep business validation and explicit user save
@@ -184,7 +270,7 @@ standalone browser rendering are not real-provider or physical-device evidence.
 
 - Use `list` to find an app, then `read` its source metadata and latest release. Edit the bound source Project and update the same ID with the observed `expectedRevision`; never overwrite concurrent work silently.
 - Version switches preserve app data and may require new execution/capability consent. Failed staged preparation keeps the prior release; rolling code back does not reverse database or IndexedDB writes. New code does not receive permissions from a saved model preference alone.
-- Keep data formats backward readable. A changed filesystem `dataSchema` requires the host's verified backup/migration transaction; `compatibleFrom` alone is not proof. Do not erase data or bypass a migration refusal.
+- Implement only the current host contract; do not add old API decoders or old Agent-data migrations. A changed business filesystem `dataSchema` requires the host's verified backup/migration transaction; `compatibleFrom` alone is not proof. Do not erase current user records or bypass a migration refusal.
 - Use localStorage/IndexedDB for browser records, validate loaded data, report failed saves, and provide export/import for important records. Installation, publication and execution are different lifecycle steps.
 - Publishing to the public market is a separate native review action. Export only declared package files, excluding credentials, transcripts, grants, browser stores, databases and private files. Market installation copies code, not author permissions; a permitted customization creates a separate app and preserves upstream attribution.
 

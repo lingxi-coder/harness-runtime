@@ -182,7 +182,16 @@ pub enum ToolExecutionPolicy {
     /// Hidden Fusion panel behavior. WebFetch may retrieve and convert locally,
     /// but must not make an internal model/side-query call.
     FusionPanel,
+    /// Host-owned Local App Chat. Results stay bounded and inline, and all
+    /// physical work must settle in the foreground before a checkpoint closes.
+    /// This selects execution behavior; it never grants tool permissions.
+    LocalAppChat,
 }
+
+/// Maximum serialized inline tool payload accepted by a Local App Chat.
+pub const LOCAL_APP_CHAT_MAX_INLINE_BYTES: usize = 2 * 1024 * 1024;
+/// Shell output is text and uses a smaller, in-memory capture budget.
+pub const LOCAL_APP_CHAT_MAX_SHELL_OUTPUT_BYTES: usize = 256 * 1024;
 
 /// Host-owned conversation state carried only for nested explicit forks.
 #[derive(Debug, Clone)]

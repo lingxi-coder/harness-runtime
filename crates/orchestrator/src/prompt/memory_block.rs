@@ -1520,6 +1520,30 @@ pub fn build_memdir_prefetch(
     // MEM-2: the User tier is scoped to `cwd`'s project, so memories written
     // while working on one repository are not recalled in another.
     let roots = memory::memdir::memdir_path(home, cwd, false);
+    memory_prefetch_from_roots(side_query_client, runtime, roots)
+}
+
+/// Build memory retrieval from a trusted explicit configuration home. Unlike
+/// the ordinary host adapter, this never reads HOME or LINGXI_CONFIG_DIR.
+#[must_use]
+pub fn build_memdir_prefetch_at(
+    side_query_client: Arc<dyn sidequery::SideQueryClient>,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
+    config_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Arc<memory::prefetch::MemoryPrefetch> {
+    memory_prefetch_from_roots(
+        side_query_client,
+        runtime,
+        memory::memdir::paths::memdir_roots_at(config_home, cwd, false),
+    )
+}
+
+fn memory_prefetch_from_roots(
+    side_query_client: Arc<dyn sidequery::SideQueryClient>,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
+    roots: memory::memdir::MemdirRoots,
+) -> Arc<memory::prefetch::MemoryPrefetch> {
     let selector = Arc::new(memory::selector::MemorySelector::new(side_query_client));
     Arc::new(memory::prefetch::MemoryPrefetch::new(
         selector, runtime, roots,
@@ -1546,6 +1570,25 @@ pub fn build_session_memory_handle(
     // The `$LINGXI_CONFIG_DIR`-aware config-home is the SAME
     // base the Session-tier memdir scan reads, so writes re-load next session.
     let config_home = memory::lingxi_md::user_config_dir(home);
+    build_session_memory_handle_at(
+        side_query_client,
+        default_model,
+        config,
+        config_home,
+        runtime,
+    )
+}
+
+/// Build the extractor under the same explicit private root used by scoped
+/// retrieval. No ambient configuration or ancestor instruction discovery.
+#[must_use]
+pub fn build_session_memory_handle_at(
+    side_query_client: Arc<dyn sidequery::SideQueryClient>,
+    default_model: String,
+    config: memory::session_memory::SessionMemoryConfig,
+    config_home: std::path::PathBuf,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
+) -> Arc<crate::SessionMemoryHandle> {
     let runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
             .with_side_query_client(side_query_client, default_model),

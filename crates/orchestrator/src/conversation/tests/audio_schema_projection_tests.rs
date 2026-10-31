@@ -34,7 +34,7 @@ impl LiveAudioSchemaTool {
 #[async_trait]
 impl Tool for LiveAudioSchemaTool {
     fn name(&self) -> &str {
-        "speech"
+        "audio_schema_fixture"
     }
 
     fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
@@ -314,18 +314,19 @@ fn wire_tool<'a>(
 fn action_enum(tool: &lingxi_core::host::SourceToolWireDefinition) -> String {
     tool.input_schema
         .subprojection("/properties/action/enum")
-        .expect("speech action enum projection")
+        .expect("fixture action enum projection")
         .to_json_string()
-        .expect("speech action enum JSON")
+        .expect("fixture action enum JSON")
 }
 
 #[tokio::test]
 async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     let (orchestrator, registry, supported_actions, schema_revision) = live_audio_orchestrator();
     let search_view = registry.tool_search_view();
+    let session_id = orchestrator.session.lock().await.session_id;
 
     let unknown = orchestrator.build_wire_tools().await.unwrap().0;
-    assert!(wire_tool(&unknown, "speech").is_none());
+    assert!(wire_tool(&unknown, "audio_schema_fixture").is_none());
     assert!(search_view.entries().is_empty());
 
     *supported_actions.write().expect("support lock") =
@@ -333,10 +334,10 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     schema_revision.store(1, Ordering::Release);
     // Model the successful ToolSearch selection: its shared deferral state
     // makes this discovered schema visible in the next request.
-    registry.deferral().mark_loaded(["speech"]);
+    registry.deferral().mark_loaded(["audio_schema_fixture"]);
     let known = orchestrator.build_wire_tools().await.unwrap().0;
     assert_eq!(
-        action_enum(wire_tool(&known, "speech").unwrap()),
+        action_enum(wire_tool(&known, "audio_schema_fixture").unwrap()),
         r#"["transcribe","speak"]"#
     );
     let known_cache = orchestrator
@@ -346,13 +347,13 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .await
         .clone()
         .expect("known capabilities should populate the wire cache");
-    assert!(known_cache
-        .key
-        .dynamic_schema_revisions
-        .contains(&("speech".into(), "native:1".into())));
+    assert!(known_cache.key.dynamic_schema_revisions.contains(&(
+        "audio_schema_fixture".into(),
+        format!("native:1:{}", session_id.as_uuid())
+    )));
     let known_search = search_view.entries();
     assert_eq!(known_search.len(), 1);
-    assert_eq!(known_search[0].name, "speech");
+    assert_eq!(known_search[0].name, "audio_schema_fixture");
     assert_eq!(
         known_search[0].description.string_at(""),
         Some("Live speech recognition and playback")
@@ -362,7 +363,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
     schema_revision.store(2, Ordering::Release);
     let changed = orchestrator.build_wire_tools().await.unwrap().0;
     assert_eq!(
-        action_enum(wire_tool(&changed, "speech").unwrap()),
+        action_enum(wire_tool(&changed, "audio_schema_fixture").unwrap()),
         r#"["transcribe"]"#
     );
     let changed_cache = orchestrator
@@ -372,17 +373,17 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .await
         .clone()
         .expect("changed capabilities should refresh the wire cache");
-    assert!(changed_cache
-        .key
-        .dynamic_schema_revisions
-        .contains(&("speech".into(), "native:2".into())));
+    assert!(changed_cache.key.dynamic_schema_revisions.contains(&(
+        "audio_schema_fixture".into(),
+        format!("native:2:{}", session_id.as_uuid())
+    )));
     assert_ne!(known_cache.key, changed_cache.key);
-    assert_eq!(search_view.entries()[0].name, "speech");
+    assert_eq!(search_view.entries()[0].name, "audio_schema_fixture");
 
     *supported_actions.write().expect("support lock") = None;
     schema_revision.store(3, Ordering::Release);
     let disconnected = orchestrator.build_wire_tools().await.unwrap().0;
-    assert!(wire_tool(&disconnected, "speech").is_none());
+    assert!(wire_tool(&disconnected, "audio_schema_fixture").is_none());
     assert!(search_view.entries().is_empty());
     let disconnected_cache = orchestrator
         .prompt_runtime
@@ -395,7 +396,7 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .key
         .tool_names
         .iter()
-        .any(|name| name == "speech"));
+        .any(|name| name == "audio_schema_fixture"));
 }
 
 #[tokio::test]
@@ -403,12 +404,12 @@ async fn wire_schema_snapshot_and_cache_follow_the_current_request_session() {
     let (orchestrator, registry, supported_actions, schema_revision) = live_audio_orchestrator();
     *supported_actions.write().expect("support lock") = Some(vec!["transcribe".into()]);
     schema_revision.store(1, Ordering::Release);
-    registry.deferral().mark_loaded(["speech"]);
+    registry.deferral().mark_loaded(["audio_schema_fixture"]);
 
     let initial_session = orchestrator.session.lock().await.session_id;
     let initial_wire = orchestrator.build_wire_tools().await.unwrap().0;
     let initial_schema: serde_json::Value = serde_json::from_str(
-        &wire_tool(&initial_wire, "speech")
+        &wire_tool(&initial_wire, "audio_schema_fixture")
             .unwrap()
             .input_schema
             .to_json_string()
@@ -432,7 +433,7 @@ async fn wire_schema_snapshot_and_cache_follow_the_current_request_session() {
     orchestrator.session.lock().await.session_id = retargeted_session;
     let retargeted_wire = orchestrator.build_wire_tools().await.unwrap().0;
     let retargeted_schema: serde_json::Value = serde_json::from_str(
-        &wire_tool(&retargeted_wire, "speech")
+        &wire_tool(&retargeted_wire, "audio_schema_fixture")
             .unwrap()
             .input_schema
             .to_json_string()

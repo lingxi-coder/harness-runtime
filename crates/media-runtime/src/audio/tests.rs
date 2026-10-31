@@ -80,8 +80,8 @@ impl AudioService for EpochAudio {
         }
     }
 
-    async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
-        self.cancellations.lock().unwrap().push(identity);
+    async fn cancel(&self, context: AudioOperationContext) -> Result<(), AudioError> {
+        self.cancellations.lock().unwrap().push(context.identity);
         Ok(())
     }
 }
@@ -156,7 +156,7 @@ impl AudioService for Local {
     ) -> Result<AudioOperationSuccess, AudioError> {
         self.execute(context, operation).await
     }
-    async fn cancel(&self, _: AudioOperationId) -> Result<(), AudioError> {
+    async fn cancel(&self, _: AudioOperationContext) -> Result<(), AudioError> {
         self.cancel.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -188,15 +188,14 @@ async fn host_configured_local_uses_one_native_route_and_never_selects_cloud_or_
     assert_eq!(offline.calls.load(Ordering::SeqCst), 0);
 }
 fn context(owner: &str) -> AudioOperationContext {
-    AudioOperationContext {
-        identity: AudioOperationId::new(1, 7),
-        owner: AudioOwner::Session {
+    AudioOperationContext::new(
+        AudioOperationId::new(1, 7),
+        AudioOwner::Session {
             session_id: owner.into(),
         },
-        initiator: None,
-        timeout_budget_ms: Some(1000),
-        max_payload_bytes: 1024,
-    }
+    )
+    .with_timeout_budget_ms(1000)
+    .with_max_payload_bytes(1024)
 }
 
 fn logical_context(owner: &str, service_epoch: u64) -> AudioOperationContext {
@@ -267,6 +266,7 @@ async fn logical_audio_epoch_maps_to_the_current_native_epoch_for_execute_and_ca
     native.pending.store(true, Ordering::SeqCst);
     let pending_context = logical_context(owner, 1);
     let public_identity = pending_context.identity.clone();
+    let cancel_context = pending_context.clone();
     let pending = tokio::spawn({
         let service = service.clone();
         async move { service.execute(pending_context, speak()).await }
@@ -274,7 +274,7 @@ async fn logical_audio_epoch_maps_to_the_current_native_epoch_for_execute_and_ca
     while native.entered.load(Ordering::SeqCst) < 3 {
         tokio::task::yield_now().await;
     }
-    service.cancel(public_identity.clone()).await.unwrap();
+    service.cancel(cancel_context).await.unwrap();
     assert_eq!(
         pending.await.unwrap().unwrap_err().kind,
         AudioErrorKind::Cancelled
@@ -454,7 +454,7 @@ async fn cancellation_deadline_and_owner_end_target_only_matching_active_calls()
     // EndOwner cancels only owner a. Native lifecycle pending here is cancelled
     // explicitly to keep the fixture's behavior deterministic.
     let end_context = context("a");
-    let end_id = end_context.identity.clone();
+    let cancel_end_context = end_context.clone();
     let ending = tokio::spawn({
         let service = service.clone();
         async move { service.execute(end_context, AudioOperation::EndOwner).await }
@@ -464,7 +464,7 @@ async fn cancellation_deadline_and_owner_end_target_only_matching_active_calls()
         AudioErrorKind::Cancelled
     );
     assert!(!task_b.is_finished());
-    service.cancel(end_id).await.unwrap();
+    service.cancel(cancel_end_context).await.unwrap();
     assert_eq!(
         ending.await.unwrap().unwrap_err().kind,
         AudioErrorKind::Cancelled
@@ -931,13 +931,9 @@ async fn global_audio_capabilities_union_configured_cloud_routes_without_faking_
     );
     let error = service
         .execute(
-            AudioOperationContext {
-                identity: AudioOperationId::new(1, 7),
-                owner: unbound,
-                initiator: None,
-                timeout_budget_ms: Some(1_000),
-                max_payload_bytes: 1024,
-            },
+            AudioOperationContext::new(AudioOperationId::new(1, 7), unbound)
+                .with_timeout_budget_ms(1_000)
+                .with_max_payload_bytes(1024),
             synthesis(),
         )
         .await
@@ -969,6 +965,46 @@ async fn session_bound_projection_rejects_another_resource_owner_before_dispatch
     assert_eq!(device.calls.load(Ordering::SeqCst), 0);
     bound.execute(context("a"), synthesis()).await.unwrap();
     assert_eq!(device.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn owner_audio_cancel_created_before_reuse_cannot_retarget_same_owner_identity() {
+    let device = EpochAudio::new(7);
+    let service = Arc::new(UnifiedAudioService::new(
+        device.clone(),
+        vec![],
+        None,
+        AudioRoutingSettings::default(),
+    ));
+    let owner = AudioOwner::Session {
+        session_id: "same-owner".into(),
+    };
+    let bound = service.for_owner(owner.clone());
+    let first_context = context("same-owner");
+    let identity = first_context.identity.clone();
+    bound.execute(first_context.clone(), speak()).await.unwrap();
+
+    let stale_cancel = bound.cancel(first_context);
+    let mut reused_context = context("same-owner");
+    reused_context.identity = identity;
+    device.pending.store(true, Ordering::SeqCst);
+    let second_service = bound.clone();
+    let second_context = reused_context.clone();
+    let second = tokio::spawn(async move { second_service.execute(second_context, speak()).await });
+    while device.entered.load(Ordering::SeqCst) < 2 {
+        tokio::task::yield_now().await;
+    }
+
+    stale_cancel.await.unwrap();
+    assert!(!second.is_finished());
+    assert!(device.cancellations.lock().unwrap().is_empty());
+
+    bound.cancel(reused_context).await.unwrap();
+    assert_eq!(
+        second.await.unwrap().unwrap_err().kind,
+        AudioErrorKind::Cancelled
+    );
+    assert_eq!(device.cancellations.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

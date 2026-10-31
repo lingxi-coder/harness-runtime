@@ -2029,6 +2029,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
             CompletedAssistantRow {
                 stream_order: 0,
                 row_id: kept_text_row_id,
+                logical_message_id: None,
                 provider_message_id: "response-1".into(),
                 model: "model-1".into(),
                 model_profile: None,
@@ -2051,6 +2052,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
             CompletedAssistantRow {
                 stream_order: 1,
                 row_id: kept_tool_row_id,
+                logical_message_id: None,
                 provider_message_id: "response-1".into(),
                 model: "model-1".into(),
                 model_profile: None,
@@ -2075,6 +2077,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
             CompletedAssistantRow {
                 stream_order: 2,
                 row_id: discarded_thinking_row_id,
+                logical_message_id: None,
                 provider_message_id: "response-1".into(),
                 model: "model-1".into(),
                 model_profile: None,
@@ -2097,6 +2100,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
             CompletedAssistantRow {
                 stream_order: 3,
                 row_id: discarded_tool_row_id,
+                logical_message_id: None,
                 provider_message_id: "response-1".into(),
                 model: "model-1".into(),
                 model_profile: None,

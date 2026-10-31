@@ -67,7 +67,7 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
 
     tokio::time::sleep(grace).await;
 
-    // SIGKILL escalation. Tolerate ESRCH / EPERM — the group is gone.
+    // SIGKILL escalation. Only ESRCH proves the group is gone.
     match killpg(pgid, Signal::SIGKILL) {
         Ok(()) => Ok(()),
         Err(e) if group_already_gone(e) => Ok(()),
@@ -75,13 +75,10 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
     }
 }
 
-/// `killpg` returns either `ESRCH` (no such group) or, on some kernels
-/// (notably macOS / BSD) `EPERM` once every member of the group has been
-/// reaped and the pgid is no longer owned by any process. Both mean "the
-/// group is already gone" — which is exactly the post-condition the
-/// caller wants from a tree-kill — and we treat them identically.
+/// Only `ESRCH` proves that no process group exists. `EPERM` can mean a
+/// live group was not signalled and must remain a stop error.
 fn group_already_gone(e: nix::errno::Errno) -> bool {
-    matches!(e, nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM)
+    matches!(e, nix::errno::Errno::ESRCH)
 }
 
 fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
@@ -104,6 +101,12 @@ mod tests {
         // and overwhelmingly likely to be ESRCH.
         let res = kill_tree_unix(0x7fff_ffff).await;
         assert!(res.is_ok(), "non-existent pgid should be ok, got {res:?}");
+    }
+
+    #[test]
+    fn permission_denied_is_not_an_already_gone_group() {
+        assert!(!super::group_already_gone(nix::errno::Errno::EPERM));
+        assert!(super::group_already_gone(nix::errno::Errno::ESRCH));
     }
 
     /// `kill_tree_force` likewise treats `ESRCH` as success.

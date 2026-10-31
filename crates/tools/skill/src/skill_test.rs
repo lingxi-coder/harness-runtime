@@ -1528,14 +1528,10 @@ mod tests {
     // Parity: prompt() byte-exact comparison (cc 2.1.220 `Xh_`, bytes 231510981)
     // ========================================================================
 
-    /// The `prompt()` string must match the 2.1.220 binary's Skill tool
-    /// description exactly (byte-for-byte, verified against a live-captured
-    /// request body). This test locks the full text so any future change
-    /// requires an explicit binary re-audit. The background-return sentence is
-    /// the cc 2.1.218 addition; the template literal ends with a trailing
-    /// newline that IS sent on the wire.
+    /// Keep the captured Native description intact and permit only the
+    /// explicit clarification needed for on-demand reference-loading skills.
     #[tokio::test]
-    async fn prompt_is_binary_faithful() {
+    async fn prompt_preserves_native_text_and_clarifies_reference_loading() {
         let tool = SkillTool::new(shell_test_ctx(dummy_out()));
         let p = tool.prompt(&PromptOptions::default()).await;
         let expected = "Invoke a skill.\n\nA skill is a packaged set of instructions the \
@@ -1557,8 +1553,8 @@ the listing (or that the user typed explicitly) are valid. Built-in CLI commands
 this turn, the skill is loaded — follow it directly rather than calling again.\n";
         assert_eq!(
             p.string_at(""),
-            Some(expected),
-            "Skill tool prompt must be byte-exact vs 2.1.220"
+            Some(format!("{expected}\nWhen a skill explicitly loads reference topics through `args`, calling it with a topic not yet loaded retrieves new material; do not repeat a topic already present.\n").as_str()),
+            "Native text is unchanged apart from the intentional reference-loading clarification"
         );
     }
 

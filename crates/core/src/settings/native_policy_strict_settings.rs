@@ -1572,7 +1572,7 @@ fn native_node_path_is_absolute(units: &[u16]) -> bool {
         return true;
     }
     units.len() >= 3
-        && units[0].is_ascii_alphabetic()
+        && u8::try_from(units[0]).is_ok_and(|unit| unit.is_ascii_alphabetic())
         && units[1] == u16::from(b':')
         && (units[2] == slash || units[2] == backslash)
 }
@@ -3043,6 +3043,25 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn windows_absolute_paths_require_ascii_drive_letters() {
+        for (path, expected) in [
+            ("C:/folder", true),
+            ("z:\\folder", true),
+            ("\\\\server\\share", true),
+            ("C:relative", false),
+            ("1:\\folder", false),
+            ("é:\\folder", false),
+        ] {
+            let units: Vec<u16> = path.encode_utf16().collect();
+            assert_eq!(
+                super::native_node_path_is_absolute(&units),
+                expected,
+                "{path}"
+            );
+        }
+    }
     use super::{
         NativePolicyRegexValidationOutcome, NativePolicyRegexValidationRow,
         NativeStrictSettingsStatus, NATIVE_DUE_FIELD_ORDER,

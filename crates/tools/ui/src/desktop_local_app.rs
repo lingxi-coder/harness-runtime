@@ -26,7 +26,7 @@ use tool_api::util::path_validation::{
 use tool_api::BuiltinToolContext;
 use visualization::{VisualizationId, VisualizationRef};
 
-const PROMPT: &str = "Create and manage Local Apps. Load the local-app skill first. Publish a multi-file project with schema-2 lingxi-app.json using bundle_path, or a simple document using html/file_path. Apps have independent versions and data and survive their authoring conversation. Read the latest revision and pass expectedRevision when updating; never silently overwrite concurrent work. Node/Python services run only after the user authorizes the exact release in the native Apps page, including install/build scripts. Keep dependencies inside the app environment, never change the shared Linux toolchain. Host and guest architectures and supported capabilities determine compatibility. Local publication does not upload to a market. Use start/status/logs to verify and stop for the app's own processes. Use agent_catalog to discover exact host model and tool IDs; discovery does not grant access. Never pass private host transport, source-session or permission fields.";
+const PROMPT: &str = "Create and manage Local Apps. Load the local-app skill first. Publish a multi-file project with schema-2 lingxi-app.json using bundle_path, or a simple document using html/file_path. Apps have independent versions and data and survive their authoring conversation. Read the latest revision and pass expectedRevision when updating; never silently overwrite concurrent work. Node/Python services run only after the user authorizes the exact release in the native Apps page, including install/build scripts. Keep dependencies inside the app environment, never change the shared Linux toolchain. Host and guest architectures and supported capabilities determine compatibility. Local publication does not upload to a market. Use start/status/logs to verify and stop for the app's own processes. Use agent_catalog to discover exact host model and tool IDs; discovery does not grant access. Never pass private host transport, source-session or permission fields. On iOS, opening the App prepares it in the foreground, not as a permanently running service. User-initiated Agent work may receive a finite, revocable background lease; termination, force quit and device restart do not guarantee immediate relaunch. After the host is available, obtain fresh service URLs for a restarted service and inspect the same saved Agent run and thread read-only. Preserve durable data and never automatically replay requests or tool actions; a new attempt requires the user's explicit choice.";
 // Matches the desktop host's transport budget, not mobile document limits.
 const MAX_HOST_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
@@ -696,6 +696,46 @@ mod tests {
         let mut ctx = fresh_ctx();
         ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::new());
         ctx
+    }
+
+    struct UnusedProjectHost;
+
+    #[async_trait]
+    impl ProjectLocalAppHost for UnusedProjectHost {
+        async fn request(&self, _: Value) -> Result<Value, String> {
+            panic!("a prompt lookup must not call the project host")
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_and_mobile_tool_prompts_include_scoped_ios_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let gate = || {
+            Arc::new(ReadGate {
+                deny: false,
+                replace: None,
+            })
+        };
+        let desktop = tool(&root, gate());
+        let mobile = tool(&root, gate()).with_host(Arc::new(UnusedProjectHost));
+        let options = PromptOptions::default();
+        let desktop_prompt = desktop.prompt(&options).await;
+        let mobile_prompt = mobile.prompt(&options).await;
+        let desktop_text = desktop_prompt.string_at("").unwrap();
+        let mobile_text = mobile_prompt.string_at("").unwrap();
+        assert_eq!(desktop_text, mobile_text);
+        for requirement in [
+            "On iOS, opening the App prepares it in the foreground",
+            "finite, revocable background lease",
+            "termination, force quit and device restart",
+            "fresh service URLs",
+            "same saved Agent run and thread read-only",
+            "never automatically replay requests or tool actions",
+            "user's explicit choice",
+        ] {
+            assert!(mobile_text.contains(requirement), "missing: {requirement}");
+        }
     }
 
     #[tokio::test]

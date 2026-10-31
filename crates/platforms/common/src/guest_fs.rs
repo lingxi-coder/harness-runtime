@@ -88,6 +88,10 @@ impl GuestPathFileSystem {
 
 #[async_trait]
 impl FileSystem for GuestPathFileSystem {
+    fn host_filesystem(&self) -> Option<Arc<dyn FileSystem>> {
+        Some(self.inner.clone())
+    }
+
     async fn read_file(
         &self,
         path: &str,
@@ -545,6 +549,22 @@ mod tests {
                 "expected fence for {path}: {result:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn trusted_host_view_does_not_relax_the_guest_fence() {
+        let (inner, fs) = fs_with(vec![]);
+        let host_path = "/tmp/host-catalog/session.jsonl";
+        assert!(matches!(
+            fs.read_file(host_path, None, None).await,
+            Err(FsError::PermissionDenied(_))
+        ));
+        fs.host_filesystem()
+            .unwrap()
+            .read_file(host_path, None, None)
+            .await
+            .unwrap();
+        assert_eq!(inner.last(), ("read".to_string(), host_path.to_string()));
     }
 
     #[tokio::test]

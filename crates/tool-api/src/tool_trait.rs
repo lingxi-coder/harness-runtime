@@ -327,6 +327,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Opt in only when the implementation honors the trusted LocalAppChat
+    /// profile before any result spill, binary persistence or background work.
+    /// The default keeps unreviewed/dynamic tool implementations out of the
+    /// persistent Local App catalog; this is never inferred from a tool name.
+    fn supports_persistent_chat(&self) -> bool {
+        false
+    }
+
     /// Trusted per-call ceiling projected on the Native Mod `tool.check`
     /// surface. Implementations return a value only when they have an
     /// authoritative host fact for this exact input; the dispatcher does not

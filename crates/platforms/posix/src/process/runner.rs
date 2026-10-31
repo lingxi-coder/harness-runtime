@@ -252,6 +252,7 @@ struct BackgroundOutput {
     stderr_decoder: Utf8StreamDecoder,
 }
 
+#[derive(Clone)]
 struct FramedOutputCapture {
     limit: usize,
     stdout: Vec<u8>,
@@ -382,6 +383,40 @@ async fn publish_background_output(
     }
 }
 
+fn stop_held_foreground(pid: u32) -> Result<(), ProcessError> {
+    #[cfg(test)]
+    if matches!(
+        std::env::var("LXS_TEST_MODE").as_deref(),
+        Ok("fg_stop_failure" | "fg_timeout_failure")
+    ) {
+        let root = std::env::var_os("LXS_TEST_BARRIER_DIR").map(std::path::PathBuf::from);
+        if root.is_some_and(|root| !root.join("foreground.retry.release").exists()) {
+            return Err(ProcessError::Io("injected foreground kill failure".into()));
+        }
+    }
+    kill_tree_force(pid)
+}
+
+fn stop_held_background(pid: u32) -> Result<(), ProcessError> {
+    #[cfg(test)]
+    if std::env::var("LXS_TEST_MODE").as_deref() == Ok("request_stop_denied") {
+        return Err(ProcessError::Io("injected kill permission denied".into()));
+    }
+    kill_tree_force(pid)
+}
+
+async fn report_background_stop_error(
+    binding: Option<&lingxi_core::host::BackgroundTaskBinding>,
+    cause: &ProcessError,
+) {
+    if let Some(binding) = binding {
+        if let Some(sink) = &binding.on_exit {
+            sink.on_supervised_runner_settled(&binding.task_id, Err(cause.clone()))
+                .await;
+        }
+    }
+}
+
 async fn drain_framed_output<SO, SE>(
     stdout: &mut SO,
     stderr: &mut SE,
@@ -436,7 +471,10 @@ where
                 // reserves this process-group identity until the final wait.
                 if let Some(pid) = child.id() {
                     deadline_expired = true;
-                    let _ = kill_tree_force(pid);
+                    if let Err(error) = kill_tree_force(pid) {
+                        report_background_stop_error(binding, &error).await;
+                        first_write_error.get_or_insert_with(|| std::io::Error::other(error.to_string()));
+                    }
                 }
                 continue;
             }
@@ -446,12 +484,17 @@ where
                 // pipes, just as the deadline path does. A user stop owns the
                 // outcome even if output draining crosses the later deadline.
                 deadline_handled = true;
-                if let Some(pid) = child.id() { let _ = kill_tree_force(pid); }
+                if let Some(pid) = child.id() {
+                    if let Err(error) = stop_held_background(pid) {
+                        report_background_stop_error(binding, &error).await;
+                        first_write_error.get_or_insert_with(|| std::io::Error::other(error.to_string()));
+                    }
+                }
                 continue;
             }
             _ = child.wait(), if stdout_done && stderr_done => break,
             _ = health_tick.tick(), if health.is_some() && !pressure_stopped => {
-                if let Some((binding, pid)) = health {
+                if let Some((binding, _)) = health {
                     if let Some(sink) = binding.on_exit.as_ref() {
                         if let Some(tail) = watchdog.poll(tokio::time::Instant::now()) {
                             sink.on_stall(&binding.task_id, &tail).await;
@@ -459,7 +502,12 @@ where
                         if super::watchdog::memory_pressure().await
                             && sink.on_memory_pressure(&binding.task_id).await {
                             pressure_stopped = true;
-                            let _ = kill_tree_force(pid);
+                            if let Some(pid) = child.id() {
+                                if let Err(error) = kill_tree_force(pid) {
+                                    report_background_stop_error(Some(binding), &error).await;
+                                    first_write_error.get_or_insert_with(|| std::io::Error::other(error.to_string()));
+                                }
+                            }
                         }
                     }
                 }
@@ -467,13 +515,15 @@ where
             }
             result = stdout.read(&mut stdout_chunk), if !stdout_done => {
                 match result {
-                    Ok(0) | Err(_) => { stdout_done = true; output.stdout_decoder.decode(&[], true) }
+                    Ok(0) => { stdout_done = true; output.stdout_decoder.decode(&[], true) }
+                    Err(error) => { stdout_done = true; first_write_error.get_or_insert(error); output.stdout_decoder.decode(&[], true) }
                     Ok(count) => output.stdout_decoder.decode(&stdout_chunk[..count], false),
                 }
             }
             result = stderr.read(&mut stderr_chunk), if !stderr_done => {
                 let decoded = match result {
-                    Ok(0) | Err(_) => { stderr_done = true; output.stderr_decoder.decode(&[], true) }
+                    Ok(0) => { stderr_done = true; output.stderr_decoder.decode(&[], true) }
+                    Err(error) => { stderr_done = true; first_write_error.get_or_insert(error); output.stderr_decoder.decode(&[], true) }
                     Ok(count) => output.stderr_decoder.decode(&stderr_chunk[..count], false),
                 };
                 if decoded.is_empty() { decoded } else { format!("[stderr] {decoded}") }
@@ -505,6 +555,113 @@ where
         first_write_error.get_or_insert(error);
     }
     (first_write_error.map_or(Ok(()), Err), deadline_expired)
+}
+
+async fn finish_failed_foreground(
+    mut child: tokio::process::Child,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    initial: BackgroundOutput,
+    binding: Option<lingxi_core::host::BackgroundTaskBinding>,
+    pid: u32,
+    birth: Option<String>,
+) {
+    // Retain ownership across failures. After a wait error, a bare PID is not
+    // enough: signal only the original process birth and wait on uncertainty.
+    while let Some(held_pid) = child.id() {
+        let still_original = birth.as_deref().is_some_and(|expected| {
+            lingxi_core::host::live_sessions::process_start_identity(held_pid).as_deref()
+                == Some(expected)
+        });
+        if still_original && stop_held_foreground(held_pid).is_ok() {
+            break;
+        }
+        // A missing or changed birth identity forbids another PID-based
+        // signal, but it does not prevent polling our held Child. If it exits
+        // naturally, reap it and continue draining instead of retaining the
+        // supervisor forever while waiting for an identity that cannot return.
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if let (Some(mut stdout), Some(mut stderr)) = (stdout, stderr) {
+        let mut file = None;
+        let _ = drain_framed_output(
+            &mut stdout,
+            &mut stderr,
+            &mut file,
+            initial,
+            binding.as_ref().map(|binding| (binding, pid)),
+            &mut child,
+            None,
+        )
+        .await;
+    }
+    while child.wait().await.is_err() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if let Some(binding) = binding {
+        if let Some(sink) = binding.on_exit {
+            sink.on_supervised_cleanup_finished(&binding.task_id).await;
+        }
+    }
+}
+
+#[cfg(test)]
+async fn promotion_test_gate(name: &str) {
+    if !matches!(
+        std::env::var("LXS_TEST_MODE").as_deref(),
+        Ok("promotion_cancel" | "promotion_abort")
+    ) {
+        return;
+    }
+    let Some(root) = std::env::var_os("LXS_TEST_BARRIER_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
+    std::fs::write(root.join(format!("promotion.{name}.ready")), "ready").unwrap();
+    while !root.join(format!("promotion.{name}.release")).exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+async fn persist_supervised_foreground(
+    command: &SandboxedCommand,
+    capture: &Option<FramedOutputCapture>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(), ProcessError> {
+    let Some((binding, sink)) = command.background_task().and_then(|binding| {
+        binding
+            .on_exit
+            .as_ref()
+            .filter(|sink| sink.stop_notify().is_some() && sink.manages_output())
+            .map(|sink| (binding, sink))
+    }) else {
+        return Ok(());
+    };
+    let capture = capture.clone().unwrap_or_else(|| {
+        let mut capture = FramedOutputCapture::new(usize::MAX);
+        capture.observe_stdout(stdout);
+        capture.observe_stderr(stderr);
+        capture
+    });
+    let content = capture.force_spilled();
+    sink.append_output(&binding.task_id, &String::from_utf8_lossy(&content))
+        .await?;
+    sink.flush_output(&binding.task_id).await
+}
+
+async fn report_foreground_settlement(
+    command: &SandboxedCommand,
+    settlement: Result<Option<i32>, ProcessError>,
+) {
+    if let Some(binding) = command.background_task() {
+        if let Some(sink) = &binding.on_exit {
+            sink.on_supervised_runner_settled(&binding.task_id, settlement)
+                .await;
+        }
+    }
 }
 
 /// Production [`ProcessRunner`] using `tokio::process`.
@@ -753,6 +910,9 @@ impl PosixProcess {
                 if reason == HOOK_COMMAND_AUDIT_REASON
         );
         let mut tcmd = Command::new(&inner.command);
+        if cmd.clear_environment() {
+            tcmd.env_clear();
+        }
         tcmd.args(&inner.args);
         if let Some(cwd) = &inner.cwd {
             tcmd.current_dir(cwd);
@@ -834,8 +994,162 @@ impl PosixProcess {
 
 #[async_trait]
 impl ProcessRunner for PosixProcess {
+    fn supports_inline_foreground(&self) -> bool {
+        true
+    }
+
+    async fn run_inline_foreground(
+        &self,
+        cmd: &SandboxedCommand,
+        max_output_bytes: usize,
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        if cmd.process_owner().is_none()
+            || cmd.background_task().is_some()
+            || cmd.inner().stdin.is_some()
+        {
+            return Err(ProcessError::Unsupported);
+        }
+        let mut command = Self::build_command(cmd);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        attach_setsid(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|error| ProcessError::Io(error.to_string()))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| ProcessError::Io("inline child has no pid".into()))?;
+        let mut group_guard = StreamingProcessGroupGuard(Some(pid));
+        let _owner = super::agent_processes::register(cmd.process_owner(), Some(pid));
+        // Shell calls carry no stdin. Refuse unsupported callers before spawn
+        // above by the same strict API rather than leaving a blocked writer.
+        drop(child.stdin.take());
+        let mut stdout = child.stdout.take().expect("piped inline stdout");
+        let mut stderr = child.stderr.take().expect("piped inline stderr");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut out_chunk = [0u8; 8192];
+        let mut err_chunk = [0u8; 8192];
+        let mut out_done = false;
+        let mut err_done = false;
+        let mut status = None;
+        let mut truncated = false;
+        let deadline = tokio::time::sleep(cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT));
+        tokio::pin!(deadline);
+        let timed_out = loop {
+            if out_done && err_done && status.is_some() {
+                break false;
+            }
+            tokio::select! {
+                biased;
+                () = &mut deadline => break true,
+                read = stdout.read(&mut out_chunk), if !out_done => {
+                    match read {
+                        Ok(0) | Err(_) => out_done = true,
+                        Ok(count) => {
+                            let keep = count.min(max_output_bytes.saturating_sub(out.len() + err.len()));
+                            out.extend_from_slice(&out_chunk[..keep]);
+                            truncated |= keep != count;
+                        }
+                    }
+                }
+                read = stderr.read(&mut err_chunk), if !err_done => {
+                    match read {
+                        Ok(0) | Err(_) => err_done = true,
+                        Ok(count) => {
+                            let keep = count.min(max_output_bytes.saturating_sub(out.len() + err.len()));
+                            err.extend_from_slice(&err_chunk[..keep]);
+                            truncated |= keep != count;
+                        }
+                    }
+                }
+                waited = child.wait(), if status.is_none() => {
+                    status = Some(waited.map_err(|error| ProcessError::Io(error.to_string()))?);
+                }
+            }
+        };
+        if timed_out {
+            let _ = kill_tree_force(pid);
+            status = Some(
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                    .await
+                    .map_err(|_| {
+                        ProcessError::Io(format!(
+                            "{} process {pid} did not reap",
+                            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                        ))
+                    })?
+                    .map_err(|error| {
+                        ProcessError::Io(format!(
+                            "{} {error}",
+                            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE
+                        ))
+                    })?,
+            );
+        }
+        // A shell may exit after a child closes its pipes and keeps running.
+        // Foreground completion must settle that owned group too.
+        kill_tree_force(pid).map_err(|error| {
+            ProcessError::Io(format!(
+                "{} {error}",
+                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+            ))
+        })?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let pgid = nix::unistd::Pid::from_raw(
+                i32::try_from(pid).map_err(|_| ProcessError::Unsupported)?,
+            );
+            loop {
+                match nix::sys::signal::killpg(pgid, None) {
+                    Err(nix::errno::Errno::ESRCH) => return Ok::<(), ProcessError>(()),
+                    Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    Err(error) => {
+                        return Err(ProcessError::Io(format!(
+                            "{} process group {pid} cleanup cannot be confirmed: {error}",
+                            lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+                        )))
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            ProcessError::Io(format!(
+                "{} process group {pid} did not settle",
+                lingxi_core::host::process::SIDE_CHAT_CLEANUP_FAILURE,
+            ))
+        })??;
+        group_guard.0 = None;
+        let mut stdout = String::from_utf8_lossy(&out).into_owned();
+        if truncated {
+            stdout.push_str("\n[Local App Chat shell output truncated at the inline limit]");
+        }
+        Ok(lingxi_core::host::ForegroundRunResult {
+            outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
+                stdout,
+                stderr: String::from_utf8_lossy(&err).into_owned(),
+                exit_code: status
+                    .and_then(|status| status.code())
+                    .unwrap_or(TIMEOUT_KILL_EXIT_CODE),
+                timed_out,
+            }),
+            output_file: None,
+        })
+    }
+
+    fn supports_request_cancellation(&self, command: &SandboxedCommand) -> bool {
+        super::supervisor::enabled(command)
+    }
+
     fn supports_foreground_backgrounding(&self) -> bool {
         true
+    }
+
+    async fn stop_request_background(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+        lingxi_core::host::shell_supervisor::stop_and_wait(handle).await
     }
 
     async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
@@ -853,6 +1167,9 @@ impl ProcessRunner for PosixProcess {
     }
 
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        if super::team_guardian::enabled() {
+            return super::team_guardian::execute(cmd, None).await;
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -919,6 +1236,16 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         sink: std::sync::Arc<dyn ProcessStreamSink>,
     ) -> Result<ProcessOutput, ProcessError> {
+        if super::team_guardian::enabled() {
+            let output = super::team_guardian::execute(cmd, None).await?;
+            for line in output.stdout.lines() {
+                sink.stdout_line(line.to_owned()).await?;
+            }
+            if !output.stderr.is_empty() {
+                sink.stderr_chunk(output.stderr.as_bytes().to_vec()).await?;
+            }
+            return Ok(output);
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -1046,6 +1373,13 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
     ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        if super::team_guardian::enabled() {
+            let output = super::team_guardian::execute(cmd, max_output_bytes).await?;
+            return Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(output),
+                output_file: None,
+            });
+        }
         if super::supervisor::enabled(cmd) {
             return super::supervisor::execute(cmd, max_output_bytes, false).await;
         }
@@ -1077,18 +1411,59 @@ impl ProcessRunner for PosixProcess {
         let spawned_pid = child
             .id()
             .ok_or_else(|| ProcessError::Io("spawned child has no pid".into()))?;
+        let spawned_birth = lingxi_core::host::live_sessions::process_start_identity(spawned_pid);
+        let _private_group_guard = cmd
+            .clear_environment()
+            .then(|| StreamingProcessGroupGuard(Some(spawned_pid)));
         let child_registration = if print_mode_cleanup {
             active_children::register(spawned_pid);
             Some(ChildRegistration(spawned_pid))
         } else {
             None
         };
+        let stop_notify = cmd
+            .background_task()
+            .and_then(|binding| binding.on_exit.as_ref())
+            .and_then(|sink| sink.stop_notify());
+        let mut stopped = false;
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
-                    .await
-                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+                tokio::select! {
+                    result = stdin.write_all(stdin_text.as_bytes()) => {
+                        if let Err(cause) = result {
+                            let cause = ProcessError::Io(cause.to_string());
+                            if stop_notify.is_some() {
+                                let binding = cmd.background_task().cloned();
+                                if let Some(bound) = &binding { if let Some(sink) = &bound.on_exit { sink.on_supervised_cleanup_pending(&bound.task_id).await; } }
+                                report_foreground_settlement(cmd, Err(cause.clone())).await;
+                                let stdout = child.stdout.take();
+                                let stderr = child.stderr.take();
+                                tokio::spawn(async move {
+                                    let _child_registration = child_registration;
+                                    let _agent_registration = agent_registration;
+                                    finish_failed_foreground(child, stdout, stderr, BackgroundOutput::default(), binding, spawned_pid, spawned_birth).await;
+                                });
+                            }
+                            return Err(cause);
+                        }
+                    }
+                    _ = async { if let Some(stop) = &stop_notify { stop.notified().await; } else { std::future::pending::<()>().await; } } => {
+                        stopped = true;
+                        if let Err(cause) = stop_held_foreground(spawned_pid) {
+                            let binding = cmd.background_task().cloned();
+                            if let Some(bound) = &binding { if let Some(sink) = &bound.on_exit { sink.on_supervised_cleanup_pending(&bound.task_id).await; } }
+                            report_foreground_settlement(cmd, Err(cause.clone())).await;
+                            let stdout = child.stdout.take();
+                            let stderr = child.stderr.take();
+                            tokio::spawn(async move {
+                                let _child_registration = child_registration;
+                                let _agent_registration = agent_registration;
+                                finish_failed_foreground(child, stdout, stderr, BackgroundOutput::default(), binding, spawned_pid, spawned_birth).await;
+                            });
+                            return Err(cause);
+                        }
+                    }
+                }
             }
         }
 
@@ -1105,11 +1480,21 @@ impl ProcessRunner for PosixProcess {
         let mut err_buf: Vec<u8> = Vec::new();
         let mut out_done = false;
         let mut err_done = false;
+        let mut read_error: Option<String> = None;
         let mut exit_status: Option<std::process::ExitStatus> = None;
         let mut framed_output = max_output_bytes.map(FramedOutputCapture::new);
         let mut framed_stdout_observed = 0usize;
         let mut framed_stderr_observed = 0usize;
 
+        #[cfg(test)]
+        if std::env::var("LXS_TEST_MODE").as_deref() == Ok("fg_timeout_failure") {
+            let root = std::env::var_os("LXS_TEST_BARRIER_DIR")
+                .map(std::path::PathBuf::from)
+                .expect("timeout test barrier root");
+            while !root.join("child.pid").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
         let sleep = tokio::time::sleep(timeout);
         tokio::pin!(sleep);
         // claude-code `I_t` backgrounds a still-running FOREGROUND child by
@@ -1139,11 +1524,38 @@ impl ProcessRunner for PosixProcess {
             }
             tokio::select! {
                 biased;
-                () = &mut sleep => break ForegroundBreak::Deadline,
-                () = &mut background_requested => break ForegroundBreak::Requested,
+                _ = async { if let Some(stop) = &stop_notify { stop.notified().await; } else { std::future::pending::<()>().await; } }, if !stopped => {
+                    stopped = true;
+                    if let Some(pid) = child.id() {
+                        if let Err(cause) = stop_held_foreground(pid) {
+                            let binding = cmd.background_task().cloned();
+                            if let Some(bound) = &binding { if let Some(sink) = &bound.on_exit { sink.on_supervised_cleanup_pending(&bound.task_id).await; } }
+                            report_foreground_settlement(cmd, Err(cause.clone())).await;
+                            let initial = framed_output.unwrap_or_else(|| {
+                                let mut capture = FramedOutputCapture::new(usize::MAX);
+                                capture.observe_stdout(&out_buf);
+                                capture.observe_stderr(&err_buf);
+                                capture
+                            }).into_background();
+                            tokio::spawn(async move {
+                                let _child_registration = child_registration;
+                                let _agent_registration = agent_registration;
+                                finish_failed_foreground(child, Some(sout), Some(serr), initial, binding, pid, spawned_birth).await;
+                            });
+                            return Err(cause);
+                        }
+                    } else if !out_done || !err_done {
+                        let cause = ProcessError::Io("cannot stop inherited output after the child was reaped".into());
+                        report_foreground_settlement(cmd, Err(ProcessError::Io(cause.to_string()))).await;
+                        return Err(cause);
+                    }
+                }
+                () = &mut sleep, if !stopped => break ForegroundBreak::Deadline,
+                () = &mut background_requested, if !stopped => break ForegroundBreak::Requested,
                 r = sout.read_buf(&mut out_buf), if !out_done => {
                     match r {
-                        Ok(0) | Err(_) => out_done = true,
+                        Ok(0) => out_done = true,
+                        Err(error) => { out_done = true; read_error.get_or_insert_with(|| error.to_string()); },
                         Ok(_) => {
                             if let Some(capture) = framed_output.as_mut() {
                                 capture.observe_stdout(&out_buf[framed_stdout_observed..]);
@@ -1154,7 +1566,8 @@ impl ProcessRunner for PosixProcess {
                 }
                 r = serr.read_buf(&mut err_buf), if !err_done => {
                     match r {
-                        Ok(0) | Err(_) => err_done = true,
+                        Ok(0) => err_done = true,
+                        Err(error) => { err_done = true; read_error.get_or_insert_with(|| error.to_string()); },
                         Ok(_) => {
                             if let Some(capture) = framed_output.as_mut() {
                                 capture.observe_stderr(&err_buf[framed_stderr_observed..]);
@@ -1163,20 +1576,58 @@ impl ProcessRunner for PosixProcess {
                         }
                     }
                 }
-                s = child.wait(), if exit_status.is_none() => {
-                    exit_status = Some(s.map_err(|e| ProcessError::Io(e.to_string()))?);
+                s = child.wait(), if exit_status.is_none() && (stop_notify.is_none() || (out_done && err_done)) => {
+                    match s {
+                        Ok(status) => exit_status = Some(status),
+                        Err(cause) => {
+                            let cause = ProcessError::Io(cause.to_string());
+                            if stop_notify.is_some() {
+                                let binding = cmd.background_task().cloned();
+                                if let Some(bound) = &binding { if let Some(sink) = &bound.on_exit { sink.on_supervised_cleanup_pending(&bound.task_id).await; } }
+                                report_foreground_settlement(cmd, Err(cause.clone())).await;
+                                let initial = framed_output.unwrap_or_else(|| {
+                                    let mut capture = FramedOutputCapture::new(usize::MAX);
+                                    capture.observe_stdout(&out_buf);
+                                    capture.observe_stderr(&err_buf);
+                                    capture
+                                }).into_background();
+                                tokio::spawn(async move {
+                                    let _child_registration = child_registration;
+                                    let _agent_registration = agent_registration;
+                                    finish_failed_foreground(child, Some(sout), Some(serr), initial, binding, spawned_pid, spawned_birth).await;
+                                });
+                            }
+                            return Err(cause);
+                        }
+                    }
                 }
             }
         };
 
         if matches!(backgrounding, ForegroundBreak::Finished) {
             let status = exit_status.expect("loop breaks with a status when not timed out");
-            return self.completed_foreground_result(
+            let code = status.code();
+            let persisted =
+                persist_supervised_foreground(cmd, &framed_output, &out_buf, &err_buf).await;
+            let result = self.completed_foreground_result(
                 &out_buf,
                 &err_buf,
                 status,
                 framed_output.and_then(FramedOutputCapture::into_spilled),
             );
+            let settlement = if let Some(cause) = read_error {
+                Err(ProcessError::Io(cause))
+            } else if let Err(cause) = persisted {
+                Err(cause)
+            } else if let Err(cause) = &result {
+                Err(ProcessError::Io(cause.to_string()))
+            } else if !out_done || !err_done {
+                Err(ProcessError::Io("output drain did not reach EOF".into()))
+            } else {
+                Ok(code)
+            };
+            report_foreground_settlement(cmd, settlement).await;
+            return result;
         }
 
         // The timer may become ready while this future is starved by other
@@ -1188,9 +1639,44 @@ impl ProcessRunner for PosixProcess {
         // grace period, and report the real completion instead.
         let completed_status = match exit_status.take() {
             Some(status) => Some(status),
-            None => child
-                .try_wait()
-                .map_err(|e| ProcessError::Io(e.to_string()))?,
+            None => match child.try_wait() {
+                Ok(status) => status,
+                Err(cause) => {
+                    let cause = ProcessError::Io(cause.to_string());
+                    if stop_notify.is_some() {
+                        let binding = cmd.background_task().cloned();
+                        if let Some(bound) = &binding {
+                            if let Some(sink) = &bound.on_exit {
+                                sink.on_supervised_cleanup_pending(&bound.task_id).await;
+                            }
+                        }
+                        report_foreground_settlement(cmd, Err(cause.clone())).await;
+                        let initial = framed_output
+                            .unwrap_or_else(|| {
+                                let mut capture = FramedOutputCapture::new(usize::MAX);
+                                capture.observe_stdout(&out_buf);
+                                capture.observe_stderr(&err_buf);
+                                capture
+                            })
+                            .into_background();
+                        tokio::spawn(async move {
+                            let _child_registration = child_registration;
+                            let _agent_registration = agent_registration;
+                            finish_failed_foreground(
+                                child,
+                                Some(sout),
+                                Some(serr),
+                                initial,
+                                binding,
+                                spawned_pid,
+                                spawned_birth,
+                            )
+                            .await;
+                        });
+                    }
+                    return Err(cause);
+                }
+            },
         };
         if let Some(status) = completed_status {
             const MAX_POST_EXIT_READS: usize = 256;
@@ -1206,7 +1692,8 @@ impl ProcessRunner for PosixProcess {
                     r = sout.read_buf(&mut out_buf), if !out_done => {
                         reads += 1;
                         match r {
-                            Ok(0) | Err(_) => out_done = true,
+                            Ok(0) => out_done = true,
+                        Err(error) => { out_done = true; read_error.get_or_insert_with(|| error.to_string()); },
                             Ok(_) => {
                                 if let Some(capture) = framed_output.as_mut() {
                                     capture.observe_stdout(&out_buf[framed_stdout_observed..]);
@@ -1218,7 +1705,8 @@ impl ProcessRunner for PosixProcess {
                     r = serr.read_buf(&mut err_buf), if !err_done => {
                         reads += 1;
                         match r {
-                            Ok(0) | Err(_) => err_done = true,
+                            Ok(0) => err_done = true,
+                        Err(error) => { err_done = true; read_error.get_or_insert_with(|| error.to_string()); },
                             Ok(_) => {
                                 if let Some(capture) = framed_output.as_mut() {
                                     capture.observe_stderr(&err_buf[framed_stderr_observed..]);
@@ -1230,12 +1718,28 @@ impl ProcessRunner for PosixProcess {
                     () = &mut grace => break,
                 }
             }
-            return self.completed_foreground_result(
+            let code = status.code();
+            let persisted =
+                persist_supervised_foreground(cmd, &framed_output, &out_buf, &err_buf).await;
+            let result = self.completed_foreground_result(
                 &out_buf,
                 &err_buf,
                 status,
                 framed_output.and_then(FramedOutputCapture::into_spilled),
             );
+            let settlement = if let Some(cause) = read_error {
+                Err(ProcessError::Io(cause))
+            } else if let Err(cause) = persisted {
+                Err(cause)
+            } else if let Err(cause) = &result {
+                Err(ProcessError::Io(cause.to_string()))
+            } else if !out_done || !err_done {
+                Err(ProcessError::Io("output drain did not reach EOF".into()))
+            } else {
+                Ok(code)
+            };
+            report_foreground_settlement(cmd, settlement).await;
+            return result;
         }
 
         // A command the caller marked non-auto-backgroundable is KILLED at its
@@ -1246,8 +1750,126 @@ impl ProcessRunner for PosixProcess {
         // An EXPLICIT request always backgrounds: the caller has already decided,
         // and `shouldAutoBackground` only ever governed what the DEADLINE does.
         if matches!(backgrounding, ForegroundBreak::Deadline) && !cmd.auto_background_on_timeout() {
-            let _ = kill_tree_force(spawned_pid);
-            let _ = child.wait().await;
+            let kill = stop_held_foreground(spawned_pid);
+            if let Err(cause) = kill {
+                let result = lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+                        stderr: String::from_utf8_lossy(&err_buf).into_owned(),
+                        exit_code: TIMEOUT_KILL_EXIT_CODE,
+                        timed_out: true,
+                    }),
+                    output_file: None,
+                };
+                let binding = cmd.background_task().cloned();
+                if let Some(bound) = &binding {
+                    if let Some(sink) = &bound.on_exit {
+                        sink.on_supervised_cleanup_pending(&bound.task_id).await;
+                    }
+                }
+                report_foreground_settlement(cmd, Err(cause)).await;
+                let initial = framed_output
+                    .unwrap_or_else(|| {
+                        let mut capture = FramedOutputCapture::new(usize::MAX);
+                        capture.observe_stdout(&out_buf);
+                        capture.observe_stderr(&err_buf);
+                        capture
+                    })
+                    .into_background();
+                tokio::spawn(async move {
+                    let _child_registration = child_registration;
+                    let _agent_registration = agent_registration;
+                    finish_failed_foreground(
+                        child,
+                        Some(sout),
+                        Some(serr),
+                        initial,
+                        binding,
+                        spawned_pid,
+                        spawned_birth,
+                    )
+                    .await;
+                });
+                return Ok(result);
+            }
+            let status = match child.wait().await {
+                Ok(status) => Some(Ok(status)),
+                Err(cause) if stop_notify.is_some() => {
+                    let cause = ProcessError::Io(cause.to_string());
+                    let result = lingxi_core::host::ForegroundRunResult {
+                        outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
+                            stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+                            stderr: String::from_utf8_lossy(&err_buf).into_owned(),
+                            exit_code: TIMEOUT_KILL_EXIT_CODE,
+                            timed_out: true,
+                        }),
+                        output_file: None,
+                    };
+                    let binding = cmd.background_task().cloned();
+                    if let Some(bound) = &binding {
+                        if let Some(sink) = &bound.on_exit {
+                            sink.on_supervised_cleanup_pending(&bound.task_id).await;
+                        }
+                    }
+                    report_foreground_settlement(cmd, Err(cause)).await;
+                    let initial = framed_output
+                        .unwrap_or_else(|| {
+                            let mut capture = FramedOutputCapture::new(usize::MAX);
+                            capture.observe_stdout(&out_buf);
+                            capture.observe_stderr(&err_buf);
+                            capture
+                        })
+                        .into_background();
+                    tokio::spawn(async move {
+                        let _child_registration = child_registration;
+                        let _agent_registration = agent_registration;
+                        finish_failed_foreground(
+                            child,
+                            Some(sout),
+                            Some(serr),
+                            initial,
+                            binding,
+                            spawned_pid,
+                            spawned_birth,
+                        )
+                        .await;
+                    });
+                    return Ok(result);
+                }
+                Err(cause) => Some(Err(cause)),
+            };
+            // Preserve the public timeout result, but certify only a real wait
+            // and complete drain. A descendant can retain a pipe after exit.
+            let grace = tokio::time::sleep(std::time::Duration::from_millis(50));
+            tokio::pin!(grace);
+            while !(out_done && err_done) {
+                tokio::select! {
+                    biased;
+                    r = sout.read_buf(&mut out_buf), if !out_done => match r {
+                        Ok(0) => out_done = true,
+                        Err(error) => { out_done = true; read_error.get_or_insert_with(|| error.to_string()); },
+                        Ok(_) => {},
+                    },
+                    r = serr.read_buf(&mut err_buf), if !err_done => match r {
+                        Ok(0) => err_done = true,
+                        Err(error) => { err_done = true; read_error.get_or_insert_with(|| error.to_string()); },
+                        Ok(_) => {},
+                    },
+                    () = &mut grace => break,
+                }
+            }
+            let persisted = persist_supervised_foreground(cmd, &None, &out_buf, &err_buf).await;
+            let settlement = match (kill, status, read_error, persisted) {
+                (Err(cause), _, _, _) => Err(cause),
+                (_, Some(Err(cause)), _, _) => Err(ProcessError::Io(cause.to_string())),
+                (_, _, Some(cause), _) => Err(ProcessError::Io(cause)),
+                (_, _, _, Err(cause)) => Err(cause),
+                (Ok(()), Some(Ok(status)), None, Ok(())) if out_done && err_done => {
+                    Ok(status.code())
+                }
+                _ => Err(ProcessError::Io("output drain did not reach EOF".into())),
+            };
+            report_foreground_settlement(cmd, settlement).await;
             return Ok(lingxi_core::host::ForegroundRunResult {
                 outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
                     stdout: String::from_utf8_lossy(&out_buf).into_owned(),
@@ -1305,7 +1927,7 @@ impl ProcessRunner for PosixProcess {
             let _agent_registration = agent_registration;
             let mut child = child;
             let mut file = std_file.map(tokio::fs::File::from_std);
-            let (_, deadline_expired) = drain_framed_output(
+            let (drain_result, deadline_expired) = drain_framed_output(
                 &mut sout,
                 &mut serr,
                 &mut file,
@@ -1319,7 +1941,14 @@ impl ProcessRunner for PosixProcess {
             // Same one-shot exit report as the explicit-background path, so an
             // auto-backgrounded (timed-out) command settles its task record.
             if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
-                let code = status.ok().and_then(|status| status.code());
+                let code = status.as_ref().ok().and_then(|status| status.code());
+                let settlement = match (drain_result, status) {
+                    (Err(error), _) => Err(ProcessError::Io(error.to_string())),
+                    (_, Err(error)) => Err(ProcessError::Io(error.to_string())),
+                    (Ok(()), Ok(_)) => Ok(code),
+                };
+                sink.on_supervised_runner_settled(&exit_task_id, settlement)
+                    .await;
                 if deadline_expired {
                     sink.on_background_deadline_exit(&exit_task_id, code).await;
                 } else {
@@ -1387,6 +2016,9 @@ impl ProcessRunner for PosixProcess {
         observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<HookRunOutcome, ProcessError> {
+        if super::team_guardian::enabled() {
+            return Err(ProcessError::Unsupported);
+        }
         if cancellation
             .as_ref()
             .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
@@ -1624,6 +2256,9 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
     ) -> Result<ProcessHandle, ProcessError> {
+        if super::team_guardian::enabled() {
+            return Err(ProcessError::Unsupported);
+        }
         if super::supervisor::enabled(cmd) {
             return match super::supervisor::execute(cmd, None, true).await?.outcome {
                 lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
@@ -1699,7 +2334,7 @@ impl ProcessRunner for PosixProcess {
         tokio::spawn(async move {
             let _agent_registration = agent_registration;
             let mut file = file.map(tokio::fs::File::from_std);
-            let (_, deadline_expired) = drain_framed_output(
+            let (drain_result, deadline_expired) = drain_framed_output(
                 &mut stdout,
                 &mut stderr,
                 &mut file,
@@ -1709,12 +2344,21 @@ impl ProcessRunner for PosixProcess {
                 background_deadline,
             )
             .await;
+            #[cfg(test)]
+            promotion_test_gate("reaper").await;
             let status = child.wait().await;
             // One-shot exit report so the caller can settle the task record
             // (claude-code `Ger`: terminal status from the child's result, then
             // the completion notification).
             if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
-                let code = status.ok().and_then(|status| status.code());
+                let code = status.as_ref().ok().and_then(|status| status.code());
+                let settlement = match (drain_result, status) {
+                    (Err(error), _) => Err(ProcessError::Io(error.to_string())),
+                    (_, Err(error)) => Err(ProcessError::Io(error.to_string())),
+                    (Ok(()), Ok(_)) => Ok(code),
+                };
+                sink.on_supervised_runner_settled(&exit_task_id, settlement)
+                    .await;
                 if deadline_expired {
                     sink.on_background_deadline_exit(&exit_task_id, code).await;
                 } else {
@@ -1723,6 +2367,8 @@ impl ProcessRunner for PosixProcess {
             }
         });
 
+        #[cfg(test)]
+        promotion_test_gate("handoff").await;
         Ok(ProcessHandle { task_id, pid })
     }
 
@@ -1818,6 +2464,75 @@ fn generate_task_id() -> Result<String, ProcessError> {
         "local_bash_{:x}_{nonce:016x}_{sequence:016x}",
         std::process::id()
     ))
+}
+
+#[cfg(test)]
+mod failed_foreground_cleanup_tests {
+    use super::*;
+    use lingxi_core::host::{BackgroundExitSink, BackgroundTaskBinding};
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct Sink {
+        output: std::sync::Mutex<String>,
+        finished: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl BackgroundExitSink for Sink {
+        fn manages_output(&self) -> bool {
+            true
+        }
+
+        async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+            self.output.lock().unwrap().push_str(text);
+            Ok(())
+        }
+
+        async fn on_supervised_cleanup_finished(&self, _: &str) {
+            self.finished.store(true, Ordering::SeqCst);
+        }
+
+        async fn on_exit(&self, _: &str, _: Option<i32>) {}
+    }
+
+    #[tokio::test]
+    async fn unknown_birth_waits_for_natural_exit_and_drains_output() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 0.15; printf natural-exit-output"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let sink = Arc::new(Sink::default());
+        let root = tempfile::tempdir().unwrap();
+        let binding = BackgroundTaskBinding {
+            task_id: "unknown-birth".into(),
+            output_path: root.path().join("output"),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            finish_failed_foreground(
+                child,
+                stdout,
+                stderr,
+                BackgroundOutput::default(),
+                Some(binding),
+                pid,
+                None,
+            ),
+        )
+        .await
+        .expect("an exited held child must not be retained forever");
+        assert_eq!(*sink.output.lock().unwrap(), "natural-exit-output");
+        assert!(sink.finished.load(Ordering::SeqCst));
+    }
 }
 
 #[cfg(test)]
@@ -2088,6 +2803,71 @@ mod async_hook_tests {
         sh_with_timeout(script, Duration::from_secs(5))
     }
 
+    async fn private_group_child_must_stop(cancel: bool) {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let pid_path = dir.path().join("pid");
+        let quote =
+            |p: &std::path::Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
+        // Redirect the grandchild's pipes so normal parent exit really returns
+        // before its 30-second child. The ready handshake proves it was alive.
+        let script = format!(
+            "(printf ready > {}; exec /bin/sleep 30) >/dev/null 2>&1 & printf '%s' $! > {}; while [ ! -f {} ]; do /bin/sleep 0.01; done; {}",
+            quote(&ready), quote(&pid_path), quote(&ready), if cancel { "wait" } else { "printf done" }
+        );
+        let command = sh(&script).with_clear_environment(true);
+        let task = tokio::spawn(async move { PosixProcess::new().run_foreground(&command).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ready.exists() || !pid_path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned grandchild starts");
+        let pid: i32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        struct Cleanup(Pid);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = kill(self.0, Signal::SIGKILL);
+            }
+        }
+        let _cleanup = Cleanup(Pid::from_raw(pid));
+        if cancel {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(matches!(
+                task.await.unwrap().unwrap(),
+                lingxi_core::host::ForegroundOutcome::Completed(_)
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    kill(Pid::from_raw(pid), None),
+                    Err(nix::errno::Errno::ESRCH)
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("private foreground drops kill same-group descendants");
+    }
+
+    #[tokio::test]
+    async fn private_foreground_success_kills_same_group_descendants() {
+        private_group_child_must_stop(false).await;
+    }
+
+    #[tokio::test]
+    async fn private_foreground_cancellation_kills_same_group_descendants() {
+        private_group_child_must_stop(true).await;
+    }
+
     fn sh_with_timeout(script: &str, timeout: Duration) -> SandboxedCommand {
         let pcmd = ProcessCommand {
             command: "/bin/sh".to_string(),
@@ -2295,6 +3075,75 @@ mod async_hook_tests {
             result.outcome,
             lingxi_core::host::ForegroundOutcome::Completed(_)
         ));
+        assert!(!parent.path().join("tasks").exists());
+    }
+
+    #[tokio::test]
+    async fn local_app_inline_foreground_caps_memory_without_spool() {
+        let parent = tempfile::tempdir().unwrap();
+        let runner = PosixProcess::with_task_output_dir(parent.path().join("tasks"));
+        let owner = format!("inline-chat-{}", std::process::id());
+        let command = sh("i=0; while [ $i -lt 10000 ]; do printf abcdefgh; i=$((i+1)); done")
+            .with_process_owner(Some(owner.clone()));
+        let result = runner.run_inline_foreground(&command, 128).await.unwrap();
+        let lingxi_core::host::ForegroundOutcome::Completed(output) = result.outcome else {
+            panic!("inline process detached")
+        };
+        assert!(output.stdout.len() < 256);
+        assert!(output.stdout.contains("truncated"));
+        assert!(result.output_file.is_none());
+        assert!(!parent.path().join("tasks").exists());
+        assert!(lingxi_core::host::agent_processes::snapshot(&owner).is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_app_inline_foreground_reaps_children_that_closed_their_pipes() {
+        let parent = tempfile::tempdir().unwrap();
+        let runner = PosixProcess::with_task_output_dir(parent.path().join("tasks"));
+        let command = sh("sleep 30 >/dev/null 2>&1 & printf '%s' \"$$\"")
+            .with_process_owner(Some("inline-closed-pipes".into()));
+        let result = runner.run_inline_foreground(&command, 128).await.unwrap();
+        let lingxi_core::host::ForegroundOutcome::Completed(output) = result.outcome else {
+            panic!("inline process detached")
+        };
+        let pgid = nix::unistd::Pid::from_raw(output.stdout.parse().unwrap());
+        assert_eq!(
+            nix::sys::signal::killpg(pgid, None),
+            Err(nix::errno::Errno::ESRCH)
+        );
+        assert!(!parent.path().join("tasks").exists());
+    }
+
+    #[tokio::test]
+    async fn local_app_inline_cancel_kills_and_reaps_before_returning() {
+        let parent = tempfile::tempdir().unwrap();
+        let runner = std::sync::Arc::new(PosixProcess::with_task_output_dir(
+            parent.path().join("tasks"),
+        ));
+        let owner = format!("inline-cancel-{}", std::process::id());
+        let command = sh("sleep 30 & wait").with_process_owner(Some(owner.clone()));
+        let worker = {
+            let runner = runner.clone();
+            tokio::spawn(async move { runner.run_inline_foreground(&command, 128).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while lingxi_core::host::agent_processes::snapshot(&owner).is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        runner.kill_owner_processes(&owner).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result.outcome,
+            lingxi_core::host::ForegroundOutcome::Completed(_)
+        ));
+        assert!(lingxi_core::host::agent_processes::snapshot(&owner).is_empty());
         assert!(!parent.path().join("tasks").exists());
     }
 

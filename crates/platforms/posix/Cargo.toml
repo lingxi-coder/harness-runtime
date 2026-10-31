@@ -14,8 +14,7 @@ jsonrpc = { path = "../../jsonrpc" }
 # registry can bridge the transport-owned `Arc<jsonrpc::Connection>` into a
 # live `McpClient`. Dep DAG: posix → mcp → jsonrpc (no cycle; mcp has no posix dep).
 mcp = { path = "../../mcp" }
-lsp = { path = "../../lsp" }
-platform-common = { path = "../common" }
+platform-common = { path = "../common", features = ["desktop"] }
 http-client = { path = "../../http-client" }
 sandbox = { path = "../../sandbox" }
 async-trait = { workspace = true }
@@ -29,9 +28,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 fs2 = "0.4"
-notify = "8"
-notify-debouncer-mini = "0.6"
-tokio-stream = "0.1"
 which = "6"
 sha2 = "0.10"
 hex = "0.4"

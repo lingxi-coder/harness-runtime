@@ -150,6 +150,30 @@ async fn publish(service: &Arc<MobileLocalAppServiceHandle>, dir: &Path, name: &
         .await
         .unwrap()
 }
+
+async fn loopback_get(launch: &Value) -> String {
+    let origin = launch["origin"].as_str().unwrap();
+    let url = launch["url"].as_str().unwrap();
+    let path = url.strip_prefix(origin).unwrap();
+    let port = origin.rsplit(':').next().unwrap().parse::<u16>().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), get(port, path))
+        .await
+        .expect("loopback gateway did not answer within 3 seconds")
+}
+
+async fn wait_for_gateway_cleanup(service: &Arc<MobileLocalAppServiceHandle>, app_id: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if !service.active.lock().await.contains_key(app_id) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed gateway run should be cleaned up");
+}
+
 pub(super) async fn get(port: u16, path: &str) -> String {
     let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
         .await
@@ -201,9 +225,8 @@ async fn external_browser_static_html_loads_the_run_scoped_webmcp_resource_first
     assert!(page.contains("Content-Security-Policy:"));
     assert!(page.contains("script-src 'self'"));
     let html = page.split_once("\r\n\r\n").unwrap().1;
-    let script = format!(
-        "<script src=\"/__run/{run_id}/__host/webmcp.js\" data-lingxi-webmcp></script>"
-    );
+    let script =
+        format!("<script src=\"/__run/{run_id}/__host/webmcp.js\" data-lingxi-webmcp></script>");
     assert_eq!(html.matches("data-lingxi-webmcp").count(), 1);
     assert!(html.find(&script).unwrap() < html.find("id=\"app-start\"").unwrap());
 
@@ -424,6 +447,269 @@ async fn two_apps_run_independently_and_same_home_reuses_process_owner() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn gateway_accept_service_retries_connection_aborted_and_serves_the_app() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (dir, service) = service();
+    let published = publish(&service, dir.path(), "accept-retry").await;
+    let app_id = published["record"]["appId"].as_str().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempt_counter = attempts.clone();
+    let acceptor: gateway::AcceptFactory = Arc::new(move |listener| {
+        let attempt = attempt_counter.fetch_add(1, Ordering::SeqCst);
+        let future: gateway::AcceptFuture = if attempt == 0 {
+            Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted)) })
+        } else {
+            Box::pin(async move { listener.accept().await })
+        };
+        future
+    });
+    *service.gateway_acceptor.lock().unwrap() = Some(acceptor);
+
+    let launch = service
+        .request_value(json!({"op":"start","appId":app_id}))
+        .await
+        .unwrap();
+    let response = loopback_get(&launch).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("hello independent app"));
+    assert!(attempts.load(Ordering::SeqCst) >= 2);
+
+    service
+        .request_value(json!({"op":"stop","appId":app_id}))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn gateway_accept_service_cleans_fatal_exit_and_next_start_serves() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (dir, service) = service();
+    let published = publish(&service, dir.path(), "accept-fatal").await;
+    let app_id = published["record"]["appId"].as_str().unwrap();
+    let first_failure = Arc::new(AtomicBool::new(true));
+    let entered_failure = Arc::new(tokio::sync::Notify::new());
+    let release_failure = Arc::new(tokio::sync::Notify::new());
+    let fail_once = first_failure.clone();
+    let entered = entered_failure.clone();
+    let release = release_failure.clone();
+    let acceptor: gateway::AcceptFactory = Arc::new(move |listener| {
+        let future: gateway::AcceptFuture = if fail_once.swap(false, Ordering::SeqCst) {
+            let entered = entered.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            })
+        } else {
+            Box::pin(async move { listener.accept().await })
+        };
+        future
+    });
+    *service.gateway_acceptor.lock().unwrap() = Some(acceptor);
+
+    let first = service
+        .request_value(json!({"op":"start","appId":app_id}))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        entered_failure.notified(),
+    )
+    .await
+    .expect("injected terminal accept error should be reached");
+    let failed_run = service
+        .active
+        .lock()
+        .await
+        .get(app_id)
+        .cloned()
+        .expect("started run should remain registered before releasing the error");
+    release_failure.notify_one();
+    wait_for_gateway_cleanup(&service, app_id).await;
+    assert_eq!(failed_run.record.lock().unwrap().phase, RunPhase::Failed);
+    assert!(failed_run.url.lock().unwrap().is_empty());
+    assert!(failed_run
+        .record
+        .lock()
+        .unwrap()
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("PermissionDenied")));
+
+    let second = service
+        .request_value(json!({"op":"start","appId":app_id}))
+        .await
+        .unwrap();
+    assert_ne!(first["run"]["runId"], second["run"]["runId"]);
+    let response = loopback_get(&second).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("hello independent app"));
+    service
+        .request_value(json!({"op":"stop","appId":app_id}))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn gateway_accept_failure_before_start_response_returns_error_and_recovers() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (dir, service) = service();
+    let published = publish(&service, dir.path(), "accept-start-fatal").await;
+    let app_id = published["record"]["appId"].as_str().unwrap().to_owned();
+    let previous = service
+        .request_value(json!({"op":"start","appId":app_id}))
+        .await
+        .unwrap();
+    let previous_run = service
+        .active
+        .lock()
+        .await
+        .get(&app_id)
+        .cloned()
+        .expect("the initial run should be registered");
+    let source = dir.path().join("accept-start-fatal");
+    std::fs::write(source.join("index.html"), "updated independent app").unwrap();
+    service
+        .request_value(json!({
+            "op":"publish",
+            "appId":app_id,
+            "expectedRevision":1,
+            "sourcePath":source
+        }))
+        .await
+        .unwrap();
+    let fail_once = Arc::new(AtomicBool::new(true));
+    let should_fail = fail_once.clone();
+    let acceptor: gateway::AcceptFactory = Arc::new(move |listener| {
+        let future: gateway::AcceptFuture = if should_fail.swap(false, Ordering::SeqCst) {
+            Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) })
+        } else {
+            Box::pin(async move { listener.accept().await })
+        };
+        future
+    });
+    *service.gateway_acceptor.lock().unwrap() = Some(acceptor);
+
+    let gate = GatewayStartGate {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let gate_entered = gate.entered.clone();
+    let gate_release = gate.release.clone();
+    *service.gateway_start_gate.lock().unwrap() = Some(gate);
+
+    let starting_service = service.clone();
+    let starting_app_id = app_id.clone();
+    let starting = tokio::spawn(async move {
+        starting_service
+            .request_value(json!({
+                "op":"start",
+                "appId":starting_app_id,
+                "revision":2
+            }))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate_entered.notified())
+        .await
+        .expect("startup should reach the gateway response gate");
+
+    let failed_run = service
+        .active
+        .lock()
+        .await
+        .get(&app_id)
+        .cloned()
+        .expect("starting run should be registered");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let is_failed = { failed_run.gateway_failure.lock().unwrap().is_some() };
+            if is_failed {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fatal accept should be marked before startup returns");
+
+    gate_release.notify_one();
+    let error = starting.await.unwrap().unwrap_err();
+    assert_eq!(error.code, "gatewayFailed");
+    assert_eq!(failed_run.record.lock().unwrap().phase, RunPhase::Failed);
+    assert!(failed_run.url.lock().unwrap().is_empty());
+    assert!(previous_run.cancel.is_cancelled());
+    assert!(!service.active.lock().await.contains_key(&app_id));
+
+    let second = service
+        .request_value(json!({"op":"start","appId":app_id,"revision":2}))
+        .await
+        .unwrap();
+    assert_ne!(previous["run"]["runId"], second["run"]["runId"]);
+    let response = loopback_get(&second).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("updated independent app"));
+    service
+        .request_value(json!({"op":"stop","appId":published["record"]["appId"]}))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn gateway_accept_abort_is_recovered_by_next_start_without_callback() {
+    let (dir, service) = service();
+    let published = publish(&service, dir.path(), "accept-aborted").await;
+    let app_id = published["record"]["appId"].as_str().unwrap();
+    let first = service
+        .request_value(json!({"op":"start","appId":app_id}))
+        .await
+        .unwrap();
+    let failed_run = service.active.lock().await.get(app_id).cloned().unwrap();
+    {
+        let gateway = failed_run.gateway.lock().await;
+        gateway.as_ref().unwrap().abort();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if failed_run
+                .gateway
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|task| task.is_finished())
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("aborted gateway task should finish");
+
+    // Aborting a task drops its future and does not execute the accept-error
+    // callback. Same-version start must notice the finished JoinHandle, clean
+    // the old run, and start a new gateway.
+    let second = service
+        .request_value(json!({"op":"start","appId":app_id}))
+        .await
+        .unwrap();
+    assert_ne!(first["run"]["runId"], second["run"]["runId"]);
+    assert_eq!(failed_run.record.lock().unwrap().phase, RunPhase::Failed);
+    assert!(failed_run.url.lock().unwrap().is_empty());
+    let response = loopback_get(&second).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("hello independent app"));
+    service
+        .request_value(json!({"op":"stop","appId":app_id}))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn ffi_errors_are_explicit_and_ui_cannot_activate_without_runtime() {
     let (_dir, service) = service();

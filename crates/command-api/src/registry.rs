@@ -1823,6 +1823,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "builtin-handlers")]
     #[test]
     fn builtin_handler_without_native_metadata_preserves_native_hidden_bit() {
         let mut registry = CommandRegistry::new();

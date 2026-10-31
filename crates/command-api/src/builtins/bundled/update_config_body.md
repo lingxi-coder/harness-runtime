@@ -36,8 +36,16 @@ When the user's request is ambiguous, use AskUserQuestion to clarify:
 - Hooks (PreToolUse, PostToolUse, etc.)
 - Complex permission rules (allow/deny arrays)
 - Environment variables
-- MCP server configuration
 - Plugin configuration
+
+**MCP server definitions use separate stores**, not settings.json:
+user scope is `~/.lingxi.json` → `mcpServers`, local scope is
+`~/.lingxi.json` → `projects[<cwd>].mcpServers`, and shared project scope is
+`<project>/.mcp.json` → `mcpServers`. Resolve a relocated configuration home
+through the host. Prefer the available LingXi CLI's `mcp` management commands
+or the native MCP settings UI; check that version's help for flags. Preserve
+unrelated entries and distinguish saving, authentication, connection and tool
+discovery. The `lingxi-api` skill's `configuration` topic explains these boundaries.
 
 ## Workflow
 
@@ -62,7 +70,7 @@ When adding to permission arrays or hook arrays, **merge with existing**, don't 
   "permissions": {
     "allow": [
       "Bash(git *)",      // existing
-      "Edit(.claude)",    // existing
+      "Edit(.lingxi)",    // existing
       "Bash(npm *)"       // new
     ]
   }

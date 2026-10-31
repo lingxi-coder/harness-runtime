@@ -14,6 +14,7 @@ core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
 lingxi-llm-client.workspace = true
 media-api.workspace = true
+media-runtime = { path = "../media-runtime" }
 tool-api = { path = "../tool-api" }
 # Finding #73: the byte-locked todo/task reminder text consts + renderers live
 # in `tool_task::reminder` (alongside the TodoWrite/Task tools they describe).

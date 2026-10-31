@@ -6,6 +6,8 @@ import {validateEvent, validateRunAgentInput} from './validators.js';
 export const LOCAL_APP_EXTENSION_KEY = 'com.lingxi.localApp';
 export const AG_UI_PROTOCOL_VERSION = '1.0';
 const MAX_EVENT_PAGE_EVENTS = 128;
+const MAX_RUN_EVENTS = 10_000;
+const MAX_TERMINAL_DRAIN_PAGES = 10_000;
 
 function isRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -186,13 +188,17 @@ function terminalTask(task) {
   return ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task?.state);
 }
 
-function eventStream({input, transport, start, knownMessageIds, persistentChat, pollIntervalMs, onAccepted}) {
+function eventStream({input, transport, start, knownMessageIds, persistentChat, pollIntervalMs, onAccepted, onSubscribe}) {
   return new Observable(subscriber => {
     const controller = new AbortController();
+    const onUnsubscribe = onSubscribe?.();
     let active = true;
 
     const poll = async () => {
       let afterSequence;
+      let observedEvents = 0;
+      let terminalStatusObserved = false;
+      let terminalDrainPages = 0;
       try {
         if (start) {
           const accepted = await transport.start(input, {knownMessageIds, persistentChat});
@@ -202,11 +208,19 @@ function eventStream({input, transport, start, knownMessageIds, persistentChat, 
           onAccepted?.();
         }
         while (active && !controller.signal.aborted) {
+          if (terminalStatusObserved && terminalDrainPages >= MAX_TERMINAL_DRAIN_PAGES) {
+            throw new TypeError('The host returned too many AG-UI event pages without a terminal event.');
+          }
           const request = {runId: input.runId};
           if (afterSequence !== undefined) request.afterSequence = afterSequence;
           const page = await transport.events(request, {signal: controller.signal});
           if (!active || controller.signal.aborted) return;
+          if (terminalStatusObserved) terminalDrainPages++;
           const events = validateEventPage(page, afterSequence);
+          observedEvents += events.length;
+          if (observedEvents > MAX_RUN_EVENTS) {
+            throw new TypeError('The host returned more than ' + MAX_RUN_EVENTS + ' AG-UI events in one run.');
+          }
           let terminalIndex = -1;
           for (let index = 0; index < events.length; index++) {
             const event = events[index];
@@ -215,23 +229,36 @@ function eventStream({input, transport, start, knownMessageIds, persistentChat, 
                 throw new TypeError('The host returned an event for a different AG-UI run.');
               }
             }
-            if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') terminalIndex = index;
-            subscriber.next(event);
-          }
-          if (terminalIndex >= 0) {
-            if (terminalIndex !== events.length - 1) {
-              throw new TypeError('The host returned events after an AG-UI terminal event.');
+            if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') {
+              if (index !== events.length - 1) {
+                throw new TypeError('The host returned events after an AG-UI terminal event.');
+              }
+              terminalIndex = index;
             }
+          }
+          for (const event of events) subscriber.next(event);
+          if (terminalIndex >= 0) {
             subscriber.complete();
             return;
           }
-          if (typeof transport.status === 'function') {
-            const task = await transport.status({runId: input.runId});
-            if (terminalTask(task)) {
+          afterSequence = page.sequence;
+          // Status and events are separate requests. A terminal status may
+          // describe events committed after the page just read: drain from its
+          // cursor until the terminal event or an empty, stable tail page.
+          if (terminalStatusObserved) {
+            if (events.length === 0) {
               throw new TypeError('The host task ended without a terminal AG-UI event.');
             }
+            continue;
           }
-          afterSequence = page.sequence;
+          if (typeof transport.status === 'function') {
+            const task = await transport.status({runId: input.runId});
+            if (!active || controller.signal.aborted) return;
+            if (terminalTask(task)) {
+              terminalStatusObserved = true;
+              continue;
+            }
+          }
           await delay(pollIntervalMs, controller.signal, setTimeout);
         }
       } catch (error) {
@@ -242,6 +269,7 @@ function eventStream({input, transport, start, knownMessageIds, persistentChat, 
     void poll();
     return () => {
       active = false;
+      onUnsubscribe?.();
       controller.abort();
     };
   });
@@ -264,6 +292,7 @@ export class LocalAppAgent extends AbstractAgent {
     this.persistentChat = persistentChat === true;
     this.sentMessageIds = new Set((agentConfig.initialMessages || []).map(message => message.id));
     this.lastRunId = undefined;
+    this.activeRun = undefined;
     this.pendingInput = undefined;
     this.readonlyConnecting = false;
   }
@@ -302,10 +331,19 @@ export class LocalAppAgent extends AbstractAgent {
     super.setState(state);
   }
 
+  trackActiveRun(runId) {
+    const activeRun = {runId};
+    this.activeRun = activeRun;
+    this.lastRunId = runId;
+    return () => {
+      // An older stream may detach after a new connection has taken ownership.
+      if (this.activeRun === activeRun) this.activeRun = undefined;
+    };
+  }
+
   run(input) {
     const knownMessageIds = new Set(this.sentMessageIds);
     const acceptedInput = localAppInput(input, {persistentChat: this.persistentChat, knownMessageIds});
-    this.lastRunId = acceptedInput.runId;
     return eventStream({
       input: acceptedInput,
       transport: this.transport,
@@ -313,6 +351,7 @@ export class LocalAppAgent extends AbstractAgent {
       knownMessageIds,
       pollIntervalMs: this.pollIntervalMs,
       persistentChat: this.persistentChat,
+      onSubscribe: () => this.trackActiveRun(acceptedInput.runId),
       onAccepted: () => {
         for (const message of acceptedInput.messages) this.sentMessageIds.add(message.id);
       },
@@ -385,30 +424,34 @@ export class LocalAppAgent extends AbstractAgent {
   async connectAgent(parameters, subscriber) {
     const runId = parameters?.runId ?? this.lastRunId;
     if (!runId) return {result: undefined, newMessages: []};
+    const clearActiveRun = this.trackActiveRun(runId);
     this.readonlyConnecting = true;
     try {
       const result = await super.connectAgent({...parameters, runId}, subscriber);
       for (const message of this.messages) this.sentMessageIds.add(message.id);
       return result;
     } finally {
+      clearActiveRun();
       this.readonlyConnecting = false;
     }
   }
 
   connect(input) {
     if (!input?.runId) return EMPTY;
+    const acceptedInput = validateRunAgentInput(input);
     return eventStream({
-      input: validateRunAgentInput(input),
+      input: acceptedInput,
       transport: this.transport,
       start: false,
       knownMessageIds: this.sentMessageIds,
       persistentChat: this.persistentChat,
       pollIntervalMs: this.pollIntervalMs,
+      onSubscribe: () => this.trackActiveRun(acceptedInput.runId),
     });
   }
 
   abortRun() {
-    const runId = this.lastRunId;
+    const runId = this.activeRun?.runId;
     if (runId && typeof this.transport.cancel === 'function') {
       void this.transport.cancel({runId});
     }

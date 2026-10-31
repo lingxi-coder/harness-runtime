@@ -77,6 +77,29 @@ impl ProviderServices {
         source.service_credential(profile).await
     }
 
+    /// Reject a service configuration which no longer matches the exact
+    /// profile in the caller's current catalog scope. An absent credential
+    /// source or profile is not sufficient authority to use a stale route.
+    pub fn profile_is_current(&self, profile: &str) -> bool {
+        let Some(source) = &self.credential_source else {
+            return false;
+        };
+        source.same_service_profile(&source.current(), profile)
+    }
+
+    /// Compare this bound service with another runtime's scoped execution
+    /// profile. Scheduled children retain the parent's credential authority,
+    /// but may use it only for the exact configuration selected by the child.
+    pub fn profile_matches_current_of(&self, other: &Self, profile: &str) -> bool {
+        let (Some(bound), Some(other_source)) = (&self.credential_source, &other.credential_source)
+        else {
+            return false;
+        };
+        self.snapshot().region() == other.snapshot().region()
+            && self.profile_is_current(profile)
+            && bound.same_service_profile(&other_source.current(), profile)
+    }
+
     /// Access all SDK services without duplicating their provider-specific APIs.
     /// Bind an exact profile using `provider::<providers::OpenAiClient>(name)`
     /// (or another provider client), then call its `audio()`, `files()` or other

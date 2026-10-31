@@ -396,6 +396,10 @@ impl OrchestratorApiClient for MockApiClient {
         self.rate_limit_error_message.lock().unwrap().clone()
     }
 
+    fn supports_responses_websocket_prewarm(&self, _model: &str, _profile: Option<&str>) -> bool {
+        true
+    }
+
     async fn prewarm_responses_websocket(
         &self,
         model: &str,

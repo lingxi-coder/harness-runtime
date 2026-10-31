@@ -1,8 +1,11 @@
-//! Own prewarm completion independently of clients waiting for host shutdown.
+//! Track every prewarm until its work future has actually been dropped.
 
+use futures::FutureExt;
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use tokio::task::AbortHandle;
 
 /// A completed drain confirms all registered prewarm futures were dropped.
@@ -17,8 +20,23 @@ struct State {
     closed: bool,
     generation: u64,
     current: Option<u64>,
-    tasks: HashMap<u64, AbortHandle>,
+    tasks: HashMap<u64, TaskEntry>,
     diagnostics: Vec<String>,
+}
+
+#[derive(Default)]
+struct TaskEntry {
+    abort: Option<AbortHandle>,
+    abort_requested: bool,
+}
+
+impl TaskEntry {
+    fn abort(&mut self) {
+        self.abort_requested = true;
+        if let Some(handle) = &self.abort {
+            handle.abort();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -27,8 +45,61 @@ struct Owner {
     changed: tokio::sync::Notify,
 }
 
-/// Spawn and permanent close share one lock. Replaced and aborted tasks remain
-/// registered until independent join owners confirm their futures were dropped.
+/// The guard belongs to the work task itself, so even destruction of the
+/// originating runtime drops the work before removing its registered claim.
+type PanicPayload = Box<dyn std::any::Any + Send>;
+type CaughtWorkFuture = Pin<Box<dyn Future<Output = Result<(), PanicPayload>> + Send>>;
+
+struct TrackedPrewarm {
+    work: Option<CaughtWorkFuture>,
+    owner: Arc<Owner>,
+    generation: u64,
+}
+
+impl Future for TrackedPrewarm {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let result = match self.work.as_mut().expect("prewarm work").as_mut().poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(result) => result,
+        };
+        drop(self.work.take());
+        if result.is_err() {
+            self.owner
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .diagnostics
+                .push("startup prewarm task panicked".into());
+        }
+        Poll::Ready(())
+    }
+}
+
+impl Drop for TrackedPrewarm {
+    fn drop(&mut self) {
+        let drop_failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(self.work.take());
+        }))
+        .is_err();
+        let mut state = self.owner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if drop_failed || std::thread::panicking() {
+            state
+                .diagnostics
+                .push("startup prewarm task panicked while releasing work".into());
+        }
+        state.tasks.remove(&self.generation);
+        if state.current == Some(self.generation) {
+            state.current = None;
+        }
+        drop(state);
+        self.owner.changed.notify_waiters();
+    }
+}
+
+/// Spawns and permanent close share one lock. Replaced/aborted tasks remain
+/// registered until their own guards confirm their futures were dropped.
 #[derive(Default)]
 pub(crate) struct StartupPrewarm {
     owner: Arc<Owner>,
@@ -44,7 +115,7 @@ impl StartupPrewarm {
             drop(state);
             return;
         }
-        if let Some(previous) = state.current.take().and_then(|id| state.tasks.get(&id)) {
+        if let Some(previous) = state.current.take().and_then(|id| state.tasks.get_mut(&id)) {
             previous.abort();
         }
         state.generation = state
@@ -52,35 +123,32 @@ impl StartupPrewarm {
             .checked_add(1)
             .expect("prewarm generation overflow");
         let generation = state.generation;
-        let task = tokio::spawn(future);
-        state.tasks.insert(generation, task.abort_handle());
+        state.tasks.insert(generation, TaskEntry::default());
         state.current = Some(generation);
-        let owner = self.owner.clone();
-        // This owner survives a cancelled waiter and releases its registration
-        // only after Tokio has dropped the actual work future.
-        tokio::spawn(async move {
-            let result = task.await;
-            let mut state = owner.state.lock().unwrap_or_else(|p| p.into_inner());
-            state.tasks.remove(&generation);
-            if state.current == Some(generation) {
-                state.current = None;
-            }
-            if let Err(error) = result {
-                if !error.is_cancelled() {
-                    state
-                        .diagnostics
-                        .push(format!("startup prewarm failed: {error}"));
-                }
-            }
-            drop(state);
-            owner.changed.notify_waiters();
+        drop(state);
+        let task = tokio::spawn(TrackedPrewarm {
+            work: Some(Box::pin(
+                std::panic::AssertUnwindSafe(future).catch_unwind(),
+            )),
+            owner: self.owner.clone(),
+            generation,
         });
+        let mut state = self.owner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = state.tasks.get_mut(&generation) {
+            if entry.abort_requested {
+                task.abort();
+            }
+            entry.abort = Some(task.abort_handle());
+        }
+        // Dropping a JoinHandle detaches it. TrackedPrewarm itself removes the
+        // claim after its future is dropped, including runtime shutdown.
+        drop(task);
     }
 
-    /// Ordinary turn, clear, or resume cancellation allows later prewarming.
+    /// Ordinary turn/clear/resume cancellation does not close future admission.
     pub(crate) fn abort_current(&self) {
         let mut state = self.owner.state.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(task) = state.current.take().and_then(|id| state.tasks.get(&id)) {
+        if let Some(task) = state.current.take().and_then(|id| state.tasks.get_mut(&id)) {
             task.abort();
         }
     }
@@ -89,7 +157,7 @@ impl StartupPrewarm {
         let mut state = self.owner.state.lock().unwrap_or_else(|p| p.into_inner());
         state.closed = true;
         state.current = None;
-        for task in state.tasks.values() {
+        for task in state.tasks.values_mut() {
             task.abort();
         }
     }

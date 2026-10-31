@@ -35,6 +35,10 @@ tokio = { workspace = true, features = ["sync"] }
 once_cell = "1"
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Stable, safe GetFileInformationByHandle wrapper for followed-path volume IDs.
+winapi-util = "=0.1.11"
+
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 core = { path = "../../core" }

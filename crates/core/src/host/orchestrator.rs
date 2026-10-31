@@ -2444,6 +2444,7 @@ pub fn curated_model_listings(
     if !current.is_empty() {
         if let Some(current_listing) = listings.iter().find(|listing| {
             listing.request_model == current
+                && listing.metadata.status.as_deref() != Some("disabled")
                 && current_provider_id.is_none_or(|provider| listing.provider_id == provider)
         }) {
             seen.insert((
@@ -2456,7 +2457,10 @@ pub fn curated_model_listings(
     for listing in listings {
         if (listing.metadata.catalog_offered
             || is_offered_model(&listing.provider_id, &listing.request_model))
-            && listing.metadata.status.as_deref() != Some("deprecated")
+            && !matches!(
+                listing.metadata.status.as_deref(),
+                Some("deprecated" | "disabled")
+            )
         {
             let key = (listing.provider_id.clone(), listing.request_model.clone());
             if seen.insert(key) {
@@ -2480,7 +2484,10 @@ pub fn provider_model_catalog_listings(listings: &[ModelListing]) -> Vec<ModelLi
         if !listing.capabilities.tools
             || (!listing.metadata.catalog_offered
                 && !is_offered_model(&listing.provider_id, &listing.request_model))
-            || listing.metadata.status.as_deref() == Some("deprecated")
+            || matches!(
+                listing.metadata.status.as_deref(),
+                Some("deprecated" | "disabled")
+            )
         {
             continue;
         }
@@ -4204,6 +4211,20 @@ pub enum ResponseTimingEvent {
 pub trait OutputStream: Send + Sync {
     /// Publish a committed profile selection or its admission at a query boundary.
     async fn emit_conversation_mode(&self, _state: &super::session_context::SessionModeSnapshot) {}
+
+    /// Whether this sink observes raw model-output progress for trusted host UI.
+    /// This observation is separate from published messages and token accounting.
+    fn wants_model_output_progress(&self) -> bool {
+        false
+    }
+
+    /// Observe exact UTF-16 units from a validated provider text or JSON delta.
+    /// `block_index` identifies the current provider block within one stream.
+    fn note_model_output_delta(&self, _block_index: u32, _units: &[u16]) {}
+
+    /// Finish a provider block or reset a reused block index in a new stream.
+    fn finish_model_output_block(&self, _block_index: u32) {}
+
     /// Observe receipt before any asynchronous presentation or output delivery.
     /// RequestStarted marks the admitted SDK transport dispatch; sinks may
     /// retain the first fact across every request in one external query.
@@ -4217,6 +4238,15 @@ pub trait OutputStream: Send + Sync {
     }
     /// Emit a session-scoped SDK `system/task_started` or `task_updated` frame.
     async fn emit_task_lifecycle(&self, _event: &Utf16JsonProjection) {}
+
+    /// Observe the already-computed managed display text for one assistant.
+    /// This does not re-run the hook or publish a message by itself.
+    async fn observe_assistant_display_text(
+        &self,
+        _message_id: &crate::types::MessageId,
+        _text: &Utf16JsonProjection,
+    ) {
+    }
 
     /// Identify the assistant response immediately before its completion boundary.
     async fn emit_assistant_message_identity(&self, _message_id: &crate::types::MessageId) {}

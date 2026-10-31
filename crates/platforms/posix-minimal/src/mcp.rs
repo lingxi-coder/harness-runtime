@@ -25,17 +25,7 @@ impl PosixMcp {
 #[async_trait]
 impl McpTransport for PosixMcp {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
-        let kind = match spec {
-            McpTransportSpec::Stdio { .. } => McpTransportKind::Stdio,
-            McpTransportSpec::Sse { .. } => McpTransportKind::Sse,
-            McpTransportSpec::Http { .. } => McpTransportKind::Http,
-            McpTransportSpec::WebSocket { .. } => McpTransportKind::WebSocket,
-            McpTransportSpec::InProcess { .. } => McpTransportKind::InProcess,
-            McpTransportSpec::SseIde { .. } => McpTransportKind::SseIde,
-            McpTransportSpec::WsIde { .. } => McpTransportKind::WsIde,
-            McpTransportSpec::SdkControl { .. } => McpTransportKind::SdkControl,
-        };
-        Err(McpError::UnsupportedTransport(kind))
+        Err(McpError::UnsupportedTransport(spec.transport_kind()))
     }
 
     async fn initialize(

@@ -42,6 +42,7 @@ mod linux_runtime;
 mod list_agents;
 mod provider_services;
 mod restoration;
+mod scheduled_workspaces;
 mod side_chat;
 
 pub use audio_context::MediaSessionContext;
@@ -54,7 +55,7 @@ pub use assembly::{
 use automation::{
     cron_task_active, finalize_cron_occurrence, fired_cron_dto, mobile_automation_runtime,
     mobile_cron_schedule_error, mobile_cron_session_gate, read_cron_tasks,
-    supervise_mobile_automation,
+    supervise_mobile_automation, try_mobile_automation_runtime,
 };
 pub use automation::{
     CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto, MobileCronStoreHandle,
@@ -80,6 +81,21 @@ pub use provider_services::{
 use restoration::{canonical_cwd_string, lower_session_mode};
 mod workspace_commands;
 pub use workspace_commands::MobileSessionDiscoveryScope;
+
+/// Initialize the process-lifetime mobile cleanup executor before a native host
+/// issues an attachment or returns an engine handle.
+pub fn initialize_mobile_lifecycle_runtime() -> Result<(), String> {
+    try_mobile_automation_runtime().map(|_| ())
+}
+
+/// Schedule cleanup or recovery work on the process-lifetime mobile executor.
+/// This Rust-only host API is not part of the UniFFI surface.
+pub fn spawn_mobile_lifecycle_task(
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    try_mobile_automation_runtime()?.spawn(task);
+    Ok(())
+}
 
 #[cfg(test)]
 use lingxi_core::host::{Clock, FileSystem};
@@ -213,20 +229,19 @@ async fn end_mobile_audio_owner(
     owner: AudioOwner,
 ) -> Result<(), AudioError> {
     let capabilities = service.capabilities();
-    let context = AudioOperationContext {
-        identity: AudioOperationId::new(
+    let context = AudioOperationContext::new(
+        AudioOperationId::new(
             NEXT_MOBILE_AUDIO_TEARDOWN_GENERATION
                 .fetch_add(1, Ordering::Relaxed)
                 .max(1),
             capabilities.service_epoch,
         ),
-        owner: owner.clone(),
-        initiator: None,
-        timeout_budget_ms: Some(
-            u64::try_from(MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET.as_millis()).unwrap_or(u64::MAX),
-        ),
-        max_payload_bytes: capabilities.max_payload_bytes,
-    };
+        owner.clone(),
+    )
+    .with_timeout_budget_ms(
+        u64::try_from(MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET.as_millis()).unwrap_or(u64::MAX),
+    )
+    .with_max_payload_bytes(capabilities.max_payload_bytes);
     let result = tokio::time::timeout(
         MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET,
         service.execute(context, AudioOperation::EndOwner),
@@ -266,6 +281,10 @@ use crate::mobile::turn_durability::{
 pub struct MobileRuntime {
     /// Official provider settings data from the same settled startup snapshot.
     pub provider_catalog: Vec<ProviderCatalogEntryDto>,
+    pub official_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
+    pub(crate) catalog_refresh: Option<provider_config::startup_catalog::CatalogRefreshGuard>,
+    pub(crate) catalog_observer:
+        std::sync::Mutex<Option<provider_config::startup_catalog::CatalogRefreshGuard>>,
     /// Per-host owner for V2 installed-plugin archive materializations.
     /// Plugin discovery and the manager retain clones of this same session.
     pub(crate) plugin_archive_session: Arc<plugin::PluginArchiveSession>,
@@ -277,6 +296,10 @@ pub struct MobileRuntime {
     pub provider_region: llm_runtime::Region,
     /// App-scoped media facade shared by tools, UI and remote media callers.
     pub media_service: Option<Arc<dyn media_api::MediaService>>,
+    /// Host-issued media scope retained until its drain is confirmed.
+    pub(crate) media_attachment_handle: Option<media_runtime::MediaAttachmentHandle>,
+    /// Release retained native routes only after confirmed teardown.
+    pub(crate) media_attachment_confirmed_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Host adapter for Conversation-intent media sessions.
     pub(crate) media_conversation_attachment: Option<Arc<dyn MediaConversationAttachment>>,
     /// Identity-bound queue for deferred media Agent continuation.
@@ -1317,6 +1340,10 @@ pub struct MobileEngineHandle {
     scheduled_reload: std::sync::atomic::AtomicBool,
     settings: Option<::configuration_admin::settings_bridge::SettingsContext>,
     task_notification_watcher: tokio::task::AbortHandle,
+    task_notification_watcher_join: Option<tokio::task::JoinHandle<()>>,
+    /// Tracks the queue watcher and every accepted turn until their futures
+    /// have actually been dropped, including after the active slot is cleared.
+    turn_tasks: tokio_util::task::TaskTracker,
     /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
     /// engine outlives any single FFI call and F3-05's `submit(SendPrompt)` can
     /// `spawn` a streaming turn that returns promptly while results stream to the
@@ -1386,14 +1413,14 @@ pub struct MobileEngineHandle {
     /// publish this only after their SessionStarted/SessionResumed (or
     /// SessionEnded for ClearSession) event has entered the shared sink.
     session_lifecycle_tx: tokio::sync::watch::Sender<String>,
-    /// The platform filesystem handle the JSONL reader reads each session file
-    /// through (`list_recent_sessions`' `Arc<dyn FileSystem>` argument). The SAME
-    /// `fs` the orchestrator's tools use — captured from the `Platform` so the
-    /// session listing reads through the device's real backend.
+    /// Model-visible filesystem, including the guest path fence.
     fs: Arc<dyn lingxi_core::host::FileSystem>,
     /// The active target whose initial transcript anchor has been established.
     /// Retargeting and failed initialization are retried under this guard.
     initialized_session_anchor: Mutex<Option<MobileSessionAnchor>>,
+    /// Host-coordinate access for paths derived from the trusted configuration,
+    /// transcript catalog, and already validated workspace directory.
+    host_fs: Arc<dyn lingxi_core::host::FileSystem>,
     /// The deterministic build recipe, captured so the cron firing path
     /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
@@ -1404,6 +1431,17 @@ pub struct MobileEngineHandle {
     /// cron firing path can call `build_mobile_inner` (and reach `filesystem()` /
     /// `clock()`) without re-deriving the device handles.
     firer_platform: Arc<dyn Platform>,
+}
+
+impl Drop for MobileRuntime {
+    fn drop(&mut self) {
+        begin_mobile_attachment_revocation(
+            self.media_attachment_handle.take(),
+            self.media_attachment_confirmed_callback.take(),
+        );
+        // Also covers short-lived cron runtimes that have no MobileEngineHandle.
+        self.orchestrator.close_background_producer_admission();
+    }
 }
 
 impl MobileRuntime {
@@ -1534,9 +1572,109 @@ impl MobileRuntime {
     }
 }
 
+/// Keep shutdown dependencies until both independently owned producer families
+/// have stopped and any launch recovery has been confirmed. A timed-out waiter
+/// does not cancel either owner; retrying also lets transient recovery errors
+/// settle without keeping a foreign UI thread blocked.
+async fn wait_for_mobile_background_producers<O, L, LF, P, PF>(
+    retained: O,
+    mut drain_launches: L,
+    mut drain_prewarm: P,
+    attempt_budget: std::time::Duration,
+    initial_retry: std::time::Duration,
+    max_retry: std::time::Duration,
+) -> O
+where
+    L: FnMut() -> LF,
+    LF: std::future::Future<
+        Output = lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchDrainReport,
+    >,
+    P: FnMut() -> PF,
+    PF: std::future::Future<Output = Vec<String>>,
+{
+    let mut launches_drained = false;
+    let mut prewarm_drained = false;
+    let mut retry = initial_retry;
+    loop {
+        let (launches, prewarm) = tokio::join!(
+            async {
+                if launches_drained {
+                    None
+                } else {
+                    Some(tokio::time::timeout(attempt_budget, drain_launches()).await)
+                }
+            },
+            async {
+                if prewarm_drained {
+                    None
+                } else {
+                    Some(tokio::time::timeout(attempt_budget, drain_prewarm()).await)
+                }
+            },
+        );
+        if let Some(result) = launches {
+            match result {
+                Ok(report) => {
+                    for diagnostic in report.diagnostics {
+                        tracing::warn!(%diagnostic, "mobile background launch diagnostic");
+                    }
+                    launches_drained = report.unconfirmed_recoveries.is_empty();
+                    for recovery in report.unconfirmed_recoveries {
+                        tracing::warn!(%recovery, "mobile background launch recovery is unconfirmed");
+                    }
+                }
+                Err(_) => tracing::warn!("mobile background launch drain timed out"),
+            }
+        }
+        if let Some(result) = prewarm {
+            match result {
+                Ok(diagnostics) => {
+                    for diagnostic in diagnostics {
+                        tracing::warn!(%diagnostic, "mobile startup prewarm diagnostic");
+                    }
+                    prewarm_drained = true;
+                }
+                Err(_) => tracing::warn!("mobile startup prewarm drain timed out"),
+            }
+        }
+        if launches_drained && prewarm_drained {
+            return retained;
+        }
+        tokio::time::sleep(retry).await;
+        retry = retry.saturating_mul(2).min(max_retry);
+    }
+}
+
+async fn cancel_mobile_turn_after_watcher(
+    watcher: Option<tokio::task::JoinHandle<()>>,
+    active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
+) {
+    // Aborting the watcher is asynchronous. It can still register a turn in
+    // its last poll, so join it before taking the final slot snapshot.
+    if let Some(watcher) = watcher {
+        let _ = watcher.await;
+    }
+    let active_turn = active_cancel.lock().await.clone();
+    if let Some(turn) = active_turn {
+        turn.cancel.cancel();
+        if tokio::time::timeout(crate::media_handoff::CLEANUP_BUDGET, turn.wait_completed())
+            .await
+            .is_err()
+        {
+            turn.abort_task();
+        }
+    }
+}
+
 impl Drop for MobileEngineHandle {
     fn drop(&mut self) {
+        let attachment_configured = begin_mobile_attachment_revocation(
+            self.inner.media_attachment_handle.take(),
+            self.inner.media_attachment_confirmed_callback.take(),
+        );
         self.task_notification_watcher.abort();
+        let watcher = self.task_notification_watcher_join.take();
+        self.turn_tasks.close();
         // Native audio callbacks may need the platform's UI executor. In
         // particular, Swift can release this handle on MainActor while an
         // EndOwner callback is awaiting MainActor; Drop must return before that
@@ -1567,93 +1705,209 @@ impl Drop for MobileEngineHandle {
         let session_cron = self.session_cron.clone();
         let side_chats = self.side_chats.clone();
         let orchestrator = self.inner.orchestrator.clone();
+        orchestrator.close_background_producer_admission();
         orchestrator.cancel_idle_compaction();
+        let runtime = self.runtime.take();
+        let retained_authorities = (
+            self.inner.task_registry.clone(),
+            self.inner.mcp_tool_registry.clone(),
+            self.inner.session_writer.clone(),
+        );
+        let turn_tasks = self.turn_tasks.clone();
+        let producer_orchestrator = orchestrator.clone();
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
         mobile_automation_runtime().spawn(async move {
-            // Cancel an in-flight model/tool request before the owner sweep.
-            // The process-lifetime runtime remains available after this
-            // handle's runtime begins shutting down, so waiting here never
-            // blocks the native thread that called Drop.
-            let active_turn = match active_turn {
-                Some(turn) => Some(turn),
-                None => tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    active_cancel.lock().await.clone()
-                })
+            let (runtime, retained_authorities) = wait_for_mobile_background_producers(
+                (runtime, retained_authorities),
+                || producer_orchestrator.drain_background_session_launches(),
+                || producer_orchestrator.shutdown_startup_responses_websocket_prewarm(),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+            // The slot can be empty while a turn is still completing. The
+            // watcher is tracked too, so it cannot register a queued turn
+            // after this barrier observes the closed tracker as empty.
+            if tokio::time::timeout(crate::media_handoff::CLEANUP_BUDGET, turn_tasks.wait())
                 .await
-                .ok()
-                .flatten(),
-            };
-            if let Some(turn) = active_turn {
-                turn.cancel.cancel();
-                if tokio::time::timeout(crate::media_handoff::CLEANUP_BUDGET, turn.wait_completed())
-                    .await
-                    .is_err()
-                {
-                    if let Some(task) = turn.take_task_handle() {
-                        task.abort();
-                    }
-                }
+                .is_err()
+            {
+                tracing::warn!("mobile turn tasks did not drain within the shutdown budget");
+                turn_tasks.wait().await;
             }
-            orchestrator.shutdown_idle_compaction().await;
+            producer_orchestrator.shutdown_idle_compaction().await;
             if let Err(error) = side_chats.shutdown().await {
                 tracing::warn!(%error, "mobile side chat teardown did not finish");
             }
+            lsp_registry.shutdown_all().await;
+            if let Some(runtime) = runtime {
+                runtime.shutdown_background();
+            }
+            drop(retained_authorities);
+        });
+        mobile_automation_runtime().spawn(async move {
+            cancel_mobile_turn_after_watcher(watcher, active_cancel).await;
+            let _ = cancelled_tx.send(());
+        });
+        mobile_automation_runtime().spawn(async move {
+            // Media cleanup must not wait indefinitely for a stuck watcher or
+            // turn. The executor and turn authorities remain separately held
+            // by the producer barrier above until the tracked tasks stop.
+            let _ = tokio::time::timeout(
+                crate::media_handoff::CLEANUP_BUDGET + std::time::Duration::from_secs(1),
+                cancelled_rx,
+            )
+            .await;
             if let Some(pending) = media_agent_handoffs.clear_for_session(&current_session_id) {
+                if !attachment_configured {
+                    if let Some(service) = media_service.as_ref() {
+                        crate::media_handoff::stop_media_session(
+                            service,
+                            &pending.request.session,
+                            media_api::MediaOwner::Session {
+                                session_id: current_session_id.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+            if !attachment_configured {
                 if let Some(service) = media_service.as_ref() {
-                    crate::media_handoff::stop_media_session(
+                    let stopped = crate::media_handoff::stop_media_owner_resources(
                         service,
-                        &pending.request.session,
                         media_api::MediaOwner::Session {
                             session_id: current_session_id.clone(),
                         },
                     )
                     .await;
-                }
-            }
-            if let Some(service) = media_service.as_ref() {
-                let stopped = crate::media_handoff::stop_media_owner_resources(
-                    service,
-                    media_api::MediaOwner::Session {
-                        session_id: current_session_id.clone(),
-                    },
-                )
-                .await;
-                if stopped > 0 {
-                    tracing::debug!(
-                        session_id = %current_session_id,
-                        stopped,
-                        "stopped active media resources during mobile engine disposal"
-                    );
-                }
-            }
-            if let Some(audio_service) = audio_service {
-                let mut audio_owners = vec![AudioOwner::Session {
-                    session_id: current_session_id,
-                }];
-                for owner in audio_recording_handles.lock().await.keys() {
-                    if !audio_owners.contains(owner) {
-                        audio_owners.push(owner.clone());
+                    if stopped > 0 {
+                        tracing::debug!(
+                            session_id = %current_session_id,
+                            stopped,
+                            "stopped active media resources during mobile engine disposal"
+                        );
                     }
                 }
-                for owner in audio_owners {
-                    if let Err(error) =
-                        end_mobile_audio_owner(&audio_service, &audio_recording_handles, owner)
-                            .await
-                    {
-                        tracing::warn!(
-                            kind = %error.kind,
-                            %error,
-                            "mobile audio owner teardown failed during engine disposal"
-                        );
+            }
+            if !attachment_configured {
+                if let Some(audio_service) = audio_service {
+                    let mut audio_owners = vec![AudioOwner::Session {
+                        session_id: current_session_id,
+                    }];
+                    for owner in audio_recording_handles.lock().await.keys() {
+                        if !audio_owners.contains(owner) {
+                            audio_owners.push(owner.clone());
+                        }
+                    }
+                    for owner in audio_owners {
+                        if let Err(error) =
+                            end_mobile_audio_owner(&audio_service, &audio_recording_handles, owner)
+                                .await
+                        {
+                            tracing::warn!(
+                                kind = %error.kind,
+                                %error,
+                                "mobile audio owner teardown failed during engine disposal"
+                            );
+                        }
                     }
                 }
             }
             if let Some(scheduler) = session_cron {
                 let _ = scheduler.stop().await;
             }
-            lsp_registry.shutdown_all().await;
         });
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
+    }
+}
+
+fn begin_mobile_attachment_revocation(
+    attachment: Option<media_runtime::MediaAttachmentHandle>,
+    confirmed_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> bool {
+    let Some(attachment) = attachment else {
+        return false;
+    };
+    attachment.begin_revoke();
+    mobile_automation_runtime().spawn(async move {
+        revoke_mobile_attachment(attachment, confirmed_callback).await;
+    });
+    true
+}
+
+async fn revoke_mobile_attachment(
+    attachment: media_runtime::MediaAttachmentHandle,
+    confirmed_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+) {
+    // `Drop` marks the phase Revoking synchronously. The first poll on the
+    // process-lifetime executor starts the shared drain before any graceful
+    // engine cleanup can block.
+    let first = attachment
+        .revoke(crate::media_handoff::CLEANUP_BUDGET)
+        .await;
+    // A wait timeout leaves the drain running in the host-owned attachment
+    // map. Give that same flight one more bounded wait for a just-late receipt.
+    let outcome = match first {
+        media_runtime::MediaAttachmentRevocation::Unknown { .. }
+            if attachment.phase() == media_runtime::MediaAttachmentPhase::Revoking =>
+        {
+            attachment
+                .revoke(crate::media_handoff::CLEANUP_BUDGET)
+                .await
+        }
+        outcome => outcome,
+    };
+    match outcome {
+        media_runtime::MediaAttachmentRevocation::Confirmed => {
+            if let Some(on_confirmed) = confirmed_callback {
+                on_confirmed();
+            }
+        }
+        media_runtime::MediaAttachmentRevocation::Unknown { reason } => {
+            tracing::warn!(
+                %reason,
+                attachment_id = ?attachment.id(),
+                "mobile media attachment teardown remains unconfirmed"
+            );
+            match attachment.phase() {
+                media_runtime::MediaAttachmentPhase::Revoked => {
+                    // The drain may have crossed its completion boundary just
+                    // after the bounded wait expired.
+                    if matches!(
+                        attachment
+                            .revoke(crate::media_handoff::CLEANUP_BUDGET)
+                            .await,
+                        media_runtime::MediaAttachmentRevocation::Confirmed
+                    ) {
+                        if let Some(on_confirmed) = confirmed_callback {
+                            on_confirmed();
+                        }
+                    }
+                }
+                media_runtime::MediaAttachmentPhase::Revoking => {
+                    // Keep watching the same flight. Unknown remains retained;
+                    // a later Confirmed observation may release its route.
+                    let attachment = attachment.clone();
+                    mobile_automation_runtime().spawn(async move {
+                        if attachment.wait_for_drain_completion().await
+                            == media_runtime::MediaAttachmentPhase::Revoked
+                            && matches!(
+                                attachment
+                                    .revoke(crate::media_handoff::CLEANUP_BUDGET)
+                                    .await,
+                                media_runtime::MediaAttachmentRevocation::Confirmed
+                            )
+                        {
+                            if let Some(on_confirmed) = confirmed_callback {
+                                on_confirmed();
+                            }
+                        }
+                    });
+                }
+                media_runtime::MediaAttachmentPhase::Unknown
+                | media_runtime::MediaAttachmentPhase::Active => {}
+            }
         }
     }
 }
@@ -2540,7 +2794,7 @@ struct ActiveTurn {
     session_id: String,
     permission_owner_id: Option<u64>,
     cancel: CancellationToken,
-    task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    task: StdMutex<Option<MobileTurnTask>>,
     completed: AtomicBool,
     /// Set before asking the orchestrator to unwind for a platform pause.
     /// Unlike an explicit cancel, a quiesced turn must not surface the
@@ -2553,6 +2807,11 @@ struct ActiveTurn {
     /// either started or been rejected by the current turn owner.
     deferred_terminal: StdMutex<Option<ClientEvent>>,
     completion: Notify,
+}
+
+struct MobileTurnTask {
+    join: Option<tokio::task::JoinHandle<()>>,
+    abort: tokio::task::AbortHandle,
 }
 
 struct MobileWakeupDelivery {
@@ -3302,16 +3561,29 @@ impl ActiveTurn {
             .task
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *task = Some(handle);
+        *task = Some(MobileTurnTask {
+            abort: handle.abort_handle(),
+            join: Some(handle),
+        });
     }
 
     fn take_task_handle(&self) -> Option<tokio::task::JoinHandle<()>> {
-        let task = self
+        self.task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+            .and_then(|task| task.join.take())
+    }
+
+    fn abort_task(&self) {
+        if let Some(task) = self
             .task
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        task
+            .as_ref()
+        {
+            task.abort.abort();
+        }
     }
 
     async fn wait_completed(&self) {
@@ -4135,8 +4407,8 @@ impl MobileEngineHandle {
     pub async fn cron_store(&self) -> Result<Arc<MobileCronStoreHandle>, ClientError> {
         let cfg = self.current_mobile_config()?;
         Ok(Arc::new(MobileCronStoreHandle::new(
-            cfg.cwd,
-            self.firer_platform.filesystem(),
+            cfg.logical_cwd.unwrap_or(cfg.cwd),
+            self.fs.clone(),
             self.firer_platform.clock(),
         )))
     }
@@ -4152,8 +4424,8 @@ impl MobileEngineHandle {
             cfg: cfg.clone(),
             platform: self.firer_platform.clone(),
         };
-        let fs = self.firer_platform.filesystem();
-        let cwd = cfg.cwd.clone();
+        let fs = self.fs.clone();
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let clock = self.firer_platform.clock();
         let claim_fs = fs.clone();
         let claim_cwd = cwd.clone();
@@ -4337,7 +4609,7 @@ impl MobileEngineHandle {
         if let Some(scheduler) = &self.session_cron {
             scheduler
                 .set_tasks_file(cron::tasks_file::session_scheduled_tasks_path(
-                    &self.current_mobile_config()?.cwd,
+                    std::path::Path::new(&self.session_cwd()),
                 ))
                 .await
                 .map_err(|error| ClientError::Internal {
@@ -4699,7 +4971,7 @@ impl MobileEngineHandle {
         .map_err(|error| ClientError::Internal {
             message: format!("empty session transcript authority failed: {error}"),
         })?;
-        let writer = session::jsonl::JsonlWriter::new(path.clone(), self.fs.clone())
+        let writer = session::jsonl::JsonlWriter::new(path.clone(), self.host_fs.clone())
             .with_durable_lock(authority);
         writer
             .activate_session_target(target_id, path, std::path::PathBuf::from(cwd))
@@ -4769,7 +5041,7 @@ impl MobileEngineHandle {
                 session::jsonl::load_routed_session_from_path_with_source(
                     path,
                     uuid,
-                    self.fs.clone(),
+                    self.host_fs.clone(),
                 )
                 .await
             }
@@ -4778,7 +5050,7 @@ impl MobileEngineHandle {
                     &self.lingxi_home,
                     &cwd,
                     uuid,
-                    self.fs.clone(),
+                    self.host_fs.clone(),
                 )
                 .await
             }
@@ -4790,7 +5062,11 @@ impl MobileEngineHandle {
             let path = selected_path.clone().unwrap_or_else(|| {
                 session::jsonl::session_path(&self.lingxi_home, &cwd, &uuid.to_string())
             });
-            if let Ok(file) = self.fs.read_file(&path.to_string_lossy(), None, None).await {
+            if let Ok(file) = self
+                .host_fs
+                .read_file(&path.to_string_lossy(), None, None)
+                .await
+            {
                 let loaded = session::jsonl::route_lines(&file.content);
                 if loaded.mobile_empty_sessions.contains(&uuid.to_string()) {
                     captured = Ok((path, file.content, loaded));
@@ -4999,7 +5275,7 @@ impl MobileEngineHandle {
                     let path =
                         session::jsonl::session_path(&self.lingxi_home, &cwd, &uuid.to_string());
                     let source = self
-                        .fs
+                        .host_fs
                         .read_file(&path.to_string_lossy(), None, None)
                         .await
                         .map_err(|error| ClientError::Internal {
@@ -5943,7 +6219,8 @@ impl MobileEngineHandle {
                 hook_messages,
                 skill,
             } => {
-                let skill_prompt = DurableSkillPrompt::new(command.clone(), body, hook_messages, skill);
+                let skill_prompt =
+                    DurableSkillPrompt::new(command.clone(), body, hook_messages, skill);
                 let checkpoint = match self.durable_turns.prepare_claimed_slash_turn(
                     &owner.session_id,
                     checkpoint.turn_id,
@@ -6280,48 +6557,55 @@ impl MobileEngineHandle {
         let task_turn = owner.clone();
         let loop_scheduler = self.inner.wakeup_scheduler.get().cloned();
         let cancel_reason = self.cancel_reason.clone();
-        let task = self.runtime().spawn(async move {
-            let shell_result = if task_turn.cancel.is_cancelled() {
-                DurableBashResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: 130,
-                    interrupted: true,
-                }
-            } else {
-                execute_mobile_bash_tool(&orchestrator, &claimed.prompt, task_turn.cancel.clone())
+        let task = self
+            .runtime()
+            .spawn(self.turn_tasks.track_future(async move {
+                let shell_result = if task_turn.cancel.is_cancelled() {
+                    DurableBashResult {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 130,
+                        interrupted: true,
+                    }
+                } else {
+                    execute_mobile_bash_tool(
+                        &orchestrator,
+                        &claimed.prompt,
+                        task_turn.cancel.clone(),
+                    )
                     .await
-            };
-            let still_should_query = claimed.bash_should_query.unwrap_or(true)
-                && !task_turn.cancel.is_cancelled()
-                && !shell_result.interrupted;
-            match durable_turns.prepare_claimed_bash_turn(
-                &task_turn.session_id,
-                claimed.turn_id,
-                shell_result,
-                still_should_query,
-            ) {
-                Ok(checkpoint) => {
-                    sink.emit(ClientEvent::TurnRecoveryState {
-                        snapshot: checkpoint.snapshot(),
-                    })
-                    .await;
-                    let checkpoint = durable_turns
-                        .load(&task_turn.session_id, checkpoint.turn_id)
-                        .unwrap_or(checkpoint);
-                    match checkpoint.queued_prompt_inputs(&durable_turns) {
-                        Ok(mut inputs) => {
-                            if task_turn.cancel.is_cancelled() {
-                                for input in &mut inputs {
-                                    if input.prompt_ingress_kind
-                                        == Some(orchestrator::PromptIngressKind::DirectBash)
-                                    {
-                                        input.skip_model_query = true;
+                };
+                let still_should_query = claimed.bash_should_query.unwrap_or(true)
+                    && !task_turn.cancel.is_cancelled()
+                    && !shell_result.interrupted;
+                match durable_turns.prepare_claimed_bash_turn(
+                    &task_turn.session_id,
+                    claimed.turn_id,
+                    shell_result,
+                    still_should_query,
+                ) {
+                    Ok(checkpoint) => {
+                        sink.emit(ClientEvent::TurnRecoveryState {
+                            snapshot: checkpoint.snapshot(),
+                        })
+                        .await;
+                        let checkpoint = durable_turns
+                            .load(&task_turn.session_id, checkpoint.turn_id)
+                            .unwrap_or(checkpoint);
+                        match checkpoint.queued_prompt_inputs(&durable_turns) {
+                            Ok(mut inputs) => {
+                                if task_turn.cancel.is_cancelled() {
+                                    for input in &mut inputs {
+                                        if input.prompt_ingress_kind
+                                            == Some(orchestrator::PromptIngressKind::DirectBash)
+                                        {
+                                            input.skip_model_query = true;
+                                        }
                                     }
                                 }
-                            }
-                            let append_only_direct_bash =
-                                inputs.iter().any(|input| input.skip_model_query)
+                                let append_only_direct_bash = inputs
+                                    .iter()
+                                    .any(|input| input.skip_model_query)
                                     && inputs.iter().any(|input| {
                                         input.prompt_ingress_kind
                                             == Some(orchestrator::PromptIngressKind::DirectBash)
@@ -6331,67 +6615,68 @@ impl MobileEngineHandle {
                                             && input.prompt_ingress_kind
                                                 == Some(orchestrator::PromptIngressKind::DirectBash)
                                     });
-                            let append_cancel = if task_turn.cancel.is_cancelled() {
-                                append_only_direct_bash.then(CancellationToken::new)
-                            } else {
-                                Some(task_turn.cancel.clone())
-                            };
-                            if let Some(append_cancel) = append_cancel {
-                                if let Err(error) = orchestrator
-                                    .run_queued_prompt_batch(inputs, append_cancel)
-                                    .await
-                                {
-                                    message_output.reset_message_buffer().await;
-                                    sink.emit(client::adapter::map_orchestrator_error(&error))
-                                        .await;
+                                let append_cancel = if task_turn.cancel.is_cancelled() {
+                                    append_only_direct_bash.then(CancellationToken::new)
+                                } else {
+                                    Some(task_turn.cancel.clone())
+                                };
+                                if let Some(append_cancel) = append_cancel {
+                                    if let Err(error) = orchestrator
+                                        .run_queued_prompt_batch(inputs, append_cancel)
+                                        .await
+                                    {
+                                        message_output.reset_message_buffer().await;
+                                        sink.emit(client::adapter::map_orchestrator_error(&error))
+                                            .await;
+                                    }
                                 }
                             }
-                        }
-                        Err(error) => {
-                            sink.emit(ClientEvent::Error {
-                                kind: ErrorKindDto::Internal,
-                                message: format!(
-                                    "could not restore mobile Bash history rows: {error}"
-                                )
-                                .into(),
-                            })
-                            .await;
+                            Err(error) => {
+                                sink.emit(ClientEvent::Error {
+                                    kind: ErrorKindDto::Internal,
+                                    message: format!(
+                                        "could not restore mobile Bash history rows: {error}"
+                                    )
+                                    .into(),
+                                })
+                                .await;
+                            }
                         }
                     }
+                    Err(error) if !task_turn.cancel.is_cancelled() => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("could not persist mobile Bash result: {error}")
+                                .into(),
+                        })
+                        .await;
+                    }
+                    Err(_) => {}
                 }
-                Err(error) if !task_turn.cancel.is_cancelled() => {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
-                        message: format!("could not persist mobile Bash result: {error}").into(),
-                    })
+                if let Some(scheduler) = &loop_scheduler {
+                    settle_mobile_loop_turn(
+                        &orchestrator,
+                        scheduler,
+                        &task_turn.cancel,
+                        &cancel_reason,
+                        true,
+                    )
                     .await;
                 }
-                Err(_) => {}
-            }
-            if let Some(scheduler) = &loop_scheduler {
-                settle_mobile_loop_turn(
-                    &orchestrator,
-                    scheduler,
-                    &task_turn.cancel,
-                    &cancel_reason,
-                    true,
-                )
-                .await;
-            }
-            let mut active = active_cancel.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &task_turn))
-            {
-                *active = None;
-            }
-            drop(active);
-            if let Some(owner_id) = task_turn.permission_owner_id {
-                permission_gate.end_main_turn(owner_id);
-            }
-            message_queue.clear_active_turn().await;
-            task_turn.mark_completed();
-        });
+                let mut active = active_cancel.lock().await;
+                if active
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &task_turn))
+                {
+                    *active = None;
+                }
+                drop(active);
+                if let Some(owner_id) = task_turn.permission_owner_id {
+                    permission_gate.end_main_turn(owner_id);
+                }
+                message_queue.clear_active_turn().await;
+                task_turn.mark_completed();
+            }));
         owner.set_task_handle(task);
     }
 
@@ -6632,128 +6917,136 @@ impl MobileEngineHandle {
         let media_agent_handoffs = self.inner.media_agent_handoffs.clone();
         let media_service = self.inner.media_service.clone();
         let media_conversation_attachment = self.inner.media_conversation_attachment.clone();
-        let task = self.runtime().spawn(async move {
-            let result = match queued_inputs {
-                Some(inputs) => {
-                    orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone())
-                        .await
-                }
-                None => {
-                    orch.run_turn_streaming_with_cancel_image_sources(
-                        &text,
-                        direct_image_sources,
-                        task_turn.cancel.clone(),
-                    )
-                    .await
-                }
-            };
-            if let Err(err) = &result {
-                message_output.reset_message_buffer().await;
-                sink.emit(client::adapter::map_orchestrator_error(err))
-                    .await;
-            }
-
-            let (media_handoff_end, media_handoff_error) = match continue_media_agent_handoff(
-                orch.clone(),
-                task_turn.clone(),
-                media_agent_handoffs,
-                media_service,
-                media_conversation_attachment,
-                result.is_ok(),
-            )
-            .await
-            {
-                Ok(end) => (end, None),
-                Err(error) => {
-                    message_output.reset_message_buffer().await;
-                    sink.emit(client::adapter::map_orchestrator_error(&error))
-                        .await;
-                    (None, Some(error))
-                }
-            };
-            let deferred_terminal = task_turn.take_deferred_terminal();
-
-            if let Some(scheduler) = &loop_scheduler {
-                settle_mobile_loop_turn(&orch, scheduler, &task_turn.cancel, &cancel_reason, true)
-                    .await;
-            }
-            if let Some(end) = media_handoff_end {
-                let (outcome, stop_reason) = match end {
-                    orchestrator::RealtimeAgentEnd::Cancelled => (
-                        client::protocol::events::TurnOutcomeDto::Cancelled,
-                        "cancelled",
-                    ),
-                    orchestrator::RealtimeAgentEnd::Closed => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_closed",
-                    ),
-                    orchestrator::RealtimeAgentEnd::Deadline => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_deadline",
-                    ),
-                    orchestrator::RealtimeAgentEnd::Idle => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_idle",
-                    ),
-                    orchestrator::RealtimeAgentEnd::ToolStopped => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_tool_stopped",
-                    ),
-                };
-                sink.emit(ClientEvent::TurnEnded {
-                    outcome,
-                    stop_reason: Some(stop_reason.into()),
-                    cost: client::adapter::lowering::lower_cost_snapshot(
-                        &orch.snapshot_cost_real().await,
-                    ),
-                })
-                .await;
-            } else if !task_turn.terminal_emitted.load(Ordering::Acquire) {
-                // A requested handoff can be cleaned up without entering
-                // realtime (ordinary turn failure/cancellation). In that
-                // case restore the terminal event held by the lifecycle gate
-                // so the client still leaves its running state exactly once.
-                if let Some(mut event @ ClientEvent::TurnEnded { .. }) = deferred_terminal {
-                    let terminal_cost = client::adapter::lowering::lower_cost_snapshot(
-                        &orch.snapshot_cost_real().await,
-                    );
-                    if let ClientEvent::TurnEnded {
-                        outcome,
-                        stop_reason,
-                        cost,
-                    } = &mut event
-                    {
-                        if task_turn.cancel.is_cancelled() {
-                            *outcome = client::protocol::events::TurnOutcomeDto::Cancelled;
-                            *stop_reason = Some("cancelled".into());
-                        } else if media_handoff_error.is_some() {
-                            *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
-                            *stop_reason = Some("media_handoff_error".into());
-                        } else if result.is_err() {
-                            *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
-                            *stop_reason = Some("error".into());
-                        }
-                        *cost = terminal_cost;
+        let task = self
+            .runtime()
+            .spawn(self.turn_tasks.track_future(async move {
+                let result = match queued_inputs {
+                    Some(inputs) => {
+                        orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone())
+                            .await
                     }
-                    sink.emit(event).await;
+                    None => {
+                        orch.run_turn_streaming_with_cancel_image_sources(
+                            &text,
+                            direct_image_sources,
+                            task_turn.cancel.clone(),
+                        )
+                        .await
+                    }
+                };
+                if let Err(err) = &result {
+                    message_output.reset_message_buffer().await;
+                    sink.emit(client::adapter::map_orchestrator_error(err))
+                        .await;
                 }
-            }
-            let mut active = active_cancel.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
-            {
-                *active = None;
-            }
-            drop(active);
-            if let Some(owner_id) = task_turn.permission_owner_id {
-                permission_gate.end_main_turn(owner_id);
-            }
-            message_queue.clear_active_turn().await;
-            // Notify only after the slot is released: Cancel returning is the
-            // guarantee that New/Resume/Clear can no longer observe this turn.
-            task_turn.mark_completed();
-        });
+
+                let (media_handoff_end, media_handoff_error) = match continue_media_agent_handoff(
+                    orch.clone(),
+                    task_turn.clone(),
+                    media_agent_handoffs,
+                    media_service,
+                    media_conversation_attachment,
+                    result.is_ok(),
+                )
+                .await
+                {
+                    Ok(end) => (end, None),
+                    Err(error) => {
+                        message_output.reset_message_buffer().await;
+                        sink.emit(client::adapter::map_orchestrator_error(&error))
+                            .await;
+                        (None, Some(error))
+                    }
+                };
+                let deferred_terminal = task_turn.take_deferred_terminal();
+
+                if let Some(scheduler) = &loop_scheduler {
+                    settle_mobile_loop_turn(
+                        &orch,
+                        scheduler,
+                        &task_turn.cancel,
+                        &cancel_reason,
+                        true,
+                    )
+                    .await;
+                }
+                if let Some(end) = media_handoff_end {
+                    let (outcome, stop_reason) = match end {
+                        orchestrator::RealtimeAgentEnd::Cancelled => (
+                            client::protocol::events::TurnOutcomeDto::Cancelled,
+                            "cancelled",
+                        ),
+                        orchestrator::RealtimeAgentEnd::Closed => (
+                            client::protocol::events::TurnOutcomeDto::EndTurn,
+                            "media_realtime_closed",
+                        ),
+                        orchestrator::RealtimeAgentEnd::Deadline => (
+                            client::protocol::events::TurnOutcomeDto::EndTurn,
+                            "media_realtime_deadline",
+                        ),
+                        orchestrator::RealtimeAgentEnd::Idle => (
+                            client::protocol::events::TurnOutcomeDto::EndTurn,
+                            "media_realtime_idle",
+                        ),
+                        orchestrator::RealtimeAgentEnd::ToolStopped => (
+                            client::protocol::events::TurnOutcomeDto::EndTurn,
+                            "media_realtime_tool_stopped",
+                        ),
+                    };
+                    sink.emit(ClientEvent::TurnEnded {
+                        outcome,
+                        stop_reason: Some(stop_reason.into()),
+                        cost: client::adapter::lowering::lower_cost_snapshot(
+                            &orch.snapshot_cost_real().await,
+                        ),
+                    })
+                    .await;
+                } else if !task_turn.terminal_emitted.load(Ordering::Acquire) {
+                    // A requested handoff can be cleaned up without entering
+                    // realtime (ordinary turn failure/cancellation). In that
+                    // case restore the terminal event held by the lifecycle gate
+                    // so the client still leaves its running state exactly once.
+                    if let Some(mut event @ ClientEvent::TurnEnded { .. }) = deferred_terminal {
+                        let terminal_cost = client::adapter::lowering::lower_cost_snapshot(
+                            &orch.snapshot_cost_real().await,
+                        );
+                        if let ClientEvent::TurnEnded {
+                            outcome,
+                            stop_reason,
+                            cost,
+                        } = &mut event
+                        {
+                            if task_turn.cancel.is_cancelled() {
+                                *outcome = client::protocol::events::TurnOutcomeDto::Cancelled;
+                                *stop_reason = Some("cancelled".into());
+                            } else if media_handoff_error.is_some() {
+                                *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
+                                *stop_reason = Some("media_handoff_error".into());
+                            } else if result.is_err() {
+                                *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
+                                *stop_reason = Some("error".into());
+                            }
+                            *cost = terminal_cost;
+                        }
+                        sink.emit(event).await;
+                    }
+                }
+                let mut active = active_cancel.lock().await;
+                if active
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
+                {
+                    *active = None;
+                }
+                drop(active);
+                if let Some(owner_id) = task_turn.permission_owner_id {
+                    permission_gate.end_main_turn(owner_id);
+                }
+                message_queue.clear_active_turn().await;
+                // Notify only after the slot is released: Cancel returning is the
+                // guarantee that New/Resume/Clear can no longer observe this turn.
+                task_turn.mark_completed();
+            }));
         turn.set_task_handle(task);
         Ok(())
     }
@@ -6860,7 +7153,11 @@ impl MobileEngineHandle {
     /// snapshots used to build the live LLM registry.
     #[must_use]
     pub fn builtin_provider_catalog(&self) -> Vec<ProviderCatalogEntryDto> {
-        self.inner.provider_catalog.clone()
+        self.inner
+            .official_catalog
+            .as_ref()
+            .map(|source| provider_catalog_from_profiles(source.snapshot().providers.clone()))
+            .unwrap_or_else(|| self.inner.provider_catalog.clone())
     }
 
     /// Start a native OAuth authorization-code flow. PKCE verifier/state stay
@@ -7174,26 +7471,32 @@ impl MobileEngineHandle {
         }
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
-            ClientCommand::GetAudioSessionContext => {
-                match self.inner.orchestrator.current_audio_binding().await {
-                    Ok((session_id, profile)) => {
-                        self.connection_sink
-                            .emit(ClientEvent::AudioSessionContext {
-                                session_id,
-                                account_scope: format!("profile:{profile}"),
-                                profile_id: profile,
-                            })
-                            .await;
-                    }
-                    Err(_) => {
-                        self.connection_sink
-                            .emit(ClientEvent::Error {
-                                kind: ErrorKindDto::Rejected,
-                                message: "audio requires an exact session provider profile".into(),
-                            })
-                            .await;
-                    }
-                }
+            ClientCommand::GetAudioSessionContext { request_id } => {
+                let session_id = self
+                    .inner
+                    .orchestrator
+                    .current_session_id()
+                    .await
+                    .as_uuid()
+                    .to_string();
+                let profile = self
+                    .inner
+                    .orchestrator
+                    .current_audio_binding()
+                    .await
+                    .ok()
+                    .and_then(|(bound_session, profile)| {
+                        (bound_session == session_id).then_some(profile)
+                    });
+                self.connection_sink
+                    .emit(ClientEvent::AudioSessionContext {
+                        request_id,
+                        session_id: Some(session_id),
+                        account_scope: profile.as_ref().map(|profile| format!("profile:{profile}")),
+                        profile_id: profile,
+                        media_owner: None,
+                    })
+                    .await;
                 Ok(())
             }
             ClientCommand::SendPrompt {
@@ -7259,16 +7562,22 @@ impl MobileEngineHandle {
                         last_sequence = checkpoint.last_sequence,
                         "mobile: attach cursor fell behind retained durable turn history"
                     );
-                    let live_owner = self.active_cancel.lock().await.as_ref().is_some_and(|turn| {
-                        turn.session_id == session_id
-                            && turn.turn_id == Some(turn_id)
-                            && !turn.cancel.is_cancelled()
-                            && !turn.completed.load(Ordering::SeqCst)
-                    });
-                    if live_owner || checkpoint
-                        .state
+                    let live_owner = self
+                        .active_cancel
+                        .lock()
+                        .await
                         .as_ref()
-                        .is_some_and(TurnRecoveryStateDto::is_terminal)
+                        .is_some_and(|turn| {
+                            turn.session_id == session_id
+                                && turn.turn_id == Some(turn_id)
+                                && !turn.cancel.is_cancelled()
+                                && !turn.completed.load(Ordering::SeqCst)
+                        });
+                    if live_owner
+                        || checkpoint
+                            .state
+                            .as_ref()
+                            .is_some_and(TurnRecoveryStateDto::is_terminal)
                     {
                         // Attaching a viewer cannot change a running owner's
                         // lifecycle, or resurrect a terminal turn. Explain the
@@ -7801,6 +8110,18 @@ impl MobileEngineHandle {
                 self.emit_controls_snapshot().await;
                 Ok(())
             }
+            ClientCommand::RefreshProviderCatalog { trigger } => {
+                if let Some(source) = &self.inner.official_catalog {
+                    let trigger = trigger
+                        .parse()
+                        .map_err(|e: String| ClientError::Internal { message: e })?;
+                    if let Err(error) = source.trigger(trigger).await {
+                        tracing::warn!(%error, "official provider directory refresh failed; keeping current snapshot");
+                    }
+                }
+                self.emit_listing(ProtocolListingKind::Models).await;
+                Ok(())
+            }
             ClientCommand::ListModels => {
                 self.emit_listing(ProtocolListingKind::Models).await;
                 Ok(())
@@ -8157,7 +8478,7 @@ impl MobileEngineHandle {
                         custom_title: None,
                         mode: Some(target_mode),
                     },
-                    self.fs.clone(),
+                    self.host_fs.clone(),
                 )
                 .await
                 .map_err(|error| ClientError::Rejected {
@@ -8604,10 +8925,26 @@ impl MobileEngineHandle {
         }
 
         use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
-        let kind = match provider_preset.as_str() {
-            "anthropic" => ProbeProtocol::Anthropic,
-            "google" => ProbeProtocol::Google,
-            _ => ProbeProtocol::OpenAi,
+        let catalog_protocol = self.inner.official_catalog.as_ref().and_then(|source| {
+            source
+                .snapshot()
+                .providers
+                .iter()
+                .find(|p| {
+                    p.profile_name == provider_preset
+                        || (provider_preset == "google" && p.profile_name == "gemini")
+                })
+                .map(|p| p.protocol)
+        });
+        let kind = match catalog_protocol {
+            Some(llm_runtime::ProtocolFamily::AnthropicMessages) => ProbeProtocol::Anthropic,
+            Some(llm_runtime::ProtocolFamily::GeminiGenerateContent) => ProbeProtocol::Google,
+            Some(_) => ProbeProtocol::OpenAi,
+            None => match provider_preset.as_str() {
+                "anthropic" => ProbeProtocol::Anthropic,
+                "google" => ProbeProtocol::Google,
+                _ => ProbeProtocol::OpenAi,
+            },
         };
         let started = std::time::Instant::now();
         let response = probe_provider(
@@ -9391,7 +9728,7 @@ impl MobileEngineHandle {
                 &self.lingxi_home,
                 &self.session_cwd(),
                 uuid,
-                self.fs.clone(),
+                self.host_fs.clone(),
             )
             .await
             .map_err(|error| ClientError::Rejected {
@@ -9454,7 +9791,7 @@ impl MobileEngineHandle {
                     }
                 })?;
                 let next_message_index =
-                    read_session_agent_next_message_index(self.fs.as_ref(), &path).await?;
+                    read_session_agent_next_message_index(self.host_fs.as_ref(), &path).await?;
                 (
                     messages,
                     session_agent_transcript_revision(&raw),
@@ -9650,7 +9987,12 @@ impl MobileEngineHandle {
             ProtocolListingKind::Models => {
                 self.event_sink
                     .emit(ClientEvent::ProviderModelCatalog {
-                        providers: self.inner.provider_model_catalog.clone(),
+                        providers: self
+                            .inner
+                            .official_catalog
+                            .as_ref()
+                            .map(|source| crate::provider_directory::entries(&source.snapshot()))
+                            .unwrap_or_else(|| self.inner.provider_model_catalog.clone()),
                     })
                     .await;
                 // Curate to the "latest few" per provider instead of flooding the
@@ -9967,8 +10309,9 @@ impl MobileEngineHandle {
     ) -> Option<FiredCronJobDto> {
         let _transition = self.loop_transition.lock().await;
         let cfg = self.current_mobile_config().ok()?;
-        let fs = self.firer_platform.filesystem();
-        let existing = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
+        let existing = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()
@@ -9984,10 +10327,10 @@ impl MobileEngineHandle {
                 .await;
         }
         let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd)
+        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd)
             .await
             .ok()?;
-        let mut document = read_cron_tasks(fs.as_ref(), &cfg.cwd).await;
+        let mut document = read_cron_tasks(fs.as_ref(), &cwd).await;
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -10016,7 +10359,7 @@ impl MobileEngineHandle {
             finalize_cron_occurrence(&mut document, &task.id, now_ms);
             let _ = cron::tasks_file::write_automation_tasks_body(
                 fs.as_ref(),
-                &cfg.cwd,
+                &cwd,
                 &cron::serialize_tasks(&document),
             )
             .await;
@@ -10031,13 +10374,14 @@ impl MobileEngineHandle {
             Ok(cfg) => cfg,
             Err(_) => return false,
         };
-        let fs = self.firer_platform.filesystem();
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
         let _process_guard = cron::lock_cron_file().await;
-        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd).await
+        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd).await
         else {
             return false;
         };
-        let mut document = read_cron_tasks(fs.as_ref(), &cfg.cwd).await;
+        let mut document = read_cron_tasks(fs.as_ref(), &cwd).await;
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -10056,7 +10400,7 @@ impl MobileEngineHandle {
         finalize_cron_occurrence(&mut document, &task_id, now_ms);
         cron::tasks_file::write_automation_tasks_body(
             fs.as_ref(),
-            &cfg.cwd,
+            &cwd,
             &cron::serialize_tasks(&document),
         )
         .await
@@ -10072,8 +10416,9 @@ impl MobileEngineHandle {
     ) -> Option<FiredCronJobDto> {
         let _transition = self.loop_transition.lock().await;
         let cfg = self.current_mobile_config().ok()?;
-        let fs = self.firer_platform.filesystem();
-        let task = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
+        let task = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()
@@ -10092,8 +10437,9 @@ impl MobileEngineHandle {
     pub async fn run_cron_task_now(&self, task_id: String) -> Option<FiredCronJobDto> {
         let _transition = self.loop_transition.lock().await;
         let cfg = self.current_mobile_config().ok()?;
-        let fs = self.firer_platform.filesystem();
-        let existing = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
+        let fs = self.fs.clone();
+        let existing = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()
@@ -10107,10 +10453,10 @@ impl MobileEngineHandle {
             return self.fire_automation_task(task_id, None, None).await;
         }
         let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd)
+        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd)
             .await
             .ok()?;
-        let task = read_cron_tasks(fs.as_ref(), &cfg.cwd)
+        let task = read_cron_tasks(fs.as_ref(), &cwd)
             .await
             .tasks
             .into_iter()
@@ -10164,6 +10510,10 @@ mod mobile_provider_allowlist_tests;
 #[cfg(test)]
 #[path = "host/tests/media_owner_cleanup_tests.rs"]
 mod media_owner_cleanup_tests;
+
+#[cfg(test)]
+#[path = "host/tests/shutdown_tests.rs"]
+mod shutdown_tests;
 
 /// The Anthropic profile's exact-id registry — what `/model` (and every client
 /// model picker riding `ClientEvent::ModelList`) can route under "anthropic".

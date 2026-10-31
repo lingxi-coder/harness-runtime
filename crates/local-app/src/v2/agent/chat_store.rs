@@ -1,20 +1,22 @@
 //! Durable App-owned Chat metadata. Transcript text stays in the Harness
 //! session JSONL; this index holds only routing and attachment metadata.
 use super::{
-    AttachmentMetadata, ChatRole, ChatState, ChatSummary, State, invalid,
+    invalid,
     protocol::{self, ProtocolMessageDigest},
+    AttachmentMetadata, ChatRecoveryFrontier, ChatRole, ChatState, ChatSummary, State,
 };
 use crate::v2::AppError;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,13 +37,10 @@ struct ChatRecord {
     session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_run_id: Option<String>,
-    #[serde(default)]
     messages: BTreeMap<String, ChatMessageMetadata>,
     /// Canonical AG-UI messages. Data-source bytes are stored as private
     /// content-addressed assets and represented here only by hash and size.
-    #[serde(default)]
     protocol_messages: Vec<StoredProtocolMessage>,
-    #[serde(default)]
     protocol_asset_bytes: u64,
 }
 
@@ -61,19 +60,76 @@ pub struct ProtocolHistoryPage {
     pub messages: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_reset: Option<bool>,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatIndex {
     chats: BTreeMap<String, ChatRecord>,
+    /// Retained even after a user deletes the Chat, so its request ID can
+    /// never silently create a second resource.
+    creations: BTreeMap<String, ChatCreation>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatCreation {
+    fingerprint: Option<String>,
+    deleted: bool,
+}
+
+struct IndexState {
+    index: ChatIndex,
+    /// A failed index write may already have renamed the new index. Never
+    /// serve or overwrite stale in-memory state after that point.
+    uncertain: bool,
+    // Host task authority, not persisted Chat metadata. Until the task ledger
+    // confirms a terminal commit, an assistant is evidence only.
+    committed_assistants: BTreeMap<String, (String, String, String)>,
+    recovery_authority: BTreeMap<String, ChatRecoveryFrontier>,
+    recovery_fenced: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct CleanupDiagnostics {
+    failed_ids: BTreeSet<String>,
+    parent_sync_failed: bool,
+}
+
+impl Deref for IndexState {
+    type Target = ChatIndex;
+    fn deref(&self) -> &Self::Target {
+        &self.index
+    }
+}
+
+impl DerefMut for IndexState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.index
+    }
 }
 
 /// One instance per Local App; its root is `<app>/agent`.
 pub struct ChatStore {
     root: PathBuf,
     index_path: PathBuf,
-    index: Mutex<ChatIndex>,
+    index: Mutex<IndexState>,
+    cleanup_diagnostics: Mutex<CleanupDiagnostics>,
+    #[cfg(test)]
+    history_capture_gate: Mutex<
+        Option<(
+            std::sync::Arc<std::sync::Barrier>,
+            std::sync::Arc<std::sync::Barrier>,
+        )>,
+    >,
+    #[cfg(test)]
+    injected_persist_failure: Mutex<Option<PersistStage>>,
+    #[cfg(test)]
+    injected_cleanup_failure: Mutex<Option<CleanupStage>>,
 }
 
 /// Chat summaries exposed by one Local App. `next_cursor` identifies the last
@@ -97,6 +153,46 @@ fn safe_id(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|uuid| uuid.to_string() == value)
 }
 
+fn safe_request_id(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|uuid| {
+        uuid.to_string() == value
+            && uuid.get_version_num() == 4
+            && uuid.get_variant() == uuid::Variant::RFC4122
+    })
+}
+
+fn creation_fingerprint(title: Option<&str>) -> Result<String, AppError> {
+    // The raw title is part of the identity; defaulting or display trimming
+    // must not turn two distinct caller inputs into the same request.
+    let bytes = serde_json::to_vec(&("agent.chats.create.v1", title))?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+fn validated_title(title: Option<&str>) -> Result<&str, AppError> {
+    let raw = title.unwrap_or("New chat");
+    let display = raw.trim();
+    if raw.len() > 512
+        || raw.chars().any(char::is_control)
+        || display.is_empty()
+        || display.chars().count() > 80
+    {
+        return Err(invalid("invalid Chat title"));
+    }
+    Ok(display)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistStage {
+    BeforeRename,
+    AfterRename,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CleanupStage {
+    BeforeRemove,
+    BeforeParentSync,
+}
+
 fn ensure_real_directory(path: &Path) -> Result<(), AppError> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -117,7 +213,11 @@ fn ensure_real_directory(path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), AppError> {
+fn atomic_json(
+    path: &Path,
+    value: &impl Serialize,
+    mut check: impl FnMut(PersistStage) -> Result<(), AppError>,
+) -> Result<(), AppError> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("Chat storage unavailable"))?;
@@ -137,7 +237,9 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), AppError> {
         let mut file = options.open(&temp)?;
         file.write_all(&serde_json::to_vec(value)?)?;
         file.sync_all()?;
+        check(PersistStage::BeforeRename)?;
         fs::rename(&temp, path)?;
+        check(PersistStage::AfterRename)?;
         File::open(parent)?.sync_all()?;
         Ok(())
     })();
@@ -148,29 +250,268 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), AppError> {
 }
 
 impl ChatStore {
-    pub fn open(root: &Path) -> Result<Self, AppError> {
-        ensure_real_directory(root)?;
-        ensure_real_directory(&root.join("chats"))?;
-        let index_path = root.join("chats-index.json");
-        let index: ChatIndex = match fs::read(&index_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ChatIndex::default(),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Self {
-            root: root.to_path_buf(),
-            index_path,
-            index: Mutex::new(index),
-        })
+    /// Validate an existing index without creating, modifying, or cleaning up
+    /// any storage. Hosts can use this before opening other per-app stores.
+    /// A missing index is allowed only when no Chat files or pending index
+    /// writes are present; an empty chats directory alone is harmless.
+    pub fn preflight_existing_index(root: &Path) -> Result<(), AppError> {
+        Self::read_existing_index(root).map(|_| ())
     }
 
-    /// Reconcile interrupted Chat metadata only after the durable task ledger
-    /// has completed its own startup recovery. A Task that terminalized before
-    /// Chat finish metadata was written closes the Chat as Idle; interrupted,
-    /// missing, or previously in-flight tasks leave the Chat Interrupted.
+    fn read_existing_index(root: &Path) -> Result<Option<ChatIndex>, AppError> {
+        let root_meta = match fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !root_meta.is_dir() || root_meta.file_type().is_symlink() {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        // Validate this path even when an index exists: otherwise a host can
+        // recover other stores before open notices that chats is unusable.
+        let chat_files_present = Self::existing_chat_files_present(root)?;
+        let index_path = root.join("chats-index.json");
+        let index_meta = match fs::symlink_metadata(&index_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Self::check_no_unindexed_chat_data(root, chat_files_present)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !index_meta.is_file() || index_meta.file_type().is_symlink() {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        // Decode only the current complete format. Missing authority or
+        // history fields are storage errors, never an empty-history upgrade.
+        let bytes = fs::read(&index_path)?;
+        let index: ChatIndex =
+            serde_json::from_slice(&bytes).map_err(|_| AppError::ChatStorageUncertain)?;
+        for (id, creation) in &index.creations {
+            let fingerprint_valid = creation.fingerprint.as_deref().is_some_and(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            });
+            if !safe_request_id(id)
+                || !fingerprint_valid
+                || (creation.deleted && index.chats.contains_key(id))
+                || (!creation.deleted
+                    && index
+                        .chats
+                        .get(id)
+                        .is_none_or(|chat| chat.summary.chat_id != *id))
+            {
+                return Err(AppError::ChatStorageUncertain);
+            }
+        }
+        for (id, chat) in &index.chats {
+            if !safe_request_id(id)
+                || chat.summary.chat_id != *id
+                || !safe_id(&chat.session_id)
+                || !index
+                    .creations
+                    .get(id)
+                    .is_some_and(|creation| !creation.deleted)
+            {
+                return Err(AppError::ChatStorageUncertain);
+            }
+        }
+        Ok(Some(index))
+    }
+
+    fn existing_chat_files_present(root: &Path) -> Result<bool, AppError> {
+        let chats = root.join("chats");
+        match fs::symlink_metadata(&chats) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                // Read at most one entry. This checks directory access but
+                // neither enumerates nor modifies any Chat contents.
+                Ok(fs::read_dir(&chats)?.next().transpose()?.is_some())
+            }
+            Ok(_) => Err(AppError::ChatStorageUncertain),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn check_no_unindexed_chat_data(root: &Path, chat_files_present: bool) -> Result<(), AppError> {
+        if chat_files_present {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".chat-index-") && name.ends_with(".tmp") {
+                return Err(AppError::ChatStorageUncertain);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn open(root: &Path) -> Result<Self, AppError> {
+        // Check before creating directories or performing tombstone cleanup.
+        // This also rechecks a host's earlier read-only preflight.
+        let existing_index = Self::read_existing_index(root)?;
+        ensure_real_directory(root)?;
+        ensure_real_directory(&root.join("chats"))?;
+        let index_exists = existing_index.is_some();
+        let index = existing_index.unwrap_or_default();
+        let index_path = root.join("chats-index.json");
+        // A previous rename may have succeeded before its directory sync failed.
+        // Re-establish durability before reporting that index as committed.
+        if index_exists {
+            File::open(root)?.sync_all()?;
+        }
+        let store = Self {
+            root: root.to_path_buf(),
+            index_path,
+            index: Mutex::new(IndexState {
+                index,
+                uncertain: false,
+                committed_assistants: BTreeMap::new(),
+                recovery_authority: BTreeMap::new(),
+                recovery_fenced: BTreeSet::new(),
+            }),
+            cleanup_diagnostics: Mutex::new(CleanupDiagnostics::default()),
+            #[cfg(test)]
+            history_capture_gate: Mutex::new(None),
+            #[cfg(test)]
+            injected_persist_failure: Mutex::new(None),
+            #[cfg(test)]
+            injected_cleanup_failure: Mutex::new(None),
+        };
+        store.recover_deleted_directories();
+        Ok(store)
+    }
+
+    /// Opaque Chat IDs and a parent-sync flag for cleanup that needs retry.
+    /// No titles, paths, transcript content, or operating-system errors are exposed.
+    pub fn pending_deletion_cleanup(&self) -> Result<(Vec<String>, bool), AppError> {
+        let diagnostics = self
+            .cleanup_diagnostics
+            .lock()
+            .map_err(|_| invalid("Chat cleanup diagnostics unavailable"))?;
+        Ok((
+            diagnostics.failed_ids.iter().cloned().collect(),
+            diagnostics.parent_sync_failed,
+        ))
+    }
+
+    fn check_cleanup_stage(&self, stage: CleanupStage) -> Result<(), AppError> {
+        #[cfg(test)]
+        {
+            let mut injected = self.injected_cleanup_failure.lock().unwrap();
+            if *injected == Some(stage) {
+                *injected = None;
+                return Err(std::io::Error::other("injected Chat cleanup failure").into());
+            }
+        }
+        let _ = stage;
+        Ok(())
+    }
+
+    fn cleanup_parent(&self) -> Result<PathBuf, AppError> {
+        let path = self.root.join("chats");
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(invalid("Chat cleanup parent is unavailable"));
+        }
+        Ok(path)
+    }
+
+    fn remove_deleted_directory(&self, chat_id: &str) -> Result<(), AppError> {
+        if !safe_id(chat_id) {
+            return Err(invalid("invalid Chat ID"));
+        }
+        let directory = self.cleanup_parent()?.join(chat_id);
+        match fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(invalid("Chat cleanup path is unavailable"));
+            }
+            Ok(_) => {}
+        }
+        self.check_cleanup_stage(CleanupStage::BeforeRemove)?;
+        match fs::remove_dir_all(&directory) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn sync_deleted_directory_parent(&self) -> Result<(), AppError> {
+        self.check_cleanup_stage(CleanupStage::BeforeParentSync)?;
+        File::open(self.cleanup_parent()?)?.sync_all()?;
+        Ok(())
+    }
+
+    fn recover_deleted_directories(&self) {
+        // Run only on tombstones already read and validated from the index.
+        // A failure is contained to this cleanup; other Apps can still open.
+        let ids = match self.lock_index() {
+            Ok(index) => index
+                .creations
+                .iter()
+                .filter(|(_, creation)| creation.deleted)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let failed_ids = ids
+            .into_iter()
+            .filter(|id| self.remove_deleted_directory(id).is_err())
+            .collect::<BTreeSet<_>>();
+        let parent_sync_failed = self.sync_deleted_directory_parent().is_err();
+        let count = failed_ids.len() + usize::from(parent_sync_failed);
+        if let Ok(mut diagnostics) = self.cleanup_diagnostics.lock() {
+            diagnostics.failed_ids = failed_ids;
+            diagnostics.parent_sync_failed = parent_sync_failed;
+        }
+        if count > 0 {
+            tracing::warn!(failure_count = count, "Deleted Chat cleanup needs retry");
+        }
+    }
+
+    /// Reconcile Chat metadata only after the durable task ledger has completed
+    /// its own startup recovery. Every protocol turn must belong to a successful
+    /// task; transcript rows are checked against their task and tool-use owners
+    /// before a resumed request reaches the model.
     pub fn reconcile_startup(&self, task_states: &BTreeMap<String, State>) -> Result<(), AppError> {
+        let recovery_authority = self.lock_index()?.recovery_authority.clone();
         self.change(|index| {
-            for record in index.chats.values_mut() {
+            for (chat_id, record) in &mut index.chats {
+                let archived = |id: &str| {
+                    recovery_authority
+                        .get(chat_id)
+                        .is_some_and(|frontier| frontier.abandoned_run_ids().contains(id))
+                };
+                let has_unverified_protocol_turn = record.protocol_messages.iter().any(|message| {
+                    !archived(&message.run_id)
+                        && task_states.get(&message.run_id) != Some(&State::Succeeded)
+                });
+                if has_unverified_protocol_turn {
+                    record.summary.state = ChatState::Interrupted;
+                    record.summary.updated_at = now();
+                    record.active_run_id = None;
+                    continue;
+                }
+                if record.active_run_id.as_deref().is_some_and(archived) {
+                    record.summary.state = ChatState::Idle;
+                    record.active_run_id = None;
+                    record.summary.updated_at = now();
+                    continue;
+                }
+                if record.summary.state == ChatState::Interrupted
+                    && recovery_authority.contains_key(chat_id)
+                {
+                    record.summary.state = ChatState::Idle;
+                }
                 if record.summary.state != ChatState::Running {
                     continue;
                 }
@@ -179,10 +520,15 @@ impl ChatStore {
                     .as_deref()
                     .and_then(|run_id| task_states.get(run_id));
                 record.summary.state = match task_state {
-                    Some(State::Succeeded | State::Failed | State::Cancelled) => ChatState::Idle,
-                    Some(State::Queued | State::Running | State::Interrupted) | None => {
-                        ChatState::Interrupted
-                    }
+                    Some(State::Succeeded) => ChatState::Idle,
+                    Some(
+                        State::Queued
+                        | State::Running
+                        | State::Failed
+                        | State::Cancelled
+                        | State::Interrupted,
+                    )
+                    | None => ChatState::Interrupted,
                 };
                 record.summary.updated_at = now();
                 record.active_run_id = None;
@@ -192,71 +538,265 @@ impl ChatStore {
     }
 
     fn persist(&self, index: &ChatIndex) -> Result<(), AppError> {
-        atomic_json(&self.index_path, index)
+        atomic_json(&self.index_path, index, |stage| {
+            #[cfg(test)]
+            {
+                let mut injected = self.injected_persist_failure.lock().unwrap();
+                if *injected == Some(stage) {
+                    *injected = None;
+                    return Err(std::io::Error::other("injected Chat index failure").into());
+                }
+            }
+            let _ = stage;
+            Ok(())
+        })
+    }
+
+    fn lock_index(&self) -> Result<MutexGuard<'_, IndexState>, AppError> {
+        let state = self
+            .index
+            .lock()
+            .map_err(|_| AppError::ChatStorageUncertain)?;
+        if state.uncertain {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        Ok(state)
+    }
+
+    fn lock_chat_index(&self, chat_id: &str) -> Result<MutexGuard<'_, IndexState>, AppError> {
+        let state = self.lock_index()?;
+        if state.recovery_fenced.contains(chat_id) {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        Ok(state)
+    }
+
+    fn change_chat<T>(
+        &self,
+        chat_id: &str,
+        edit: impl FnOnce(&mut ChatIndex) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let mut state = self.lock_chat_index(chat_id)?;
+        let mut next = state.index.clone();
+        let result = edit(&mut next)?;
+        self.commit_index(&mut state, next)?;
+        Ok(result)
+    }
+
+    /// Fence cached instances immediately after an uncertain cross-store write.
+    /// No rollback or second successful disk write is required to hide results.
+    pub fn quarantine_storage(&self) {
+        if let Ok(mut state) = self.index.lock() {
+            state.uncertain = true;
+        }
+    }
+
+    fn assistant_matches(record: &ChatRecord, run_id: &str, message_id: &str, text: &str) -> bool {
+        record.protocol_messages.iter().any(|entry| {
+            entry.run_id == run_id
+                && entry.id == message_id
+                && entry.role == "assistant"
+                && entry.message == json!({"id":message_id,"role":"assistant","content":text})
+        })
+    }
+
+    /// Verify bytes already committed to ChatStore before the task authority can
+    /// publish success. This does not make the assistant publicly visible.
+    pub fn verify_protocol_assistant(
+        &self,
+        chat_id: &str,
+        run_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<(), AppError> {
+        let mut state = self.lock_chat_index(chat_id)?;
+        if !state
+            .chats
+            .get(chat_id)
+            .is_some_and(|record| Self::assistant_matches(record, run_id, message_id, text))
+        {
+            state.uncertain = true;
+            return Err(AppError::ChatStorageUncertain);
+        }
+        Ok(())
+    }
+
+    /// Install the task ledger's committed assistant authority at startup or
+    /// after terminal commit. Never infer commitment from Chat active_run.
+    pub fn set_committed_assistants(
+        &self,
+        accepted: &BTreeMap<String, (String, String, String)>,
+    ) -> Result<(), AppError> {
+        let mut state = self.lock_index()?;
+        for (run_id, (chat_id, message_id, text)) in accepted {
+            if state
+                .creations
+                .get(chat_id)
+                .is_some_and(|creation| creation.deleted)
+            {
+                continue;
+            }
+            if !state
+                .chats
+                .get(chat_id)
+                .is_some_and(|record| Self::assistant_matches(record, run_id, message_id, text))
+            {
+                state.uncertain = true;
+                return Err(AppError::ChatStorageUncertain);
+            }
+        }
+        state.committed_assistants = accepted.clone();
+        Ok(())
+    }
+
+    fn message_visible(state: &IndexState, chat_id: &str, message: &StoredProtocolMessage) -> bool {
+        if state
+            .recovery_authority
+            .get(chat_id)
+            .is_some_and(|frontier| frontier.abandoned_run_ids().contains(&message.run_id))
+        {
+            return false;
+        }
+        message.role != "assistant"
+            || state
+                .committed_assistants
+                .get(&message.run_id)
+                .is_some_and(|(chat, id, text)| {
+                    chat == chat_id
+                        && id == &message.id
+                        && message.message == json!({"id":id,"role":"assistant","content":text})
+                })
+    }
+
+    fn commit_index(&self, state: &mut IndexState, next: ChatIndex) -> Result<(), AppError> {
+        if self.persist(&next).is_err() {
+            state.uncertain = true;
+            return Err(AppError::ChatStorageUncertain);
+        }
+        state.index = next;
+        Ok(())
     }
 
     fn change<T>(
         &self,
         edit: impl FnOnce(&mut ChatIndex) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        let mut index = self
-            .index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?;
-        let mut next = index.clone();
+        let mut index = self.lock_index()?;
+        let mut next = index.index.clone();
         let result = edit(&mut next)?;
-        self.persist(&next)?;
-        *index = next;
+        self.commit_index(&mut index, next)?;
         Ok(result)
     }
 
-    pub fn create(&self, title: Option<&str>, session_id: &str) -> Result<ChatSummary, AppError> {
+    pub fn create(
+        &self,
+        request_id: &str,
+        title: Option<&str>,
+        session_id: &str,
+    ) -> Result<ChatSummary, AppError> {
+        if !safe_request_id(request_id) {
+            return Err(invalid("invalid Chat creation request ID"));
+        }
         if !safe_id(session_id) {
             return Err(invalid("invalid Harness session ID"));
         }
-        let title = title.unwrap_or("New chat").trim();
-        if title.is_empty() || title.chars().count() > 80 || title.chars().any(char::is_control) {
+        if title.is_some_and(|value| value.len() > 512) {
             return Err(invalid("invalid Chat title"));
         }
-        let chat_id = uuid::Uuid::new_v4().to_string();
+        let fingerprint = creation_fingerprint(title)?;
+        let mut index = self.lock_index()?;
+        if let Some(summary) = Self::lookup_creation(&index, request_id, &fingerprint)? {
+            return Ok(summary);
+        }
+        let display_title = validated_title(title)?;
+        let chat_id = request_id.to_owned();
         let timestamp = now();
         let summary = ChatSummary {
             chat_id: chat_id.clone(),
-            title: title.to_owned(),
+            title: display_title.to_owned(),
             created_at: timestamp,
             updated_at: timestamp,
             archived: false,
             state: ChatState::Idle,
         };
-        let directory = self.root.join("chats").join(&chat_id);
-        ensure_real_directory(&directory)?;
-        let result = self.change(|index| {
-            index.chats.insert(
-                chat_id.clone(),
-                ChatRecord {
-                    summary: summary.clone(),
-                    session_id: session_id.to_owned(),
-                    active_run_id: None,
-                    messages: BTreeMap::new(),
-                    protocol_messages: Vec::new(),
-                    protocol_asset_bytes: 0,
-                },
-            );
-            Ok(summary.clone())
-        });
-        if result.is_err() {
-            let _ = fs::remove_dir_all(directory);
+        let mut next = index.index.clone();
+        next.chats.insert(
+            chat_id.clone(),
+            ChatRecord {
+                summary: summary.clone(),
+                session_id: session_id.to_owned(),
+                active_run_id: None,
+                messages: BTreeMap::new(),
+                protocol_messages: Vec::new(),
+                protocol_asset_bytes: 0,
+            },
+        );
+        next.creations.insert(
+            chat_id,
+            ChatCreation {
+                fingerprint: Some(fingerprint),
+                deleted: false,
+            },
+        );
+        self.commit_index(&mut index, next)?;
+        Ok(summary)
+    }
+
+    /// A missing entry is not proof that an earlier submission cannot still arrive.
+    pub fn creation_status(
+        &self,
+        request_id: &str,
+        title: Option<&str>,
+    ) -> Result<Option<ChatSummary>, AppError> {
+        if !safe_request_id(request_id) {
+            return Err(invalid("invalid Chat creation request ID"));
         }
-        result
+        if title.is_some_and(|value| value.len() > 512) {
+            return Err(invalid("invalid Chat title"));
+        }
+        let fingerprint = creation_fingerprint(title)?;
+        let index = self.lock_index()?;
+        let result = Self::lookup_creation(&index, request_id, &fingerprint)?;
+        validated_title(title)?;
+        Ok(result)
+    }
+
+    fn lookup_creation(
+        index: &ChatIndex,
+        request_id: &str,
+        fingerprint: &str,
+    ) -> Result<Option<ChatSummary>, AppError> {
+        match index.creations.get(request_id) {
+            Some(creation) => {
+                if creation
+                    .fingerprint
+                    .as_deref()
+                    .is_some_and(|value| value != fingerprint)
+                {
+                    return Err(AppError::ChatCreateConflict);
+                }
+                if creation.deleted {
+                    return Err(AppError::ChatCreateDeleted);
+                }
+                if creation.fingerprint.is_none() {
+                    return Err(AppError::ChatStorageUncertain);
+                }
+                index
+                    .chats
+                    .get(request_id)
+                    .map(|record| Some(record.summary.clone()))
+                    .ok_or(AppError::ChatStorageUncertain)
+            }
+            None if index.chats.contains_key(request_id) => Err(AppError::ChatStorageUncertain),
+            None => Ok(None),
+        }
     }
 
     pub fn get(&self, chat_id: &str) -> Result<ChatSummary, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
         }
-        self.index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?
+        self.lock_chat_index(chat_id)?
             .chats
             .get(chat_id)
             .map(|record| record.summary.clone())
@@ -303,10 +843,7 @@ impl ChatStore {
         limit: usize,
         include_archived: bool,
     ) -> Result<Vec<ChatSummary>, AppError> {
-        let index = self
-            .index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?;
+        let index = self.lock_index()?;
         let mut chats = index
             .chats
             .values()
@@ -334,19 +871,149 @@ impl ChatStore {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
         }
-        self.index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?
+        self.lock_chat_index(chat_id)?
             .chats
             .get(chat_id)
             .map(|record| record.session_id.clone())
             .ok_or_else(|| AppError::NotFound("App Chat".into()))
     }
 
+    /// Stop canonical reads while the host stages or commits recovery. The
+    /// task ledger remains the sole durable authority; this fence never edits
+    /// messages, assets, terminal task states or the original transcript.
+    pub fn fence_recovery(&self, chat_id: &str) -> Result<(), AppError> {
+        let mut state = self
+            .index
+            .lock()
+            .map_err(|_| AppError::ChatStorageUncertain)?;
+        if state.uncertain {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        if !state.chats.contains_key(chat_id) {
+            return Err(AppError::NotFound("App Chat".into()));
+        }
+        state.recovery_fenced.insert(chat_id.to_owned());
+        Ok(())
+    }
+
+    pub fn install_recovery_authority(
+        &self,
+        authority: BTreeMap<String, ChatRecoveryFrontier>,
+    ) -> Result<(), AppError> {
+        let mut state = self
+            .index
+            .lock()
+            .map_err(|_| AppError::ChatStorageUncertain)?;
+        if state.uncertain {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        for (id, frontier) in &authority {
+            if id != frontier.chat_id() || !safe_id(id) || !safe_id(frontier.generation()) {
+                return Err(AppError::ChatStorageUncertain);
+            }
+            if !state.chats.contains_key(id)
+                && !state
+                    .creations
+                    .get(id)
+                    .is_some_and(|creation| creation.deleted)
+            {
+                return Err(AppError::ChatStorageUncertain);
+            }
+        }
+        state.recovery_authority = authority;
+        Ok(())
+    }
+
+    pub fn finish_recovery(&self, chat_id: &str) -> Result<(), AppError> {
+        let mut state = self
+            .index
+            .lock()
+            .map_err(|_| AppError::ChatStorageUncertain)?;
+        if state.uncertain || !state.recovery_authority.contains_key(chat_id) {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        state.recovery_fenced.remove(chat_id);
+        Ok(())
+    }
+
+    /// Metadata inspection does not activate recovery and remains available to
+    /// the recovery coordinator through that Chat's temporary read fence.
+    pub fn recovery_summary(&self, chat_id: &str) -> Result<ChatSummary, AppError> {
+        let state = self.lock_index()?;
+        state
+            .chats
+            .get(chat_id)
+            .map(|record| record.summary.clone())
+            .ok_or_else(|| AppError::NotFound("App Chat".into()))
+    }
+
+    /// Read only host-derived paths even while the recovery fence is active.
+    pub fn recovery_paths(
+        &self,
+        plan: &ChatRecoveryFrontier,
+    ) -> Result<(PathBuf, PathBuf), AppError> {
+        let state = self
+            .index
+            .lock()
+            .map_err(|_| AppError::ChatStorageUncertain)?;
+        if state.uncertain {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        let record = state
+            .chats
+            .get(plan.chat_id())
+            .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
+        if record.summary.archived {
+            return Err(invalid("Chat is archived"));
+        }
+        let directory = self.root.join("chats").join(plan.chat_id());
+        ensure_real_directory(&directory)?;
+        let source = match plan.source_generation() {
+            Some(generation) => directory.join(generation),
+            None => directory.clone(),
+        }
+        .join(format!("{}.jsonl", record.session_id));
+        let target = directory
+            .join(plan.generation())
+            .join(format!("{}.jsonl", record.session_id));
+        Ok((source, target))
+    }
+
+    /// Validate every retained official-message attachment before switching
+    /// authority. Original failed-attempt references also remain intact.
+    pub fn verify_recovery_assets(&self, plan: &ChatRecoveryFrontier) -> Result<(), AppError> {
+        let messages = {
+            let state = self
+                .index
+                .lock()
+                .map_err(|_| AppError::ChatStorageUncertain)?;
+            if state.uncertain {
+                return Err(AppError::ChatStorageUncertain);
+            }
+            state
+                .chats
+                .get(plan.chat_id())
+                .ok_or_else(|| AppError::NotFound("App Chat".into()))?
+                .protocol_messages
+                .iter()
+                .map(|message| message.message.clone())
+                .collect::<Vec<_>>()
+        };
+        for message in messages {
+            self.rehydrate_protocol_message(plan.chat_id(), &message)?;
+        }
+        Ok(())
+    }
+
     pub fn transcript_path(&self, chat_id: &str) -> Result<PathBuf, AppError> {
         let session_id = self.session_id(chat_id)?;
-        let directory = self.root.join("chats").join(chat_id);
+        let index = self.lock_chat_index(chat_id)?;
+        let mut directory = self.root.join("chats").join(chat_id);
         ensure_real_directory(&directory)?;
+        if let Some(frontier) = index.recovery_authority.get(chat_id) {
+            directory = directory.join(frontier.generation());
+            ensure_real_directory(&directory)?;
+        }
         Ok(directory.join(format!("{session_id}.jsonl")))
     }
 
@@ -354,7 +1021,7 @@ impl ChatStore {
         if !safe_id(chat_id) || run_id.is_empty() || run_id.len() > 128 {
             return Err(invalid("invalid Chat turn"));
         }
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -373,7 +1040,7 @@ impl ChatStore {
     }
 
     pub fn finish_turn(&self, chat_id: &str, run_id: &str) -> Result<(), AppError> {
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -390,7 +1057,7 @@ impl ChatStore {
     /// Mark a Chat interrupted when its protocol event stream cannot be
     /// persisted. The run remains available in the task store for diagnosis.
     pub fn interrupt_turn(&self, chat_id: &str, run_id: &str) -> Result<(), AppError> {
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -408,9 +1075,7 @@ impl ChatStore {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
         }
-        self.index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?
+        self.lock_chat_index(chat_id)?
             .chats
             .get(chat_id)
             .map(|record| record.active_run_id.clone())
@@ -430,7 +1095,7 @@ impl ChatStore {
         {
             return Err(invalid("invalid Chat message"));
         }
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -447,19 +1112,92 @@ impl ChatStore {
         })
     }
 
+    /// Correct one recovered user row to its trusted task owner. The expected
+    /// old run ID makes this repair conditional on the row read by the caller.
+    pub fn repair_recovered_message_run_id(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        expected_run_id: &str,
+        tool_owner_run_id: &str,
+    ) -> Result<(), AppError> {
+        if !safe_id(chat_id)
+            || message_id.is_empty()
+            || message_id.len() > 128
+            || expected_run_id.is_empty()
+            || tool_owner_run_id.is_empty()
+            || expected_run_id.len() > 128
+            || tool_owner_run_id.len() > 128
+        {
+            return Err(invalid("invalid Chat message selector"));
+        }
+        self.change_chat(chat_id, |index| {
+            let record = index
+                .chats
+                .get_mut(chat_id)
+                .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
+            let message = record
+                .messages
+                .get_mut(message_id)
+                .ok_or_else(|| AppError::NotFound("App Chat message".into()))?;
+            if message.role != ChatRole::User {
+                return Err(invalid("recovered task rows must be Chat user messages"));
+            }
+            if message.run_id == tool_owner_run_id {
+                return Ok(());
+            }
+            if message.run_id != expected_run_id {
+                return Err(invalid("Chat message identity conflict"));
+            }
+            message.run_id = tool_owner_run_id.to_owned();
+            record.summary.updated_at = now();
+            Ok(())
+        })
+    }
+
+    /// Host-only evidence read; unlike canonical history this includes sealed
+    /// failed attempts and remains readable while recovery is fenced.
+    pub fn recovery_message_metadata(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<ChatMessageMetadata>, AppError> {
+        let state = self
+            .index
+            .lock()
+            .map_err(|_| AppError::ChatStorageUncertain)?;
+        if state.uncertain {
+            return Err(AppError::ChatStorageUncertain);
+        }
+        Ok(state
+            .chats
+            .get(chat_id)
+            .ok_or_else(|| AppError::NotFound("App Chat".into()))?
+            .messages
+            .values()
+            .cloned()
+            .collect())
+    }
+
     pub fn message_metadata(&self, chat_id: &str) -> Result<Vec<ChatMessageMetadata>, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
         }
-        let index = self
-            .index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?;
+        let index = self.lock_chat_index(chat_id)?;
         let record = index
             .chats
             .get(chat_id)
             .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
-        let mut messages = record.messages.values().cloned().collect::<Vec<_>>();
+        let mut messages = record
+            .messages
+            .values()
+            .filter(|message| {
+                !index
+                    .recovery_authority
+                    .get(chat_id)
+                    .is_some_and(|frontier| frontier.abandoned_run_ids().contains(&message.run_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         messages.sort_by(|left, right| {
             left.created_at
                 .cmp(&right.created_at)
@@ -487,10 +1225,7 @@ impl ChatStore {
         }
 
         let (existing_asset_hashes, current_asset_bytes, existing_message) = {
-            let index = self
-                .index
-                .lock()
-                .map_err(|_| invalid("Chat storage unavailable"))?;
+            let index = self.lock_chat_index(chat_id)?;
             let record = index
                 .chats
                 .get(chat_id)
@@ -514,9 +1249,7 @@ impl ChatStore {
             return Err(invalid("AG-UI message ID conflicts with stored history"));
         }
         if self
-            .index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?
+            .lock_chat_index(chat_id)?
             .chats
             .get(chat_id)
             .is_some_and(|record| record.protocol_messages.len() >= 10_000)
@@ -536,7 +1269,7 @@ impl ChatStore {
         for (hash, bytes) in &unique_assets {
             self.write_protocol_asset(chat_id, hash, bytes)?;
         }
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -573,11 +1306,8 @@ impl ChatStore {
             return Err(invalid("invalid AG-UI message selector"));
         }
         let (removed, remaining_hashes) = {
-            let mut index = self
-                .index
-                .lock()
-                .map_err(|_| invalid("Chat storage unavailable"))?;
-            let mut next = index.clone();
+            let mut index = self.lock_chat_index(chat_id)?;
+            let mut next = index.index.clone();
             let record = next
                 .chats
                 .get_mut(chat_id)
@@ -597,8 +1327,7 @@ impl ChatStore {
                 }
             }
             record.protocol_asset_bytes = referenced.values().copied().sum();
-            self.persist(&next)?;
-            *index = next;
+            self.commit_index(&mut index, next)?;
             (removed, referenced.keys().cloned().collect::<BTreeSet<_>>())
         };
         for (hash, _) in stored_asset_lengths(&removed.message) {
@@ -628,7 +1357,7 @@ impl ChatStore {
         if !safe_id(chat_id) || message_id.is_empty() || run_id.is_empty() {
             return Err(invalid("invalid Chat message selector"));
         }
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -651,10 +1380,7 @@ impl ChatStore {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
         }
-        let index = self
-            .index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?;
+        let index = self.lock_chat_index(chat_id)?;
         let record = index
             .chats
             .get(chat_id)
@@ -662,6 +1388,7 @@ impl ChatStore {
         Ok(record
             .protocol_messages
             .iter()
+            .filter(|message| Self::message_visible(&index, chat_id, message))
             .map(|message| ProtocolMessageDigest {
                 id: message.id.clone(),
                 role: message.role.clone(),
@@ -675,36 +1402,20 @@ impl ChatStore {
             return Err(invalid("invalid AG-UI message selector"));
         }
         let stored = {
-            let index = self
-                .index
-                .lock()
-                .map_err(|_| invalid("Chat storage unavailable"))?;
+            let index = self.lock_chat_index(chat_id)?;
             index
                 .chats
                 .get(chat_id)
                 .ok_or_else(|| AppError::NotFound("App Chat".into()))?
                 .protocol_messages
                 .iter()
-                .find(|message| message.id == message_id)
+                .find(|message| {
+                    message.id == message_id && Self::message_visible(&index, chat_id, message)
+                })
                 .map(|message| message.message.clone())
                 .ok_or_else(|| AppError::NotFound("AG-UI chat message".into()))?
         };
         self.rehydrate_protocol_message(chat_id, &stored)
-    }
-
-    pub fn has_legacy_history_without_protocol(&self, chat_id: &str) -> Result<bool, AppError> {
-        if !safe_id(chat_id) {
-            return Err(invalid("invalid Chat ID"));
-        }
-        let index = self
-            .index
-            .lock()
-            .map_err(|_| invalid("Chat storage unavailable"))?;
-        let record = index
-            .chats
-            .get(chat_id)
-            .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
-        Ok(!record.messages.is_empty() && record.protocol_messages.is_empty())
     }
 
     /// Rehydrate a bounded official Message page. The returned JSON contains
@@ -715,34 +1426,101 @@ impl ChatStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<ProtocolHistoryPage, AppError> {
+        self.protocol_history_page_selected(chat_id, cursor, limit, None)
+    }
+
+    /// Read the retained user input of a sealed attempt. A candidate assistant
+    /// is still evidence only and cannot become an accepted Chat message.
+    pub fn protocol_attempt_history_page(
+        &self,
+        chat_id: &str,
+        private_run_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ProtocolHistoryPage, AppError> {
+        if !self
+            .lock_chat_index(chat_id)?
+            .recovery_authority
+            .get(chat_id)
+            .is_some_and(|frontier| frontier.abandoned_run_ids().contains(private_run_id))
+        {
+            return Err(invalid("Chat attempt is not archived by the host"));
+        }
+        self.protocol_history_page_selected(chat_id, cursor, limit, Some(private_run_id))
+    }
+
+    fn protocol_history_page_selected(
+        &self,
+        chat_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        attempt: Option<&str>,
+    ) -> Result<ProtocolHistoryPage, AppError> {
         if !safe_id(chat_id) || !(1..=100).contains(&limit) {
             return Err(invalid("invalid AG-UI chat history request"));
         }
-        let (entries, has_more_entries) = {
-            let index = self
-                .index
-                .lock()
-                .map_err(|_| invalid("Chat storage unavailable"))?;
+        let (entries, has_more_entries, recovery_generation, cursor_reset) = {
+            let index = self.lock_chat_index(chat_id)?;
             let record = index
                 .chats
                 .get(chat_id)
                 .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
+            let visible = record
+                .protocol_messages
+                .iter()
+                .filter(|message| match attempt {
+                    Some(run_id) => message.run_id == run_id && message.role != "assistant",
+                    None => Self::message_visible(&index, chat_id, message),
+                })
+                .collect::<Vec<_>>();
+            let recovery_generation = if attempt.is_none() {
+                index
+                    .recovery_authority
+                    .get(chat_id)
+                    .map(|frontier| frontier.generation().to_owned())
+            } else {
+                None
+            };
+            let mut cursor_reset = None;
             let start = if let Some(cursor) = cursor {
-                record
-                    .protocol_messages
-                    .iter()
-                    .position(|message| message.id == cursor)
-                    .map(|position| position + 1)
-                    .ok_or_else(|| invalid("invalid AG-UI history cursor"))?
+                if let Some(position) = visible.iter().position(|message| message.id == cursor) {
+                    position + 1
+                } else if attempt.is_none()
+                    && record.protocol_messages.iter().any(|message| {
+                        message.id == cursor
+                            && index
+                                .recovery_authority
+                                .get(chat_id)
+                                .is_some_and(|frontier| {
+                                    frontier.abandoned_run_ids().contains(&message.run_id)
+                                })
+                    })
+                {
+                    cursor_reset = Some(true);
+                    0
+                } else {
+                    return Err(invalid("invalid AG-UI history cursor"));
+                }
             } else {
                 0
             };
-            let remaining = &record.protocol_messages[start..];
+            let remaining = &visible[start..];
             (
-                remaining.iter().take(limit).cloned().collect::<Vec<_>>(),
+                remaining
+                    .iter()
+                    .take(limit)
+                    .map(|entry| (**entry).clone())
+                    .collect::<Vec<_>>(),
                 remaining.len() > limit,
+                recovery_generation,
+                cursor_reset,
             )
         };
+        #[cfg(test)]
+        if let Some((entered, release)) = self.history_capture_gate.lock().unwrap().take() {
+            entered.wait();
+            release.wait();
+        }
         let mut messages = Vec::with_capacity(entries.len());
         let mut total_bytes = 2usize;
         for entry in &entries {
@@ -773,6 +1551,8 @@ impl ChatStore {
         Ok(ProtocolHistoryPage {
             messages,
             next_cursor,
+            recovery_generation,
+            cursor_reset,
         })
     }
 
@@ -902,7 +1682,7 @@ impl ChatStore {
         if title.is_empty() {
             return Ok(());
         }
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -919,7 +1699,7 @@ impl ChatStore {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
         }
-        self.change(|index| {
+        self.change_chat(chat_id, |index| {
             let record = index
                 .chats
                 .get_mut(chat_id)
@@ -937,25 +1717,46 @@ impl ChatStore {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
         }
-        let directory = self.root.join("chats").join(chat_id);
-        if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Err(invalid("Chat storage unavailable"));
-        }
-        let removed = self.change(|index| {
-            let record = index
-                .chats
-                .get(chat_id)
-                .ok_or_else(|| AppError::NotFound("App Chat".into()))?;
+        let mut index = self.lock_chat_index(chat_id)?;
+        if let Some(record) = index.chats.get(chat_id) {
             if record.summary.state == ChatState::Running {
                 return Err(AppError::Busy(chat_id.into()));
             }
-            index.chats.remove(chat_id);
-            Ok(())
-        });
-        removed?;
-        if directory.exists() {
-            fs::remove_dir_all(directory)?;
+            let mut next = index.index.clone();
+            next.chats.remove(chat_id);
+            let creation = next
+                .creations
+                .get_mut(chat_id)
+                .ok_or(AppError::ChatStorageUncertain)?;
+            creation.deleted = true;
+            self.commit_index(&mut index, next)?;
+        } else if !index
+            .creations
+            .get(chat_id)
+            .is_some_and(|creation| creation.deleted)
+        {
+            return Err(AppError::NotFound("App Chat".into()));
+        }
+        drop(index);
+
+        if let Err(error) = self.remove_deleted_directory(chat_id) {
+            if let Ok(mut diagnostics) = self.cleanup_diagnostics.lock() {
+                diagnostics.failed_ids.insert(chat_id.to_owned());
+            }
+            tracing::warn!("Deleted Chat directory cleanup needs retry");
+            return Err(error);
+        }
+        if let Err(error) = self.sync_deleted_directory_parent() {
+            if let Ok(mut diagnostics) = self.cleanup_diagnostics.lock() {
+                diagnostics.failed_ids.remove(chat_id);
+                diagnostics.parent_sync_failed = true;
+            }
+            tracing::warn!("Deleted Chat directory sync needs retry");
+            return Err(error);
+        }
+        if let Ok(mut diagnostics) = self.cleanup_diagnostics.lock() {
+            diagnostics.failed_ids.remove(chat_id);
+            diagnostics.parent_sync_failed = false;
         }
         Ok(())
     }
@@ -1078,6 +1879,733 @@ fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn deleted_chat_cleanup_recovers_on_reopen_without_touching_other_data() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        store.create(&id, None, &session).unwrap();
+        let transcript = store.transcript_path(&id).unwrap();
+        fs::write(&transcript, b"deleted transcript").unwrap();
+        let other_id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&other_id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let other_transcript = store.transcript_path(&other_id).unwrap();
+        fs::write(&other_transcript, b"keep active chat").unwrap();
+        let orphan = root
+            .path()
+            .join("chats")
+            .join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir(&orphan).unwrap();
+        fs::write(orphan.join("keep"), b"unindexed data").unwrap();
+
+        *store.injected_cleanup_failure.lock().unwrap() = Some(CleanupStage::BeforeRemove);
+        assert!(store.delete(&id).is_err());
+        assert_eq!(
+            store.pending_deletion_cleanup().unwrap(),
+            (vec![id.clone()], false)
+        );
+        assert!(matches!(
+            store.creation_status(&id, None),
+            Err(AppError::ChatCreateDeleted)
+        ));
+        assert!(transcript.exists());
+        drop(store);
+
+        let reopened = ChatStore::open(root.path()).unwrap();
+        assert!(!transcript.exists());
+        assert_eq!(
+            reopened.pending_deletion_cleanup().unwrap(),
+            (vec![], false)
+        );
+        assert_eq!(fs::read(&other_transcript).unwrap(), b"keep active chat");
+        assert_eq!(fs::read(orphan.join("keep")).unwrap(), b"unindexed data");
+        assert!(matches!(
+            reopened.create(&id, None, &session),
+            Err(AppError::ChatCreateDeleted)
+        ));
+        reopened.delete(&id).unwrap();
+        reopened.delete(&id).unwrap();
+        assert!(matches!(
+            reopened.delete(&uuid::Uuid::new_v4().to_string()),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn deleted_parent_sync_failure_is_retryable_even_after_directory_is_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let transcript = store.transcript_path(&id).unwrap();
+        fs::write(&transcript, b"delete me").unwrap();
+        *store.injected_cleanup_failure.lock().unwrap() = Some(CleanupStage::BeforeParentSync);
+        assert!(store.delete(&id).is_err());
+        assert!(!transcript.exists());
+        assert_eq!(store.pending_deletion_cleanup().unwrap(), (vec![], true));
+        store.delete(&id).unwrap();
+        assert_eq!(store.pending_deletion_cleanup().unwrap(), (vec![], false));
+        drop(store);
+        let reopened = ChatStore::open(root.path()).unwrap();
+        assert!(matches!(
+            reopened.creation_status(&id, None),
+            Err(AppError::ChatCreateDeleted)
+        ));
+    }
+
+    #[test]
+    fn uncertain_delete_rename_preserves_files_until_open_reconciles_index() {
+        for stage in [PersistStage::BeforeRename, PersistStage::AfterRename] {
+            let root = tempfile::tempdir().unwrap();
+            let store = ChatStore::open(root.path()).unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            store
+                .create(&id, None, &uuid::Uuid::new_v4().to_string())
+                .unwrap();
+            let transcript = store.transcript_path(&id).unwrap();
+            fs::write(&transcript, b"preserve until commit is known").unwrap();
+            *store.injected_persist_failure.lock().unwrap() = Some(stage);
+            assert!(matches!(
+                store.delete(&id),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(transcript.exists());
+            drop(store);
+            let reopened = ChatStore::open(root.path()).unwrap();
+            if stage == PersistStage::BeforeRename {
+                assert!(reopened.get(&id).is_ok());
+                assert!(transcript.exists());
+                reopened.delete(&id).unwrap();
+            } else {
+                assert!(matches!(
+                    reopened.creation_status(&id, None),
+                    Err(AppError::ChatCreateDeleted)
+                ));
+            }
+            assert!(!transcript.exists());
+            reopened.delete(&id).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_automatic_cleanup_is_observable_without_blocking_other_apps() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let first_root = root.path().join("first");
+        let other_root = root.path().join("other");
+        let store = ChatStore::open(&first_root).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let path = store.transcript_path(&id).unwrap();
+        *store.injected_cleanup_failure.lock().unwrap() = Some(CleanupStage::BeforeRemove);
+        assert!(store.delete(&id).is_err());
+        drop(store);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        let external = root.path().join("outside");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("keep"), b"outside").unwrap();
+        symlink(&external, path.parent().unwrap()).unwrap();
+
+        let reopened = ChatStore::open(&first_root).unwrap();
+        assert_eq!(
+            reopened.pending_deletion_cleanup().unwrap(),
+            (vec![id.clone()], false)
+        );
+        assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside");
+        assert!(reopened.delete(&id).is_err());
+        let other = ChatStore::open(&other_root).unwrap();
+        let other_id = uuid::Uuid::new_v4().to_string();
+        assert!(other
+            .create(&other_id, None, &uuid::Uuid::new_v4().to_string())
+            .is_ok());
+        fs::remove_file(path.parent().unwrap()).unwrap();
+        reopened.delete(&id).unwrap();
+        assert_eq!(
+            reopened.pending_deletion_cleanup().unwrap(),
+            (vec![], false)
+        );
+        assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_rejects_a_replaced_parent_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        store.create(&id, None, &session).unwrap();
+        let transcript = store.transcript_path(&id).unwrap();
+        fs::write(&transcript, b"original").unwrap();
+        let chats = root.path().join("chats");
+        let moved = root.path().join("saved-chats");
+        let external = root.path().join("outside");
+        fs::create_dir(&external).unwrap();
+        fs::create_dir(external.join(&id)).unwrap();
+        fs::write(external.join(&id).join("keep"), b"outside").unwrap();
+        fs::rename(&chats, &moved).unwrap();
+        symlink(&external, &chats).unwrap();
+
+        assert!(store.delete(&id).is_err());
+        assert_eq!(
+            fs::read(external.join(&id).join("keep")).unwrap(),
+            b"outside"
+        );
+        assert_eq!(
+            fs::read(moved.join(&id).join(format!("{session}.jsonl"))).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            store.pending_deletion_cleanup().unwrap(),
+            (vec![id.clone()], false)
+        );
+        fs::remove_file(&chats).unwrap();
+        fs::rename(&moved, &chats).unwrap();
+        store.delete(&id).unwrap();
+        assert_eq!(
+            fs::read(external.join(&id).join("keep")).unwrap(),
+            b"outside"
+        );
+        assert!(!transcript.exists());
+    }
+
+    #[test]
+    fn automatic_parent_sync_failure_is_reported_and_can_be_retried() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        store.delete(&id).unwrap();
+        *store.injected_cleanup_failure.lock().unwrap() = Some(CleanupStage::BeforeParentSync);
+        store.recover_deleted_directories();
+        assert_eq!(store.pending_deletion_cleanup().unwrap(), (vec![], true));
+        store.recover_deleted_directories();
+        assert_eq!(store.pending_deletion_cleanup().unwrap(), (vec![], false));
+    }
+
+    #[test]
+    fn creation_identity_is_exact_durable_and_tombstoned() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        assert!(store.creation_status(&request_id, None).unwrap().is_none());
+        let chat = store.create(&request_id, None, &session_id).unwrap();
+        assert_eq!(chat.chat_id, request_id);
+        assert!(!root.path().join("chats").join(&request_id).exists());
+        assert_eq!(
+            store
+                .create(&request_id, None, &uuid::Uuid::new_v4().to_string())
+                .unwrap(),
+            chat
+        );
+        assert_eq!(store.session_id(&request_id).unwrap(), session_id);
+        assert!(matches!(
+            store.create(&request_id, Some("New chat"), &session_id),
+            Err(AppError::ChatCreateConflict)
+        ));
+        assert!(matches!(
+            store.creation_status(&request_id, Some("New chat")),
+            Err(AppError::ChatCreateConflict)
+        ));
+        let other = uuid::Uuid::new_v4().to_string();
+        assert_ne!(
+            store
+                .create(&other, None, &uuid::Uuid::new_v4().to_string())
+                .unwrap()
+                .chat_id,
+            chat.chat_id
+        );
+        assert!(store
+            .transcript_path(&request_id)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .is_dir());
+        drop(store);
+
+        let store = ChatStore::open(root.path()).unwrap();
+        assert_eq!(
+            store.creation_status(&request_id, None).unwrap(),
+            Some(chat)
+        );
+        assert_eq!(store.session_id(&request_id).unwrap(), session_id);
+        store.delete(&request_id).unwrap();
+        drop(store);
+        let store = ChatStore::open(root.path()).unwrap();
+        assert!(matches!(
+            store.creation_status(&request_id, None),
+            Err(AppError::ChatCreateDeleted)
+        ));
+        assert!(matches!(
+            store.create(&request_id, None, &session_id),
+            Err(AppError::ChatCreateDeleted)
+        ));
+        assert!(matches!(
+            store.create(&request_id, Some("different"), &session_id),
+            Err(AppError::ChatCreateConflict)
+        ));
+        assert_eq!(store.list(None, 100, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_create_commits_one_private_session() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        store
+                            .create(
+                                &request_id,
+                                Some("same title"),
+                                &uuid::Uuid::new_v4().to_string(),
+                            )
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                assert_eq!(handle.join().unwrap().chat_id, request_id);
+            }
+        });
+        assert_eq!(store.list(None, 100, true).unwrap().len(), 1);
+        let session = store.session_id(&request_id).unwrap();
+        drop(store);
+        let reopened = ChatStore::open(root.path()).unwrap();
+        assert_eq!(reopened.session_id(&request_id).unwrap(), session);
+        assert_eq!(
+            reopened
+                .create(
+                    &request_id,
+                    Some("same title"),
+                    &uuid::Uuid::new_v4().to_string()
+                )
+                .unwrap()
+                .chat_id,
+            request_id
+        );
+    }
+
+    #[test]
+    fn index_write_failures_block_all_access_until_reopen() {
+        for stage in [PersistStage::BeforeRename, PersistStage::AfterRename] {
+            let root = tempfile::tempdir().unwrap();
+            let store = ChatStore::open(root.path()).unwrap();
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let session_id = uuid::Uuid::new_v4().to_string();
+            *store.injected_persist_failure.lock().unwrap() = Some(stage);
+            assert!(matches!(
+                store.create(&request_id, None, &session_id),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(matches!(
+                store.creation_status(&request_id, None),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(matches!(
+                store.list(None, 10, true),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(matches!(
+                store.create(&request_id, None, &session_id),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(!root.path().join("chats").join(&request_id).exists());
+            drop(store);
+            let reopened = ChatStore::open(root.path()).unwrap();
+            let found = reopened.creation_status(&request_id, None).unwrap();
+            assert_eq!(found.is_some(), stage == PersistStage::AfterRename);
+            let restored = reopened.create(&request_id, None, &session_id).unwrap();
+            assert_eq!(restored.chat_id, request_id);
+            assert_eq!(reopened.list(None, 10, true).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn corrupt_creation_index_is_never_rewritten_or_opened() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, Some("test"), &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        drop(store);
+        let path = root.path().join("chats-index.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["chats"].as_object_mut().unwrap().remove(&id);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            ChatStore::open(root.path()),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn missing_creation_fingerprint_or_reverse_mapping_is_never_accepted() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, Some("exact title"), &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        drop(store);
+        let path = root.path().join("chats-index.json");
+        let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut missing_mapping = original.clone();
+        missing_mapping["creations"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&id);
+        let mut missing_fingerprint = original.clone();
+        missing_fingerprint["creations"][&id]["fingerprint"] = Value::Null;
+        let mut mismatched_summary = original.clone();
+        mismatched_summary["chats"][&id]["summary"]["chatId"] =
+            json!(uuid::Uuid::new_v4().to_string());
+        for value in [missing_mapping, missing_fingerprint, mismatched_summary] {
+            let bytes = serde_json::to_vec(&value).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(matches!(
+                ChatStore::open(root.path()),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn current_index_requires_creation_and_protocol_fields_without_rewriting_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let new_root = temp.path().join("new");
+        ChatStore::preflight_existing_index(&new_root).unwrap();
+        assert!(!new_root.exists());
+
+        let empty_root = temp.path().join("empty");
+        fs::create_dir(&empty_root).unwrap();
+        ChatStore::preflight_existing_index(&empty_root).unwrap();
+        assert_eq!(fs::read_dir(&empty_root).unwrap().count(), 0);
+        fs::create_dir(empty_root.join("chats")).unwrap();
+        ChatStore::preflight_existing_index(&empty_root).unwrap();
+        assert_eq!(fs::read_dir(empty_root.join("chats")).unwrap().count(), 0);
+
+        let root = temp.path().join("incomplete");
+        let store = ChatStore::open(&root).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, Some("preserved"), &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let transcript = store.transcript_path(&id).unwrap();
+        fs::write(&transcript, b"original transcript").unwrap();
+        drop(store);
+        let index_path = root.join("chats-index.json");
+        let original: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+        for field in [
+            "creations",
+            "messages",
+            "protocolMessages",
+            "protocolAssetBytes",
+        ] {
+            let mut incomplete = original.clone();
+            let object = if field == "creations" {
+                incomplete.as_object_mut().unwrap()
+            } else {
+                incomplete["chats"][&id].as_object_mut().unwrap()
+            };
+            assert!(object.remove(field).is_some());
+            let bytes = serde_json::to_vec(&incomplete).unwrap();
+            fs::write(&index_path, &bytes).unwrap();
+            assert!(
+                matches!(
+                    ChatStore::preflight_existing_index(&root),
+                    Err(AppError::ChatStorageUncertain)
+                ),
+                "{field}"
+            );
+            assert!(
+                matches!(ChatStore::open(&root), Err(AppError::ChatStorageUncertain)),
+                "{field}"
+            );
+            assert_eq!(fs::read(&index_path).unwrap(), bytes);
+            assert_eq!(fs::read(&transcript).unwrap(), b"original transcript");
+        }
+
+        let missing_creation_root = temp.path().join("missing-creations");
+        fs::create_dir(&missing_creation_root).unwrap();
+        fs::write(
+            missing_creation_root.join("chats-index.json"),
+            b"{\"chats\":{}}",
+        )
+        .unwrap();
+        assert!(matches!(
+            ChatStore::open(&missing_creation_root),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert!(!missing_creation_root.join("chats").exists());
+    }
+
+    #[test]
+    fn missing_index_with_chat_files_or_pending_index_is_not_treated_as_new() {
+        let temp = tempfile::tempdir().unwrap();
+        let orphan_root = temp.path().join("orphan");
+        let transcript = orphan_root
+            .join("chats")
+            .join("unknown")
+            .join("transcript.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, b"preserve unindexed data").unwrap();
+        assert!(matches!(
+            ChatStore::preflight_existing_index(&orphan_root),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert!(matches!(
+            ChatStore::open(&orphan_root),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert_eq!(fs::read(&transcript).unwrap(), b"preserve unindexed data");
+        assert!(!orphan_root.join("chats-index.json").exists());
+
+        let pending_root = temp.path().join("pending");
+        fs::create_dir(&pending_root).unwrap();
+        let pending = pending_root.join(".chat-index-unknown.tmp");
+        fs::write(&pending, b"possibly interrupted index write").unwrap();
+        assert!(matches!(
+            ChatStore::preflight_existing_index(&pending_root),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert!(matches!(
+            ChatStore::open(&pending_root),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert_eq!(
+            fs::read(&pending).unwrap(),
+            b"possibly interrupted index write"
+        );
+        assert!(!pending_root.join("chats").exists());
+    }
+
+    #[test]
+    fn preflight_rejects_corrupt_index_without_writing_or_cleaning() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("chats-index.json");
+        let cases: &[&[u8]] = &[
+            b"not JSON",
+            b"[]",
+            b"{\"chats\":{},\"creations\":null}",
+            b"{\"chats\":{},\"creations\":{},\"creations\":{}}",
+            b"{\"creations\":{}}",
+        ];
+        for bytes in cases {
+            fs::write(&path, bytes).unwrap();
+            assert!(matches!(
+                ChatStore::preflight_existing_index(root.path()),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(matches!(
+                ChatStore::open(root.path()),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert_eq!(fs::read(&path).unwrap(), *bytes);
+            assert!(!root.path().join("chats").exists());
+        }
+    }
+
+    #[test]
+    fn preflight_does_not_clean_pending_tombstones() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let transcript = store.transcript_path(&id).unwrap();
+        fs::write(&transcript, b"pending cleanup").unwrap();
+        *store.injected_cleanup_failure.lock().unwrap() = Some(CleanupStage::BeforeRemove);
+        assert!(store.delete(&id).is_err());
+        drop(store);
+        let index_path = root.path().join("chats-index.json");
+        let bytes = fs::read(&index_path).unwrap();
+        ChatStore::preflight_existing_index(root.path()).unwrap();
+        assert_eq!(fs::read(&index_path).unwrap(), bytes);
+        assert_eq!(fs::read(&transcript).unwrap(), b"pending cleanup");
+        let reopened = ChatStore::open(root.path()).unwrap();
+        assert!(!transcript.exists());
+        assert!(matches!(
+            reopened.creation_status(&id, None),
+            Err(AppError::ChatCreateDeleted)
+        ));
+    }
+
+    #[test]
+    fn preflight_checks_existing_chat_root_before_opening_a_valid_index() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        drop(store);
+        let index_path = root.path().join("chats-index.json");
+        let index_bytes = fs::read(&index_path).unwrap();
+        let chats = root.path().join("chats");
+        fs::remove_dir(&chats).unwrap();
+        fs::write(&chats, b"preserve this file").unwrap();
+
+        assert!(matches!(
+            ChatStore::preflight_existing_index(root.path()),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert!(matches!(
+            ChatStore::open(root.path()),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert_eq!(fs::read(&chats).unwrap(), b"preserve this file");
+        assert_eq!(fs::read(&index_path).unwrap(), index_bytes);
+
+        // A missing chats directory is still allowed and preflight itself
+        // must not create it. Opening the store may then create it normally.
+        fs::remove_file(&chats).unwrap();
+        ChatStore::preflight_existing_index(root.path()).unwrap();
+        assert!(!chats.exists());
+        let reopened = ChatStore::open(root.path()).unwrap();
+        assert!(chats.is_dir());
+        assert_eq!(reopened.get(&id).unwrap().chat_id, id);
+        assert_eq!(fs::read(index_path).unwrap(), index_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_rejects_symlinked_chat_root_with_valid_index() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        store
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        drop(store);
+        let index_path = root.path().join("chats-index.json");
+        let index_bytes = fs::read(&index_path).unwrap();
+        let chats = root.path().join("chats");
+        fs::remove_dir(&chats).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("keep");
+        fs::write(&sentinel, b"preserve target").unwrap();
+        symlink(outside.path(), &chats).unwrap();
+
+        assert!(matches!(
+            ChatStore::preflight_existing_index(root.path()),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert!(matches!(
+            ChatStore::open(root.path()),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert_eq!(fs::read(index_path).unwrap(), index_bytes);
+        assert_eq!(fs::read(sentinel).unwrap(), b"preserve target");
+        assert!(fs::symlink_metadata(chats)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_propagates_chat_directory_permission_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        store
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        drop(store);
+        let chats = root.path().join("chats");
+        let original_mode = fs::metadata(&chats).unwrap().permissions().mode();
+        fs::set_permissions(&chats, fs::Permissions::from_mode(0)).unwrap();
+        let directory_denied = fs::read_dir(&chats).is_err();
+        let preflight = ChatStore::preflight_existing_index(root.path());
+        fs::set_permissions(&chats, fs::Permissions::from_mode(original_mode)).unwrap();
+        // Privileged test runners can bypass directory permissions.
+        if directory_denied {
+            assert!(matches!(preflight, Err(AppError::Io(_))));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_refuses_index_or_root_symlinks_without_touching_target() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let external = temp.path().join("external");
+        fs::write(&external, b"{\"chats\":{},\"creations\":{}}").unwrap();
+        symlink(&external, root.join("chats-index.json")).unwrap();
+        assert!(matches!(
+            ChatStore::preflight_existing_index(&root),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert!(matches!(
+            ChatStore::open(&root),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert_eq!(
+            fs::read(&external).unwrap(),
+            b"{\"chats\":{},\"creations\":{}}"
+        );
+        assert!(!root.join("chats").exists());
+
+        let link = temp.path().join("root-link");
+        symlink(&root, &link).unwrap();
+        assert!(matches!(
+            ChatStore::preflight_existing_index(&link),
+            Err(AppError::ChatStorageUncertain)
+        ));
+        assert!(matches!(
+            ChatStore::open(&link),
+            Err(AppError::ChatStorageUncertain)
+        ));
+    }
+
+    #[test]
+    fn creation_ids_and_titles_are_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(store.create(&id.to_uppercase(), None, &session).is_err());
+        assert!(store
+            .create("00000000-0000-0000-0000-000000000000", None, &session)
+            .is_err());
+        assert!(store.create(&id, Some(&"x".repeat(81)), &session).is_err());
+        assert!(store.create(&id, Some(&" ".repeat(513)), &session).is_err());
+        assert!(store.create(&id, Some("bad\ntitle"), &session).is_err());
+        assert!(store.list(None, 100, true).unwrap().is_empty());
+    }
+
     fn collect_chat_pages(store: &ChatStore, include_archived: bool) -> Vec<ChatSummary> {
         let mut all = Vec::new();
         let mut cursor = None;
@@ -1105,6 +2633,8 @@ mod tests {
         let page = ProtocolHistoryPage {
             messages: vec![serde_json::json!({"id":"m1","role":"user","content":"Hello"})],
             next_cursor: None,
+            recovery_generation: None,
+            cursor_reset: None,
         };
         let exhausted = serde_json::to_value(&page).unwrap();
         assert_eq!(exhausted, serde_json::json!({"messages":page.messages}));
@@ -1133,6 +2663,7 @@ mod tests {
             .map(|index| {
                 store
                     .create(
+                        &uuid::Uuid::new_v4().to_string(),
                         Some(&format!("chat-{index}")),
                         &uuid::Uuid::new_v4().to_string(),
                     )
@@ -1186,7 +2717,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_id = uuid::Uuid::new_v4().to_string();
         let store = ChatStore::open(root.path()).unwrap();
-        let chat = store.create(None, &session_id).unwrap();
+        let chat = store
+            .create(&uuid::Uuid::new_v4().to_string(), None, &session_id)
+            .unwrap();
         let public = serde_json::to_value(&chat).unwrap();
         assert!(public.get("sessionId").is_none());
         assert_eq!(store.session_id(&chat.chat_id).unwrap(), session_id);
@@ -1214,7 +2747,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = ChatStore::open(root.path()).unwrap();
         let chat = store
-            .create(None, &uuid::Uuid::new_v4().to_string())
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
             .unwrap();
         store.start_turn(&chat.chat_id, "run-1").unwrap();
         drop(store);
@@ -1228,11 +2765,55 @@ mod tests {
     }
 
     #[test]
+    fn startup_blocks_protocol_history_without_a_successful_ledger_task() {
+        for task_state in [
+            None,
+            Some(State::Failed),
+            Some(State::Cancelled),
+            Some(State::Interrupted),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = ChatStore::open(root.path()).unwrap();
+            let chat = store
+                .create(
+                    &uuid::Uuid::new_v4().to_string(),
+                    None,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .unwrap();
+            store
+                .record_protocol_message(
+                    &chat.chat_id,
+                    "task-run",
+                    &json!({"id":"user-1","role":"user","content":"question"}),
+                )
+                .unwrap();
+            drop(store);
+
+            let recovered = ChatStore::open(root.path()).unwrap();
+            let mut task_states = BTreeMap::new();
+            if let Some(state) = task_state {
+                task_states.insert("task-run".into(), state);
+            }
+            recovered.reconcile_startup(&task_states).unwrap();
+            assert_eq!(
+                recovered.get(&chat.chat_id).unwrap().state,
+                ChatState::Interrupted,
+                "history without a confirmed successful task must remain untrusted"
+            );
+        }
+    }
+
+    #[test]
     fn messages_are_deduplicated_and_listed_in_creation_order() {
         let root = tempfile::tempdir().unwrap();
         let store = ChatStore::open(root.path()).unwrap();
         let chat = store
-            .create(None, &uuid::Uuid::new_v4().to_string())
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
             .unwrap();
         for (message_id, created_at, role) in [
             ("assistant-id", 2, ChatRole::Assistant),
@@ -1254,20 +2835,18 @@ mod tests {
         let messages = store.message_metadata(&chat.chat_id).unwrap();
         assert_eq!(messages[0].message_id, "user-id");
         assert_eq!(messages[1].message_id, "assistant-id");
-        assert!(
-            store
-                .record_message(
-                    &chat.chat_id,
-                    ChatMessageMetadata {
-                        message_id: "assistant-id".into(),
-                        run_id: "other-run".into(),
-                        role: ChatRole::Assistant,
-                        created_at: 2,
-                        attachments: Vec::new(),
-                    },
-                )
-                .is_err()
-        );
+        assert!(store
+            .record_message(
+                &chat.chat_id,
+                ChatMessageMetadata {
+                    message_id: "assistant-id".into(),
+                    run_id: "other-run".into(),
+                    role: ChatRole::Assistant,
+                    created_at: 2,
+                    attachments: Vec::new(),
+                },
+            )
+            .is_err());
     }
 
     #[test]
@@ -1275,7 +2854,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = ChatStore::open(root.path()).unwrap();
         let chat = store
-            .create(None, &uuid::Uuid::new_v4().to_string())
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
             .unwrap();
         let encoded = STANDARD.encode(b"private document bytes");
         let message = json!({
@@ -1313,16 +2896,289 @@ mod tests {
         recovered
             .rollback_protocol_message(&chat.chat_id, "task-private-uuid", "user-message-1")
             .unwrap();
-        assert!(
-            recovered
-                .protocol_history_page(&chat.chat_id, None, 10)
-                .unwrap()
-                .messages
-                .is_empty()
-        );
+        assert!(recovered
+            .protocol_history_page(&chat.chat_id, None, 10)
+            .unwrap()
+            .messages
+            .is_empty());
         assert_eq!(
             recovered.protocol_history_digests(&chat.chat_id).unwrap(),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn assistant_history_is_hidden_until_task_ledger_commits_it() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let chat = store
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+        let run_id = "private-run-id";
+        let user = json!({"id":"user-1","role":"user","content":"question"});
+        let assistant = json!({"id":"assistant-1","role":"assistant","content":"answer"});
+        store
+            .record_protocol_message(&chat.chat_id, run_id, &user)
+            .unwrap();
+        store
+            .record_protocol_message(&chat.chat_id, run_id, &assistant)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .protocol_history_page(&chat.chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![user.clone()]
+        );
+        assert_eq!(
+            store.protocol_history_digests(&chat.chat_id).unwrap().len(),
+            1
+        );
+        assert!(store
+            .protocol_message(&chat.chat_id, "assistant-1")
+            .is_err());
+        store
+            .verify_protocol_assistant(&chat.chat_id, run_id, "assistant-1", "answer")
+            .unwrap();
+
+        store
+            .set_committed_assistants(&BTreeMap::from([(
+                run_id.to_owned(),
+                (chat.chat_id.clone(), "assistant-1".into(), "answer".into()),
+            )]))
+            .unwrap();
+        assert_eq!(
+            store
+                .protocol_history_page(&chat.chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![user, assistant]
+        );
+    }
+
+    #[test]
+    fn uncertain_assistant_index_write_stays_hidden_after_reopen() {
+        for stage in [PersistStage::BeforeRename, PersistStage::AfterRename] {
+            let root = tempfile::tempdir().unwrap();
+            let store = ChatStore::open(root.path()).unwrap();
+            let chat = store
+                .create(
+                    &uuid::Uuid::new_v4().to_string(),
+                    None,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .unwrap();
+            let run_id = "task-private-uuid";
+            let user = json!({"id":"user-1","role":"user","content":"question"});
+            let assistant =
+                json!({"id":"assistant-1","role":"assistant","content":"private answer"});
+            store
+                .record_protocol_message(&chat.chat_id, run_id, &user)
+                .unwrap();
+            *store.injected_persist_failure.lock().unwrap() = Some(stage);
+            assert!(matches!(
+                store.record_protocol_message(&chat.chat_id, run_id, &assistant),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            assert!(matches!(
+                store.protocol_history_page(&chat.chat_id, None, 10),
+                Err(AppError::ChatStorageUncertain)
+            ));
+            drop(store);
+
+            let recovered = ChatStore::open(root.path()).unwrap();
+            assert_eq!(
+                recovered
+                    .protocol_history_page(&chat.chat_id, None, 10)
+                    .unwrap()
+                    .messages,
+                vec![user]
+            );
+            assert!(recovered
+                .protocol_message(&chat.chat_id, "assistant-1")
+                .is_err());
+        }
+    }
+    #[test]
+    fn recovery_projection_fences_reads_and_retains_failed_input_and_attachment() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&chat_id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let encoded = STANDARD.encode(b"attachment belonging to failed attempt");
+        let message = json!({"id":"failed-user","role":"user","content":[
+            {"type":"document","source":{"type":"data","value":encoded,"mimeType":"text/plain"},
+            "metadata":{"com.lingxi.localApp":{"version":1,"filename":"notes.txt"}}}
+        ]});
+        store
+            .record_protocol_message(&chat_id, "failed-private-run", &message)
+            .unwrap();
+        let index_before = fs::read(root.path().join("chats-index.json")).unwrap();
+        let plan: ChatRecoveryFrontier = serde_json::from_value(json!({
+            "appId":format!("a{}", "1".repeat(32)),"chatId":chat_id,
+            "generation":uuid::Uuid::new_v4().to_string(),"sourceGeneration":null,
+            "baseTaskId":null,"checkpoint":null,"abandonedRunIds":["failed-private-run"]
+        }))
+        .unwrap();
+        store.fence_recovery(&chat_id).unwrap();
+        assert!(store.protocol_history_page(&chat_id, None, 10).is_err());
+        store.verify_recovery_assets(&plan).unwrap();
+        store
+            .install_recovery_authority(BTreeMap::from([(chat_id.clone(), plan)]))
+            .unwrap();
+        store.finish_recovery(&chat_id).unwrap();
+        assert!(store
+            .protocol_history_page(&chat_id, None, 10)
+            .unwrap()
+            .messages
+            .is_empty());
+        assert_eq!(
+            store
+                .protocol_attempt_history_page(&chat_id, "failed-private-run", None, 10)
+                .unwrap()
+                .messages,
+            vec![message.clone()]
+        );
+        assert!(store
+            .protocol_attempt_history_page(&chat_id, "another-run", None, 10)
+            .is_err());
+        assert_eq!(
+            fs::read(root.path().join("chats-index.json")).unwrap(),
+            index_before
+        );
+        drop(store);
+        let store = ChatStore::open(root.path()).unwrap();
+        // A Chat file alone cannot activate a recovery projection after restart.
+        assert_eq!(
+            store
+                .protocol_history_page(&chat_id, None, 10)
+                .unwrap()
+                .messages,
+            vec![message]
+        );
+    }
+    fn recovery_fixture_plan(chat_id: &str, run_id: &str) -> ChatRecoveryFrontier {
+        serde_json::from_value(json!({
+            "appId":format!("a{}", "1".repeat(32)),"chatId":chat_id,
+            "generation":uuid::Uuid::new_v4().to_string(),"sourceGeneration":null,
+            "baseTaskId":null,"checkpoint":null,"abandonedRunIds":[run_id]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_chat_recovery_fence_does_not_block_healthy_chat_reads_or_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        for id in [&a, &b] {
+            store
+                .create(id, None, &uuid::Uuid::new_v4().to_string())
+                .unwrap();
+        }
+        store.fence_recovery(&a).unwrap();
+        assert!(store.get(&a).is_err());
+        assert!(store.protocol_history_page(&a, None, 10).is_err());
+        store
+            .record_protocol_message(
+                &b,
+                "healthy-run",
+                &json!({"id":"healthy-user","role":"user","content":"healthy"}),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .protocol_history_page(&b, None, 10)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        store.archive(&b).unwrap();
+        assert!(store.get(&b).unwrap().archived);
+        assert!(
+            store.get(&a).is_err(),
+            "another Chat cannot clear A's unresolved fence"
+        );
+    }
+
+    #[test]
+    fn only_an_archived_cursor_of_this_chat_resets_to_the_canonical_first_page() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        store
+            .record_protocol_message(
+                &id,
+                "failed",
+                &json!({"id":"failed-cursor","role":"user","content":"failed"}),
+            )
+            .unwrap();
+        let plan = recovery_fixture_plan(&id, "failed");
+        let generation = plan.generation().to_owned();
+        store
+            .install_recovery_authority(BTreeMap::from([(id.clone(), plan)]))
+            .unwrap();
+        let page = store
+            .protocol_history_page(&id, Some("failed-cursor"), 1)
+            .unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.cursor_reset, Some(true));
+        assert_eq!(page.recovery_generation, Some(generation));
+        assert!(store
+            .protocol_history_page(&id, Some("unrelated-cursor"), 1)
+            .is_err());
+    }
+
+    #[test]
+    fn history_page_and_recovery_generation_share_one_index_snapshot() {
+        use std::sync::{Arc, Barrier};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(ChatStore::open(root.path()).unwrap());
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .create(&id, None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        store
+            .record_protocol_message(
+                &id,
+                "failed",
+                &json!({"id":"old-user","role":"user","content":"old view"}),
+            )
+            .unwrap();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        *store.history_capture_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let reader = store.clone();
+        let reader_id = id.clone();
+        let worker =
+            std::thread::spawn(move || reader.protocol_history_page(&reader_id, None, 10).unwrap());
+        entered.wait();
+        let plan = recovery_fixture_plan(&id, "failed");
+        let generation = plan.generation().to_owned();
+        store
+            .install_recovery_authority(BTreeMap::from([(id.clone(), plan)]))
+            .unwrap();
+        release.wait();
+        let before = worker.join().unwrap();
+        assert_eq!(before.messages.len(), 1);
+        assert!(
+            before.recovery_generation.is_none(),
+            "old messages must never be labelled with the new frontier"
+        );
+        let after = store.protocol_history_page(&id, None, 10).unwrap();
+        assert!(after.messages.is_empty());
+        assert_eq!(after.recovery_generation, Some(generation));
     }
 }

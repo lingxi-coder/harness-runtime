@@ -533,6 +533,12 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Whether the selected route can use startup Responses WebSocket prewarm.
+    /// Clients without this capability skip prompt and tool preparation.
+    fn supports_responses_websocket_prewarm(&self, _model: &str, _profile: Option<&str>) -> bool {
+        false
+    }
+
     /// Best-effort startup prewarm for OpenAI Responses WebSocket providers.
     ///
     /// Default is a no-op so non-routing mocks and non-WebSocket clients keep
@@ -1660,6 +1666,7 @@ pub use native_policy_attachments::{
 pub struct ConversationOrchestrator {
     /// Lightweight child state never publishes process-wide session flags.
     pub(crate) side_chat: bool,
+    pub(crate) persistent_app_chat: bool,
     pub(crate) side_chat_model_refs: Option<Vec<String>>,
     pub(crate) config: OrchestratorConfig,
     pub(crate) conversation_context: Mutex<context_state_impl::ConversationContextRuntime>,
@@ -1856,6 +1863,8 @@ pub struct ConversationOrchestrator {
     pub(crate) ide_handle: Option<Arc<dyn lingxi_core::host::IdeHandle>>,
     /// Compaction engines, token ledgers, and extraction state.
     pub(crate) compaction_runtime: CompactionRuntime,
+    /// Physically checkpointed, request-only summaries for independent Chats.
+    pub(crate) persistent_chat_context: Option<Arc<persistent_chat_context::PersistentChatContext>>,
     /// `/fork` background-agent spawner. When wired (via
     /// [`Self::with_fork_spawner`], the composition root's
     /// `BackgroundAgentSpawner`), [`OrchestratorHandle::fork_conversation`]
@@ -2049,6 +2058,7 @@ pub use drivers_impl::{
     realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, PendingPromptIdentity, QueuedPromptInput, RealtimeAgentContext,
     RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentSessionIo,
+    ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;
@@ -2116,6 +2126,9 @@ mod headless_mcp;
 mod headless_ui;
 #[path = "conversation/idle_compaction.rs"]
 mod idle_compaction_impl;
+#[path = "conversation/persistent_chat_context.rs"]
+mod persistent_chat_context;
+pub use persistent_chat_context::PersistentChatContextConfig;
 
 use drivers_impl::parse_generated_session_name;
 pub(crate) use runtime_impl::TurnTimingCapture;

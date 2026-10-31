@@ -3,12 +3,37 @@
 use super::*;
 use hooks::attachment::HookPublicationGuard;
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+use lingxi_core::types::ContentBlock;
 use llm_runtime::services::sdk::protocol::JsonPayload;
 
 fn erase_tool_dispatch_fence(
     fence: crate::autonomous_tool_scheduler::ToolDispatchPublicationFence,
 ) -> Arc<dyn HookPublicationGuard> {
     Arc::new(fence)
+}
+
+// JSONL decodes valid UTF-16 strings as ordinary Rust text. App Chat's live
+// canonical rows must use that same representation; unpaired units still need
+// the exact JS carrier. Ordinary Native Chat/Code retains its source carrier.
+fn canonicalize_app_chat_assistant_text(message: &mut ConversationMessage) {
+    let ConversationMessage::Assistant { content, .. } = message else {
+        return;
+    };
+    for block in content {
+        if let ContentBlock::TextJsUtf16 {
+            utf16_code_units,
+            citations,
+            ..
+        } = block
+        {
+            if let Ok(text) = String::from_utf16(utf16_code_units) {
+                *block = ContentBlock::Text {
+                    text,
+                    citations: citations.take(),
+                };
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1226,7 +1251,11 @@ impl ConversationOrchestrator {
         update_history: bool,
         publication_fence: Option<Arc<dyn HookPublicationGuard>>,
     ) -> ConversationMessage {
-        let original = message.clone();
+        let mut original = message.clone();
+        let persistent_app_chat = self.is_persistent_app_chat();
+        if persistent_app_chat {
+            canonicalize_app_chat_assistant_text(&mut original);
+        }
         if publication_fence.as_ref().is_some_and(|fence| {
             !hooks::attachment::HookPublicationGuard::is_current(fence.as_ref())
         }) {
@@ -1336,8 +1365,11 @@ impl ConversationOrchestrator {
                                 )));
                             }
                         }
-                        let rewritten = rewrite_mod_append_message(&core_original, &incoming)
+                        let mut rewritten = rewrite_mod_append_message(&core_original, &incoming)
                             .map_err(hooks::mods::ModError::Hook)?;
+                        if persistent_app_chat {
+                            canonicalize_app_chat_assistant_text(&mut rewritten);
+                        }
                         let projected = mod_append_message(&rewritten);
                         *applied
                             .lock()
@@ -2962,6 +2994,9 @@ impl ConversationOrchestrator {
     /// HEAD reporting `"HEAD"`), matching TS's `try { getBranch() } catch {
     /// undefined }` — a `None` is then omitted from the JSONL line.
     pub(super) async fn resolve_git_branch(&self) -> Option<String> {
+        if self.prompt_runtime.host_environment_probes_disabled {
+            return None;
+        }
         {
             let cache = self.transcript.git_branch_cache.lock().await;
             if let Some(resolved) = cache.as_ref() {
@@ -3275,7 +3310,10 @@ impl ConversationOrchestrator {
         publication_guard: Option<Arc<dyn HookPublicationGuard>>,
         note_assistant_commit: bool,
     ) -> bool {
-        let message = assistant.clone();
+        let mut message = assistant.clone();
+        if self.is_persistent_app_chat() {
+            canonicalize_app_chat_assistant_text(&mut message);
+        }
         let guard_for_commit = publication_guard.clone();
         let commit = async {
             self.session.lock().await.history.push(message.clone());
@@ -5292,6 +5330,14 @@ impl ConversationOrchestrator {
         if row.stop_reason.is_none() || row.is_api_error {
             return None;
         }
+        let inner_id = if self.is_persistent_app_chat() {
+            // Replay groups the per-block rows into the exact live assistant
+            // identity. A provider id is neither that host UUID nor a replay
+            // authority; retain it separately as response metadata.
+            row.logical_message_id?.as_uuid().to_string()
+        } else {
+            row.provider_message_id.clone()
+        };
 
         self.append_completed_assistant_row(row, publication_guard.clone())
             .await;
@@ -5322,7 +5368,7 @@ impl ConversationOrchestrator {
             self.resolve_git_branch().await,
             Some(entrypoint_value()),
             None,
-            Some(&row.provider_message_id),
+            Some(&inner_id),
             Some(&row.model),
             usage.as_ref(),
             row.request_id.as_deref(),
@@ -5331,6 +5377,11 @@ impl ConversationOrchestrator {
         let row_uuid = row.row_id.as_uuid().to_string();
         jmsg.uuid.clone_from(&row_uuid);
         jmsg.timestamp.clone_from(&row.timestamp);
+        if self.is_persistent_app_chat() {
+            jmsg.extra
+                .set_field("providerMessageId", row.provider_message_id.clone().into())
+                .expect("extra metadata is an object");
+        }
         jmsg.extra
             .set_field(
                 "modelProfile",
@@ -5970,6 +6021,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         per_turn_effort: None,
         stream_order: 0,
         row_id: MessageId::new(),
+        logical_message_id: None,
         provider_message_id: "assistant-presence-row".into(),
         model: "claude-sonnet-4-5".into(),
         model_profile: None,

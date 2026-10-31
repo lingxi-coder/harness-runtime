@@ -46,10 +46,10 @@
     "bytes": 94359
   },
   "artifacts": {
-    "dist/browser.entry.js": "e5be4af2b4d4786110062c77ca8ad4d84be9d817d8fee22cb3ce59fe55049127",
-    "dist/browser.global.js": "61ad0825f37989b902aa6efd8f4440c01fa1c137b358061d38f4d2fb6daeb73a",
-    "dist/browser.source.js": "b207d7a316ee9cd2c0fdea2a7135cbd16a2f6147ad8ea9fe9f9010a10a8609dc",
-    "dist/client.bundle.js": "fdc48ceeade2fe77eed3376230e86edd5a20545be830891562f0678dabbefc24",
+    "dist/browser.entry.js": "72b13d9c6e6afadc038574ab0a2e23ee7fab97ec5634c58d1981858bc80e70cd",
+    "dist/browser.global.js": "0a4135ee725b605fa541cc5f5d786fc864cb278ae17e436cb0b9adc13dc42eed",
+    "dist/browser.source.js": "ad778bc104829980d7d5a7b03b3f9ab92a6fc4190bfd3a049662baefc813707a",
+    "dist/client.bundle.js": "183c6dababd3bf199b0c0c3e269d33e48e86eec4388760256ce63917eecbfaa5",
     "dist/licenses/AG-UI-MIT.txt": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
     "dist/licenses/README.md": "cbc669e18e9d0817b7a13a6f3c6d728bda44609bea5fa391b18983d828c45548",
     "dist/licenses/THIRD-PARTY-NOTICES.md": "babfc6edb622d2a12e08b66b77e8eea707d0049f18767d7d7c562a6eddbcac9a",
@@ -66,10 +66,10 @@
     "dist/licenses/third-party/uuid-11.1.1-LICENSE.md": "beaa6b04fb82e41dd2ad679e19e27953afb5999b1abbb455b6564e78ebfeb332",
     "dist/licenses/third-party/zod-3.25.76-LICENSE": "3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8",
     "dist/types/browser-source.d.ts": "2b22b78027c8a53718dabd9a16c5e5b979752158532bb69a977d5379a91dc9b1",
-    "dist/types/browser.d.ts": "d68f8ddd482b84c53ba6e576f4ebdd30d6276df808cbc38ab6e76b2e16d0cc7c",
+    "dist/types/browser.d.ts": "60a18bce3b9f651c0c7a713ca28afff2c208286930e61bcd3dbe926eac6d8766",
     "dist/types/client.d.ts": "4da4a88eb66b18bc64e39e4f6afc11829ce0834bcd5aadfc0d77b079ee013a9f",
     "dist/types/file.d.ts": "305f43d728d03f5e2c03d5715fbbec02c9c004e9a638aa8d4f7df7a55e824407",
-    "dist/types/index.d.ts": "157230411f80a2b68ce9937de0d8861db867989e3cf436773580837d3a65041b",
+    "dist/types/index.d.ts": "7bcd4ad1407086bb9be47cacd2ac909466cf78395c7db2745747b0451c52f4b9",
     "dist/types/validators.d.ts": "1374b828746dc6edbbf571c86b21760f2c124cda55237f0d9e188d9f6e901763"
   }
 }

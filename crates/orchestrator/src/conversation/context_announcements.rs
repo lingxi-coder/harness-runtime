@@ -152,7 +152,7 @@ impl ConversationOrchestrator {
         ConversationMessage,
         lingxi_core::types::utf16_json::Utf16JsonProjection,
     )> {
-        if self.config.bare {
+        if self.config.bare || self.is_persistent_app_chat() {
             return Vec::new();
         }
         let mut context = self.instruction_context_snapshot().await;

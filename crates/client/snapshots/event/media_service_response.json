@@ -9,6 +9,7 @@
         "generation": 1,
         "service_epoch": 2
       },
+      "incarnation": "00000000-0000-4000-8000-000000000001",
       "result": {
         "type": "sources",
         "sources": []

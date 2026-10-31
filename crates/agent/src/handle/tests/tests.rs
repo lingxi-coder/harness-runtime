@@ -4934,10 +4934,10 @@ async fn agent_listing_surfaces_builtins_with_tools_description() {
     let spawner = test_spawner(pool);
     let entries = spawner.agent_listing().await;
     // Every LISTED built-in, sorted by type: general-purpose,
-    // statusline-setup, Explore, Plan. `workflow-subagent` is in the roster
+    // statusline-setup, Explore, Plan, lingxi-code-guide. `workflow-subagent` is in the roster
     // as the workflow runtime's resolution entry but is never advertised —
     // the oracle's `cre()` has never held it (see `agent_listing_entries`).
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), listed_builtin_count());
     let by: std::collections::HashMap<&str, &SubagentListingEntry> =
         entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
     // general-purpose: All { .. } → "All tools".
@@ -4949,6 +4949,10 @@ async fn agent_listing_surfaces_builtins_with_tools_description() {
     );
     // statusline-setup: Explicit([Read, Edit]).
     assert_eq!(by["statusline-setup"].tools_description, "Read, Edit");
+    assert_eq!(
+        by["lingxi-code-guide"].tools_description,
+        "Read, Grep, Glob"
+    );
     // `Explore` is the only definition carrying both texts: `when_to_use`
     // is the FULL `vto`, `when_to_use_lean` the `Cto` a lean session
     // renders. `U2n` picks between them per render, so the entry must
@@ -4970,7 +4974,12 @@ async fn agent_listing_surfaces_builtins_with_tools_description() {
         .unwrap()
         .contains("broad fan-out searches"));
     // Every other built-in declares no lean variant.
-    for ty in ["general-purpose", "statusline-setup", "Plan"] {
+    for ty in [
+        "general-purpose",
+        "statusline-setup",
+        "Plan",
+        "lingxi-code-guide",
+    ] {
         assert!(
             by[ty].when_to_use_lean.is_none(),
             "{ty} declares no whenToUseLean"
@@ -5095,8 +5104,8 @@ async fn agent_listing_catalog_overrides_builtin() {
     // The catalog entry (Explicit[Read] → "Read") wins over the built-in.
     assert_eq!(explore.when_to_use, "CUSTOM EXPLORE");
     assert_eq!(explore.tools_description, "Read");
-    // Still 4 (override, not addition).
-    assert_eq!(entries.len(), 4);
+    // An override does not add another entry to the current builtin roster.
+    assert_eq!(entries.len(), listed_builtin_count());
 }
 
 /// claude 2.1.238 `NJa` (@290291941) guard-by-guard.

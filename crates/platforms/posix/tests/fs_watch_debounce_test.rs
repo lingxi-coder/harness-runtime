@@ -23,11 +23,12 @@ async fn rapid_writes_collapse_to_single_event() {
 
     let target = dir_path.join("rapid.txt");
 
-    // 3 writes within the 500ms stability window.
+    // Submit the burst without yielding between writes. A timer sleep between
+    // writes can be delayed by unrelated load past the stability window,
+    // turning the fixture into separate bursts rather than testing debounce.
     let burst_start = Instant::now();
     for i in 0..3 {
         std::fs::write(&target, format!("v{i}")).unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let burst_end = burst_start.elapsed();
     assert!(

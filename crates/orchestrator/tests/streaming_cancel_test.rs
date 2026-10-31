@@ -130,7 +130,10 @@ const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool us
 /// A concurrency-SAFE tool whose `interrupt_behavior()==Cancel`. It blocks on its
 /// `ctx.cancel` token (the per-tool child of the turn's user-interrupt token), so
 /// it stays in-flight until the user interrupts; on cancel it returns `Aborted`.
-struct CancelBlockingTool;
+struct CancelBlockingTool {
+    started: Arc<tokio::sync::Notify>,
+    observed_scope: Arc<std::sync::Mutex<Option<tool_api::context::ToolCancellationScope>>>,
+}
 
 #[async_trait]
 impl Tool for CancelBlockingTool {
@@ -213,9 +216,11 @@ impl Tool for CancelBlockingTool {
         ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        *self.observed_scope.lock().unwrap() = Some(ctx.cancellation_scope);
         let token = ctx.cancel.clone();
         match token {
             Some(t) => {
+                self.started.notify_one();
                 t.cancelled().await;
                 Err(ToolError::Aborted)
             }
@@ -236,11 +241,18 @@ impl Tool for CancelBlockingTool {
     }
 }
 
-fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Arc<ConversationOrchestrator> {
+fn build_orch_with_cancel_tool(
+    api: Arc<MockStreamingApiClient>,
+    started: Arc<tokio::sync::Notify>,
+    observed_scope: Arc<std::sync::Mutex<Option<tool_api::context::ToolCancellationScope>>>,
+) -> Arc<ConversationOrchestrator> {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let mut registry = ToolRegistry::new();
-    registry.register_builtin(Arc::new(CancelBlockingTool) as Arc<dyn Tool>);
+    registry.register_builtin(Arc::new(CancelBlockingTool {
+        started,
+        observed_scope,
+    }) as Arc<dyn Tool>);
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
@@ -284,26 +296,37 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
         message_stop(),
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1]));
-    let orch = build_orch_with_cancel_tool(api.clone());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let observed_scope = Arc::new(std::sync::Mutex::new(None));
+    let orch = build_orch_with_cancel_tool(api.clone(), started.clone(), observed_scope.clone());
     let cancel = CancellationToken::new();
 
-    // Fire the user-cancel shortly after the turn starts, so the blocking
-    // CancelTool is in flight (awaiting its ctx.cancel) when it fires.
+    // Cancel only after the tool actually enters call(), regardless of how
+    // long provider streaming and dispatch take on a loaded CI worker.
     let cancel_clone = cancel.clone();
     let firer = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+            .await
+            .expect("CancelTool must start before user interruption");
         cancel_clone.cancel();
     });
 
-    let outcome = orch
-        .run_turn_streaming_with_cancel("call the cancel tool", cancel.clone())
-        .await
-        .expect("turn must end gracefully (NOT loop into a 2nd, script-exhausting model call)");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        orch.run_turn_streaming_with_cancel("call the cancel tool", cancel.clone()),
+    )
+    .await
+    .expect("interrupted turn must settle")
+    .expect("turn must end gracefully (NOT loop into a 2nd, script-exhausting model call)");
     firer.await.unwrap();
 
     // The turn ended GRACEFULLY (not dropped). The TUI sees Cancelled because the
     // token fired.
     assert_eq!(outcome, TurnOutcome::Cancelled);
+    assert_eq!(
+        *observed_scope.lock().unwrap(),
+        Some(tool_api::context::ToolCancellationScope::ModelTurn)
+    );
 
     // Parity: EXACTLY ONE model call. A second call would mean the loop continued
     // after the interrupt (claude-code returns `aborted_tools` with no further
@@ -339,6 +362,50 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
         Some(REJECT_MESSAGE),
         "in-flight Cancel tool must get the bare REJECT_MESSAGE on user interrupt"
     );
+}
+
+#[tokio::test]
+async fn host_tool_dispatch_preserves_request_cancellation_scope() {
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![]));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let observed_scope = Arc::new(std::sync::Mutex::new(None));
+    let orch = build_orch_with_cancel_tool(api, started.clone(), observed_scope.clone());
+    let cancel = CancellationToken::new();
+    let operation = {
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            orch.call_tool_from_host_request(
+                ToolUseId::new(),
+                "CancelTool".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({}))
+                    .unwrap(),
+                cancel,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("host-dispatched tool must start");
+    assert_eq!(
+        *observed_scope.lock().unwrap(),
+        Some(tool_api::context::ToolCancellationScope::HostRequest)
+    );
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), operation)
+        .await
+        .expect("cancelled host dispatch must settle")
+        .unwrap()
+        .unwrap()
+        .expect("registered tool");
+    assert!(matches!(
+        result,
+        ContentBlock::ToolResult {
+            is_error: Some(true),
+            ..
+        }
+    ));
 }
 
 /// Parity guard for Consequence 2 (semantic violation): if the loop incorrectly

@@ -944,7 +944,11 @@ mod tests {
                 ("upgrade", "DISABLE_UPGRADE_COMMAND"),
             ]
         );
+    }
 
+    #[cfg(feature = "builtin-handlers")]
+    #[test]
+    fn env_gated_names_resolve_to_registered_commands() {
         // `doctor` is not a row in BUILTIN_COMMAND_NAMES in 2.1.295: its
         // command object comes from the bundled prompt factory (`Mo()`), with
         // canonical name `doctor` and alias `checkup`. The other four rows

@@ -1,20 +1,13 @@
-//! `platform-ios` (M8-P10) — the iOS platform skeleton.
+//! iOS platform composition.
 //!
-//! [`IosPlatform`] implements the [`lingxi_core::host::Platform`] aggregate. The core OS
-//! handles (filesystem/clock/process/sandbox/worktree) are currently reused
-//! from `platform-posix-minimal` — those impls are portable Rust (`std::fs`
-//! over the App-Sandbox root, `std::time`, and `Unsupported` stubs) and valid
-//! on iOS. The `http` handle is the shared real client
-//! ([`http_client::ReqwestHttp`], `reqwest` + `rustls-tls`), so a
-//! keyed conversation streams against the real provider rather than the
-//! posix-minimal stub. The iOS-specific device capabilities (camera, voice,
-//! share) are injected as `Arc<dyn …>` trait objects implemented natively in
-//! Swift via `UniFFI` (P12).
-//!
-//! M9 replaces the reused posix handles with App-Sandbox-aware iOS impls. The
-//! crate is intentionally **not** `#[cfg(target_os = "ios")]`-gated: the
-//! skeleton is portable, so it compiles and is verified on the host build and
-//! cross-compiles to `aarch64-apple-ios` unchanged.
+//! Real filesystem I/O and the shared clock are reused from
+//! `platform-posix-minimal`; its workspace root is a predicate, not a filesystem
+//! confinement boundary. HTTP uses the real shared client. An injected iSH
+//! runtime supplies process and sandbox services when mobile Linux is selected;
+//! otherwise those services report unavailable. Native device and Keychain
+//! capabilities are injected by the Swift host. The worktree implementation
+//! remains unavailable on this path. Mount authorization is checked here and
+//! by the native adapter before a guest filesystem is exposed.
 
 #![forbid(unsafe_code)]
 // Documentation debt, not a decision that docs do not matter: this crate had
@@ -27,7 +20,7 @@
 
 use lingxi_core::host::{
     AudioService, CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider,
-    DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
+    DeepLinkOpener, DeviceServices, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
     LocationProvider, NotificationService, Platform, ProcessRunner, Sandbox, SecureStorage,
     SharingService, WorktreeManager,
 };
@@ -42,16 +35,16 @@ use std::sync::Arc;
 /// Construction inputs for [`IosPlatform`].
 ///
 /// The native capabilities are supplied by the Swift layer (via `UniFFI` in P12);
-/// `app_sandbox_root` is the container directory the filesystem is confined to.
+/// `app_sandbox_root` is the container directory used as the workspace root.
 pub struct IosPlatformInputs {
     /// Authoritative Linux account and guest-path profile.
     pub brand_profile: mobile_linux_api::BrandRuntimeProfile,
     /// The app's writable sandbox container root.
     pub app_sandbox_root: PathBuf,
-    /// Native camera (Swift impl).
-    pub camera: Arc<dyn CameraControl>,
-    /// Unified app-scoped device audio service (Swift impl).
-    pub audio: Arc<dyn AudioService>,
+    /// Native camera (Swift impl), when available to this host.
+    pub camera: Option<Arc<dyn CameraControl>>,
+    /// Unified app-scoped device audio service (Swift impl), when available.
+    pub audio: Option<Arc<dyn AudioService>>,
     /// Native share sheet (Swift impl).
     pub share: Arc<dyn SharingService>,
     /// Native system notifications (Swift impl), when wired. `None` keeps the
@@ -97,19 +90,7 @@ pub struct IosPlatform {
     process: Arc<dyn ProcessRunner>,
     sandbox: Arc<dyn Sandbox>,
     worktree: Arc<dyn WorktreeManager>,
-    camera: Arc<dyn CameraControl>,
-    audio: Arc<dyn AudioService>,
-    share: Arc<dyn SharingService>,
-    notifications: Option<Arc<dyn NotificationService>>,
-    clipboard: Option<Arc<dyn Clipboard>>,
-    device_status: Option<Arc<dyn DeviceStatusProvider>>,
-    haptics: Option<Arc<dyn HapticService>>,
-    deep_link: Option<Arc<dyn DeepLinkOpener>>,
-    calendar: Option<Arc<dyn CalendarProvider>>,
-    contacts: Option<Arc<dyn ContactsProvider>>,
-    secure_storage: Option<Arc<dyn SecureStorage>>,
-    location: Option<Arc<dyn LocationProvider>>,
-    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    device_services: DeviceServices,
 }
 
 impl IosPlatform {
@@ -190,19 +171,23 @@ impl IosPlatform {
             process,
             sandbox,
             worktree: Arc::new(PosixWorktree::new()),
-            camera: inputs.camera,
-            audio: inputs.audio,
-            share: inputs.share,
-            notifications: inputs.notifications,
-            clipboard: inputs.clipboard,
-            device_status: inputs.device_status,
-            haptics: inputs.haptics,
-            deep_link: inputs.deep_link,
-            calendar: inputs.calendar,
-            contacts: inputs.contacts,
-            secure_storage: inputs.secure_storage,
-            location: inputs.location,
-            mobile_linux: effective_runtime,
+            device_services: DeviceServices {
+                camera: inputs.camera,
+                audio: inputs.audio,
+                location: inputs.location,
+                share: Some(inputs.share),
+                notifications: inputs.notifications,
+                clipboard: inputs.clipboard,
+                device_status: inputs.device_status,
+                haptics: inputs.haptics,
+                deep_link: inputs.deep_link,
+                calendar: inputs.calendar,
+                contacts: inputs.contacts,
+                computer_control: None,
+                android_ui_automation: None,
+                secure_storage: inputs.secure_storage,
+                mobile_linux: effective_runtime,
+            },
         }
     }
 }
@@ -439,47 +424,9 @@ impl Platform for IosPlatform {
     fn worktree(&self) -> Arc<dyn WorktreeManager> {
         self.worktree.clone()
     }
-    fn camera(&self) -> Option<Arc<dyn CameraControl>> {
-        Some(self.camera.clone())
+    fn device_services(&self) -> Option<&DeviceServices> {
+        Some(&self.device_services)
     }
-    fn audio_service(&self) -> Option<Arc<dyn AudioService>> {
-        Some(self.audio.clone())
-    }
-    fn share(&self) -> Option<Arc<dyn SharingService>> {
-        Some(self.share.clone())
-    }
-    fn location(&self) -> Option<Arc<dyn LocationProvider>> {
-        self.location.clone()
-    }
-    fn notifications(&self) -> Option<Arc<dyn NotificationService>> {
-        self.notifications.clone()
-    }
-    fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
-        self.clipboard.clone()
-    }
-    fn device_status(&self) -> Option<Arc<dyn DeviceStatusProvider>> {
-        self.device_status.clone()
-    }
-    fn haptics(&self) -> Option<Arc<dyn HapticService>> {
-        self.haptics.clone()
-    }
-    fn deep_link(&self) -> Option<Arc<dyn DeepLinkOpener>> {
-        self.deep_link.clone()
-    }
-    fn calendar(&self) -> Option<Arc<dyn CalendarProvider>> {
-        self.calendar.clone()
-    }
-    fn contacts(&self) -> Option<Arc<dyn ContactsProvider>> {
-        self.contacts.clone()
-    }
-    fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
-        self.secure_storage.clone()
-    }
-    fn mobile_linux(&self) -> Option<Arc<dyn MobileLinuxRuntime>> {
-        self.mobile_linux.clone()
-    }
-    // computer_control() defaults to None — screen automation is not an iOS
-    // capability in M8.
 }
 
 #[cfg(test)]
@@ -530,7 +477,7 @@ mod tests {
         }
         async fn cancel(
             &self,
-            _identity: lingxi_core::host::AudioOperationId,
+            _context: lingxi_core::host::AudioOperationContext,
         ) -> Result<(), lingxi_core::host::AudioError> {
             Ok(())
         }
@@ -551,8 +498,8 @@ mod tests {
         IosPlatformInputs {
             brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
             app_sandbox_root: root.to_path_buf(),
-            camera: Arc::new(StubCamera),
-            audio: Arc::new(StubAudio),
+            camera: Some(Arc::new(StubCamera)),
+            audio: Some(Arc::new(StubAudio)),
             share: Arc::new(StubShare),
             notifications: None,
             clipboard: None,
@@ -568,6 +515,114 @@ mod tests {
             stable_workspace_id: Some("abc".to_string()),
             additional_workspace_mounts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn platform_retains_supplied_camera_and_audio() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let platform_inputs = inputs(temp.path(), None);
+        let camera = platform_inputs.camera.clone().unwrap();
+        let audio = platform_inputs.audio.clone().unwrap();
+        let platform = IosPlatform::new(platform_inputs);
+        assert!(Arc::ptr_eq(&camera, &platform.camera().unwrap()));
+        assert!(Arc::ptr_eq(&audio, &platform.audio_service().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn platform_without_media_preserves_filesystem_and_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("workspace")).expect("workspace");
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                SandboxBackend::IosIsh,
+                MobileLinuxRuntimeMode::Legacy,
+                "ios",
+                "arm64",
+                "test runtime",
+            ));
+        let mut platform_inputs = inputs(temp.path(), Some(runtime.clone()));
+        platform_inputs.camera = None;
+        platform_inputs.audio = None;
+        let platform = IosPlatform::new(platform_inputs);
+
+        assert!(platform.camera().is_none());
+        assert!(platform.audio_service().is_none());
+        assert!(platform.share().is_some());
+        assert!(Arc::ptr_eq(&runtime, &platform.mobile_linux().unwrap()));
+        let path = temp.path().join("available.txt");
+        let path = path.to_str().expect("UTF-8 temp path");
+        platform
+            .filesystem()
+            .write_file(path, "file works")
+            .await
+            .unwrap();
+        assert_eq!(
+            platform
+                .filesystem()
+                .read_file(path, None, None)
+                .await
+                .unwrap()
+                .content,
+            "file works"
+        );
+
+        // The mobile-linux adapter and guest-path fence remain active too.
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                SandboxBackend::IosIsh,
+                MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test runtime",
+            ));
+        let mut platform_inputs = inputs(temp.path(), Some(runtime.clone()));
+        platform_inputs.camera = None;
+        platform_inputs.audio = None;
+        let platform = IosPlatform::new(platform_inputs);
+        assert!(platform.camera().is_none());
+        assert!(platform.audio_service().is_none());
+        assert!(Arc::ptr_eq(&runtime, &platform.mobile_linux().unwrap()));
+        assert_eq!(platform.sandbox().backend(), SandboxBackend::IosIsh);
+        assert!(matches!(
+            platform
+                .filesystem()
+                .read_file("/tmp/not-host-backed", None, None)
+                .await,
+            Err(FsError::PermissionDenied(_))
+        ));
+    }
+
+    #[test]
+    fn device_services_preserve_injected_handles_and_unavailable_options() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut inputs = inputs(temp.path(), None);
+        inputs.secure_storage = Some(Arc::new(lingxi_core::host::InMemorySecureStorage::new()));
+        let camera = inputs.camera.clone().unwrap();
+        let audio = inputs.audio.clone().unwrap();
+        let share = inputs.share.clone();
+        let secure_storage = inputs.secure_storage.clone().unwrap();
+        let platform = IosPlatform::new(inputs);
+        let platform: &dyn Platform = &platform;
+
+        assert!(Arc::ptr_eq(&camera, &platform.camera().unwrap()));
+        assert!(Arc::ptr_eq(&audio, &platform.audio_service().unwrap()));
+        assert!(Arc::ptr_eq(&share, &platform.share().unwrap()));
+        assert!(Arc::ptr_eq(
+            &secure_storage,
+            &platform.secure_storage().unwrap()
+        ));
+        assert!(platform.device_services().is_some());
+        assert!(platform.mobile_linux().is_none());
+        assert!(platform.location().is_none());
+        assert!(platform.notifications().is_none());
+        assert!(platform.clipboard().is_none());
+        assert!(platform.device_status().is_none());
+        assert!(platform.haptics().is_none());
+        assert!(platform.deep_link().is_none());
+        assert!(platform.calendar().is_none());
+        assert!(platform.contacts().is_none());
+        assert!(platform.computer_control().is_none());
+        assert!(platform.android_ui_automation().is_none());
     }
 
     #[test]
@@ -687,18 +742,16 @@ mod tests {
 
         let wrong_profile =
             mobile_linux_api::BrandRuntimeProfile::new("other", "other_guest", ".other");
-        assert!(
-            append_additional_workspace_mounts(
-                build_mobile_linux_mounts(
-                    Some(mounts[0].host_path.clone()),
-                    Some("projects".into()),
-                    &wrong_profile,
-                ),
-                vec![external_mount(app_host, app_guest)],
+        assert!(append_additional_workspace_mounts(
+            build_mobile_linux_mounts(
+                Some(mounts[0].host_path.clone()),
+                Some("projects".into()),
                 &wrong_profile,
-            )
-            .is_err()
-        );
+            ),
+            vec![external_mount(app_host, app_guest)],
+            &wrong_profile,
+        )
+        .is_err());
     }
 
     #[test]
@@ -743,14 +796,12 @@ mod tests {
         {
             let alias = home.join(".atlas/.apps/alias");
             std::os::unix::fs::symlink(&app_host, &alias).expect("create app alias symlink");
-            assert!(
-                append_additional_workspace_mounts(
-                    primary,
-                    vec![external_mount(alias, format!("{apps_guest}/alias"))],
-                    &profile,
-                )
-                .is_err()
-            );
+            assert!(append_additional_workspace_mounts(
+                primary,
+                vec![external_mount(alias, format!("{apps_guest}/alias"))],
+                &profile,
+            )
+            .is_err());
         }
     }
 
@@ -769,21 +820,21 @@ mod tests {
         let parent_guest = "/home/atlas_guest/.atlas/.apps/team";
         let nested_guest = "/home/atlas_guest/.atlas/.apps/team/nested";
         let app = external_mount(parent.clone(), parent_guest);
-        assert!(
-            append_additional_workspace_mounts(primary.clone(), vec![app.clone(), app], &profile,)
-                .is_err()
-        );
-        assert!(
-            append_additional_workspace_mounts(
-                primary,
-                vec![
-                    external_mount(parent, parent_guest),
-                    external_mount(nested, nested_guest)
-                ],
-                &profile,
-            )
-            .is_err()
-        );
+        assert!(append_additional_workspace_mounts(
+            primary.clone(),
+            vec![app.clone(), app],
+            &profile,
+        )
+        .is_err());
+        assert!(append_additional_workspace_mounts(
+            primary,
+            vec![
+                external_mount(parent, parent_guest),
+                external_mount(nested, nested_guest)
+            ],
+            &profile,
+        )
+        .is_err());
     }
 
     /// The assembly seam this pins: selecting mobile-linux mode must wrap the
