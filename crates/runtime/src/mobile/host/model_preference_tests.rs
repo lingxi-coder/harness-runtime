@@ -47,8 +47,7 @@ mod model_preference_tests {
                 restarted
                     .submit(ClientCommand::NewSession {
                         cwd: None,
-                        model: None,
-                    })
+                        model: None, mode: client::protocol::listings::SessionModeDto::Code, })
                     .await
                     .unwrap();
                 assert_eq!(selected_model(&restarted).await, selected);
@@ -68,14 +67,14 @@ mod model_preference_tests {
                 .submit(ClientCommand::ResumeSession {
                     session_id,
                     cwd: None,
+                    expected_mode: SessionModeDto::Code,
                 })
                 .await
                 .unwrap();
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None,
-                })
+                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             assert!(!home.join("last-model.json").exists());
@@ -194,8 +193,7 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: Some("openai/gpt-5.6-sol".into()),
-                })
+                    model: Some("openai/gpt-5.6-sol".into()), mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             assert_eq!(
@@ -238,6 +236,7 @@ mod model_preference_tests {
                 .submit(ClientCommand::ResumeSession {
                     session_id,
                     cwd: None,
+                    expected_mode: SessionModeDto::Code,
                 })
                 .await
                 .unwrap();
@@ -249,8 +248,7 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: Some("openai/gpt-5.6-sol".into()),
-                })
+                    model: Some("openai/gpt-5.6-sol".into()), mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             assert_eq!(selected_model(&handle).await, "openai/gpt-5.6-sol");
@@ -283,8 +281,7 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None,
-                })
+                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             let session_id = handle
@@ -304,6 +301,7 @@ mod model_preference_tests {
                 .submit(ClientCommand::ResumeSession {
                     session_id,
                     cwd: None,
+                    expected_mode: SessionModeDto::Code,
                 })
                 .await
                 .unwrap();
@@ -326,6 +324,7 @@ mod model_preference_tests {
                 .submit(ClientCommand::ResumeSession {
                     session_id,
                     cwd: None,
+                    expected_mode: SessionModeDto::Code,
                 })
                 .await
                 .unwrap();
@@ -341,8 +340,7 @@ mod model_preference_tests {
             assert!(handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: Some(disabled.into()),
-                })
+                    model: Some(disabled.into()), mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .is_err());
             assert_eq!(

@@ -1427,9 +1427,12 @@ async fn hydrate_captured_session_before_start(
             cfg.cli_agent.is_some()
                 || model_provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier,
             permission_mode,
-            session::JsonlWriter::session_mode_transition_from_source(
-                &snapshot.content,
-                &session_id.to_string(),
+            Some(
+                session::JsonlWriter::fixed_session_mode_from_source(
+                    &snapshot.content,
+                    &session_id.to_string(),
+                )
+                .map_err(BuildError::Orchestrator)?,
             ),
             &snapshot.content,
         )
@@ -2812,6 +2815,54 @@ pub struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    /// Pin the currently mounted session's durable writer authority. The
+    /// session mutex excludes identity activation while the manager resolves
+    /// and pins the matching coordinator; the returned lease remains tied to
+    /// that UUID even if the runtime later mounts a different session.
+    pub async fn current_session_writer_lease(
+        &self,
+        expected: lingxi_core::types::SessionId,
+    ) -> Result<lingxi_core::host::live_sessions::SharedSessionWriterLease, String> {
+        let session = self.orchestrator.session();
+        let state = session.lock().await;
+        if state.session_id != expected {
+            return Err("the active session changed before acquiring its writer lease".into());
+        }
+        let coordinator = self
+            .session_lifecycle
+            .session_state_manager
+            .coordinator(expected)
+            .ok_or_else(|| "the active session writer is unavailable".to_string())?;
+        let lease = coordinator.writer_lease();
+        if lease.canonical_session_id() != Some(expected) {
+            return Err("the active session writer has a different identity".into());
+        }
+        Ok(lease)
+    }
+
+    /// Capture a complete committed prefix under the session's writer lock.
+    /// No conversation or turn lock is held while waiting for filesystem I/O.
+    pub async fn capture_current_session_transcript(
+        &self,
+        expected: lingxi_core::types::SessionId,
+    ) -> Result<session::jsonl::writer::CommittedTranscript, String> {
+        if self.orchestrator.current_session_id().await != expected {
+            return Err("the active session changed before transcript capture".into());
+        }
+        let writer = self
+            .fork_writer
+            .as_ref()
+            .ok_or("session persistence is disabled")?;
+        let capture = writer
+            .capture_committed_transcript(expected.as_uuid())
+            .await
+            .map_err(|error| error.to_string())?;
+        if self.orchestrator.current_session_id().await != expected {
+            return Err("the active session changed during transcript capture".into());
+        }
+        Ok(capture)
+    }
+
     /// Apply SessionStart reload requests through the session's live handler,
     /// retaining registered prompt directories and shared producer refreshes.
     pub async fn apply_session_start_effects(

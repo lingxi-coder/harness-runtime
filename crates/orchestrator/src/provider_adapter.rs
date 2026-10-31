@@ -364,6 +364,10 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
 
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn set_tool_search_enabled(&self, enabled: bool) {
+        self.service.set_tool_search_enabled(enabled);
+    }
+
     fn supports_native_mid_conversation_system(&self, model: &str, profile: Option<&str>) -> bool {
         self.service
             .supports_native_mid_conversation_system(model, profile)

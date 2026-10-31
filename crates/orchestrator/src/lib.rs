@@ -80,6 +80,7 @@ pub mod sse;
 pub mod stop_hook_snapshot;
 pub(crate) mod streaming_executor;
 pub mod streaming_loop;
+pub mod session_handoff;
 pub mod structured_output;
 mod subagent_stop_hook_firer;
 pub mod task_completed_firer;

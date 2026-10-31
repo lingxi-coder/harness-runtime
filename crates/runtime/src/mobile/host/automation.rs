@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use super::{build_mobile_inner, MobileConfig, MobileEngineError, MobileEngineHandle};
+use super::{MobileConfig, MobileEngineError, MobileEngineHandle};
 
 /// Per-job wall-clock budget for a fired cron turn. This remains a second
 /// safety limit beneath WorkManager's outer lifecycle budget.
@@ -189,6 +189,27 @@ pub(super) async fn supervise_mobile_automation<F>(
 where
     F: std::future::Future<Output = Result<cron::AutomationRunResult, String>> + Send + 'static,
 {
+    supervise_mobile_automation_with_cancel(fs, cwd, clock, claim, move |request, cancel| async move {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err("cancelled: Scheduled execution was cancelled by the host".into()),
+            result = execute(request) => result,
+        }
+    }).await
+}
+
+/// Production executions cooperate with cancellation and settle their owned
+/// cleanup before a terminal cancellation is committed to the task ledger.
+pub(super) async fn supervise_mobile_automation_with_cancel<F>(
+    fs: Arc<dyn FileSystem>,
+    cwd: std::path::PathBuf,
+    clock: Arc<dyn Clock>,
+    claim: impl std::future::Future<Output = Option<cron::AutomationRunRequest>> + Send + 'static,
+    execute: impl FnOnce(cron::AutomationRunRequest, CancellationToken) -> F + Send + 'static,
+) -> Option<FiredCronJobDto>
+where
+    F: std::future::Future<Output = Result<cron::AutomationRunResult, String>> + Send + 'static,
+{
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     mobile_automation_runtime().spawn(async move {
@@ -196,13 +217,14 @@ where
         // cancelled. Never drop the claim future: settle it, then cancel the
         // returned occurrence before any model execution begins.
         let request = claim.await?;
-        let execution = execute(request.clone());
-        let result = {
-            // The losing execution future is destroyed before durable completion.
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err("cancelled: Scheduled execution was cancelled by the host".into()),
-                result = execution => result,
+        let result = if cancel.is_cancelled() {
+            Err("cancelled: Scheduled execution was cancelled by the host".into())
+        } else {
+            let result = execute(request.clone(), cancel.clone()).await;
+            if cancel.is_cancelled() {
+                Err("cancelled: Scheduled execution was cancelled by the host".into())
+            } else {
+                result
             }
         };
         let now = clock.now().duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -420,6 +442,39 @@ pub(super) struct MobileTurnFirer {
     pub(super) platform: Arc<dyn Platform>,
 }
 
+/// A caller can disappear while a scheduled child is still unwinding. Keep the
+/// child task (and its session gate) alive, but request cancellation immediately.
+async fn run_owned_mobile_cron<F, Fut>(operation: F) -> Result<cron::AutomationRunResult, String>
+where
+    F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<cron::AutomationRunResult, String>> + Send + 'static,
+{
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    tokio::spawn(operation(cancel))
+        .await
+        .map_err(|error| format!("scheduled execution owner failed: {error}"))?
+}
+
+async fn drain_scheduled_child(orchestrator: Arc<orchestrator::ConversationOrchestrator>) {
+    orchestrator.close_background_producer_admission();
+    let retained = super::wait_for_mobile_background_producers(
+        orchestrator.clone(),
+        || orchestrator.drain_background_session_launches(),
+        || orchestrator.shutdown_startup_responses_websocket_prewarm(),
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(60),
+    )
+    .await;
+    retained.shutdown_idle_compaction().await;
+    let errors = retained.close_and_drain_session_switches().await;
+    for error in errors {
+        tracing::warn!(%error, "scheduled session switch drain reported an error");
+    }
+    retained.wait_for_turn_idle().await;
+}
+
 #[async_trait]
 impl cron::CronJobFirer for MobileTurnFirer {
     async fn fire(&self, _id: &str, prompt: &Utf16JsonProjection) -> Result<String, String> {
@@ -469,6 +524,20 @@ fn scheduled_parent_context_check(
 }
 
 impl MobileTurnFirer {
+    pub(super) async fn fire_automation_with_cancel(
+        &self,
+        request: &cron::AutomationRunRequest,
+        cancel: CancellationToken,
+    ) -> Result<cron::AutomationRunResult, String> {
+        llm_runtime::catalog_task::scope(self.fire_session_scoped(
+            request.task.prompt.clone(),
+            request.task.automation.as_ref(),
+            Some(request),
+            cancel,
+        ))
+        .await
+    }
+
     /// Build a transient scheduled runtime with its own host-issued media
     /// attachment. The child cannot borrow the parent's owner namespace or
     /// conversation adapter, and parent revocation cascades through the
@@ -477,6 +546,9 @@ impl MobileTurnFirer {
         &self,
     ) -> Result<(MobileConfig, Option<ScheduledChildMedia>), String> {
         let mut config = self.cfg.clone();
+        // The parent identity belongs only to its live source; each scheduled
+        // child either creates a session or explicitly mounts its own target.
+        config.initial_session_id = None;
         config.media_attachment_confirmed_callback = None;
         // Realtime IO is engine-specific; only the separate host route factory
         // participates in scheduled child assembly.
@@ -544,8 +616,22 @@ impl MobileTurnFirer {
         automation: Option<&cron::CronAutomation>,
         request: Option<&cron::AutomationRunRequest>,
     ) -> Result<cron::AutomationRunResult, String> {
-        llm_runtime::catalog_task::scope(self.fire_session_scoped(prompt, automation, request))
+        let owner = MobileTurnFirer {
+            cfg: self.cfg.clone(),
+            platform: self.platform.clone(),
+        };
+        let automation = automation.cloned();
+        let request = request.cloned();
+        run_owned_mobile_cron(move |cancel| async move {
+            llm_runtime::catalog_task::scope(owner.fire_session_scoped(
+                prompt,
+                automation.as_ref(),
+                request.as_ref(),
+                cancel,
+            ))
             .await
+        })
+        .await
     }
 
     async fn fire_session_scoped(
@@ -553,7 +639,11 @@ impl MobileTurnFirer {
         mut prompt: Utf16JsonProjection,
         automation: Option<&cron::CronAutomation>,
         request: Option<&cron::AutomationRunRequest>,
+        cancel: CancellationToken,
     ) -> Result<cron::AutomationRunResult, String> {
+        if cancel.is_cancelled() {
+            return Err("cancelled: Scheduled execution was cancelled by the host".into());
+        }
         let target = automation.and_then(|a| match a.run_mode {
             cron::RunMode::SelectedSession => a.target_session_id.as_deref(),
             cron::RunMode::TaskSession => a.owned_session_id.as_deref(),
@@ -606,6 +696,7 @@ impl MobileTurnFirer {
             ),
             None => None,
         };
+        let mut reader_transitions = Vec::new();
         let mut readers = Vec::new();
         if let Some(uuid) = target_uuid {
             // Fresh sessions cannot have foreground readers. Do not retain
@@ -620,12 +711,27 @@ impl MobileTurnFirer {
                 .collect();
             for reader in handles {
                 let handle: Arc<dyn OrchestratorHandle> = reader.inner.orchestrator.clone();
-                if reader.session_cwd() == cwd
+                if reader.lingxi_home == self.cfg.lingxi_home
+                    && reader.session_cwd() == cwd
                     && handle.current_session_id().await.as_uuid() == uuid
                 {
+                    // Foreground submission takes transition before the cron
+                    // gate; never wait in the reverse order. Holding this lease
+                    // also fences realtime and queued wake admission.
+                    let transition = reader
+                        .loop_transition
+                        .clone()
+                        .try_lock_owned()
+                        .map_err(|_| "busy: Conversation is changing".to_string())?;
+                    if reader.session_cwd() != cwd
+                        || handle.current_session_id().await.as_uuid() != uuid
+                    {
+                        return Err("busy: Conversation changed".into());
+                    }
                     if reader.active_cancel.lock().await.is_some() {
                         return Err("busy: Conversation has an active turn".into());
                     }
+                    reader_transitions.push(transition);
                     readers.push(reader);
                 }
             }
@@ -667,93 +773,84 @@ impl MobileTurnFirer {
         if let Some(uuid) = target_uuid {
             config.session_mode =
                 cron_target_session_mode(&config.lingxi_home, &cwd, uuid, host_fs.clone()).await?;
+            config.initial_session_id = Some(uuid.to_string());
         }
         if let Some(automation) = automation {
             config.default_model = automation.model.clone();
         }
-        let target_conversation_mode = config.session_mode;
-        let mut rt = build_mobile_inner(config, self.platform.clone(), listener, sink, None)
-            .await
-            .map_err(|e| {
-                if automation.is_some() {
-                    format!("paused: Scheduled runtime configuration is unavailable: {e}")
-                } else {
-                    e.to_string()
-                }
-            })?;
+        let borrowed_sessions = cleanup
+            .readers
+            .first()
+            .map(|reader| reader.inner.transcript_sessions.clone());
+        if let Some(owner) = &borrowed_sessions {
+            if cleanup
+                .readers
+                .iter()
+                .any(|reader| !Arc::ptr_eq(owner, &reader.inner.transcript_sessions))
+            {
+                return Err("busy: Multiple conversation owners".into());
+            }
+        }
+        let mut rt = super::assembly::build_mobile_inner_for_scheduled(
+            config,
+            self.platform.clone(),
+            listener,
+            sink,
+            borrowed_sessions,
+        )
+        .await
+        .map_err(|e| {
+            if automation.is_some() {
+                format!("paused: Scheduled runtime configuration is unavailable: {e}")
+            } else {
+                e.to_string()
+            }
+        })?;
         // The guard was installed before assembly to cover build failures and
         // is the sole cleanup owner for this short-lived scheduled runtime.
         debug_assert!(rt.media_attachment_confirmed_callback.is_none());
         drop(rt.media_attachment_handle.take());
+        if cancel.is_cancelled() {
+            drain_scheduled_child(rt.orchestrator.clone()).await;
+            return Err("cancelled: Scheduled execution was cancelled by the host".into());
+        }
 
         let handle: Arc<dyn OrchestratorHandle> = rt.orchestrator.clone();
-        if let Some(uuid) = target_uuid {
-            let replayed =
-                cron_replay_session(&self.cfg.lingxi_home, &cwd, uuid, host_fs.clone()).await?;
-            let (history, last_message, runtime) = match replayed {
-                Some(replayed) => (
-                    replayed.state.history.clone(),
-                    replayed.last_message_uuid.map(|id| id.to_string()),
-                    replayed.handle_runtime_snapshot(),
-                ),
-                None => (
-                    Vec::new(),
-                    None,
-                    lingxi_core::host::ResumeRuntimeSnapshot::default(),
-                ),
-            };
-            handle
-                .resume_session(
-                    lingxi_core::types::SessionId::from_uuid(uuid),
-                    history,
-                    last_message,
-                    None,
-                    runtime,
-                )
-                .await
-                .map_err(|error| format!("paused: Cannot restore conversation: {error}"))?;
-            rt.retarget_session_context(
-                &self.cfg.lingxi_home,
-                lingxi_core::types::SessionId::from_uuid(uuid),
-                &cwd,
-            )
-            .await;
-            handle
-                .restore_conversation_mode(target_conversation_mode)
-                .await
-                .map_err(|error| format!("paused: Cannot restore conversation mode: {error}"))?;
-        }
         let session_id = handle.current_session_id().await.as_uuid().to_string();
-        if target_uuid.is_none() && automation.is_some() {
-            // A configured turn can fail validation before appending a prompt.
-            // Anchor newly allocated identities before publishing the binding,
-            // so a repaired task can resume the same durable conversation.
-            rt.session_writer
-                .append_mobile_empty_session(
+        let preparation = async {
+            if target_uuid.is_none() && automation.is_some() {
+                // A configured turn can fail validation before appending a prompt.
+                // Anchor newly allocated identities before publishing the binding,
+                // so a repaired task can resume the same durable conversation.
+                rt.session_writer
+                    .append_mobile_empty_session(
+                        &session_id,
+                        automation
+                            .and_then(|a| a.name.as_deref())
+                            .unwrap_or("Scheduled task"),
+                        &cwd,
+                    )
+                    .await
+                    .map_err(|error| format!("persist scheduled session anchor: {error}"))?;
+            }
+            if let Some(workspace) = &workspace {
+                workspace.bind(&self.cfg.lingxi_home, &session_id)?;
+            }
+            if let Some(request) = request {
+                cron::bind_automation_run_session(
+                    model_fs.as_ref(),
+                    std::path::Path::new(&store_cwd),
+                    request,
                     &session_id,
-                    automation
-                        .and_then(|a| a.name.as_deref())
-                        .unwrap_or("Scheduled task"),
-                    &cwd,
                 )
-                .await
-                .map_err(|error| format!("persist scheduled session anchor: {error}"))?;
-            rt.session_writer
-                .append_session_mode_selection(&session_id, self.cfg.session_mode.as_str(), 0, 0)
-                .await
-                .map_err(|error| format!("persist scheduled session mode: {error}"))?;
+                .await?;
+            }
+            Ok::<(), String>(())
         }
-        if let Some(workspace) = &workspace {
-            workspace.bind(&self.cfg.lingxi_home, &session_id)?;
-        }
-        if let Some(request) = request {
-            cron::bind_automation_run_session(
-                model_fs.as_ref(),
-                std::path::Path::new(&store_cwd),
-                request,
-                &session_id,
-            )
-            .await?;
+        .await;
+        if let Err(error) = preparation {
+            drain_scheduled_child(rt.orchestrator.clone()).await;
+            return Err(error);
         }
         if let Some(route) = cleanup
             .media_attachment
@@ -839,41 +936,54 @@ impl MobileTurnFirer {
                     .await;
             }
         }));
-        let turn_cancel = CancellationToken::new();
-        let _cancel_turn_on_drop = turn_cancel.clone().drop_guard();
-        let run = async {
-            if let Some(automation) = automation {
-                let reasoning = if automation.reasoning.is_null() {
-                    lingxi_core::host::ReasoningSelection::Automatic
+        let turn_cancel = cancel;
+        let outcome = {
+            let run = async {
+                if let Some(automation) = automation {
+                    let reasoning = if automation.reasoning.is_null() {
+                        lingxi_core::host::ReasoningSelection::Automatic
+                    } else {
+                        serde_json::from_value(automation.reasoning.clone())
+                            .map_err(|e| format!("paused: {e}"))?
+                    };
+                    rt.orchestrator
+                        .run_scheduled_turn(
+                            prompt.clone(),
+                            &automation.model,
+                            reasoning,
+                            turn_cancel.clone(),
+                        )
+                        .await
+                        .and_then(cron_scheduled_turn_outcome)
                 } else {
-                    serde_json::from_value(automation.reasoning.clone())
-                        .map_err(|e| format!("paused: {e}"))?
-                };
-                rt.orchestrator
-                    .run_scheduled_turn(
-                        prompt.clone(),
-                        &automation.model,
-                        reasoning,
-                        turn_cancel.clone(),
-                    )
-                    .await
-                    .and_then(cron_scheduled_turn_outcome)
-            } else {
-                rt.orchestrator
-                    .run_turn_streaming_source_with_origin(
-                        prompt.clone(),
-                        Vec::new(),
-                        turn_cancel.clone(),
-                        None,
-                        true,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(cron_scheduled_turn_outcome)
+                    rt.orchestrator
+                        .run_turn_streaming_source_with_origin(
+                            prompt.clone(),
+                            Vec::new(),
+                            turn_cancel.clone(),
+                            None,
+                            true,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(cron_scheduled_turn_outcome)
+                }
+            };
+
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => Ok(result),
+                () = tokio::time::sleep(CRON_TURN_TIMEOUT) => {
+                    turn_cancel.cancel();
+                    // Never release the borrowed session gate while child cleanup
+                    // can still persist a prompt, result, or admission transaction.
+                    let _ = run.await;
+                    Err(())
+                }
             }
         };
-
-        let result = match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
+        drain_scheduled_child(rt.orchestrator.clone()).await;
+        let result = match outcome {
             Ok(Ok(_outcome)) => Ok(cron::AutomationRunResult {
                 session_id,
                 summary: captured.lock().await.clone(),
@@ -941,16 +1051,16 @@ pub(super) async fn cron_target_session_mode(
     fs: Arc<dyn FileSystem>,
 ) -> Result<session::jsonl::SessionMode, String> {
     let path = session::jsonl::session_path(home, cwd, &session_id.to_string());
-    let routed = session::jsonl::JsonlReader::new(path, fs)
-        .read_routed()
+    let source = fs
+        .read_file(&path.to_string_lossy(), None, None)
         .await
         .map_err(|error| format!("paused: Cannot read scheduled conversation mode: {error}"))?;
-    match routed.session_modes.get(&session_id.to_string()) {
-        Some(value) => session::jsonl::SessionMode::from_str(value)
-            .ok_or_else(|| "paused: Scheduled conversation mode is invalid".to_string()),
-        // Historical transcripts without explicit mode were Code sessions.
-        None => Ok(session::jsonl::SessionMode::Code),
-    }
+    session::jsonl::JsonlWriter::fixed_session_mode_from_source(
+        &source.content,
+        &session_id.to_string(),
+    )
+    .map(|profile| profile.active)
+    .map_err(|error| format!("paused: Scheduled conversation mode is invalid: {error}"))
 }
 
 pub(super) fn cron_scheduled_turn_outcome(
@@ -2138,5 +2248,59 @@ pub(super) fn finalize_cron_occurrence(
                 document.tasks.retain(|task| task.id != task_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod owned_cron_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn cancelled_caller_keeps_session_gate_until_cleanup_finishes() {
+        let gate = Arc::new(Mutex::new(()));
+        let entered = Arc::new(Notify::new());
+        let cleaning = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let done = Arc::new(Notify::new());
+        let caller = tokio::spawn({
+            let gate = gate.clone();
+            let entered = entered.clone();
+            let cleaning = cleaning.clone();
+            let release = release.clone();
+            let done = done.clone();
+            async move {
+                run_owned_mobile_cron(move |cancel| async move {
+                    let held = gate.lock().await;
+                    entered.notify_one();
+                    cancel.cancelled().await;
+                    cleaning.notify_one();
+                    release.notified().await;
+                    drop(held);
+                    done.notify_one();
+                    Ok(cron::AutomationRunResult {
+                        session_id: "same".into(),
+                        summary: String::new(),
+                    })
+                })
+                .await
+            }
+        });
+        entered.notified().await;
+        caller.abort();
+        let _ = caller.await;
+        tokio::time::timeout(Duration::from_secs(2), cleaning.notified())
+            .await
+            .unwrap();
+        assert!(
+            gate.try_lock().is_err(),
+            "the session gate must outlive the cancelled caller"
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), done.notified())
+            .await
+            .unwrap();
+        assert!(gate.try_lock().is_ok());
     }
 }

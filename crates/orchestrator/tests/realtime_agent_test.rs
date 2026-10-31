@@ -511,64 +511,46 @@ async fn connection_with_codec(
     (control, events, tokio::spawn(driver.run()), tx, sent)
 }
 #[tokio::test]
-async fn realtime_rejects_prepared_context_when_behavior_changes_before_admission() {
-    for switch_back in [false, true] {
-        let gate = Arc::new(Gate {
-            calls: AtomicUsize::new(0),
-            deny: false,
-            release: None,
-            approved: AtomicBool::new(false),
-        });
-        let (orch, calls) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
-        assert_eq!(prepared.conversation_mode.active, ConversationMode::Code);
-        orch.set_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
-        if switch_back {
-            orch.set_conversation_mode(ConversationMode::Code)
-                .await
-                .unwrap();
-        }
-        let current = orch.prepare_realtime_agent().await.unwrap();
-        assert_eq!(prepared.session_id, current.session_id);
-        assert_eq!(prepared.profile_name, current.profile_name);
-        assert_eq!(prepared.history, current.history);
-        assert_eq!(prepared.tools, current.tools);
-        assert_ne!(
-            prepared.conversation_mode.revision,
-            current.conversation_mode.revision
-        );
-        if !switch_back {
-            assert!(current.instructions.contains("research, writing, learning"));
-            assert_ne!(prepared.instructions, current.instructions);
-        }
-        let (control, events, driver, _provider, _) = connection().await;
-        let (_inputs_tx, inputs) = mpsc::channel(4);
-        let (output, _output_rx) = mpsc::channel(4);
-        let error = orch
-            .run_realtime_agent(
-                prepared,
-                control,
-                events,
-                inputs,
-                output,
-                RealtimeAgentLimits::default(),
-                false,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("conversation mode changed before realtime admission"));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
-    }
+async fn realtime_rejects_context_for_another_fixed_mode() {
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
+    let (orch, calls) = fixture(gate).await;
+    let mut prepared = orch.prepare_realtime_agent().await.unwrap();
+    assert_eq!(prepared.conversation_mode.active, ConversationMode::Code);
+    assert!(orch
+        .ensure_conversation_mode(ConversationMode::Chat)
+        .await
+        .is_err());
+    prepared.conversation_mode.active = ConversationMode::Chat;
+    let (control, events, driver, _provider, _) = connection().await;
+    let (_inputs_tx, inputs) = mpsc::channel(4);
+    let (output, _output_rx) = mpsc::channel(4);
+    let error = orch
+        .run_realtime_agent(
+            prepared,
+            control,
+            events,
+            inputs,
+            output,
+            RealtimeAgentLimits::default(),
+            false,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("conversation mode changed before realtime admission"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
 }
 
 #[tokio::test]
-async fn realtime_admission_rejects_a_profile_selected_during_the_previous_turn() {
+async fn realtime_running_turn_rejects_mode_change_without_interrupting_owner() {
     let release = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate {
         calls: AtomicUsize::new(0),
@@ -608,11 +590,14 @@ async fn realtime_admission_rejects_a_profile_selected_during_the_previous_turn(
         "previous realtime turn owns gate",
     )
     .await;
-    let pending = orch
-        .set_conversation_mode(ConversationMode::Chat)
+    assert!(orch
+        .ensure_conversation_mode(ConversationMode::Chat)
         .await
-        .unwrap();
-    assert!(pending.pending);
+        .is_err());
+    assert_eq!(
+        orch.conversation_mode().await.active,
+        ConversationMode::Code
+    );
     cancel.cancel();
     release.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), first)
@@ -620,29 +605,10 @@ async fn realtime_admission_rejects_a_profile_selected_during_the_previous_turn(
         .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
 
-    let (control, events, driver, _provider, _) = connection().await;
-    let (_inputs_tx, inputs) = mpsc::channel(4);
-    let (output, _output_rx) = mpsc::channel(4);
-    let error = orch
-        .run_realtime_agent(
-            prepared,
-            control,
-            events,
-            inputs,
-            output,
-            RealtimeAgentLimits::default(),
-            false,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("conversation mode changed before realtime admission"));
-    let selected = orch.conversation_mode().await;
-    assert_eq!(selected.active, ConversationMode::Chat);
-    assert!(!selected.pending);
-    let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
+    assert_eq!(
+        orch.conversation_mode().await.active,
+        ConversationMode::Code
+    );
 }
 
 #[tokio::test]

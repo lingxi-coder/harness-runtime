@@ -37,22 +37,23 @@ impl ConversationMode {
     }
 }
 
-/// A committed selection and the profile admitted for the running query.
+/// Read-only snapshot of the mode fixed for one session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionModeSnapshot {
-    /// Owning conversation; prevents pending selections crossing session changes.
+    /// Owning conversation.
     pub session_id: String,
-    /// Profile frozen for the current query.
+    /// Profile fixed when this session was created or migrated.
     pub active: ConversationMode,
-    /// Most recently persisted user selection.
+    /// Equal to `active` in current sessions.
     pub selected: ConversationMode,
-    /// Monotonic revision of the persisted selection within this session.
+    /// Revision retained from the session's persisted profile.
     pub revision: u64,
-    /// Whether the selection awaits the next query boundary.
+    /// Always false in current sessions.
     pub pending: bool,
 }
 
-/// Durable selection together with the profile admitted for an interrupted query.
+/// Durable profile and epoch. Historical records can carry a pending choice;
+/// restore resolves those records to their admitted mode and epoch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionModeTransition {
     /// Most recently selected profile.

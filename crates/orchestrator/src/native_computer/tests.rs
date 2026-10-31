@@ -2230,29 +2230,24 @@ async fn fresh_owner_reuses_prepared_receipt_and_published_output_without_input(
 }
 
 #[tokio::test]
-async fn profile_change_keeps_pending_receipt_recoverable_then_retires_old_continuation() {
+async fn fixed_mode_rejection_keeps_pending_receipt_recoverable() {
     use lingxi_core::host::session_context::ConversationMode;
 
     for cold in [false, true] {
         let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
         let (_, saved) = fixture.prepared_receipt().await;
         let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
-        let turn = fixture.orch.turn_gate.lock().await;
-        assert!(
-            fixture
-                .orch
-                .select_conversation_mode(ConversationMode::Chat)
-                .await
-                .unwrap()
-                .pending
-        );
+        assert!(fixture
+            .orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
         let before = prepare_projection(&fixture.orch, MODEL, None, &catalog)
             .await
             .unwrap()
             .unwrap();
         assert!(before.continuation.is_some());
         assert!(!before.ordinary_history);
-        drop(turn);
 
         if cold {
             fixture.forget_runtime().await;
@@ -2262,33 +2257,16 @@ async fn profile_change_keeps_pending_receipt_recoverable_then_retires_old_conti
                 .await
                 .unwrap();
         }
-        let turn = fixture.orch.turn_gate.lock().await;
-        let error = fixture
+        let profile = fixture
             .orch
-            .admit_conversation_profile_inner()
+            .ensure_conversation_mode(ConversationMode::Code)
             .await
-            .unwrap_err();
-        drop(turn);
-        assert!(error.to_string().contains("computer receipt"));
-        let profile = fixture.orch.conversation_profile().await;
+            .unwrap();
         assert_eq!(
             (profile.active, profile.selected, profile.pending),
             (ConversationMode::Code, ConversationMode::Code, false)
         );
-        assert_eq!(profile.revision, 2);
-        let durable = fixture
-            .orch
-            .transcript
-            .jsonl_writer
-            .as_ref()
-            .unwrap()
-            .persisted_session_mode_transition()
-            .await
-            .unwrap();
-        assert_eq!(
-            (durable.active, durable.selected, durable.pending),
-            (ConversationMode::Code, ConversationMode::Code, false)
-        );
+        assert_eq!(profile.revision, 0);
 
         // The old-profile receipt still has its original continuation and can be
         // submitted exactly once; no computer operation is re-executed.
@@ -2305,11 +2283,11 @@ async fn profile_change_keeps_pending_receipt_recoverable_then_retires_old_conti
         fixture.accept_response(&response).await.unwrap();
         assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
 
-        fixture
+        assert!(fixture
             .orch
-            .select_conversation_mode(ConversationMode::Chat)
+            .ensure_conversation_mode(ConversationMode::Chat)
             .await
-            .unwrap();
+            .is_err());
         if cold {
             fixture.forget_runtime().await;
         }
@@ -2317,9 +2295,7 @@ async fn profile_change_keeps_pending_receipt_recoverable_then_retires_old_conti
             .await
             .unwrap()
             .unwrap();
-        assert!(fresh.continuation.is_none());
         assert!(fresh.submission.is_none());
-        assert!(fresh.ordinary_history);
     }
 }
 
@@ -2393,7 +2369,7 @@ async fn independent_branch_rejects_unsettled_receipt_and_accepts_settled_source
 }
 
 #[tokio::test]
-async fn profile_epoch_fences_openai_and_gemini_continuations_after_cold_recovery() {
+async fn fixed_mode_retains_provider_continuations_after_cold_recovery() {
     use lingxi_core::host::session_context::ConversationMode;
 
     for provider in [
@@ -2420,30 +2396,17 @@ async fn profile_epoch_fences_openai_and_gemini_continuations_after_cold_recover
         }
         fixture.accept_response(&old).await.unwrap();
         let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
-        let turn = fixture.orch.turn_gate.lock().await;
-        assert!(
-            fixture
-                .orch
-                .select_conversation_mode(ConversationMode::Chat)
-                .await
-                .unwrap()
-                .pending
-        );
-        let pending = prepare_projection(&fixture.orch, MODEL, None, &catalog)
+        assert!(fixture
+            .orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
+        let current = prepare_projection(&fixture.orch, MODEL, None, &catalog)
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            pending.continuation.is_some(),
-            "old admitted query retains its continuation"
-        );
-        fixture
-            .orch
-            .admit_conversation_profile_inner()
-            .await
-            .unwrap();
-        drop(turn);
-        assert!(!fixture
+        assert!(current.continuation.is_some());
+        assert!(fixture
             .orch
             .session
             .lock()
@@ -2461,13 +2424,13 @@ async fn profile_epoch_fences_openai_and_gemini_continuations_after_cold_recover
             .await
             .unwrap()
             .unwrap();
-        assert!(fresh.continuation.is_none());
-        assert!(fresh.ordinary_history);
+        assert!(fresh.continuation.is_some());
+        assert!(!fresh.ordinary_history);
     }
 }
 
 #[tokio::test]
-async fn retired_continuation_keeps_new_anthropic_receipt_in_the_actual_request() {
+async fn provider_change_keeps_new_anthropic_receipt_in_the_actual_request() {
     use lingxi_core::host::session_context::ConversationMode;
 
     for old_provider in [
@@ -2540,11 +2503,11 @@ async fn retired_continuation_keeps_new_anthropic_receipt_in_the_actual_request(
                 set_continuation_response_id(&mut old_successor);
             }
             fixture.accept_response(&old_successor).await.unwrap();
-            fixture
+            assert!(fixture
                 .orch
-                .select_conversation_mode(ConversationMode::Chat)
+                .ensure_conversation_mode(ConversationMode::Chat)
                 .await
-                .unwrap();
+                .is_err());
 
             *fixture.api.provider.lock().unwrap() = NativeComputerProvider::Anthropic;
             fixture
@@ -3055,52 +3018,24 @@ async fn full_compaction_preserves_abandonment_authority_but_not_pending_receipt
                 unresolved,
                 "unresolved={unresolved}, cold={cold}"
             );
-            let turn = fixture.orch.turn_gate.lock().await;
-            let queued = fixture
+            assert!(fixture
                 .orch
-                .select_conversation_mode(ConversationMode::Chat)
+                .ensure_conversation_mode(ConversationMode::Chat)
+                .await
+                .is_err());
+            let state = fixture
+                .orch
+                .ensure_conversation_mode(ConversationMode::Code)
                 .await
                 .unwrap();
-            assert!(queued.pending);
-            let admission = fixture.orch.admit_conversation_profile_inner().await;
-            drop(turn);
-            if unresolved {
-                assert!(admission
-                    .unwrap_err()
-                    .to_string()
-                    .contains("computer receipt"));
-                let state = fixture.orch.conversation_profile().await;
-                assert_eq!(
-                    (state.active, state.selected, state.pending),
-                    (ConversationMode::Code, ConversationMode::Code, false)
-                );
-            } else {
-                admission.unwrap();
-                let state = fixture.orch.conversation_profile().await;
-                assert_eq!(
-                    (state.active, state.selected, state.pending),
-                    (ConversationMode::Chat, ConversationMode::Chat, false)
-                );
-                fixture
-                    .orch
-                    .select_conversation_mode(ConversationMode::Code)
-                    .await
-                    .unwrap();
-            }
-            let selection = fixture
-                .orch
-                .select_conversation_mode(ConversationMode::Chat)
-                .await;
-            if unresolved {
-                assert!(selection
-                    .unwrap_err()
-                    .to_string()
-                    .contains("computer receipt"));
-                assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
-            } else {
-                assert!(!selection.unwrap().pending);
-                assert_eq!(fixture.computer.calls.lock().unwrap().len(), 0);
-            }
+            assert_eq!(
+                (state.active, state.selected, state.pending),
+                (ConversationMode::Code, ConversationMode::Code, false)
+            );
+            assert_eq!(
+                fixture.computer.calls.lock().unwrap().len(),
+                usize::from(unresolved)
+            );
         }
     }
 }
@@ -3276,14 +3211,11 @@ async fn full_compaction_relinks_noncontiguous_abandonment_rows_on_cold_resume()
         drop(session);
         fixture.forget_runtime().await;
         assert!(!has_unsettled_profile_receipts(&fixture.orch).await.unwrap());
-        assert!(
-            !fixture
-                .orch
-                .select_conversation_mode(ConversationMode::Chat)
-                .await
-                .unwrap()
-                .pending
-        );
+        assert!(fixture
+            .orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
     }
 }
 
@@ -3452,14 +3384,11 @@ async fn failed_native_compaction_stage_keeps_history_and_tip_on_cold_append() {
     drop(session);
     fixture.forget_runtime().await;
     assert!(!has_unsettled_profile_receipts(&fixture.orch).await.unwrap());
-    assert!(
-        !fixture
-            .orch
-            .select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap()
-            .pending
-    );
+    assert!(fixture
+        .orch
+        .ensure_conversation_mode(ConversationMode::Chat)
+        .await
+        .is_err());
 }
 
 #[tokio::test]

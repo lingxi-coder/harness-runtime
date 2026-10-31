@@ -1574,28 +1574,6 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         }
     }
 
-    async fn set_conversation_mode(
-        &self,
-        mode: lingxi_core::host::session_context::ConversationMode,
-    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        {
-            let mut profile = self.conversation_profile.lock().unwrap();
-            if profile.0 != mode {
-                profile.0 = mode;
-                profile.1 += 1;
-            }
-        }
-        Ok(self.conversation_mode().await)
-    }
-
-    async fn restore_conversation_mode(
-        &self,
-        mode: lingxi_core::host::session_context::ConversationMode,
-    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        *self.conversation_profile.lock().unwrap() = (mode, 0);
-        Ok(self.conversation_mode().await)
-    }
-
     async fn current_session_id(&self) -> SessionId {
         self.session_id
     }

@@ -276,6 +276,9 @@ mod session_usage_tests;
 #[path = "conversation/tests/session_append_tests.rs"]
 mod session_append_tests;
 
+#[path = "conversation/tests/session_handoff_tests.rs"]
+mod session_handoff_tests;
+
 #[path = "conversation/tests/mod_session_receive_tests.rs"]
 mod mod_session_receive_tests;
 

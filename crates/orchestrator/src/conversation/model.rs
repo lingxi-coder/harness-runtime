@@ -2057,6 +2057,166 @@ impl ConversationOrchestrator {
     /// the byte-audit copy in `command-core`'s `recap.rs` test.
     pub(crate) const RECAP_PROMPT: &str = "The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.";
 
+    /// Capture committed history without waiting for the active turn to finish.
+    /// The writer transaction is released before prefix assembly or model I/O.
+    pub async fn capture_session_handoff(
+        &self,
+        expected_session_id: SessionId,
+        target_mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<crate::session_handoff::SessionHandoffCapture, lingxi_core::host::HandleError> {
+        use lingxi_core::host::HandleError;
+        use sha2::{Digest, Sha256};
+        let session_id = self.session.lock().await.session_id;
+        if session_id != expected_session_id {
+            return Err(HandleError::ActionFailed(
+                "handoff source session changed".into(),
+            ));
+        }
+        let writer = self.transcript.jsonl_writer.as_ref().ok_or_else(|| {
+            HandleError::ActionFailed("handoff requires a persisted conversation".into())
+        })?;
+        let captured = writer
+            .capture_committed_transcript(session_id.as_uuid())
+            .await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        let profile = session::JsonlWriter::fixed_session_mode_from_source(
+            &captured.source,
+            &session_id.as_uuid().to_string(),
+        )
+        .map_err(HandleError::ActionFailed)?;
+        if profile.active == target_mode {
+            return Err(HandleError::ActionFailed(
+                "handoff target must use the other mode".into(),
+            ));
+        }
+        let cutoff = format!(
+            "sha256:{:x}:{}",
+            Sha256::digest(captured.source.as_bytes()),
+            captured.source.len()
+        );
+        let loaded = session::jsonl::route_lines(&captured.source);
+        // The evidence projection preserves the committed UTF-16 source rather
+        // than applying the native assistant-resume text replacement boundary.
+        let replayed = crate::resume::replay_persistent_app_chat_session(
+            captured.transcript_path,
+            captured.source,
+            loaded,
+            session_id.as_uuid(),
+        )
+        .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        let history = crate::session_handoff::evidence(replayed.state.model_context_history());
+        if history.is_empty() {
+            return Err(HandleError::ActionFailed(
+                "handoff requires a non-empty conversation".into(),
+            ));
+        }
+        // Construct only the route and immutable evidence needed here. The
+        // general side-query fallback builds wire tools, updates model/tool
+        // caches and assembles prompts from live state, none of which belongs
+        // to a read-only handoff.
+        let (model, model_profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        let model_source = self
+            .main_model_source_for_request(&model, model_profile.as_deref())
+            .await;
+        let params = sidequery::CacheSafeParams {
+            system_prompt: Arc::new(crate::session_handoff::HANDOFF_SYSTEM.into()),
+            system_prompt_input: None,
+            user_context: Default::default(),
+            system_context: Default::default(),
+            user_context_message: None,
+            tool_use_options: tool_api::ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: model,
+                model_profile,
+                max_budget_nano_usd: None,
+                mcp_clients: Vec::new(),
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            model_source,
+            tools: Vec::new(),
+            effort: None,
+            fork_context_messages: history,
+            typed_attachment_ids: Default::default(),
+            task_deliveries: Default::default(),
+            transcript_path: None,
+            generation: 0,
+        };
+        if self.session.lock().await.session_id != expected_session_id {
+            return Err(HandleError::ActionFailed(
+                "handoff source session changed".into(),
+            ));
+        }
+        Ok(crate::session_handoff::SessionHandoffCapture {
+            source_session_id: session_id.as_uuid().to_string(),
+            source_mode: profile.active,
+            target_mode,
+            cutoff,
+            params,
+        })
+    }
+
+    /// One isolated, tool-denied summary request over an already fixed cutoff.
+    /// This does not compact, save a prompt cache, mutate history or fire hooks.
+    pub async fn summarize_session_handoff(
+        &self,
+        capture: &crate::session_handoff::SessionHandoffCapture,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<crate::session_handoff::SessionHandoffSummary, lingxi_core::host::HandleError> {
+        use lingxi_core::host::HandleError;
+        let runner = self
+            .recap_runner
+            .clone()
+            .ok_or_else(|| HandleError::ActionFailed("handoff summary is unavailable".into()))?;
+        let request = sidequery::ForkedAgentRequest {
+            api_attempts_left: None,
+            prompt_messages: vec![ConversationMessage::user(MessageId::new(), format!(
+                "Prepare a handoff from {} to {}. Source session: {}. Durable cutoff: {}.\nThe target is a new conversation which starts only after the user edits and sends the summary.",
+                capture.source_mode.as_str(), capture.target_mode.as_str(), capture.source_session_id, capture.cutoff,
+            ))],
+            cache_safe_params: capture.params.clone(),
+            fork_label: "session_handoff".into(),
+            query_source: sidequery::QuerySource::Custom("session_handoff".into()),
+            max_output_tokens: Some(2048),
+        };
+        let observer = self.model_safety_observer().await;
+        let response = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(HandleError::ActionFailed("handoff cancelled".into())),
+            result = lingxi_core::host::model_safety::bind_model_safety(observer, runner.run(request)) =>
+                result.map_err(|error| HandleError::ActionFailed(error.to_string()))?,
+        };
+        if !response.tool_calls.is_empty() {
+            return Err(HandleError::ActionFailed(
+                "handoff returned a tool request instead of a summary".into(),
+            ));
+        }
+        let summary = source_trimmed_text(&response.final_text);
+        if source_text_is_empty(&summary) {
+            return Err(HandleError::ActionFailed(
+                "handoff summary was empty".into(),
+            ));
+        }
+        Ok(crate::session_handoff::SessionHandoffSummary {
+            source_session_id: capture.source_session_id.clone(),
+            source_mode: capture.source_mode,
+            target_mode: capture.target_mode,
+            cutoff: capture.cutoff.clone(),
+            summary,
+        })
+    }
+
+    /// Wait until a running or detached turn has released its session gate.
+    /// Hosts use this only after closing admission for an isolated owner.
+    pub async fn wait_for_turn_idle(&self) {
+        let _guard = self.turn_gate.lock().await;
+    }
+
     /// Rebuild a side-query prefix when a profile boundary invalidated the
     /// last main request. Do not publish this provisional prefix to the slot.
     async fn side_query_params_after_profile_boundary(

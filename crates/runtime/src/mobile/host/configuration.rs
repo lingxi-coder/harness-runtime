@@ -58,6 +58,9 @@ pub struct MobileConfig {
     pub default_model: String,
     /// Capability profile the mobile conversation runs under.
     pub session_mode: session::jsonl::SessionMode,
+    /// Mount this existing conversation directly, or create a new one when absent.
+    /// On resume `session_mode` must match the transcript's fixed mode.
+    pub initial_session_id: Option<String>,
     /// Optional host-owned model-invocable skill grants for this session.
     /// `None` offers every eligible skill; an empty list offers none.
     pub session_skill_allowlist: Option<Vec<String>>,
@@ -167,6 +170,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("session_mode", &self.session_mode.as_str())
+            .field("initial_session_id", &self.initial_session_id)
             .field("session_skill_allowlist", &self.session_skill_allowlist)
             .field("workspace_trusted", &self.workspace_trusted)
             .field("inline_visualization", &self.inline_visualization)
@@ -253,6 +257,7 @@ impl Default for MobileConfig {
             lingxi_home: std::path::PathBuf::new(),
             default_model: crate::mobile::MobileEngineConfig::default().default_model,
             session_mode: session::jsonl::SessionMode::Code,
+            initial_session_id: None,
             session_skill_allowlist: None,
             workspace_trusted: false,
             inline_visualization: false,

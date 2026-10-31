@@ -271,9 +271,51 @@ fn current_contract_index() -> ContractIndex {
         ix.insert(path.to_string(), ty.to_string());
     };
 
-    put("ClientCommand::SetSessionMode", "set_session_mode");
-    put("ClientCommand::SetSessionMode.mode", "SessionModeDto");
     put("ClientCommand::GetContextManifest", "get_context_manifest");
+    put(
+        "ClientCommand::PrepareSessionHandoff",
+        "prepare_session_handoff",
+    );
+    put("ClientCommand::PrepareSessionHandoff.request_id", "String");
+    put(
+        "ClientCommand::PrepareSessionHandoff.target_mode",
+        "SessionModeDto",
+    );
+    put(
+        "ClientCommand::CancelSessionHandoff",
+        "cancel_session_handoff",
+    );
+    put("ClientCommand::CancelSessionHandoff.request_id", "String");
+    put("ClientCommand::RetrySessionHandoff", "retry_session_handoff");
+    put("ClientCommand::RetrySessionHandoff.request_id", "String");
+    put(
+        "ClientEvent::SessionHandoffPrepared",
+        "session_handoff_prepared",
+    );
+    put("ClientEvent::SessionHandoffPrepared.request_id", "String");
+    put(
+        "ClientEvent::SessionHandoffPrepared.source_session_id",
+        "String",
+    );
+    put(
+        "ClientEvent::SessionHandoffPrepared.source_mode",
+        "SessionModeDto",
+    );
+    put(
+        "ClientEvent::SessionHandoffPrepared.target_mode",
+        "SessionModeDto",
+    );
+    put("ClientEvent::SessionHandoffPrepared.cutoff", "String");
+    put(
+        "ClientEvent::SessionHandoffPrepared.summary",
+        "ClientTextDto",
+    );
+    put(
+        "ClientEvent::SessionHandoffFailed",
+        "session_handoff_failed",
+    );
+    put("ClientEvent::SessionHandoffFailed.request_id", "String");
+    put("ClientEvent::SessionHandoffFailed.message", "String");
     put("ClientEvent::SessionModeChanged", "session_mode_changed");
     put("ClientEvent::SessionModeChanged.session_id", "String");
     put("ClientEvent::SessionModeChanged.mode", "SessionModeDto");
@@ -1166,13 +1208,19 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::NewSession", "new_session");
     put("ClientCommand::NewSession.cwd", "Option<String>");
     put("ClientCommand::NewSession.model", "Option<ClientTextDto>");
+    put("ClientCommand::NewSession.mode", "SessionModeDto");
 
     put("ClientCommand::ResumeSession", "resume_session");
     put("ClientCommand::ResumeSession.session_id", "String");
     put("ClientCommand::ResumeSession.cwd", "Option<String>");
+    put(
+        "ClientCommand::ResumeSession.expected_mode",
+        "SessionModeDto",
+    );
 
     put("ClientCommand::ListSessions", "list_sessions");
     put("ClientCommand::ListSessions.limit", "Option<u32>");
+    put("ClientCommand::ListSessions.mode", "Option<SessionModeDto>");
 
     put("ClientCommand::Login", "login");
     put("ClientCommand::Logout", "logout");
@@ -3220,8 +3268,20 @@ fn contract_index_covers_every_dto() {
         ClientEvent::SessionModeChanged {
             session_id: String::new(),
             mode: SessionModeDto::Chat,
-            pending_mode: Some(SessionModeDto::Code),
+            pending_mode: None,
             revision: 0,
+        },
+        ClientEvent::SessionHandoffPrepared {
+            request_id: "1".into(),
+            source_session_id: "s".into(),
+            source_mode: SessionModeDto::Code,
+            target_mode: SessionModeDto::Chat,
+            cutoff: "cutoff".into(),
+            summary: ClientTextDto::from_utf8("summary"),
+        },
+        ClientEvent::SessionHandoffFailed {
+            request_id: "1".into(),
+            message: "error".into(),
         },
         ClientEvent::ContextManifest {
             manifest_json: String::new(),
@@ -3637,8 +3697,15 @@ fn contract_index_covers_every_dto() {
     };
     let _skill_admin = skill_admin_command.clone();
     let _cmd: Vec<ClientCommand> = vec![
-        ClientCommand::SetSessionMode {
-            mode: SessionModeDto::Chat,
+        ClientCommand::PrepareSessionHandoff {
+            request_id: "1".into(),
+            target_mode: SessionModeDto::Chat,
+        },
+        ClientCommand::CancelSessionHandoff {
+            request_id: "1".into(),
+        },
+        ClientCommand::RetrySessionHandoff {
+            request_id: "1".into(),
         },
         ClientCommand::GetContextManifest,
         ClientCommand::ListProviderCredentials {

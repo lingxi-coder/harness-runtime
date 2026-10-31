@@ -789,6 +789,32 @@ impl PartialEq for MainLoopAssistantUsageSnapshot {
 
 impl Eq for MainLoopAssistantUsageSnapshot {}
 
+/// Host-owned capability kept alive until an admitted resume finishes. This is
+/// process-local state, never a transcript or client-protocol value.
+#[derive(Clone)]
+pub struct ResumeLifetimeGuard(std::sync::Arc<dyn Send + Sync>);
+
+impl ResumeLifetimeGuard {
+    /// Retain an arbitrary host reservation through the owned resume task.
+    pub fn new<T: Send + Sync + 'static>(guard: T) -> Self {
+        Self(std::sync::Arc::new(guard))
+    }
+}
+
+impl std::fmt::Debug for ResumeLifetimeGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResumeLifetimeGuard(..)")
+    }
+}
+
+impl PartialEq for ResumeLifetimeGuard {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ResumeLifetimeGuard {}
+
 /// Transcript-adjacent runtime state needed by an in-place session resume.
 ///
 /// This leaf-friendly mirror deliberately uses primitive fields instead of
@@ -798,6 +824,8 @@ impl Eq for MainLoopAssistantUsageSnapshot {}
 /// the JSONL loader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeRuntimeSnapshot {
+    /// Host reservation that must outlive detached resume work.
+    pub lifetime_guard: Option<ResumeLifetimeGuard>,
     /// Exact transcript selected by the loader. A cross-worktree resume keeps
     /// appending here even when the stored working directory no longer exists.
     pub transcript_path: Option<std::path::PathBuf>,
@@ -2685,26 +2713,7 @@ pub struct PromptSuggestionResult {
 /// `ConversationOrchestrator` does NOT yet implement it.
 #[async_trait]
 pub trait OrchestratorHandle: Send + Sync {
-    /// Persist a profile selection; a running query retains its admitted profile.
-    async fn set_conversation_mode(
-        &self,
-        _mode: super::session_context::ConversationMode,
-    ) -> Result<super::session_context::SessionModeSnapshot, HandleError> {
-        Err(HandleError::Unimplemented("set_conversation_mode".into()))
-    }
-
-    /// Restore a transcript's profile after the host has mounted its history.
-    /// This does not append another selection record.
-    async fn restore_conversation_mode(
-        &self,
-        _mode: super::session_context::ConversationMode,
-    ) -> Result<super::session_context::SessionModeSnapshot, HandleError> {
-        Err(HandleError::Unimplemented(
-            "restore_conversation_mode".into(),
-        ))
-    }
-
-    /// Read the selected and currently admitted profiles without a model call.
+    /// Read the session's fixed profile without a model call.
     async fn conversation_mode(&self) -> super::session_context::SessionModeSnapshot {
         super::session_context::SessionModeSnapshot {
             session_id: self.current_session_id().await.as_uuid().to_string(),

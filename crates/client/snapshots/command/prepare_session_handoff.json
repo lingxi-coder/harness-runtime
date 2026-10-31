@@ -1,0 +1,5 @@
+{
+  "type": "prepare_session_handoff",
+  "request_id": "handoff-1",
+  "target_mode": "chat"
+}

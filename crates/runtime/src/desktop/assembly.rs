@@ -895,12 +895,50 @@ pub async fn build_with_credential_stack(
 ) -> Result<DesktopRuntime, BuildError> {
     super::team_invocation::enforce_team_config(&mut cfg)?;
     super::app_invocation::enforce_app_config(&mut cfg)?;
+    // Resolve and validate fixed ownership before opening a writer or running
+    // any startup effects. A restored session never adopts a UI selection.
+    let initial_conversation_mode = cfg.initial_conversation_mode.take();
+    let captured_mode = cfg
+        .session_resume_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            session::JsonlWriter::fixed_session_mode_from_source(
+                &snapshot.content,
+                &snapshot.source_session_id,
+            )
+            .map(|profile| profile.active)
+            .map_err(|error| {
+                BuildError::Orchestrator(format!("invalid resumed session mode: {error}"))
+            })
+        })
+        .transpose()?;
+    if let (Some(expected), Some(actual)) = (initial_conversation_mode, captured_mode) {
+        if expected != actual {
+            return Err(BuildError::Orchestrator(format!(
+                "session mode mismatch: expected {}, found {}",
+                expected.as_str(),
+                actual.as_str()
+            )));
+        }
+    }
+    let construction_mode = captured_mode
+        .or(initial_conversation_mode)
+        .unwrap_or_default();
     let app_chat_mount = super::app_invocation::chat::open(
         &cfg,
         Arc::new(DesktopFileSystem::new(cfg.cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
     )
     .await?;
     let is_app_chat = app_chat_mount.is_some();
+    // App-owned Chat has a separate transcript and lifecycle. Its captured
+    // profile, not the ordinary conversation's selected space, is authoritative.
+    let construction_mode = if let Some(source) = app_chat_mount.as_ref().and_then(|chat| chat.source.as_ref()) {
+        session::JsonlWriter::fixed_session_mode_from_source(source.source(), &source.session_id().to_string())
+            .map_err(BuildError::Orchestrator)?
+            .active
+    } else {
+        construction_mode
+    };
     let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
         .with_tool_aliases(cfg.tool_aliases.clone())
         .map_err(BuildError::InvalidToolAliases)?;
@@ -909,7 +947,6 @@ pub async fn build_with_credential_stack(
     let permission_timeout = cfg.resolved_permission_timeout()?;
     // This choice belongs only to this construction; no settings, cron,
     // workflow or other cloned child configuration may inherit it.
-    let initial_conversation_mode = cfg.initial_conversation_mode.take();
     let target_resume_snapshot = cfg.session_resume_target_snapshot.take();
     // The foreground launch owner is construction-only. A short-lived cron
     // or other child must never rebind its registry or close its admission.
@@ -5955,6 +5992,7 @@ pub async fn build_with_credential_stack(
         memory,
         cwd.clone(),
     )
+    .with_conversation_mode(construction_mode)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
     .with_native_model_settings_snapshot(crate::native_model_settings::snapshot(Some(
         &effective_settings,
@@ -6389,15 +6427,12 @@ pub async fn build_with_credential_stack(
         model_provenance,
     ))
     .await?;
-    // A cold resume must finish its original profile's hooks and deferred
-    // recovery before its host applies an explicit new selection. Deferred
-    // headless builds likewise own this step at their mount boundary.
-    if !cfg.defer_session_start && cfg.session_resume_snapshot.is_none() {
-        if let Some(mode) = initial_conversation_mode {
-            orch.set_conversation_mode(mode)
-                .await
-                .map_err(|error| BuildError::Orchestrator(error.to_string()))?;
-        }
+    // Deferred headless mounts initialize only after installing their captured
+    // history. App Chat uses its own transcript identity and lifecycle.
+    if !cfg.defer_session_start && !is_app_chat {
+        orch.initialize_conversation_mode()
+            .await
+            .map_err(|error| BuildError::Orchestrator(error.to_string()))?;
     }
     orch.enable_goal_retries();
     orch.attach_owned_session_switches();

@@ -1503,6 +1503,13 @@ async fn enrich_candidate_uncached(
         }
     };
     *scoped_cwd = scoped_cwd_from_source(&content);
+    let mode = match crate::jsonl::JsonlWriter::fixed_session_mode_from_source(&content, &stem) {
+        Ok(profile) => profile.active,
+        Err(_) => {
+            *skipped_files += 1;
+            return Ok(None);
+        }
+    };
     // The parse is the whole cost of a row: keep it off the async workers so
     // concurrent rows (see `enrich_candidates`) parse on separate threads.
     let loaded = match tokio::task::spawn_blocking(move || route_lines(&content)).await {
@@ -1663,11 +1670,6 @@ async fn enrich_candidate_uncached(
         .get(sid)
         .or_else(|| loaded.ai_titles.get(sid))
         .cloned();
-    let mode = loaded
-        .session_modes
-        .get(sid)
-        .and_then(|value| SessionMode::from_str(value))
-        .unwrap_or(SessionMode::Code);
     let (resume_model, resume_model_profile) = persisted_model_ref(&loaded, tip);
     let workspace_path = scoped_cwd
         .as_deref()
@@ -2067,6 +2069,71 @@ pub async fn list_recent_sessions_in_scope_with_worktrees(
         None,
     )
     .await
+}
+
+/// List one fixed mode, applying the limit only after the entire scope has
+/// been discovered and filtered. `None` keeps the ordinary catalog behavior.
+pub async fn list_recent_sessions_in_scope_with_mode(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+    mode: Option<SessionMode>,
+) -> Result<SessionCatalog, LoaderError> {
+    let worktrees = if scope == SessionDiscoveryScope::Repository {
+        git_worktree_paths(cwd)
+    } else {
+        Vec::new()
+    };
+    list_recent_sessions_in_scope_with_worktrees_and_mode(
+        lingxi_home,
+        cwd,
+        scope,
+        limit,
+        fs,
+        &worktrees,
+        mode,
+    )
+    .await
+}
+
+/// Mode-aware catalog for hosts which resolve worktree roots themselves.
+pub async fn list_recent_sessions_in_scope_with_worktrees_and_mode(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+    mode: Option<SessionMode>,
+) -> Result<SessionCatalog, LoaderError> {
+    let Some(mode) = mode else {
+        return list_recent_sessions_in_scope_with_worktrees(
+            lingxi_home,
+            cwd,
+            scope,
+            limit,
+            fs,
+            worktree_paths,
+        )
+        .await;
+    };
+    let mut catalog = list_recent_sessions_inner_with_diagnostics(
+        lingxi_home,
+        cwd,
+        scope,
+        usize::MAX,
+        &fs,
+        worktree_paths,
+        None,
+    )
+    .await?;
+    catalog.sessions.retain(|row| row.mode == mode);
+    if limit > 0 {
+        catalog.sessions.truncate(limit);
+    }
+    Ok(catalog)
 }
 
 /// [`list_recent_sessions_with_diagnostics`] narrowed to one session: the
@@ -2552,6 +2619,24 @@ pub async fn load_routed_session_from_path_with_source(
     expected_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<(PathBuf, String, LoadedTranscript), LoaderError> {
+    let content = fs
+        .read_file(path.to_str().expect("UTF-8 transcript path"), None, None)
+        .await
+        .map_err(|error| LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::other(error.to_string()),
+        })?
+        .content;
+    let loaded = route_captured_session_source(path, expected_id, &content)?;
+    Ok((path.to_path_buf(), content, loaded))
+}
+
+/// Validate an already captured source without reading a mutable file again.
+pub fn route_captured_session_source(
+    path: &Path,
+    expected_id: Uuid,
+    content: &str,
+) -> Result<LoadedTranscript, LoaderError> {
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -2563,15 +2648,7 @@ pub async fn load_routed_session_from_path_with_source(
             arg: expected_id.to_string(),
         });
     }
-    let content = fs
-        .read_file(path.to_str().expect("UTF-8 transcript path"), None, None)
-        .await
-        .map_err(|error| LoaderError::Io {
-            arg: path.display().to_string(),
-            source: std::io::Error::other(error.to_string()),
-        })?
-        .content;
-    let loaded = route_lines(&content);
+    let loaded = route_lines(content);
     if !native_exact_preserved_valid_for(&loaded, &expected_id.to_string()) {
         return Err(LoaderError::Io {
             arg: path.display().to_string(),
@@ -2582,11 +2659,13 @@ pub async fn load_routed_session_from_path_with_source(
         });
     }
     if loaded.messages_in_order.is_empty()
-        && !stem.is_some_and(|stem| loaded.mobile_empty_sessions.contains(stem))
+        && !loaded
+            .mobile_empty_sessions
+            .contains(&expected_id.to_string())
     {
         return Err(LoaderError::EmptyDirectory);
     }
-    Ok((path.to_path_buf(), content, loaded))
+    Ok(loaded)
 }
 
 /// Resolve CLI `--resume UUID` through native FIe: current full transcript,
@@ -6187,6 +6266,48 @@ mod tests {
         .expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].uuid, main);
+    }
+
+    #[tokio::test]
+    async fn mode_filter_precedes_catalog_limit_even_after_two_hundred_other_sessions() {
+        use std::io::Write;
+
+        let (temp, home, cwd, dir) = setup();
+        let base = SystemTime::now() - Duration::from_secs(3_600);
+        let chat = write_session(&dir, &cwd, "older chat", base, false, None);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(format!("{chat}.jsonl")))
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"session-mode", "sessionId":chat.to_string(), "sessionMode":"chat"})
+        )
+        .unwrap();
+        for index in 0..205 {
+            write_session(
+                &dir,
+                &cwd,
+                &format!("code {index}"),
+                base + Duration::from_secs(index + 1),
+                false,
+                None,
+            );
+        }
+        let catalog = list_recent_sessions_in_scope_with_worktrees_and_mode(
+            &home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            20,
+            make_fs(temp.path()),
+            &[],
+            Some(SessionMode::Chat),
+        )
+        .await
+        .unwrap();
+        assert_eq!(catalog.sessions.len(), 1);
+        assert_eq!(catalog.sessions[0].uuid, chat);
     }
 
     #[tokio::test]

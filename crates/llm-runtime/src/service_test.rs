@@ -5193,12 +5193,11 @@ mod tests {
 
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
-        let prior = lingxi_core::host::session_flags::tool_search_enabled();
 
         // Session gate ON, EMPTY toolset (no `ToolSearch` declaration present):
         // the ENABLED branch filters the unavailable reference against the empty
         // availability set and emits the "tools no longer available" placeholder.
-        lingxi_core::host::session_flags::set_tool_search_enabled(true);
+        adapter.set_tool_search_enabled(true);
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -5218,9 +5217,50 @@ mod tests {
             "empty toolset in a tool-search-enabled session must take the enabled branch"
         );
 
+        // A second session must not overwrite the first session's enabled gate.
+        let peer = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        peer.set_tool_search_enabled(false);
+        let peer_request = peer
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                convo(),
+                vec![],
+                false,
+                Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .unwrap();
+        assert_eq!(
+            placeholder(&peer_request),
+            "[Tool references removed - tool search not enabled]"
+        );
+        let original_request = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                convo(),
+                vec![],
+                false,
+                Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .unwrap();
+        assert_eq!(
+            placeholder(&original_request),
+            "[Tool references removed - tools no longer available]"
+        );
+
         // Session gate OFF: the DISABLED branch strips every reference with the
         // "tool search not enabled" placeholder, regardless of the toolset.
-        lingxi_core::host::session_flags::set_tool_search_enabled(false);
+        adapter.set_tool_search_enabled(false);
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -5239,8 +5279,6 @@ mod tests {
             "[Tool references removed - tool search not enabled]",
             "a tool-search-disabled session must take the disabled branch"
         );
-
-        lingxi_core::host::session_flags::set_tool_search_enabled(prior);
     }
 
     #[test]

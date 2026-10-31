@@ -1488,6 +1488,8 @@ fn sdk_prompt_cache_ttl_settings(
 
 /// Production service: drives `ModelRuntime` with full retry/rate-limit/betas.
 pub struct ApiService {
+    /// Provider normalization policy owned by this session service.
+    tool_search_enabled: std::sync::atomic::AtomicBool,
     scope_output_quota: Option<Arc<crate::ScopeOutputQuota>>,
     fast_policy: crate::model::fast_admission::PolicySource,
     fast_availability: Arc<crate::model::fast_admission::Availability>,
@@ -2332,6 +2334,12 @@ fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json
 }
 
 impl ApiService {
+    /// Publish the resolved provider gate without changing another live session.
+    pub fn set_tool_search_enabled(&self, enabled: bool) {
+        self.tool_search_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Sample Native's process-local MCTC and inline-tools gates for one
     /// logical request. Callers retain the result in the trusted request
     /// context so preparation, beta generation, and SDK encoding share it.
@@ -3523,6 +3531,7 @@ impl ApiService {
             prompt_cache_overage: prompt_cache_overage.clone(),
         });
         Self {
+            tool_search_enabled: std::sync::atomic::AtomicBool::new(false),
             fast_policy: Arc::new(|| Ok(crate::model::fast_admission::Policy::default())),
             scope_output_quota: None,
             fast_availability,
@@ -3602,6 +3611,10 @@ impl ApiService {
             self.fallback_overrides.clone(),
             self.settings_max_retries,
             self.settings_backoff_ms,
+        );
+        child.set_tool_search_enabled(
+            self.tool_search_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
         );
         child.fallback_models = self.fallback_models.clone();
         child.scope_output_quota = self.scope_output_quota.clone();
@@ -11519,7 +11532,9 @@ impl ApiService {
                 true
             });
         }
-        let tool_search_enabled = lingxi_core::host::session_flags::tool_search_enabled();
+        let tool_search_enabled = self
+            .tool_search_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
         let available_tool_names: std::collections::HashSet<String> =
             tools.iter().map(|tool| tool.name.clone()).collect();
         let messages = ensure_tool_result_pairing_with_sources(

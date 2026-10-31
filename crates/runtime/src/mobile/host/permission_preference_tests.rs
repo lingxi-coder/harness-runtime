@@ -41,8 +41,7 @@ mod permission_preference_tests {
             restarted
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None,
-                })
+                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             assert_eq!(
@@ -84,6 +83,7 @@ mod permission_preference_tests {
                 .submit(ClientCommand::ResumeSession {
                     session_id,
                     cwd: None,
+                    expected_mode: SessionModeDto::Code,
                 })
                 .await
                 .unwrap();
@@ -221,8 +221,7 @@ mod permission_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None,
-                })
+                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             assert_ne!(
@@ -277,8 +276,7 @@ mod permission_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None,
-                })
+                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             assert_ne!(

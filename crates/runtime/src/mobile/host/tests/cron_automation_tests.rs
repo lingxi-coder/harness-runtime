@@ -85,7 +85,8 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
     use crate::mobile::test_support::{test_config, FakeListener, HostFakePlatform};
     use lingxi_core::host::PermissionGate as _;
     let temp = tempfile::tempdir().unwrap();
-    let config = test_config(temp.path());
+    let mut config = test_config(temp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
     let home = config.lingxi_home.clone();
     let cwd = canonical_cwd_string(temp.path());
     let (sender, mut requests) = mpsc::unbounded_channel();
@@ -102,7 +103,7 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
     let target_uuid = target.as_uuid().to_string();
     let target_path = session::jsonl::session_path(&home, &cwd, &target_uuid);
     let target_writer = session::jsonl::JsonlWriter::new(
-        target_path,
+        target_path.clone(),
         Arc::new(platform_posix_minimal::PosixFileSystem::new(
             temp.path().to_path_buf(),
         )),
@@ -112,7 +113,17 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
         .await
         .unwrap();
     target_writer
-        .append_session_mode_selection(&target_uuid, "chat", 4, 3)
+        .initialize_fixed_session_mode(
+            &target_uuid,
+            &lingxi_core::host::session_context::SessionModeTransition {
+                selected: session::jsonl::SessionMode::Chat,
+                active: session::jsonl::SessionMode::Chat,
+                revision: 4,
+                selected_epoch: 3,
+                active_epoch: 3,
+                pending: false,
+            },
+        )
         .await
         .unwrap();
     for (task_id, session_uuid, run_id) in [
@@ -142,16 +153,19 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
             Vec::new(),
             None,
             None,
-            lingxi_core::host::ResumeRuntimeSnapshot::default(),
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                transcript_path: Some(target_path.clone()),
+                transcript_metadata: Some(session::JsonlWriter::capture_session_metadata_source(
+                    &std::fs::read_to_string(&target_path).unwrap(),
+                    &target_uuid,
+                )),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
     runtime.retarget_session_context(&home, target, &cwd).await;
-    let restored = runtime
-        .orchestrator
-        .restore_conversation_mode(session::jsonl::SessionMode::Chat)
-        .await
-        .unwrap();
+    let restored = runtime.orchestrator.conversation_mode().await;
     assert_eq!(restored.selected, session::jsonl::SessionMode::Chat);
     assert_eq!(restored.revision, 4);
     assert_eq!(*runtime.active_session_uuid.lock().unwrap(), target_uuid);
@@ -239,7 +253,13 @@ async fn mounted_workspace_scheduled_run_reuses_the_selected_host_transcript() {
         .append_mobile_empty_session(&session.to_string(), "Scheduled source", &guest)
         .await
         .unwrap();
-    writer.append_session_mode("code").await.unwrap();
+    writer
+        .initialize_fixed_session_mode(
+            &session.to_string(),
+            &lingxi_core::host::session_context::SessionModeTransition::default(),
+        )
+        .await
+        .unwrap();
     let original_source = std::fs::read(&path).unwrap();
     let mut scheduled = task("active");
     scheduled.recurring = Some(true);
@@ -766,7 +786,10 @@ async fn scheduled_empty_anchor_is_replayable_before_first_prompt() {
         .await
         .unwrap();
     writer
-        .append_session_mode(session::jsonl::SessionMode::Code.as_str())
+        .initialize_fixed_session_mode(
+            &id.to_string(),
+            &lingxi_core::host::session_context::SessionModeTransition::default(),
+        )
         .await
         .unwrap();
     assert!(
@@ -811,7 +834,17 @@ async fn scheduled_existing_session_uses_its_persisted_mode() {
             )
             .await
             .unwrap();
-        writer.append_session_mode(mode.as_str()).await.unwrap();
+        writer
+            .initialize_fixed_session_mode(
+                &id.to_string(),
+                &lingxi_core::host::session_context::SessionModeTransition {
+                    active: mode,
+                    selected: mode,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(
             cron_target_session_mode(&home, &cwd.to_string_lossy(), id, fs.clone())
                 .await
@@ -1068,4 +1101,78 @@ async fn no_project_cron_allocates_brand_workspace_without_moving_its_claim_ledg
         !cron::scheduled_tasks_path(&workspace.host).exists(),
         "execution directory must not get a duplicate schedule"
     );
+}
+
+#[tokio::test]
+async fn cancelled_automation_waits_for_non_abortable_cleanup_before_persisting() {
+    let (temp, fs, request) = claimed_test_run().await;
+    let id = request.run_id.clone();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancelling = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let caller = tokio::spawn(supervise_mobile_automation_with_cancel(
+        fs.clone(),
+        temp.path().into(),
+        Arc::new(platform_posix_minimal::PosixClock::new()),
+        std::future::ready(Some(request)),
+        {
+            let started = started.clone();
+            let cancelling = cancelling.clone();
+            let release = release.clone();
+            move |_, cancel| async move {
+                started.notify_one();
+                cancel.cancelled().await;
+                cancelling.notify_one();
+                release.notified().await;
+                Ok(cron::AutomationRunResult {
+                    session_id: "same".into(),
+                    summary: String::new(),
+                })
+            }
+        },
+    ));
+    started.notified().await;
+    caller.abort();
+    let _ = caller.await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancelling.notified())
+        .await
+        .unwrap();
+    let stored = read_cron_tasks(fs.as_ref(), temp.path()).await;
+    let run = stored.tasks[0]
+        .automation
+        .as_ref()
+        .unwrap()
+        .runs
+        .iter()
+        .find(|run| run.id == id)
+        .unwrap();
+    assert_ne!(run.status, cron::AutomationRunStatus::Cancelled);
+    assert!(run.finished_at.is_none());
+    assert!(cron::claim_automation_run_now(
+        fs.as_ref(),
+        temp.path(),
+        "d12345678",
+        std::time::SystemTime::now()
+    )
+    .await
+    .is_none());
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let stored = read_cron_tasks(fs.as_ref(), temp.path()).await;
+            if stored.tasks[0]
+                .automation
+                .as_ref()
+                .unwrap()
+                .runs
+                .iter()
+                .any(|run| run.id == id && run.status == cron::AutomationRunStatus::Cancelled)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }

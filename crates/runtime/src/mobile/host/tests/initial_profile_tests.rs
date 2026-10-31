@@ -1,4 +1,5 @@
 use super::*;
+use crate::mobile::host::canonical_cwd_string;
 use lingxi_core::host::OrchestratorHandle;
 
 #[derive(Default)]
@@ -47,118 +48,228 @@ impl lingxi_core::host::ProcessRunner for ObserveStartupProfile {
     }
 }
 
-#[test]
-fn configured_chat_is_durable_before_startup_hook_and_cold_resume() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_project_hook(tmp.path(), "SessionStart");
-    let mut config = test_config(tmp.path());
-    config.session_mode = session::jsonl::SessionMode::Chat;
-    config.workspace_trusted = true;
-    let process = Arc::new(ObserveStartupProfile::default());
-    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
-        HostFakePlatform::new(tmp.path().to_path_buf())
-            .with_process_runner(process.clone())
+fn profile_test_platform(
+    root: &std::path::Path,
+    process: Arc<ObserveStartupProfile>,
+) -> Arc<dyn lingxi_core::host::Platform> {
+    Arc::new(
+        HostFakePlatform::new(root.to_path_buf())
+            .with_process_runner(process)
             .with_sandbox(Arc::new(
                 crate::mobile::test_support::FakeProcessAdmittingSandbox,
             )),
-    );
-    let listener = Arc::new(FakeListener::default());
+    )
+}
+
+#[test]
+fn configured_chat_creates_and_cold_resumes_the_original_session_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_project_hook(tmp.path(), "SessionStart");
+    let process = Arc::new(ObserveStartupProfile::default());
+    let platform = profile_test_platform(tmp.path(), process.clone());
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    config.workspace_trusted = true;
+    let first_listener = Arc::new(FakeListener::default());
     let first = build_mobile_engine(
-        config,
-        platform,
-        listener,
+        config.clone(),
+        platform.clone(),
+        first_listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
     )
     .unwrap();
-
-    let (id, transcript_path) = first.runtime().block_on(async {
-        let snapshot = first.inner().orchestrator.conversation_mode().await;
-        assert_eq!(snapshot.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(snapshot.selected, session::jsonl::SessionMode::Chat);
-        assert_eq!(snapshot.revision, 1);
-        assert!(!snapshot.pending);
-        (
-            snapshot.session_id,
-            first.inner().session_writer.active_path(),
-        )
+    let (id, path) = first.runtime().block_on(async {
+        let state = first.inner().orchestrator.conversation_mode().await;
+        assert_eq!(state.active, session::jsonl::SessionMode::Chat);
+        assert_eq!(state.selected, state.active);
+        assert_eq!(state.revision, 0);
+        let events = drained(&first_listener).await;
+        assert!(events.iter().any(|event| matches!(event,
+            Ev::SessionStarted { session_id, mode: SessionModeDto::Chat } if session_id == &state.session_id
+        )));
+        (state.session_id, first.inner().session_writer.active_path())
     });
-    let calls = process.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1, "startup hook must run once");
-    let (input, at_hook) = &calls[0];
-    assert_eq!(input["source"], "startup");
-    assert_eq!(input["session_id"], id);
-    assert_eq!(input["transcript_path"].as_str(), transcript_path.to_str());
-    let at_hook = at_hook.as_deref().expect("profile exists before hook");
-    let profile = session::JsonlWriter::session_mode_transition_from_source(at_hook, &id)
-        .expect("startup hook observes durable profile");
-    assert_eq!(profile.active, session::jsonl::SessionMode::Chat);
-    assert_eq!(profile.selected, session::jsonl::SessionMode::Chat);
-    assert_eq!(
-        (
-            profile.revision,
-            profile.active_epoch,
-            profile.selected_epoch
-        ),
-        (1, 1, 1)
-    );
-    assert!(!profile.pending);
-    let source = std::fs::read_to_string(&transcript_path).unwrap();
-    assert!(source.contains("startup-profile-probe"));
+    {
+        let calls = process.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0["source"], "startup");
+        let source = calls[0].1.as_deref().expect("mode persisted before hook");
+        assert_eq!(
+            session::JsonlWriter::fixed_session_mode_from_source(source, &id)
+                .unwrap()
+                .active,
+            session::jsonl::SessionMode::Chat
+        );
+    }
     drop(first);
-
-    // Restart from the implicit Code default; the captured startup transcript
-    // must restore Chat and its epoch without any preceding selection command.
-    std::fs::remove_file(tmp.path().join(".lingxi/settings.json")).unwrap();
-    let (second, listener) = build_submit_handle(tmp.path());
-    second.runtime().block_on(async {
-        second
-            .submit(ClientCommand::ResumeSession {
-                session_id: id.clone(),
-                cwd: None,
-            })
-            .await
-            .expect("resume startup-created history");
-        let snapshot = second.inner().orchestrator.conversation_mode().await;
-        assert_eq!(snapshot.session_id, id);
-        assert_eq!(snapshot.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(snapshot.selected, session::jsonl::SessionMode::Chat);
-        assert_eq!(snapshot.revision, 1);
-        assert!(!snapshot.pending);
-        assert!(drained(&listener).await.iter().any(|event| matches!(event,
+    super::session_owner_tests::wait_for_session_release(&config.lingxi_home, &id);
+    config.initial_session_id = Some(id.clone());
+    let listener = Arc::new(FakeListener::default());
+    let resumed = build_mobile_engine(
+        config,
+        platform,
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .unwrap();
+    resumed.runtime().block_on(async {
+        let state = resumed.inner().orchestrator.conversation_mode().await;
+        assert_eq!(state.session_id, id);
+        assert_eq!(state.active, session::jsonl::SessionMode::Chat);
+        assert_eq!(resumed.inner().session_writer.active_path(), path);
+        let events = drained(&listener).await;
+        assert!(events.iter().any(|event| matches!(event,
             Ev::SessionResumed { session_id, mode: SessionModeDto::Chat, .. } if session_id == &id
         )));
-        let restored_source = std::fs::read_to_string(&transcript_path).unwrap();
-        let restored =
-            session::JsonlWriter::session_mode_transition_from_source(&restored_source, &id)
-                .expect("restored profile remains durable");
-        assert_eq!((restored.active_epoch, restored.selected_epoch), (1, 1));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ev::SessionStarted { .. })));
+    });
+    let calls = process.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2, "exactly one hook for each actual mount");
+    assert_eq!(calls[1].0["source"], "resume");
+    assert_eq!(calls[1].0["session_id"], id);
+}
+
+#[test]
+fn cold_resume_restores_recorded_workspace_and_full_transcript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("another-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let config = test_config(tmp.path());
+    let (id, message_count) = seed_replay_valid_session(tmp.path());
+    let old_path =
+        session::jsonl::session_path(&config.lingxi_home, &config.cwd.to_string_lossy(), &id);
+    let new_path =
+        session::jsonl::session_path(&config.lingxi_home, &workspace.to_string_lossy(), &id);
+    std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+    let source = std::fs::read_to_string(&old_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+            value["cwd"] = serde_json::json!(workspace.to_string_lossy());
+            format!("{value}\n")
+        })
+        .collect::<String>();
+    std::fs::write(&new_path, source).unwrap();
+    std::fs::remove_file(old_path).unwrap();
+    let mut config = config;
+    config.initial_session_id = Some(id.clone());
+    let listener = Arc::new(FakeListener::default());
+    let resumed = build_mobile_engine(
+        config,
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .unwrap();
+    resumed.runtime().block_on(async {
+        assert_eq!(resumed.session_cwd(), canonical_cwd_string(&workspace));
+        assert_eq!(resumed.inner().session_writer.active_path(), new_path);
+        let events = drained(&listener).await;
+        assert!(events.iter().any(|event| matches!(event,
+            Ev::SessionResumed { session_id, mode: SessionModeDto::Code, messages }
+                if session_id == &id && messages.len() == message_count
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ev::SessionStarted { .. })));
     });
 }
 
 #[test]
-fn configured_chat_is_persisted_even_when_no_hook_or_command_runs() {
+fn cold_resume_repairs_only_the_torn_final_record_before_hooks_or_appends() {
+    for suffix in [
+        b"{\"type\":\"assistant\"".as_slice(),
+        b"{\"type\":\"assistant\",\"text\":\"\xf0\x9f".as_slice(),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = test_config(tmp.path());
+        let (id, message_count) = seed_replay_valid_session(tmp.path());
+        let path =
+            session::jsonl::session_path(&config.lingxi_home, &config.cwd.to_string_lossy(), &id);
+        let committed = std::fs::read(&path).unwrap();
+        let mut crashed = committed.clone();
+        crashed.extend_from_slice(suffix);
+        std::fs::write(&path, crashed).unwrap();
+        config.initial_session_id = Some(id.clone());
+        let listener = Arc::new(FakeListener::default());
+        let resumed = build_mobile_engine(
+            config,
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+            listener.clone(),
+            Arc::new(RecordingPermissionSink::default()),
+        )
+        .unwrap();
+        resumed.runtime().block_on(async {
+            let events = drained(&listener).await;
+            assert!(events.iter().any(|event| matches!(event,
+                Ev::SessionResumed { session_id, messages, .. } if session_id == &id && messages.len() == message_count)));
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(bytes.starts_with(&committed));
+            let source = String::from_utf8(bytes).unwrap();
+            assert_eq!(session::jsonl::route_lines(&source).malformed_line_count, 0);
+            resumed.inner().session_writer.append_custom_title(&id, "after recovery".into()).await.unwrap();
+            let appended = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(session::jsonl::route_lines(&appended).malformed_line_count, 0);
+        });
+    }
+}
+
+#[test]
+fn cold_resume_mode_mismatch_has_no_writer_or_hook_effects() {
     let tmp = tempfile::tempdir().unwrap();
+    write_project_hook(tmp.path(), "SessionStart");
+    let process = Arc::new(ObserveStartupProfile::default());
+    let platform = profile_test_platform(tmp.path(), process.clone());
     let mut config = test_config(tmp.path());
     config.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, _) = build_submit_handle_with_config(config, tmp.path());
-    handle.runtime().block_on(async {
-        let state = handle.inner().orchestrator.conversation_mode().await;
-        let source = std::fs::read_to_string(handle.inner().session_writer.active_path()).unwrap();
-        let profile =
-            session::JsonlWriter::session_mode_transition_from_source(&source, &state.session_id)
-                .expect("initial Chat must be written by the constructor");
-        assert_eq!(profile.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(profile.selected, session::jsonl::SessionMode::Chat);
-        assert_eq!(
-            (
-                profile.revision,
-                profile.active_epoch,
-                profile.selected_epoch
-            ),
-            (1, 1, 1)
-        );
-        assert!(!profile.pending);
+    config.workspace_trusted = true;
+    let first = build_mobile_engine(
+        config.clone(),
+        platform.clone(),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .unwrap();
+    let (id, path) = first.runtime().block_on(async {
+        (
+            first
+                .inner()
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string(),
+            first.inner().session_writer.active_path(),
+        )
     });
+    drop(first);
+    let original = std::fs::read(&path).unwrap();
+    let before_entries = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+    config.initial_session_id = Some(id);
+    config.session_mode = session::jsonl::SessionMode::Code;
+    let error = match build_mobile_engine(
+        config,
+        platform,
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+    ) {
+        Ok(_) => panic!("wrong mode must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("session mode mismatch"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+        before_entries
+    );
+    assert_eq!(
+        process.calls.lock().unwrap().len(),
+        1,
+        "mismatch must not run a hook"
+    );
 }
 
 #[test]
@@ -171,7 +282,6 @@ fn isolated_app_agent_keeps_initial_chat_without_a_transcript() {
     handle.runtime().block_on(async {
         let state = handle.inner().orchestrator.conversation_mode().await;
         assert_eq!(state.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
         assert_eq!(state.revision, 0);
         assert!(!handle.inner().session_writer.active_path().exists());
     });

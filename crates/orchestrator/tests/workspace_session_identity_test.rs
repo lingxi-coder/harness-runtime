@@ -442,7 +442,13 @@ async fn warm_resume_after_cd_cannot_reappend_the_previous_sessions_metadata() {
         .await
         .unwrap();
     writer.append_permission_mode("plan").await.unwrap();
-    writer.append_session_mode("A mode").await.unwrap();
+    writer
+        .initialize_fixed_session_mode(
+            &id_a.as_uuid().to_string(),
+            &lingxi_core::host::session_context::SessionModeTransition::default(),
+        )
+        .await
+        .unwrap();
     orch.change_working_directory(moved.clone(), vec![moved.clone()])
         .await
         .unwrap();
@@ -470,7 +476,6 @@ async fn warm_resume_after_cd_cannot_reappend_the_previous_sessions_metadata() {
     let tail = session::jsonl::read_tail(&path_b);
     assert!(tail.contains("B preserved title"));
     assert!(!tail.contains("A title"));
-    assert!(!tail.contains("A mode"));
     assert!(!tail.contains(r#""permissionMode":"plan""#));
     assert!(!tail.contains(&moved.to_string_lossy().to_string()));
 }

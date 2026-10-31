@@ -182,4 +182,4 @@
 /// Native bindings and bridge peers must be regenerated together.
 /// Session-mode selection and context-manifest commands/events append after
 /// the current command/event variants without changing their ordinals.
-pub const CLIENT_PROTOCOL_VERSION: &str = "30.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "31.0.0";

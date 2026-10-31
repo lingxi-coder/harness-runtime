@@ -593,7 +593,9 @@ async fn compact_boundary_session_append_keeps_metadata_and_rewrites_disk_and_hi
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn skill_companion_registers_only_the_accepted_durable_body_and_cold_restores_it() {
-    let _guard = compaction::invoked_skills::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = compaction::invoked_skills::TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     compaction::invoked_skills::reset_for_test();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("session.jsonl");
@@ -609,94 +611,191 @@ async fn skill_companion_registers_only_the_accepted_durable_body_and_cold_resto
     struct CompactClient;
     #[async_trait::async_trait]
     impl sidequery::SideQueryClient for CompactClient {
-        async fn query(&self, _: sidequery::SideQueryRequest) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
-            Ok(sidequery::SideQueryResponse { text: Some("<summary>task context</summary>".into()), structured: None, tool_calls: Vec::new(), usage: cost::Usage::default(), stop_reason: Some("end_turn".into()), retry_count: 0 })
+        async fn query(
+            &self,
+            _: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            Ok(sidequery::SideQueryResponse {
+                text: Some("<summary>task context</summary>".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+                retry_count: 0,
+            })
         }
     }
     let (orch, _) = build_orchestrator(root.path(), &path, rewrite).await;
     let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-    let runner = Arc::new(sidequery::ForkedAgentRunner::new().with_side_query_client(Arc::new(CompactClient), "compact-test".into()));
-    let orch = orch.with_cache_safe_slot(slot.clone()).with_compaction(Arc::new(
-        compaction::CompactionOrchestrator::with_autocompactor(
-            compaction::Autocompactor::with_forked_runner(runner, slot), 100,
-        ),
-    ));
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(CompactClient), "compact-test".into()),
+    );
+    let orch = orch
+        .with_cache_safe_slot(slot.clone())
+        .with_compaction(Arc::new(
+            compaction::CompactionOrchestrator::with_autocompactor(
+                compaction::Autocompactor::with_forked_runner(runner, slot),
+                100,
+            ),
+        ));
     let session_id = orch.session.lock().await.session_id;
     let scoped_id = session_id.to_string();
     let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&scoped_id), None);
     let input = crate::skill_prompt_inputs(
         "<command-message>review</command-message>\n<command-name>/review</command-name>".into(),
-        "ORIGINAL-X".into(), Vec::new(),
-        Some(lingxi_core::host::SlashSkillIdentity { name: "review".into(), path: "/skills/review".into() }),
-    ).remove(1);
+        "ORIGINAL-X".into(),
+        Vec::new(),
+        Some(lingxi_core::host::SlashSkillIdentity {
+            name: "review".into(),
+            path: "/skills/review".into(),
+        }),
+    )
+    .remove(1);
     let id = MessageId::new();
     let mut message = ConversationMessage::user_meta(id, "ORIGINAL-X".into());
-    orch.stamp_skill_prompt_activation(&input, &mut message).await;
-    assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty(), "stamping alone cannot activate a Skill");
-    orch.admit_skill_prompt_message(&input, &message).await.unwrap();
+    orch.stamp_skill_prompt_activation(&input, &mut message)
+        .await;
+    assert!(
+        compaction::invoked_skills::filter_for_scope(scope).is_empty(),
+        "stamping alone cannot activate a Skill"
+    );
+    orch.admit_skill_prompt_message(&input, &message)
+        .await
+        .unwrap();
     let live = compaction::invoked_skills::filter_for_scope(scope);
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].content.string_at(""), Some("ACCEPTED-Y"));
     assert_eq!(live[0].path, std::path::PathBuf::from("/skills/review"));
     let restored = compaction::restore_post_compact_skills(live, &[]);
     assert_eq!(restored[0].content.string_at(""), Some("ACCEPTED-Y"));
-    assert!(!std::fs::read_to_string(&path).unwrap().contains("ORIGINAL-X"));
+    assert!(!std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("ORIGINAL-X"));
 
-    orch.append_external_history_message(ConversationMessage::user(MessageId::new(), "task context ".repeat(300))).await;
+    orch.append_external_history_message(ConversationMessage::user(
+        MessageId::new(),
+        "task context ".repeat(300),
+    ))
+    .await;
     orch.append_external_history_message(ConversationMessage::Assistant {
-        per_turn_effort: None, id: MessageId::new(), content: vec![ContentBlock::Text { text: "answer".into(), citations: None }], stop_reason: Some("end_turn".into()), resumable: None,
-    }).await;
+        per_turn_effort: None,
+        id: MessageId::new(),
+        content: vec![ContentBlock::Text {
+            text: "answer".into(),
+            citations: None,
+        }],
+        stop_reason: Some("end_turn".into()),
+        resumable: None,
+    })
+    .await;
     let model = orch.session.lock().await.model.clone();
-    orch.save_cache_safe_params(None, &model, &[]).await.unwrap();
+    orch.save_cache_safe_params(None, &model, &[])
+        .await
+        .unwrap();
     orch.maybe_compact_before_call(None).await;
-    let compacted = orch.session.lock().await.model_context_history().iter().map(ConversationMessage::text_content).collect::<String>();
-    assert!(compacted.contains("ACCEPTED-Y"), "auto compaction must restore the accepted body");
+    let compacted = orch
+        .session
+        .lock()
+        .await
+        .model_context_history()
+        .iter()
+        .map(ConversationMessage::text_content)
+        .collect::<String>();
+    assert!(
+        compacted.contains("ACCEPTED-Y"),
+        "auto compaction must restore the accepted body"
+    );
     assert!(!compacted.contains("ORIGINAL-X"));
 
     // Rebuild from the exact captured transcript, as a cold host does.
     let source = std::fs::read_to_string(&path).unwrap();
     let loaded = session::jsonl::route_lines(&source);
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.as_uuid().to_string());
+    let (messages, _) =
+        session::jsonl::build_conversation_chain(&loaded, &session_id.as_uuid().to_string());
     compaction::invoked_skills::reset_for_test();
     let cold = ConversationOrchestrator::new(
-        OrchestratorConfig::default(), Arc::new(MockApiClient::new(vec![])),
-        Arc::new(tool_api::registry::ToolRegistry::new()), noop_hook_executor(),
-        Arc::new(NoOpPermissionGate), Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()), root.path().to_path_buf(),
-    ).with_session_id(session_id);
-    cold.restore_captured_session_history(session_id.as_uuid(), &messages, &loaded.messages_in_order,
-        false, permission::PermissionMode::Default, None, &source).await.unwrap();
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    )
+    .with_session_id(session_id);
+    cold.restore_captured_session_history(
+        session_id.as_uuid(),
+        &messages,
+        &loaded.messages_in_order,
+        false,
+        permission::PermissionMode::Default,
+        None,
+        &source,
+    )
+    .await
+    .unwrap();
     let cold_rows = compaction::invoked_skills::filter_for_scope(scope);
     assert_eq!(cold_rows.len(), 1);
     assert_eq!(cold_rows[0].content.string_at(""), Some("ACCEPTED-Y"));
-    assert_eq!(cold_rows[0].path, std::path::PathBuf::from("/skills/review"));
+    assert_eq!(
+        cold_rows[0].path,
+        std::path::PathBuf::from("/skills/review")
+    );
     compaction::invoked_skills::reset_for_test();
 }
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn failed_skill_append_does_not_activate_or_publish_body() {
-    let _guard = compaction::invoked_skills::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = compaction::invoked_skills::TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     compaction::invoked_skills::reset_for_test();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("unwritable.jsonl");
     std::fs::create_dir(&path).unwrap();
-    let (orch, _) = build_orchestrator(root.path(), &path, "export function register(on) { on('session.append', ($, e, next) => next(e)); }").await;
+    let (orch, _) = build_orchestrator(
+        root.path(),
+        &path,
+        "export function register(on) { on('session.append', ($, e, next) => next(e)); }",
+    )
+    .await;
     let scoped_id = orch.session.lock().await.session_id.to_string();
     let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&scoped_id), None);
     let prior_id = MessageId::new();
     compaction::invoked_skills::register_activation_with_message(
-        &Source::from("review"), std::path::Path::new("/skills/review"),
-        &Source::from("previous accepted body"), None, scope, prior_id,
+        &Source::from("review"),
+        std::path::Path::new("/skills/review"),
+        &Source::from("previous accepted body"),
+        None,
+        scope,
+        prior_id,
     );
-    let input = crate::skill_prompt_inputs("/review".into(), "body".into(), Vec::new(),
-        Some(lingxi_core::host::SlashSkillIdentity { name: "review".into(), path: "/skills/review".into() })).remove(1);
+    let input = crate::skill_prompt_inputs(
+        "/review".into(),
+        "body".into(),
+        Vec::new(),
+        Some(lingxi_core::host::SlashSkillIdentity {
+            name: "review".into(),
+            path: "/skills/review".into(),
+        }),
+    )
+    .remove(1);
     let mut message = ConversationMessage::user_meta(MessageId::new(), "body".into());
-    orch.stamp_skill_prompt_activation(&input, &mut message).await;
-    assert!(orch.admit_skill_prompt_message(&input, &message).await.is_err());
+    orch.stamp_skill_prompt_activation(&input, &mut message)
+        .await;
+    assert!(orch
+        .admit_skill_prompt_message(&input, &message)
+        .await
+        .is_err());
     let effective = compaction::invoked_skills::filter_for_scope(scope);
     assert_eq!(effective.len(), 1);
-    assert_eq!(effective[0].content.string_at(""), Some("previous accepted body"));
+    assert_eq!(
+        effective[0].content.string_at(""),
+        Some("previous accepted body")
+    );
     assert!(orch.session.lock().await.history.is_empty());
     compaction::invoked_skills::reset_for_test();
 }
@@ -704,10 +803,16 @@ async fn failed_skill_append_does_not_activate_or_publish_body() {
 struct FixedReviewSkill;
 #[async_trait::async_trait]
 impl tool_skill::skill::SkillLoader for FixedReviewSkill {
-    async fn load(&self, _: &Source) -> Result<Option<tool_skill::skill::SkillDescriptor>, tool_api::tool_trait::ToolError> {
+    async fn load(
+        &self,
+        _: &Source,
+    ) -> Result<Option<tool_skill::skill::SkillDescriptor>, tool_api::tool_trait::ToolError> {
         Ok(Some(tool_skill::skill::SkillDescriptor {
-            name: "review".into(), description: "review".into(), body: "TOOL-X".into(),
-            skill_root: Some("/skills/review".into()), ..Default::default()
+            name: "review".into(),
+            description: "review".into(),
+            body: "TOOL-X".into(),
+            skill_root: Some("/skills/review".into()),
+            ..Default::default()
         }))
     }
 }
@@ -719,11 +824,23 @@ async fn skill_tool_reinvocation_commits_only_accepted_body_under_publication_fe
     struct CompactClient;
     #[async_trait::async_trait]
     impl sidequery::SideQueryClient for CompactClient {
-        async fn query(&self, _: sidequery::SideQueryRequest) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
-            Ok(sidequery::SideQueryResponse { text: Some("<summary>task context</summary>".into()), structured: None, tool_calls: Vec::new(), usage: cost::Usage::default(), stop_reason: Some("end_turn".into()), retry_count: 0 })
+        async fn query(
+            &self,
+            _: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            Ok(sidequery::SideQueryResponse {
+                text: Some("<summary>task context</summary>".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+                retry_count: 0,
+            })
         }
     }
-    let _guard = compaction::invoked_skills::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = compaction::invoked_skills::TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for streaming in [false, true] {
         compaction::invoked_skills::reset_for_test();
         let root = tempfile::tempdir().unwrap();
@@ -741,72 +858,167 @@ async fn skill_tool_reinvocation_commits_only_accepted_body_under_publication_fe
         }"#;
         let (orch, _) = build_orchestrator(root.path(), &path, rewrite).await;
         let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-        let runner = Arc::new(sidequery::ForkedAgentRunner::new().with_side_query_client(Arc::new(CompactClient), "compact-test".into()));
+        let runner = Arc::new(
+            sidequery::ForkedAgentRunner::new()
+                .with_side_query_client(Arc::new(CompactClient), "compact-test".into()),
+        );
         let orch = ConversationOrchestrator::into_shared(
-            orch.with_cache_safe_slot(slot.clone()).with_compaction(Arc::new(
-                compaction::CompactionOrchestrator::with_autocompactor(compaction::Autocompactor::with_forked_runner(runner, slot), 100),
-            )),
+            orch.with_cache_safe_slot(slot.clone())
+                .with_compaction(Arc::new(
+                    compaction::CompactionOrchestrator::with_autocompactor(
+                        compaction::Autocompactor::with_forked_runner(runner, slot),
+                        100,
+                    ),
+                )),
         );
         let sid = orch.session.lock().await.session_id;
         let session_text = sid.to_string();
-        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_text), None);
+        let scope =
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_text), None);
         let input = crate::skill_prompt_inputs(
-            "<command-message>review</command-message>\n<command-name>/review</command-name>".into(),
-            "SLASH-I1".into(), Vec::new(), Some(lingxi_core::host::SlashSkillIdentity { name: "review".into(), path: "/skills/review".into() }),
-        ).remove(1);
+            "<command-message>review</command-message>\n<command-name>/review</command-name>"
+                .into(),
+            "SLASH-I1".into(),
+            Vec::new(),
+            Some(lingxi_core::host::SlashSkillIdentity {
+                name: "review".into(),
+                path: "/skills/review".into(),
+            }),
+        )
+        .remove(1);
         let mut old = ConversationMessage::user_meta(MessageId::new(), "SLASH-I1".into());
         orch.stamp_skill_prompt_activation(&input, &mut old).await;
         orch.admit_skill_prompt_message(&input, &old).await.unwrap();
         let old_id = old.id();
         let tool = tool_skill::SkillTool::with_loader(
-            tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput { stdout: String::new(), stderr: String::new(), exit_code: 0, timed_out: false }),
+            tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            }),
             Arc::new(FixedReviewSkill),
         );
         let mut ctx = tool_api::test_support::fresh_ctx();
         ctx.session = Some(orch.session());
-        let result = tool.call(Source::parse(r#"{"skill":"alias"}"#).unwrap(), ctx, tool_api::test_support::fresh_tx()).await.unwrap();
+        let result = tool
+            .call(
+                Source::parse(r#"{"skill":"alias"}"#).unwrap(),
+                ctx,
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap();
         let message = &result.new_messages[0];
-        assert_eq!(compaction::invoked_skills::filter_for_scope(scope)[0].content.string_at(""), Some("SLASH-I1"), "tool execution alone must not retire the slash activation");
+        assert_eq!(
+            compaction::invoked_skills::filter_for_scope(scope)[0]
+                .content
+                .string_at(""),
+            Some("SLASH-I1"),
+            "tool execution alone must not retire the slash activation"
+        );
         let token = tokio_util::sync::CancellationToken::new();
-        let fence = Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(token.clone(), Arc::new(tokio::sync::Mutex::new(()))));
+        let fence = Arc::new(
+            crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+                token.clone(),
+                Arc::new(tokio::sync::Mutex::new(())),
+            ),
+        );
         token.cancel();
         let id = ToolUseId::new();
         let accepted = if streaming {
-            let stored = orch.append_streamed_query_row(message, Some(fence.clone())).await;
-            orch.persist_preappended_stream_row(&stored, None, "2026-10-28T00:00:00.000Z", Some(fence), Some(id)).await
+            let stored = orch
+                .append_streamed_query_row(message, Some(fence.clone()))
+                .await;
+            orch.persist_preappended_stream_row(
+                &stored,
+                None,
+                "2026-10-28T00:00:00.000Z",
+                Some(fence),
+                Some(id),
+            )
+            .await
         } else {
-            orch.append_committed_tool_skill(message, id, Some(fence)).await
+            orch.append_committed_tool_skill(message, id, Some(fence))
+                .await
         };
         assert!(!accepted);
-        assert_eq!(compaction::invoked_skills::filter_for_scope(scope)[0].content.string_at(""), Some("SLASH-I1"));
-        assert!(!compaction::invoked_skills::expired_message_ids_for_scope(scope).contains(&old_id));
+        assert_eq!(
+            compaction::invoked_skills::filter_for_scope(scope)[0]
+                .content
+                .string_at(""),
+            Some("SLASH-I1")
+        );
+        assert!(
+            !compaction::invoked_skills::expired_message_ids_for_scope(scope).contains(&old_id)
+        );
 
         let backup = path.with_extension("backup");
         std::fs::rename(&path, &backup).unwrap();
         std::fs::create_dir(&path).unwrap();
         let token = tokio_util::sync::CancellationToken::new();
-        let fence = Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(token, Arc::new(tokio::sync::Mutex::new(()))));
+        let fence = Arc::new(
+            crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+                token,
+                Arc::new(tokio::sync::Mutex::new(())),
+            ),
+        );
         let id = ToolUseId::new();
         let accepted = if streaming {
-            let stored = orch.append_streamed_query_row(message, Some(fence.clone())).await;
-            orch.persist_preappended_stream_row(&stored, None, "2026-10-28T00:00:00.000Z", Some(fence), Some(id)).await
+            let stored = orch
+                .append_streamed_query_row(message, Some(fence.clone()))
+                .await;
+            orch.persist_preappended_stream_row(
+                &stored,
+                None,
+                "2026-10-28T00:00:00.000Z",
+                Some(fence),
+                Some(id),
+            )
+            .await
         } else {
-            orch.append_committed_tool_skill(message, id, Some(fence)).await
+            orch.append_committed_tool_skill(message, id, Some(fence))
+                .await
         };
-        assert!(!accepted, "a failed durable append must not activate the Skill");
-        assert_eq!(compaction::invoked_skills::filter_for_scope(scope)[0].content.string_at(""), Some("SLASH-I1"));
-        assert!(!compaction::invoked_skills::expired_message_ids_for_scope(scope).contains(&old_id));
+        assert!(
+            !accepted,
+            "a failed durable append must not activate the Skill"
+        );
+        assert_eq!(
+            compaction::invoked_skills::filter_for_scope(scope)[0]
+                .content
+                .string_at(""),
+            Some("SLASH-I1")
+        );
+        assert!(
+            !compaction::invoked_skills::expired_message_ids_for_scope(scope).contains(&old_id)
+        );
         std::fs::remove_dir(&path).unwrap();
         std::fs::rename(&backup, &path).unwrap();
 
         let token = tokio_util::sync::CancellationToken::new();
-        let fence = Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(token, Arc::new(tokio::sync::Mutex::new(()))));
+        let fence = Arc::new(
+            crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+                token,
+                Arc::new(tokio::sync::Mutex::new(())),
+            ),
+        );
         let id = ToolUseId::new();
         let accepted = if streaming {
-            let stored = orch.append_streamed_query_row(message, Some(fence.clone())).await;
-            orch.persist_preappended_stream_row(&stored, None, "2026-10-28T00:00:00.000Z", Some(fence), Some(id)).await
+            let stored = orch
+                .append_streamed_query_row(message, Some(fence.clone()))
+                .await;
+            orch.persist_preappended_stream_row(
+                &stored,
+                None,
+                "2026-10-28T00:00:00.000Z",
+                Some(fence),
+                Some(id),
+            )
+            .await
         } else {
-            orch.append_committed_tool_skill(message, id, Some(fence)).await
+            orch.append_committed_tool_skill(message, id, Some(fence))
+                .await
         };
         assert!(accepted);
         let active = compaction::invoked_skills::filter_for_scope(scope);
@@ -817,33 +1029,73 @@ async fn skill_tool_reinvocation_commits_only_accepted_body_under_publication_fe
         assert_ne!(metadata[0].definition_sha256, metadata[0].content_sha256);
         let definition_digest = metadata[0].definition_sha256;
         assert!(compaction::invoked_skills::expired_message_ids_for_scope(scope).contains(&old_id));
-        orch.append_external_history_message(ConversationMessage::user(MessageId::new(), "task context ".repeat(300))).await;
+        orch.append_external_history_message(ConversationMessage::user(
+            MessageId::new(),
+            "task context ".repeat(300),
+        ))
+        .await;
         orch.append_external_history_message(ConversationMessage::Assistant {
-            per_turn_effort: None, id: MessageId::new(), content: vec![ContentBlock::Text { text: "answer".into(), citations: None }], stop_reason: Some("end_turn".into()), resumable: None,
-        }).await;
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "answer".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        })
+        .await;
         let model = orch.session.lock().await.model.clone();
-        orch.save_cache_safe_params(None, &model, &[]).await.unwrap();
+        orch.save_cache_safe_params(None, &model, &[])
+            .await
+            .unwrap();
         orch.maybe_compact_before_call(None).await;
-        let model_text = orch.session.lock().await.model_context_history().iter().map(ConversationMessage::text_content).collect::<String>();
+        let model_text = orch
+            .session
+            .lock()
+            .await
+            .model_context_history()
+            .iter()
+            .map(ConversationMessage::text_content)
+            .collect::<String>();
         assert!(model_text.contains("TOOL-Y"));
         assert!(!model_text.contains("TOOL-X"));
         let source = std::fs::read_to_string(&path).unwrap();
         assert!(!source.contains("TOOL-X"));
         let loaded = session::jsonl::route_lines(&source);
-        let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid.as_uuid().to_string());
+        let (messages, _) =
+            session::jsonl::build_conversation_chain(&loaded, &sid.as_uuid().to_string());
         compaction::invoked_skills::reset_for_test();
         let cold = ConversationOrchestrator::new(
-            OrchestratorConfig::default(), Arc::new(MockApiClient::new(vec![])),
-            Arc::new(tool_api::ToolRegistry::new()), noop_hook_executor(), Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()), Arc::new(StaticMemoryProvider::empty()), root.path().to_path_buf(),
-        ).with_session_id(sid);
-        cold.restore_captured_session_history(sid.as_uuid(), &messages, &loaded.messages_in_order, false,
-            permission::PermissionMode::Default, None, &source).await.unwrap();
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        )
+        .with_session_id(sid);
+        cold.restore_captured_session_history(
+            sid.as_uuid(),
+            &messages,
+            &loaded.messages_in_order,
+            false,
+            permission::PermissionMode::Default,
+            None,
+            &source,
+        )
+        .await
+        .unwrap();
         let cold_active = compaction::invoked_skills::filter_for_scope(scope);
         assert_eq!(cold_active.len(), 1);
         assert_eq!(cold_active[0].content.string_at(""), Some("TOOL-Y"));
         let cold_metadata = compaction::invoked_skills::activation_metadata_for_scope(scope);
-        assert_ne!(cold_metadata[0].definition_sha256, cold_metadata[0].content_sha256);
+        assert_ne!(
+            cold_metadata[0].definition_sha256,
+            cold_metadata[0].content_sha256
+        );
         assert_eq!(cold_metadata[0].definition_sha256, definition_digest);
     }
     compaction::invoked_skills::reset_for_test();

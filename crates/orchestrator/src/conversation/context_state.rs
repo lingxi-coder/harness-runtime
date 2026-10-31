@@ -53,623 +53,47 @@ mod tests {
         orchestrator_with_tools(Arc::new(tool_api::ToolRegistry::new()))
     }
 
-    #[derive(Default)]
-    struct CaptureCompactRequests(std::sync::Mutex<Vec<sidequery::SideQueryRequest>>);
-
-    #[derive(Default)]
-    struct CaptureSideRequests(std::sync::Mutex<Vec<sidequery::SideQueryRequest>>);
-
-    #[async_trait::async_trait]
-    impl sidequery::SideQueryClient for CaptureSideRequests {
-        async fn query(
-            &self,
-            request: sidequery::SideQueryRequest,
-        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
-            self.0.lock().unwrap().push(request);
-            Ok(sidequery::SideQueryResponse {
-                text: Some(r#"{"name":"current-topic"}"#.into()),
-                structured: None,
-                tool_calls: Vec::new(),
-                usage: cost::Usage::default(),
-                stop_reason: Some("end_turn".into()),
-                retry_count: 0,
-            })
-        }
-    }
-
-    #[derive(Default)]
-    struct CaptureForkRequests(
-        std::sync::Mutex<Vec<lingxi_core::host::subagent_spawn::SubagentSpawnRequest>>,
-    );
-
-    #[async_trait::async_trait]
-    impl lingxi_core::host::subagent_spawn::SubagentSpawner for CaptureForkRequests {
-        async fn spawn(
-            &self,
-            _: lingxi_core::host::subagent_spawn::SubagentSpawnRequest,
-            _: lingxi_core::host::subagent_spawn::SubagentInheritance,
-        ) -> Result<
-            lingxi_core::host::subagent_spawn::SubagentResult,
-            lingxi_core::host::subagent_spawn::SubagentSpawnError,
-        > {
-            Err(
-                lingxi_core::host::subagent_spawn::SubagentSpawnError::Internal(
-                    "only async forks are expected".into(),
-                ),
-            )
-        }
-
-        async fn spawn_async(
-            &self,
-            request: lingxi_core::host::subagent_spawn::SubagentSpawnRequest,
-            _: lingxi_core::host::subagent_spawn::SubagentInheritance,
-        ) -> Result<
-            lingxi_core::host::subagent_spawn::AsyncLaunch,
-            lingxi_core::host::subagent_spawn::SubagentSpawnError,
-        > {
-            self.0.lock().unwrap().push(request);
-            Ok(lingxi_core::host::subagent_spawn::AsyncLaunch {
-                agent_id: lingxi_core::types::AgentId::new(),
-                output_file: String::new(),
-            })
-        }
-    }
-
-    struct ForkBudget;
-
-    #[async_trait::async_trait]
-    impl lingxi_core::host::budget::BudgetEnforcerHandle for ForkBudget {
-        async fn check_and_charge(
-            &self,
-            _: u64,
-        ) -> Result<(), lingxi_core::host::budget::BudgetError> {
-            Ok(())
-        }
-
-        async fn snapshot_total_nano_usd(&self) -> u64 {
-            0
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl sidequery::SideQueryClient for CaptureCompactRequests {
-        async fn query(
-            &self,
-            request: sidequery::SideQueryRequest,
-        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
-            self.0.lock().unwrap().push(request);
-            Ok(sidequery::SideQueryResponse {
-                text: Some("<summary>Kept the user's project context.</summary>".into()),
-                structured: None,
-                tool_calls: Vec::new(),
-                usage: cost::Usage::default(),
-                stop_reason: Some("end_turn".into()),
-                retry_count: 0,
-            })
-        }
-    }
-
     #[tokio::test]
-    async fn profile_boundary_invalidates_cached_fork_before_manual_compaction() {
-        use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
-
-        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-        let captured = Arc::new(CaptureCompactRequests::default());
-        let runner = Arc::new(
-            sidequery::ForkedAgentRunner::new()
-                .with_side_query_client(captured.clone(), "test-compact-model".into()),
+    async fn construction_fixes_mode_and_same_mode_check_does_not_change_epoch() {
+        let code = orchestrator();
+        let code_prompt = code.assemble_system_prompt_preview().await.unwrap();
+        assert!(code_prompt.contains("command-line coding assistant"));
+        let chat = orchestrator().with_conversation_mode(ConversationMode::Chat);
+        let before = chat.conversation_profile().await;
+        assert_eq!(
+            chat.ensure_conversation_mode(ConversationMode::Chat)
+                .await
+                .unwrap(),
+            before
         );
-        let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
-            compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
-            u64::MAX,
-        ));
-        let orch = ConversationOrchestrator::into_shared(orchestrator()
-            .with_conversation_mode(ConversationMode::Code)
-            .with_cache_safe_slot(slot.clone())
-            .with_compaction(compactor));
-        let retired = ConversationMessage::user_meta(MessageId::new(), "old skill body".into())
-            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
-        let answer = |text: &str| ConversationMessage::Assistant {
-            per_turn_effort: None,
-            id: MessageId::new(),
-            content: vec![lingxi_core::types::ContentBlock::Text {
-                text: text.into(),
-                citations: None,
-            }],
-            stop_reason: Some("end_turn".into()),
-            resumable: None,
-        };
-        orch.session.lock().await.history = vec![
-            ConversationMessage::user(MessageId::new(), "first question".into()),
-            retired.clone(),
-            answer("first answer"),
-            ConversationMessage::user(MessageId::new(), "second question".into()),
-            answer("second answer"),
-        ];
-        let model = orch.session.lock().await.model.clone();
-        let old_system = SystemPromptInput::custom_prompt("OLD PROFILE SOURCE".into());
-        orch.save_cache_safe_params(Some(&old_system), &model, &[])
-            .await
-            .unwrap();
-        orch.save_current_turn_system_prompt(Some(&old_system))
-            .await;
-        let old = slot.get_last().await.unwrap();
-        assert!(old
-            .fork_context_messages
-            .iter()
-            .any(|row| row.id() == retired.id()));
-
-        // Selection during a running turn is pending and must not disturb the
-        // old turn's captured context.
-        let turn = orch.turn_gate.lock().await;
-        let selected = orch
-            .select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
-        assert!(selected.pending);
-        assert_eq!(slot.get_last().await.unwrap().generation, old.generation);
-        assert!(orch.current_turn_system_prompt().await.is_some());
-        drop(turn);
-
-        // Manual compaction admits the pending profile before rebuilding its
-        // system source and sending a fork to the actual side-query client.
-        orch.force_compact_with_instructions_and_cancel(
-            None,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(orch.current_turn_system_prompt().await.is_none());
-        let calls = captured.0.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let call = &calls[0];
-        let system = call.system_prompt.as_ref().unwrap().string_at("").unwrap();
-        assert!(system.contains("research, writing, learning"), "{system}");
-        assert!(!system.contains("OLD PROFILE SOURCE"), "{system}");
-        assert!(call.messages.iter().all(|row| row.id() != retired.id()));
-        drop(calls);
-
-        assert!(slot
-            .save_if_generation_matches(old.generation, old)
+        assert!(chat
+            .ensure_conversation_mode(ConversationMode::Code)
             .await
             .is_err());
-        let current = slot.get_last().await.unwrap();
-        assert!(current
-            .system_prompt
-            .string_at("")
-            .unwrap()
-            .contains("research, writing, learning"));
+        assert_eq!(chat.conversation_profile().await, before);
+        assert_eq!(chat.profile_epoch().await, 0);
+        let prompt = chat.assemble_system_prompt_preview().await.unwrap();
+        assert!(prompt.contains("research, writing, learning"));
+        assert!(!prompt.contains("command-line coding assistant"));
     }
 
     #[tokio::test]
-    async fn profile_boundary_fork_uses_current_system_and_filtered_history() {
-        use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
-
-        let captured = Arc::new(CaptureForkRequests::default());
-        let orch = ConversationOrchestrator::into_shared(orchestrator()
-            .with_conversation_mode(ConversationMode::Code)
-            .with_fork_spawner(captured.clone())
-            .with_fork_budget(Arc::new(ForkBudget)));
-        let retired = ConversationMessage::user_meta(MessageId::new(), "old skill body".into())
-            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
-        let user = ConversationMessage::user(MessageId::new(), "question".into());
-        let assistant = ConversationMessage::Assistant {
-            per_turn_effort: None,
-            id: MessageId::new(),
-            content: vec![lingxi_core::types::ContentBlock::Text {
-                text: "answer".into(),
-                citations: None,
-            }],
-            stop_reason: Some("end_turn".into()),
-            resumable: None,
-        };
-        let raw = vec![user.clone(), retired.clone(), assistant.clone()];
-        orch.session.lock().await.history = raw.clone();
-        orch.save_current_turn_system_prompt(Some(&SystemPromptInput::custom_prompt(
-            "OLD PROFILE SOURCE".into(),
-        )))
-        .await;
-        let turn = orch.turn_gate.lock().await;
-        assert!(
-            orch.select_conversation_mode(ConversationMode::Chat)
-                .await
-                .unwrap()
-                .pending
-        );
-        drop(turn);
-        orch.fork_conversation(&Source::from("follow up"))
-            .await
-            .unwrap();
-        assert!(!orch.conversation_profile().await.pending);
-
-        let requests = captured.0.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        let request = &requests[0];
-        let system = request
-            .fork_parent_system_prompt
-            .as_ref()
-            .unwrap()
-            .string_at("")
-            .unwrap();
-        assert!(system.contains("research, writing, learning"), "{system}");
-        assert!(!system.contains("OLD PROFILE SOURCE"), "{system}");
-        let history = request.fork_context_messages.as_ref().unwrap();
-        assert!(history.iter().any(|row| row.id() == user.id()));
-        assert!(history.iter().any(|row| row.id() == assistant.id()));
-        assert!(history.iter().all(|row| row.id() != retired.id()));
-        drop(requests);
-        assert_eq!(orch.session.lock().await.history, raw);
-    }
-
-    #[tokio::test]
-    async fn profile_boundary_rebuilds_recap_and_name_without_old_cached_context() {
-        use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
-
-        let captured = Arc::new(CaptureSideRequests::default());
-        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-        let runner = Arc::new(
-            sidequery::ForkedAgentRunner::new()
-                .with_side_query_client(captured.clone(), "test-model".into()),
-        );
-        let orch = orchestrator()
-            .with_conversation_mode(ConversationMode::Code)
-            .with_cache_safe_slot(slot.clone())
-            .with_recap_runner(runner);
-        let retired = ConversationMessage::user_meta(MessageId::new(), "old skill body".into())
-            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
-        orch.session.lock().await.history = vec![
-            ConversationMessage::user(MessageId::new(), "question".into()),
-            retired.clone(),
-        ];
-        let model = orch.session.lock().await.model.clone();
-        orch.save_cache_safe_params(
-            Some(&SystemPromptInput::custom_prompt(
-                "OLD PROFILE SOURCE".into(),
-            )),
-            &model,
-            &[],
-        )
-        .await
-        .unwrap();
-        orch.select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
-        assert!(slot.get_last().await.is_none());
-        *orch
-            .prompt_runtime
-            .pending_prompt_source_vector
-            .lock()
-            .await = Some(vec![
-            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
-                "main request snapshot",
-            ),
-        ]);
-        orch.generate_recap_query(tokio_util::sync::CancellationToken::new())
-            .await
-            .unwrap();
-        assert!(orch
-            .generate_session_name_query(tokio_util::sync::CancellationToken::new())
-            .await
-            .unwrap()
-            .is_some());
-        let requests = captured.0.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        for request in requests.iter() {
-            let system = request
-                .system_prompt
-                .as_ref()
-                .unwrap()
-                .string_at("")
-                .unwrap();
-            assert!(system.contains("research, writing, learning"), "{system}");
-            assert!(!system.contains("OLD PROFILE SOURCE"));
-            assert!(request.messages.iter().all(|row| row.id() != retired.id()));
-        }
-        drop(requests);
-        assert!(slot.get_last().await.is_none());
-        let pending = orch
-            .prompt_runtime
-            .pending_prompt_source_vector
-            .lock()
-            .await;
-        assert_eq!(
-            pending.as_ref().unwrap()[0].display_text(),
-            "main request snapshot"
-        );
-    }
-
-    /// Minimal deferred Skill whose activation follows the real Skill tool's
-    /// session/epoch provenance, without loading a file or executing setup.
-    struct DeferredSkill;
-    #[async_trait::async_trait]
-    impl tool_api::tool_trait::Tool for DeferredSkill {
-        fn name(&self) -> &str {
-            "Skill"
-        }
-        fn input_schema(&self) -> &Source {
-            static SCHEMA: once_cell::sync::Lazy<Source> = once_cell::sync::Lazy::new(|| {
-                tool_api::tool_trait::generated_builtin_result(
-                    &serde_json::json!({"type":"object","properties":{}}),
-                )
-            });
-            &SCHEMA
-        }
-        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
-            tool_api::tool_trait::ToolInputRepairMetadata::Known {
-                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
-                schema_provenance:
-                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
-                exempt_top_level_keys: None,
-            }
-        }
-        fn is_enabled(&self, _: &tool_api::tool_trait::ToolStaticContext) -> bool {
-            true
-        }
-        fn max_result_size_chars(&self) -> usize {
-            4096
-        }
-        fn is_concurrency_safe(&self, _: &Source) -> bool {
-            true
-        }
-        fn is_read_only(&self, _: &Source) -> bool {
-            true
-        }
-        async fn validate_input(
-            &self,
-            _: &Source,
-            _: &tool_api::context::ToolUseContext,
-        ) -> Result<(), tool_api::tool_trait::ValidationError> {
-            Ok(())
-        }
-        async fn check_permissions(
-            &self,
-            _: &Source,
-            _: &tool_api::context::ToolUseContext,
-        ) -> permission::PermissionResult {
-            permission::PermissionResult::Allow {
-                reason: permission::PermissionDecisionReason::Other {
-                    reason: "test".into(),
-                },
-                updated_input: None,
-                update_destination: None,
-                metadata: permission::result::PermissionMetadata::default(),
-            }
-        }
-        async fn description(
-            &self,
-            _: &Source,
-            _: &tool_api::tool_trait::DescriptionOptions,
-        ) -> String {
-            "deferred skill".into()
-        }
-        async fn prompt(&self, _: &tool_api::tool_trait::PromptOptions) -> Source {
-            "".into()
-        }
-        async fn call(
-            &self,
-            _: Source,
-            ctx: tool_api::context::ToolUseContext,
-            _: tool_api::progress::ToolProgressSender,
-        ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
-            let session = ctx
-                .session
-                .expect("deferred Skill has a session")
-                .lock()
-                .await
-                .session_id
-                .to_string();
-            let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session), None);
-            let name: Source = "deferred".into();
-            let body: Source = "guidance from old turn".into();
-            let id = MessageId::new();
-            let message = ConversationMessage::user(id, "guidance from old turn".to_string())
-                .with_origin(
-                    compaction::invoked_skills::skill_activation_origin_with_skill(
-                        compaction::invoked_skills::context_epoch(scope),
-                        &name,
-                        std::path::Path::new("/skill"),
-                    ),
-                );
-            compaction::invoked_skills::register_activation_with_message(
-                &name,
-                std::path::Path::new("/skill"),
-                &body,
-                None,
-                scope,
-                id,
-            );
-            Ok(tool_api::tool_trait::ToolCallResult {
-                data: tool_api::tool_trait::generated_builtin_result(
-                    &serde_json::json!({"model_content":"Launching skill: deferred"}),
-                ),
-                model_content: None,
-                new_messages: vec![message],
-                context_modifier: None,
-                is_error: false,
-                mcp_meta: None,
-                subagent_hooks_fired: false,
-            })
-        }
-    }
-
-    fn persisted_orchestrator(
-        root: &std::path::Path,
-        id: lingxi_core::types::SessionId,
-    ) -> (ConversationOrchestrator, Arc<session::jsonl::JsonlWriter>) {
-        let fs: Arc<dyn lingxi_core::host::FileSystem> =
-            Arc::new(platform_posix::fs::PosixFileSystem::new(root.to_path_buf()));
-        let writer = Arc::new(session::jsonl::JsonlWriter::new(
-            root.join(format!("{}.jsonl", id.as_uuid())),
-            fs,
-        ));
-        let mut tools = tool_api::ToolRegistry::new();
-        tools.register_builtin(Arc::new(DeferredSkill));
-        (
-            orchestrator_with_tools(Arc::new(tools))
-                .with_session_id(id)
-                .with_jsonl_writer(writer.clone()),
-            writer,
-        )
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn pending_profile_survives_cold_resume_and_expires_deferred_old_skill_at_boundary() {
-        let _registry_guard = compaction::invoked_skills::TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = tempfile::tempdir().unwrap();
-        let id = lingxi_core::types::SessionId::new();
-        let (original, _) = persisted_orchestrator(root.path(), id);
-        let turn = original.turn_gate.lock().await;
-        let selected = original
-            .select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
-        assert!(selected.pending);
-        drop(turn);
-        drop(original);
-
-        let (recovered, writer) = persisted_orchestrator(root.path(), id);
-        let restored = recovered
-            .restore_conversation_profile(ConversationMode::Code)
-            .await
-            .unwrap();
-        assert_eq!(
-            (
-                restored.active,
-                restored.selected,
-                restored.revision,
-                restored.pending
-            ),
-            (ConversationMode::Code, ConversationMode::Chat, 1, true)
-        );
-
-        // Execute the actual deferred replay path; the test Skill stamps its
-        // instruction with the profile retained by the interrupted query.
-        let turn = recovered.turn_gate.lock().await;
-        crate::resume::replay_deferred_tools_after_resume(
-            &recovered,
-            vec![lingxi_core::host::DeferredToolReplay {
-                tool_use_id: "deferred-call".into(),
-                tool_name: "Skill".into(),
-                tool_input: Source::parse("{}").unwrap(),
-                permission_mode: None,
-                traceparent: None,
-            }],
-        )
-        .await
-        .unwrap();
-        drop(turn);
-        let skill = recovered
-            .session
-            .lock()
-            .await
-            .history
-            .iter()
-            .find(|row| {
-                matches!(row, ConversationMessage::User { origin: Some(origin), .. }
-                if origin.string_at("/type") == Some("skill_activation"))
-            })
-            .unwrap()
-            .clone();
-        let skill_id = skill.id();
-        let scope_id = id.to_string();
-        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&scope_id), None);
-        assert_eq!(compaction::invoked_skills::context_epoch(scope), 0);
-        assert_eq!(compaction::invoked_skills::filter_for_scope(scope).len(), 1);
-
-        // Hosts can repeat restoration after the owned resume completed; that
-        // must not turn this already-applied replay into a new activation.
-        recovered
-            .restore_conversation_profile(ConversationMode::Chat)
-            .await
-            .unwrap();
-        assert_eq!(compaction::invoked_skills::filter_for_scope(scope).len(), 1);
-        let turn = recovered.turn_gate.lock().await;
-        recovered.admit_conversation_profile_inner().await.unwrap();
-        drop(turn);
-        assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());
-        assert!(!recovered
-            .session
-            .lock()
-            .await
-            .model_context_history()
-            .iter()
-            .any(|row| row.id() == skill_id));
-        let applied = writer.persisted_session_mode_transition().await.unwrap();
-        assert_eq!(
-            (
-                applied.active,
-                applied.selected,
-                applied.revision,
-                applied.active_epoch,
-                applied.pending
-            ),
-            (ConversationMode::Chat, ConversationMode::Chat, 1, 1, false)
-        );
-        drop(recovered);
-
-        // A second crash after admission reads the applied boundary and cannot
-        // make the old-epoch instruction effective again.
-        let (again, _) = persisted_orchestrator(root.path(), id);
-        again.session.lock().await.history.push(skill);
-        let profile = again
-            .restore_conversation_profile(ConversationMode::Code)
-            .await
-            .unwrap();
-        assert_eq!(
-            (profile.active, profile.pending),
-            (ConversationMode::Chat, false)
-        );
-        assert!(!again
-            .session
-            .lock()
-            .await
-            .model_context_history()
-            .iter()
-            .any(|row| row.id() == skill_id));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn failed_boundary_persistence_keeps_pending_profile_and_old_skill() {
-        let _registry_guard = compaction::invoked_skills::TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = tempfile::tempdir().unwrap();
-        let id = lingxi_core::types::SessionId::new();
-        let (orch, writer) = persisted_orchestrator(root.path(), id);
-        let turn = orch.turn_gate.lock().await;
-        orch.select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
-        drop(turn);
-        let input = super::super::drivers_impl::skill_prompt_inputs(
-            "/keep".into(),
-            "keep".into(),
-            Vec::new(),
-            Some(lingxi_core::host::SlashSkillIdentity { name: "keep".into(), path: "/skills/keep".into() }),
-        )
-        .remove(1);
+    async fn same_mode_check_preserves_current_skill_context() {
+        let orch = orchestrator();
         let skill_id = MessageId::new();
-        let mut skill = ConversationMessage::user_meta(skill_id, "keep".to_string());
-        orch.stamp_skill_prompt_activation(&input, &mut skill).await;
+        let skill = ConversationMessage::user_meta(skill_id, "current skill".into())
+            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
         orch.session.lock().await.history.push(skill);
-
-        // Make the transcript path unwritable while keeping the writer's
-        // in-memory metadata and then restore it for the retry.
-        let path = writer.active_path();
-        let backup = path.with_extension("backup");
-        std::fs::rename(&path, &backup).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        let turn = orch.turn_gate.lock().await;
-        assert!(orch.admit_conversation_profile_inner().await.is_err());
-        let current = orch.conversation_profile().await;
-        assert_eq!(
-            (current.active, current.selected, current.pending),
-            (ConversationMode::Code, ConversationMode::Chat, true)
-        );
+        let before = orch.conversation_profile().await;
+        orch.ensure_conversation_mode(ConversationMode::Code)
+            .await
+            .unwrap();
+        assert!(orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
+        assert_eq!(orch.conversation_profile().await, before);
+        assert_eq!(orch.profile_epoch().await, 0);
         assert!(orch
             .session
             .lock()
@@ -677,87 +101,11 @@ mod tests {
             .model_context_history()
             .iter()
             .any(|row| row.id() == skill_id));
-        assert!(
-            writer
-                .persisted_session_mode_transition()
-                .await
-                .unwrap()
-                .pending
-        );
-        std::fs::remove_dir(&path).unwrap();
-        std::fs::rename(&backup, &path).unwrap();
-        orch.admit_conversation_profile_inner().await.unwrap();
-        drop(turn);
-        assert!(
-            !writer
-                .persisted_session_mode_transition()
-                .await
-                .unwrap()
-                .pending
-        );
-    }
-
-    #[tokio::test]
-    async fn conversation_profiles_replace_cached_engineering_instructions() {
-        let orch = orchestrator();
-        let model = orch.session.lock().await.model.clone();
-        let code = orch.assemble_system_prompt_preview().await.unwrap();
-        assert!(code.contains("command-line coding assistant"));
-        let selected = orch
-            .select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
-        assert_eq!(
-            selected.session_id,
-            orch.current_session_id().await.as_uuid().to_string()
-        );
-        assert!(!selected.pending);
-        let chat = orch.assemble_system_prompt_preview().await.unwrap();
-        assert!(chat.contains("research, writing, learning"));
-        assert!(!chat.contains("command-line coding assistant"));
-        assert!(!chat.contains("# Doing tasks"));
-        assert!(chat.contains("Earlier profile directives"));
-        orch.select_conversation_mode(ConversationMode::Code)
-            .await
-            .unwrap();
-        let code_again = orch.assemble_system_prompt_preview().await.unwrap();
-        assert!(code_again.contains("command-line coding assistant"));
-        assert!(!code_again.contains("You are LingXi, a capable assistant"));
-        assert_eq!(orch.session.lock().await.model, model);
-    }
-
-    #[tokio::test]
-    async fn conversation_profiles_pending_cancel_preserves_effective_epoch() {
-        let orch = orchestrator();
-        let turn = orch.turn_gate.lock().await;
-        let pending = orch
-            .select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
-        assert!(pending.pending);
-        assert_eq!(pending.active, ConversationMode::Code);
-        orch.record_context_projection(None, &[], &[]).await;
-        assert!(!orch.current_context_manifest().await.projected);
-        let canceled = orch
-            .select_conversation_mode(ConversationMode::Code)
-            .await
-            .unwrap();
-        assert!(!canceled.pending);
-        assert_eq!(canceled.revision, 2);
-        assert_eq!(orch.profile_epoch().await, 0);
-        drop(turn);
-        let _turn = orch.turn_gate.lock().await;
-        orch.admit_conversation_profile_inner().await.unwrap();
-        assert_eq!(orch.profile_epoch().await, 0);
-        assert_eq!(
-            orch.conversation_profile().await.active,
-            ConversationMode::Code
-        );
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn captured_profile_restores_pending_epochs_without_a_writer() {
+    async fn captured_profile_keeps_admitted_mode_and_epoch_without_a_writer() {
         let _registry_guard = compaction::invoked_skills::TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -782,7 +130,9 @@ mod tests {
         let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid.to_string());
         let profile =
             session::JsonlWriter::session_mode_transition_from_source(&source, &sid.to_string());
-        let orch = orchestrator().with_session_id(session_id);
+        let orch = orchestrator()
+            .with_conversation_mode(ConversationMode::Chat)
+            .with_session_id(session_id);
         orch.restore_captured_session_history(
             sid,
             &messages,
@@ -798,7 +148,7 @@ mod tests {
         let mode = orch.conversation_profile().await;
         assert_eq!(
             (mode.active, mode.selected, mode.revision, mode.pending),
-            (ConversationMode::Chat, ConversationMode::Code, 3, true)
+            (ConversationMode::Chat, ConversationMode::Chat, 3, false)
         );
         assert_eq!(orch.profile_epoch().await, 2);
         let history = orch.session.lock().await;
@@ -818,37 +168,17 @@ mod tests {
             .iter()
             .any(|skill| skill.name.string_at("") == Some("current")));
 
-        let _turn = orch.turn_gate.lock().await;
-        orch.admit_conversation_profile_inner().await.unwrap();
-        assert_eq!(
-            orch.conversation_profile().await.active,
-            ConversationMode::Code
-        );
-        assert_eq!(orch.profile_epoch().await, 3);
-        let model = orch.session.lock().await.model_context_history();
-        assert!(!model.iter().any(|row| row.id() == current_id));
-        assert!(model.iter().any(|row| row.id() == user_id));
-    }
-
-    #[tokio::test]
-    async fn conversation_profiles_retire_only_host_marked_skill_instructions() {
-        let orch = orchestrator();
-        let old_id = MessageId::new();
-        let user_id = MessageId::new();
-        let mut old = ConversationMessage::user_meta(old_id, "Do the old skill action".to_string());
-        if let ConversationMessage::User { origin, .. } = &mut old {
-            *origin = Some(compaction::invoked_skills::skill_activation_origin(0));
-        }
-        let user = ConversationMessage::user_meta(user_id, "Do the old skill action".to_string());
-        orch.session.lock().await.history.extend([old, user]);
-        orch.select_conversation_mode(ConversationMode::Chat)
+        orch.ensure_conversation_mode(ConversationMode::Chat)
             .await
             .unwrap();
-        let session = orch.session.lock().await;
-        assert_eq!(session.history.len(), 2, "the transcript remains available");
-        let projected = session.model_context_history();
-        assert!(!projected.iter().any(|row| row.id() == old_id));
-        assert!(projected.iter().any(|row| row.id() == user_id));
+        assert!(orch
+            .ensure_conversation_mode(ConversationMode::Code)
+            .await
+            .is_err());
+        assert_eq!(orch.profile_epoch().await, 2);
+        let model = orch.session.lock().await.model_context_history();
+        assert!(model.iter().any(|row| row.id() == current_id));
+        assert!(model.iter().any(|row| row.id() == user_id));
     }
 
     #[tokio::test]
@@ -952,99 +282,90 @@ impl ConversationOrchestrator {
         context.state.clone()
     }
 
-    pub(crate) async fn select_conversation_mode(
+    /// Verify the host-selected mode without changing the owning session.
+    pub async fn ensure_conversation_mode(
         &self,
         mode: ConversationMode,
     ) -> Result<SessionModeSnapshot, HandleError> {
-        // An idle selection owns the same gate as compaction/resume/turns.
-        // A busy selection changes only `selected`; the running query keeps
-        // `active` and all of its already-admitted instructions and tools.
-        let turn = self.turn_gate.try_lock().ok();
-        let transition = self.conversation_transition.lock().await;
+        let snapshot = self.conversation_profile().await;
+        if snapshot.active != mode {
+            return Err(HandleError::ActionFailed(
+                "session mode is fixed at creation".into(),
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    /// Persist and validate the mode chosen by the unshared builder. This is
+    /// called before startup hooks, after installing the UUID and its writer.
+    pub async fn initialize_conversation_mode(&self) -> Result<SessionModeSnapshot, HandleError> {
+        let _turn = self.turn_gate.lock().await;
+        let _transition = self.conversation_transition.lock().await;
+        self.initialize_conversation_mode_locked().await
+    }
+
+    /// The session-switch owner already holds the turn and transition gates.
+    pub(crate) async fn initialize_conversation_mode_locked(
+        &self,
+    ) -> Result<SessionModeSnapshot, HandleError> {
         let session_id = self.current_session_id().await.as_uuid().to_string();
-        let mut context = self.conversation_context.lock().await;
-        if self.current_session_id().await.as_uuid().to_string() != session_id {
-            return Err(HandleError::ActionFailed(
-                "conversation changed before profile selection".into(),
-            ));
-        }
-        context.bind(session_id.clone());
-        if context.state.selected == mode {
-            return Ok(context.state.clone());
-        }
-        let revision = context.state.revision.checked_add(1).ok_or_else(|| {
-            HandleError::ActionFailed("conversation context revision exhausted".into())
-        })?;
-        // Keep epochs exactly representable in the source JSON projection.
-        if revision > (1_u64 << 53) - 1 {
-            return Err(HandleError::ActionFailed(
-                "conversation context revision exhausted".into(),
-            ));
-        }
-        let selected_epoch = if context.state.active == mode {
-            context.active_epoch
-        } else {
-            revision
+        let (expected, restored, active_epoch, revision) = {
+            let mut context = self.conversation_context.lock().await;
+            context.bind(session_id.clone());
+            (
+                context.state.active,
+                context.restored,
+                context.active_epoch,
+                context.state.revision,
+            )
         };
-        let apply_now = turn.is_some() && context.state.active != mode;
-        if apply_now
-            && crate::native_computer::has_unsettled_profile_receipts(self)
+        let writer = self.transcript.jsonl_writer.as_ref();
+        let persisted = if let Some(writer) = writer {
+            writer
+                .persisted_fixed_session_mode()
                 .await
-                .map_err(|error| HandleError::ActionFailed(error.to_string()))?
-        {
-            return Err(HandleError::ActionFailed(
-                "A computer receipt is still pending. Finish its current-profile recovery before changing mode.".into(),
-            ));
-        }
-        let transition_record = SessionModeTransition {
-            selected: mode,
-            active: if apply_now {
-                mode
-            } else {
-                context.state.active
-            },
-            revision,
-            selected_epoch,
-            active_epoch: if apply_now {
-                selected_epoch
-            } else {
-                context.active_epoch
-            },
-            pending: !apply_now && context.state.active != mode,
+                .map_err(HandleError::ActionFailed)?
+        } else {
+            None
         };
-        if let Some(writer) = &self.transcript.jsonl_writer {
-            let path = writer.active_path();
-            if path.file_stem().and_then(|name| name.to_str()) != Some(session_id.as_str()) {
+        if let Some(profile) = &persisted {
+            if profile.active != expected || (restored && profile.active_epoch != active_epoch) {
                 return Err(HandleError::ActionFailed(
-                    "conversation changed before profile persistence".into(),
+                    "persisted session mode or instruction epoch does not match the initialized session".into(),
                 ));
             }
-            writer
-                .append_session_mode_transition(&session_id, &transition_record)
-                .await
-                .map_err(|error| {
-                    HandleError::ActionFailed(format!("persist conversation profile: {error}"))
-                })?;
         }
-        // No live state is changed until the durable append succeeds.
-        context.state.selected = mode;
-        context.selected_epoch = selected_epoch;
-        context.state.revision = revision;
-        context.state.pending = transition_record.pending;
-        if apply_now {
-            self.reset_profile_projection(&session_id, selected_epoch, true, false)
-                .await;
-            context.active_epoch = selected_epoch;
-            context.state.active = mode;
-            context.state.pending = false;
+        let profile = persisted.unwrap_or(SessionModeTransition {
+            selected: expected,
+            active: expected,
+            revision,
+            selected_epoch: active_epoch,
+            active_epoch,
+            pending: false,
+        });
+        if let Some(writer) = writer {
+            if writer
+                .active_path()
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .and_then(|stem| uuid::Uuid::parse_str(stem).ok())
+                != uuid::Uuid::parse_str(&session_id).ok()
+            {
+                return Err(HandleError::ActionFailed(
+                    "session changed before mode initialization".into(),
+                ));
+            }
+            if writer.persisted_session_mode_transition().await.as_ref() != Some(&profile) {
+                writer
+                    .initialize_fixed_session_mode(&session_id, &profile)
+                    .await
+                    .map_err(|error| {
+                        HandleError::ActionFailed(format!("persist fixed session mode: {error}"))
+                    })?;
+            }
         }
-        context.manifest.projected = false;
-        let snapshot = context.state.clone();
-        drop(context);
-        drop(transition);
-        drop(turn);
-        self.output.emit_conversation_mode(&snapshot).await;
-        Ok(snapshot)
+        self.restore_conversation_profile_state_locked(expected, Some(profile))
+            .await
     }
 
     pub(crate) async fn restore_conversation_profile(
@@ -1100,7 +421,7 @@ impl ConversationOrchestrator {
         persisted: Option<SessionModeTransition>,
     ) -> Result<SessionModeSnapshot, HandleError> {
         let session_id = self.current_session_id().await.as_uuid().to_string();
-        let profile = persisted.unwrap_or(SessionModeTransition {
+        let mut profile = persisted.unwrap_or(SessionModeTransition {
             selected: fallback,
             active: fallback,
             revision: 0,
@@ -1108,6 +429,9 @@ impl ConversationOrchestrator {
             active_epoch: 0,
             pending: false,
         });
+        profile.selected = profile.active;
+        profile.selected_epoch = profile.active_epoch;
+        profile.pending = false;
         let mut context = self.conversation_context.lock().await;
         if context.restored
             && context.state.session_id == session_id
@@ -1152,134 +476,16 @@ impl ConversationOrchestrator {
     /// Called once per admitted outer query, before any prompt is assembled.
     pub(crate) async fn admit_conversation_profile(
         &self,
-        turn_guard: &ProfileTurnGuard,
+        _turn_guard: &ProfileTurnGuard,
     ) -> Result<(), HandleError> {
-        let Some(owner) = self.upgrade_streaming_tool_dispatch_owner() else {
-            // An unshared value may run an unchanged profile, but cannot
-            // start a durable transition that would outlive a dropped caller.
-            let _transition = self.conversation_transition.lock().await;
-            let mut context = self.conversation_context.lock().await;
-            let session_id = self.current_session_id().await;
-            context.bind(session_id.as_uuid().to_string());
-            if context.state.pending {
-                return Err(HandleError::ActionFailed(
-                    "conversation profile admission requires a shared orchestrator owner".into(),
-                ));
-            }
-            let scope_id = session_id.to_string();
-            compaction::invoked_skills::set_context_epoch(
-                compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&scope_id), None),
-                context.active_epoch,
-            );
-            return Ok(());
-        };
-        let claim = self.lifecycle_runtime.session_switch_supervisor.claim()
-            .map_err(HandleError::ActionFailed)?;
-        let turn_guard = turn_guard.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let _turn_guard = turn_guard;
-            let result = owner.admit_conversation_profile_inner().await;
-            match tx.send(result) {
-                Ok(()) => claim.complete(None),
-                Err(result) => claim.complete(result.err().map(|error| {
-                    format!("detached conversation profile admission failed: {error}")
-                })),
-            }
-        });
-        rx.await.map_err(|_| HandleError::ActionFailed(
-            "conversation profile admission task failed".into(),
-        ))?
-    }
-
-    /// Called only with the turn gate held by the admission owner.
-    pub(crate) async fn admit_conversation_profile_inner(&self) -> Result<(), HandleError> {
-        let transition = self.conversation_transition.lock().await;
-        let session_id = self.current_session_id().await.as_uuid().to_string();
+        let session_id = self.current_session_id().await;
         let mut context = self.conversation_context.lock().await;
-        context.bind(session_id.clone());
-        let skill_session_id = self.current_session_id().await.to_string();
+        context.bind(session_id.as_uuid().to_string());
+        let scope_id = session_id.to_string();
         compaction::invoked_skills::set_context_epoch(
-            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&skill_session_id), None),
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&scope_id), None),
             context.active_epoch,
         );
-        if context.state.pending {
-            if crate::native_computer::has_unsettled_profile_receipts(self)
-                .await
-                .map_err(|error| HandleError::ActionFailed(error.to_string()))?
-            {
-                // Cancel the queued change durably, so the next query can
-                // recover the receipt with the profile that admitted it.
-                let revision = context
-                    .state
-                    .revision
-                    .checked_add(1)
-                    .filter(|revision| *revision <= (1_u64 << 53) - 1)
-                    .ok_or_else(|| {
-                        HandleError::ActionFailed("conversation context revision exhausted".into())
-                    })?;
-                if let Some(writer) = &self.transcript.jsonl_writer {
-                    writer
-                        .append_session_mode_transition(
-                            &session_id,
-                            &SessionModeTransition {
-                                selected: context.state.active,
-                                active: context.state.active,
-                                revision,
-                                selected_epoch: context.active_epoch,
-                                active_epoch: context.active_epoch,
-                                pending: false,
-                            },
-                        )
-                        .await
-                        .map_err(|error| {
-                            HandleError::ActionFailed(format!(
-                                "persist canceled conversation profile: {error}"
-                            ))
-                        })?;
-                }
-                context.state.selected = context.state.active;
-                context.state.revision = revision;
-                context.state.pending = false;
-                context.selected_epoch = context.active_epoch;
-                context.manifest.projected = false;
-                let snapshot = context.state.clone();
-                drop(context);
-                drop(transition);
-                self.output.emit_conversation_mode(&snapshot).await;
-                return Err(HandleError::ActionFailed(
-                    "The mode change was canceled because a computer receipt is pending. Finish its recovery, then select the mode again.".into(),
-                ));
-            }
-            if let Some(writer) = &self.transcript.jsonl_writer {
-                let applied = SessionModeTransition {
-                    selected: context.state.selected,
-                    active: context.state.selected,
-                    revision: context.state.revision,
-                    selected_epoch: context.selected_epoch,
-                    active_epoch: context.selected_epoch,
-                    pending: false,
-                };
-                writer
-                    .append_session_mode_transition(&session_id, &applied)
-                    .await
-                    .map_err(|error| {
-                        HandleError::ActionFailed(format!(
-                            "persist conversation profile admission: {error}"
-                        ))
-                    })?;
-            }
-            self.reset_profile_projection(&session_id, context.selected_epoch, true, false)
-                .await;
-            context.active_epoch = context.selected_epoch;
-            context.state.active = context.state.selected;
-            context.state.pending = false;
-            context.manifest.projected = false;
-            let snapshot = context.state.clone();
-            drop(context);
-            drop(transition);
-            self.output.emit_conversation_mode(&snapshot).await;
-        }
         Ok(())
     }
 
@@ -1410,12 +616,16 @@ impl ConversationOrchestrator {
         input: &super::QueuedPromptInput,
         message: &mut ConversationMessage,
     ) {
-        let Some(skill) = input.skill_identity.as_ref() else { return; };
+        let Some(skill) = input.skill_identity.as_ref() else {
+            return;
+        };
         let session_id = self.current_session_id().await.to_string();
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
         let epoch = compaction::invoked_skills::context_epoch(scope);
         let activation = compaction::invoked_skills::skill_activation_origin_with_skill(
-            epoch, &skill.name, &skill.path,
+            epoch,
+            &skill.name,
+            &skill.path,
         );
         if let ConversationMessage::User { origin, .. } = message {
             *origin = Some(activation);
@@ -1462,7 +672,10 @@ impl ConversationOrchestrator {
                 continue;
             }
             if let Ok(name) = origin.subprojection("/skill_name") {
-                if compaction::invoked_skills::register_accepted_skill_message(&accepted_message, scope) {
+                if compaction::invoked_skills::register_accepted_skill_message(
+                    &accepted_message,
+                    scope,
+                ) {
                     continue;
                 }
                 let units = content

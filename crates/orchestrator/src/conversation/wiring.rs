@@ -111,7 +111,7 @@ impl ConversationOrchestrator {
         // any side query fired before the first main-loop turn still sees the
         // session's mode+provider decision rather than the bare `false` default.
         if !side_chat {
-            lingxi_core::host::session_flags::set_tool_search_enabled(
+            api.set_tool_search_enabled(
                 tools.deferral().mode().is_enabled()
                     && tool_search_supported_for_request(api.as_ref(), &config.model, None, None),
             );

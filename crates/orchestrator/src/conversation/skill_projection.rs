@@ -29,13 +29,21 @@ fn skill_names(origin: &Utf16JsonProjection) -> Option<Vec<Vec<u16>>> {
         .collect()
 }
 
-fn aggregate_origin(epoch: u64, skills: &[compaction::RestoredSkill], scope: Option<compaction::invoked_skills::InvokedSkillScopeRef<'_>>) -> Utf16JsonProjection {
+fn aggregate_origin(
+    epoch: u64,
+    skills: &[compaction::RestoredSkill],
+    scope: Option<compaction::invoked_skills::InvokedSkillScopeRef<'_>>,
+) -> Utf16JsonProjection {
     let mut origin = compaction::invoked_skills::skill_activation_origin(epoch);
     let sources = skills
         .iter()
         .map(|skill| {
             if let Some(scope) = scope {
-                return compaction::invoked_skills::skill_source_metadata(&skill.name, &skill.path, scope);
+                return compaction::invoked_skills::skill_source_metadata(
+                    &skill.name,
+                    &skill.path,
+                    scope,
+                );
             }
             Utf16JsonProjection::object(vec![
                 ("name".into(), skill.name.clone()),

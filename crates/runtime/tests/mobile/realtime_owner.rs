@@ -156,6 +156,7 @@ fn native_audio_uses_mobile_listener_owner_and_drains_permissions_before_release
         .unwrap();
         assert!(engine
             .submit(ClientCommand::NewSession {
+                mode: client::protocol::listings::SessionModeDto::Code,
                 cwd: None,
                 model: None
             })
@@ -211,6 +212,7 @@ fn native_audio_uses_mobile_listener_owner_and_drains_permissions_before_release
             .any(|event| matches!(event, ClientEvent::TurnEnded { .. })));
         engine
             .submit(ClientCommand::NewSession {
+                mode: client::protocol::listings::SessionModeDto::Code,
                 cwd: None,
                 model: None,
             })

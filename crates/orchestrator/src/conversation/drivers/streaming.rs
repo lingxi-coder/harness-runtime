@@ -4087,7 +4087,8 @@ impl StreamingTurnDriver<'_> {
         } else {
             match queued_inputs {
                 Some(inputs) => {
-                    let requires_skill_header = inputs.iter().any(|input| input.skill_identity.is_some());
+                    let requires_skill_header =
+                        inputs.iter().any(|input| input.skill_identity.is_some());
                     let mut admitted = Vec::with_capacity(inputs.len());
                     let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
                     for (index, mut input) in inputs.into_iter().enumerate() {
@@ -4126,7 +4127,9 @@ impl StreamingTurnDriver<'_> {
                             }
                         }
                     }
-                    if admitted.is_empty() || (requires_skill_header && !admitted.iter().any(|input| !input.is_meta)) {
+                    if admitted.is_empty()
+                        || (requires_skill_header && !admitted.iter().any(|input| !input.is_meta))
+                    {
                         return Ok(ConversationOutcome::StopHookPrevented {
                             turn_count: 0,
                             final_message_id: message_id.unwrap_or_else(MessageId::new),

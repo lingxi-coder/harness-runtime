@@ -540,12 +540,17 @@ struct ExactCompactPreparedState {
 
 impl ExactCompactPreparedState {
     fn commit(&self, orch: &ConversationOrchestrator) {
-        orch.prompt_runtime.read_state_map.lock()
+        orch.prompt_runtime
+            .read_state_map
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .apply_compaction_transition(&self.reads_before, &self.reads_after);
         for write in &self.skills {
             compaction::invoked_skills::write_back_if_unchanged(
-                &write.key, write.activation_id, &write.original, &write.replacement,
+                &write.key,
+                write.activation_id,
+                &write.original,
+                &write.replacement,
             );
         }
     }
@@ -2216,8 +2221,12 @@ impl ConversationOrchestrator {
         boundary_context: &[lingxi_core::types::ConversationMessage],
     ) -> Vec<lingxi_core::types::ConversationMessage> {
         self.restore_post_compact_attachments_with_state(
-            boundary_context, &self.prompt_runtime.read_state_map, false,
-        ).await.0
+            boundary_context,
+            &self.prompt_runtime.read_state_map,
+            false,
+        )
+        .await
+        .0
     }
 
     async fn restore_post_compact_attachments_with_state(
@@ -2225,12 +2234,16 @@ impl ConversationOrchestrator {
         boundary_context: &[lingxi_core::types::ConversationMessage],
         read_state_map: &tool_api::read_file_state::ReadFileStateMap,
         stage_skills: bool,
-    ) -> (Vec<lingxi_core::types::ConversationMessage>, Vec<compaction::post_compact::StagedSkillWriteBack>) {
+    ) -> (
+        Vec<lingxi_core::types::ConversationMessage>,
+        Vec<compaction::post_compact::StagedSkillWriteBack>,
+    ) {
         // Native g_n snapshots every cache entry, including nested-memory
         // seeds, before readFileState.clear(). Keep the cache's MRU order so
         // Evo's stable timestamp sort preserves ties.
         let snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
-            let mut map = read_state_map.lock()
+            let mut map = read_state_map
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let snapshot = map
                 .keys()
@@ -2255,8 +2268,13 @@ impl ConversationOrchestrator {
                 self.config.plans_directory.as_deref(),
             ));
             out.extend(
-                self.restore_post_compact_files_arm(snapshot, &already_attached, &plan_file, read_state_map)
-                    .await,
+                self.restore_post_compact_files_arm(
+                    snapshot,
+                    &already_attached,
+                    &plan_file,
+                    read_state_map,
+                )
+                .await,
             );
         }
 
@@ -2274,9 +2292,15 @@ impl ConversationOrchestrator {
         );
         let already_attached_skills = self.post_compact_attached_skill_contents(boundary_context);
         let (restored_skills, staged_skills) = if stage_skills {
-            compaction::post_compact::stage_post_compact_skills(skill_candidates, &already_attached_skills)
+            compaction::post_compact::stage_post_compact_skills(
+                skill_candidates,
+                &already_attached_skills,
+            )
         } else {
-            (compaction::restore_post_compact_skills(skill_candidates, &already_attached_skills), Vec::new())
+            (
+                compaction::restore_post_compact_skills(skill_candidates, &already_attached_skills),
+                Vec::new(),
+            )
         };
         if let Some(rendered) = compaction::render_invoked_skills_attachment(&restored_skills) {
             let message_id = lingxi_core::types::MessageId::new();
@@ -3019,17 +3043,34 @@ impl ConversationOrchestrator {
         // position of `buildPostCompactMessages` order. Internal vision
         // sidecars are inserted between the kept tail and these attachments.
         let (restored_attachments, exact_prepared) = if native_exact_preserved {
-            let reads_before = self.prompt_runtime.read_state_map.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            let reads_before = self
+                .prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let staged_reads = std::sync::Arc::new(std::sync::Mutex::new(reads_before.clone()));
-            let (attachments, skills) = self.restore_post_compact_attachments_with_state(
-                &preserved_tail, &staged_reads, true,
-            ).await;
-            let reads_after = staged_reads.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-            (attachments, Some(ExactCompactPreparedState { reads_before, reads_after, skills }))
+            let (attachments, skills) = self
+                .restore_post_compact_attachments_with_state(&preserved_tail, &staged_reads, true)
+                .await;
+            let reads_after = staged_reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            (
+                attachments,
+                Some(ExactCompactPreparedState {
+                    reads_before,
+                    reads_after,
+                    skills,
+                }),
+            )
         } else {
-            (self.restore_post_compact_attachments_against(&preserved_tail).await, None)
+            (
+                self.restore_post_compact_attachments_against(&preserved_tail)
+                    .await,
+                None,
+            )
         };
 
         // Claude Code 2.1.212 `gio(...)` builds the post-compact attachment
@@ -3218,12 +3259,23 @@ impl ConversationOrchestrator {
             }
             let mut parent = marker.id();
             for (index, (original, _)) in retained_context_announcements.iter_mut().enumerate() {
-                let accepted = self.mod_session_append_row(original, None, false, None).await;
+                let accepted = self
+                    .mod_session_append_row(original, None, false, None)
+                    .await;
                 if let Err(error) = crate::native_computer::stage_exact_compaction_row(
-                    self, original, &accepted, marker.id(), parent, false,
-                ).await {
+                    self,
+                    original,
+                    &accepted,
+                    marker.id(),
+                    parent,
+                    false,
+                )
+                .await
+                {
                     tracing::warn!(%error, "native compaction prelude could not be persisted");
-                    self.output.emit_compaction_finished(Some(&error.to_string())).await;
+                    self.output
+                        .emit_compaction_finished(Some(&error.to_string()))
+                        .await;
                     return None;
                 }
                 parent = accepted.id();
@@ -3232,20 +3284,38 @@ impl ConversationOrchestrator {
             }
             let offset = 1 + retained_context_announcements.len();
             for (index, original) in result.messages.iter_mut().enumerate() {
-                let accepted = self.mod_session_append_row(original, None, false, None).await;
+                let accepted = self
+                    .mod_session_append_row(original, None, false, None)
+                    .await;
                 if let Err(error) = crate::native_computer::stage_exact_compaction_row(
-                    self, original, &accepted, marker.id(), parent, true,
-                ).await {
+                    self,
+                    original,
+                    &accepted,
+                    marker.id(),
+                    parent,
+                    true,
+                )
+                .await
+                {
                     tracing::warn!(%error, "native compaction summary could not be persisted");
-                    self.output.emit_compaction_finished(Some(&error.to_string())).await;
+                    self.output
+                        .emit_compaction_finished(Some(&error.to_string()))
+                        .await;
                     return None;
                 }
                 parent = accepted.id();
                 history_after[offset + index] = accepted.clone();
                 *original = accepted;
             }
-            if !self.persist_compact_boundary_to_jsonl(&marker, &metadata).await {
-                self.output.emit_compaction_finished(Some("native compaction boundary could not be persisted")).await;
+            if !self
+                .persist_compact_boundary_to_jsonl(&marker, &metadata)
+                .await
+            {
+                self.output
+                    .emit_compaction_finished(Some(
+                        "native compaction boundary could not be persisted",
+                    ))
+                    .await;
                 return None;
             }
             if let Some(tail_last) = native_exact_tail.as_ref() {
@@ -4249,8 +4319,10 @@ impl ConversationOrchestrator {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return false;
         };
-        let exact_native = compact_metadata.at_pointer("/nativeExactPreserved")
-            .and_then(|value| value.as_bool()) == Some(true);
+        let exact_native = compact_metadata
+            .at_pointer("/nativeExactPreserved")
+            .and_then(|value| value.as_bool())
+            == Some(true);
         let session_id_str = self.session.lock().await.session_id.to_string();
         let explicit_parent = match marker {
             ConversationMessage::System {
@@ -4313,11 +4385,16 @@ impl ConversationOrchestrator {
         let append = if exact_native {
             match writer.append_native_message_once(&jmsg).await {
                 Ok((_, true)) => Ok(()),
-                Ok((_, false)) => Err("native compact boundary is not the transcript tip".to_string()),
+                Ok((_, false)) => {
+                    Err("native compact boundary is not the transcript tip".to_string())
+                }
                 Err(error) => Err(error.to_string()),
             }
         } else {
-            writer.append(&jmsg).await.map_err(|error| error.to_string())
+            writer
+                .append(&jmsg)
+                .await
+                .map_err(|error| error.to_string())
         };
         match append {
             Ok(()) => {

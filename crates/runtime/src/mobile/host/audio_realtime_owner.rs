@@ -22,6 +22,12 @@ impl MobileEngineHandle {
         cancel: CancellationToken,
     ) -> Result<RealtimeAgentEnd, OrchestratorError> {
         let transition = self.loop_transition.lock().await;
+        let current = self.inner.orchestrator.current_session_id().await.as_uuid().to_string();
+        let gate = super::mobile_cron_session_gate(&self.session_cwd(), &current);
+        let scheduled_guard = gate.lock().await;
+        self.reload_scheduled_if_needed()
+            .await
+            .map_err(|error| OrchestratorError::Internal(format!("scheduled session reload: {error}")))?;
         let turn = self
             .reserve_turn(None)
             .await
@@ -107,6 +113,7 @@ impl MobileEngineHandle {
             let _ = result_tx.send(result);
         });
         turn.set_task_handle(task);
+        drop(scheduled_guard);
         drop(transition);
         result_rx.await.map_err(|_| {
             OrchestratorError::Internal("native audio owner task ended unexpectedly".into())

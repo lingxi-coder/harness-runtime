@@ -37,7 +37,7 @@ use crate::protocol::audio::{
 };
 use crate::protocol::computer_access::ComputerAccessResponseDto;
 use crate::protocol::controls::ReasoningSelectionDto;
-use crate::protocol::listings::TaskStatusDto;
+use crate::protocol::listings::{SessionModeDto, TaskStatusDto};
 use crate::protocol::media::{
     MediaConnectionResponseDto, MediaControlResponseDto, MediaDeviceResponseDto,
     MediaServiceRequestDto, MediaSessionModeDto,
@@ -471,6 +471,8 @@ define_client_command! {
         // Optional exact starting model-selection source. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ClientTextDto>,
+        // The new session owns this mode for its entire lifetime.
+        mode: SessionModeDto,
     },
 
     // Resume a prior session on this connection. **The ONE allowed
@@ -483,6 +485,8 @@ define_client_command! {
         // Optional working directory override. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        // Reject a transcript belonging to another session space.
+        expected_mode: SessionModeDto,
     },
 
     // Request the resumable-session catalog. Replied with a
@@ -491,6 +495,9 @@ define_client_command! {
         // Optional cap on the number of rows. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
+        // Filter the complete catalog before applying the limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SessionModeDto>,
     },
 
     // ── Auth + session control ────────────────────────────────────────────
@@ -935,19 +942,40 @@ define_client_command! {
         // startup, foreground, background, timer, network_restored, settings, manual.
         trigger: String,
     },
-    // Behavior selection is independent of tool permission and model settings.
-    SetSessionMode {
-        mode: crate::protocol::listings::SessionModeDto,
-    },
     // Inspect host-side context metadata without a model call or prompt bodies.
     GetContextManifest,
+    // Prepare a read-only summary for a new session in the target space.
+    PrepareSessionHandoff {
+        request_id: String,
+        target_mode: SessionModeDto,
+    },
+    // Cancel a pending handoff preparation.
+    CancelSessionHandoff {
+        request_id: String,
+    },
+    // Explicitly retry a failed summary at its retained original cutoff.
+    RetrySessionHandoff {
+        request_id: String,
+    },
 }
 
 impl From<ClientCommandWire> for ClientCommand {
     fn from(value: ClientCommandWire) -> Self {
         match value {
-            ClientCommandWire::SetSessionMode { mode } => Self::SetSessionMode { mode },
             ClientCommandWire::GetContextManifest => Self::GetContextManifest,
+            ClientCommandWire::PrepareSessionHandoff {
+                request_id,
+                target_mode,
+            } => Self::PrepareSessionHandoff {
+                request_id,
+                target_mode,
+            },
+            ClientCommandWire::CancelSessionHandoff { request_id } => {
+                Self::CancelSessionHandoff { request_id }
+            }
+            ClientCommandWire::RetrySessionHandoff { request_id } => {
+                Self::RetrySessionHandoff { request_id }
+            }
             ClientCommandWire::FusionAdmin { command } => Self::FusionAdmin { command },
             ClientCommandWire::SideChatCreate {
                 request_id,
@@ -1065,11 +1093,19 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::LoadSessionAgentTranscript { agent_id } => {
                 Self::LoadSessionAgentTranscript { agent_id }
             }
-            ClientCommandWire::NewSession { cwd, model } => Self::NewSession { cwd, model },
-            ClientCommandWire::ResumeSession { session_id, cwd } => {
-                Self::ResumeSession { session_id, cwd }
+            ClientCommandWire::NewSession { cwd, model, mode } => {
+                Self::NewSession { cwd, model, mode }
             }
-            ClientCommandWire::ListSessions { limit } => Self::ListSessions { limit },
+            ClientCommandWire::ResumeSession {
+                session_id,
+                cwd,
+                expected_mode,
+            } => Self::ResumeSession {
+                session_id,
+                cwd,
+                expected_mode,
+            },
+            ClientCommandWire::ListSessions { limit, mode } => Self::ListSessions { limit, mode },
             ClientCommandWire::Login => Self::Login,
             ClientCommandWire::Logout => Self::Logout,
             ClientCommandWire::ForceCompact => Self::ForceCompact,

@@ -886,7 +886,7 @@ define_client_event! {
     MediaControlRequest {
         request: MediaControlRequestDto,
     },
-    // The selected profile is pending only while another query owns the turn.
+    // Read-only notification of the session's fixed mode. pending_mode is None.
     SessionModeChanged {
         session_id: String,
         mode: SessionModeDto,
@@ -897,12 +897,48 @@ define_client_event! {
     ContextManifest {
         manifest_json: String,
     },
+    /// Read-only summary captured for a new conversation in another space.
+    SessionHandoffPrepared {
+        request_id: String,
+        source_session_id: String,
+        source_mode: SessionModeDto,
+        target_mode: SessionModeDto,
+        cutoff: String,
+        summary: ClientTextDto,
+    },
+    /// Handoff preparation failed before a draft was produced.
+    SessionHandoffFailed {
+        request_id: String,
+        message: String,
+    },
 
 }
 
 impl From<ClientEventWire> for ClientEvent {
     fn from(value: ClientEventWire) -> Self {
         match value {
+            ClientEventWire::SessionHandoffPrepared {
+                request_id,
+                source_session_id,
+                source_mode,
+                target_mode,
+                cutoff,
+                summary,
+            } => Self::SessionHandoffPrepared {
+                request_id,
+                source_session_id,
+                source_mode,
+                target_mode,
+                cutoff,
+                summary,
+            },
+            ClientEventWire::SessionHandoffFailed {
+                request_id,
+                message,
+            } => Self::SessionHandoffFailed {
+                request_id,
+                message,
+            },
             ClientEventWire::SessionModeChanged {
                 session_id,
                 mode,

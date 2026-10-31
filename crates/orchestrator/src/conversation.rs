@@ -75,6 +75,9 @@ impl HookPromptRequest {
 /// Minimal current contract the orchestrator needs from the API client.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
+    /// Session-owned tool-reference normalization used by main and side queries.
+    fn set_tool_search_enabled(&self, _enabled: bool) {}
+
     /// Exact native route identity. Unavailable route metadata admits no Fast mode.
     fn is_first_party_route(&self, _model: &str, _profile: Option<&str>) -> bool {
         false

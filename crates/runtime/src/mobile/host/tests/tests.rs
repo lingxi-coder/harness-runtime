@@ -4,6 +4,8 @@ include!("../model_preference_tests.rs");
 include!("../provider_region_tests.rs");
 #[path = "initial_profile_tests.rs"]
 mod initial_profile_tests;
+#[path = "session_owner_tests.rs"]
+mod session_owner_tests;
 include!("../reasoning_preference_tests.rs");
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
@@ -5397,6 +5399,7 @@ fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session(
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: Some("deepseek/deepseek-flash".into()),
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await;
         assert!(result.is_err(), "expected rejection, got {result:?}");
@@ -5411,6 +5414,7 @@ fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session(
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: Some("openai/gpt-5.6-sol".into()),
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("a routable model must be accepted");
@@ -6354,20 +6358,7 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
             .append_mobile_empty_session(&session_id, "cold Bash no-response", &first.session_cwd())
             .await
             .expect("anchor the session before restart");
-        first
-            .inner()
-            .session_writer
-            .append_session_mode(
-                first
-                    .inner()
-                    .orchestrator
-                    .conversation_mode()
-                    .await
-                    .selected
-                    .as_str(),
-            )
-            .await
-            .expect("persist session mode");
+
         first
             .submit(ClientCommand::SendPrompt {
                 text: "printf cold-no-response".into(),
@@ -6427,6 +6418,7 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
             .submit(ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await
             .expect("restore completed session");
@@ -6532,20 +6524,6 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             .append_mobile_empty_session(&session_id, "cold prompt replay", &first.session_cwd())
             .await
             .expect("anchor the session before restart");
-        first
-            .inner
-            .session_writer
-            .append_session_mode(
-                first
-                    .inner
-                    .orchestrator
-                    .conversation_mode()
-                    .await
-                    .selected
-                    .as_str(),
-            )
-            .await
-            .expect("persist the session mode");
 
         first
             .submit(client::protocol::commands::ClientCommand::SendPrompt {
@@ -6691,6 +6669,7 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             .submit(client::protocol::commands::ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await
             .expect("restore the session containing the durable turn");
@@ -6840,20 +6819,6 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
             )
             .await
             .expect("anchor the session transcript");
-        engine_for_work
-            .inner
-            .session_writer
-            .append_session_mode(
-                engine_for_work
-                    .inner
-                    .orchestrator
-                    .conversation_mode()
-                    .await
-                    .selected
-                    .as_str(),
-            )
-            .await
-            .expect("persist the session mode");
 
         engine_for_work
             .submit(client::protocol::commands::ClientCommand::SendPrompt {
@@ -6966,6 +6931,7 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
             .submit(client::protocol::commands::ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await
             .expect("restore the session containing the no-ID prompt");
@@ -7873,12 +7839,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 .append_mobile_empty_session(&session_id, "skill cold replay", &first.session_cwd())
                 .await
                 .expect("anchor the session before restart");
-            first
-                .inner()
-                .session_writer
-                .append_session_mode(first.inner().orchestrator.conversation_mode().await.selected.as_str())
-                .await
-                .expect("persist session mode");
+
 
             first
                 .submit(ClientCommand::RunSlashCommand {
@@ -8285,8 +8246,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         resumed
             .submit(ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
-                cwd: None,
-            })
+                cwd: None, expected_mode: SessionModeDto::Code, })
             .await
             .expect("restore the session containing the skill turn");
         let paused = resumed
@@ -8696,6 +8656,7 @@ fn submit_cancel_waits_for_cleanup_before_new_session() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("NewSession immediately after Cancel must not see an in-flight turn");
@@ -11239,6 +11200,7 @@ fn dynamic_loop_session_switch_cancels_previous_session_timer() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .unwrap();
@@ -11290,6 +11252,7 @@ fn mobile_session_switch_ends_only_the_previous_audio_owner() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("new session should be created");
@@ -11692,7 +11655,10 @@ fn submit_list_sessions_emits_seeded_row() {
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::ListSessions { limit: None })
+            .submit(ClientCommand::ListSessions {
+                limit: None,
+                mode: None,
+            })
             .await
             .expect("submit(ListSessions) ok");
 
@@ -11702,19 +11668,16 @@ fn submit_list_sessions_emits_seeded_row() {
             _ => None,
         });
         let sessions = row.expect("a SessionList event must be emitted");
-        assert_eq!(sessions.len(), 1, "exactly one seeded session expected");
-        assert_eq!(
-            sessions[0].uuid, seeded_uuid,
-            "the listed row must be the seeded session"
-        );
-        assert_eq!(sessions[0].mode, SessionModeDto::Code);
+        let seeded = sessions
+            .iter()
+            .find(|row| row.uuid == seeded_uuid)
+            .expect("seeded row");
+        assert_eq!(seeded.mode, SessionModeDto::Code);
     });
 }
 
 /// SESSIONS/HISTORY: `submit(ListSessions)` on a connection with NO on-disk
-/// catalog (empty / missing project dir) still replies with a `SessionList`
-/// carrying an EMPTY vec — the loader's `EmptyDirectory` is "no sessions yet",
-/// not an error, and the client must always get a reply.
+/// catalog contains the newly created durable empty session and always replies.
 #[test]
 fn submit_list_sessions_empty_when_no_catalog() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -11722,7 +11685,10 @@ fn submit_list_sessions_empty_when_no_catalog() {
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::ListSessions { limit: Some(5) })
+            .submit(ClientCommand::ListSessions {
+                limit: Some(5),
+                mode: None,
+            })
             .await
             .expect("submit(ListSessions) ok");
 
@@ -11734,10 +11700,8 @@ fn submit_list_sessions_empty_when_no_catalog() {
                 _ => None,
             })
             .expect("a SessionList event must be emitted even with no catalog");
-        assert!(
-            sessions.is_empty(),
-            "no on-disk catalog must yield an empty SessionList, got {sessions:?}"
-        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].uuid, handle.active_session_id());
     });
 }
 
@@ -11760,6 +11724,7 @@ fn submit_new_session_emits_session_started() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("submit(NewSession) ok");
@@ -11769,7 +11734,7 @@ fn submit_new_session_emits_session_started() {
         assert_ne!(before, after, "NewSession must mint a fresh session id");
 
         let events = drained(&listener).await;
-        let started = events.iter().find_map(|e| match e {
+        let started = events.iter().rev().find_map(|e| match e {
             Ev::SessionStarted { session_id, mode } => Some((session_id.clone(), *mode)),
             _ => None,
         });
@@ -11805,7 +11770,10 @@ fn submit_new_session_emits_session_started() {
         }));
 
         handle
-            .submit(ClientCommand::ListSessions { limit: None })
+            .submit(ClientCommand::ListSessions {
+                limit: None,
+                mode: None,
+            })
             .await
             .expect("list anchored empty session");
         let events = drained(&listener).await;
@@ -11833,6 +11801,7 @@ fn submit_resume_session_restores_anchored_empty_session_with_same_uuid() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("create anchored empty session");
@@ -11848,6 +11817,7 @@ fn submit_resume_session_restores_anchored_empty_session_with_same_uuid() {
             .submit(ClientCommand::ResumeSession {
                 session_id: expected.clone(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await
             .expect("anchored empty session resumes");
@@ -11898,6 +11868,7 @@ fn submit_resume_session_restores_its_persisted_permission_mode() {
             .submit(ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await
             .expect("resume persisted session");
@@ -11910,344 +11881,12 @@ fn submit_resume_session_restores_its_persisted_permission_mode() {
 }
 
 #[test]
-fn resume_restores_persisted_mode_from_a_different_initial_mode() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (session_id, _) = seed_replay_valid_session(tmp.path());
-    let cfg = test_config(tmp.path());
-    let path =
-        session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), &session_id);
-    let mut transcript = std::fs::read_to_string(&path).unwrap();
-    transcript.push_str(&format!(
-        "{}\n",
-        serde_json::json!({
-            "type": "session-mode", "sessionMode": "chat", "sessionId": session_id,
-        })
-    ));
-    std::fs::write(&path, transcript).unwrap();
-    let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
-    handle.runtime().block_on(async {
-        handle.submit(ClientCommand::ResumeSession { session_id: session_id.clone(), cwd: None })
-            .await.expect("resume a chat session from a code engine");
-        assert!(drained(&listener).await.iter().any(|event| matches!(event,
-            Ev::SessionResumed { session_id: id, mode: SessionModeDto::Chat, .. } if id == &session_id
-        )));
-        let state = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(state.session_id, session_id);
-        assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
-        assert!(!state.pending);
-    });
-}
-
-#[test]
-fn resume_mode_less_session_from_chat_restores_code_default() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (session_id, _) = seed_replay_valid_session(tmp.path());
-    let mut cfg = test_config(tmp.path());
-    cfg.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
-    handle.runtime().block_on(async {
-        handle.submit(ClientCommand::ResumeSession { session_id: session_id.clone(), cwd: None })
-            .await.expect("resume mode-less session");
-        assert!(drained(&listener).await.iter().any(|event| matches!(event,
-            Ev::SessionResumed { session_id: id, mode: SessionModeDto::Code, .. } if id == &session_id
-        )));
-        assert_eq!(handle.inner().orchestrator.conversation_mode().await.selected,
-            session::jsonl::SessionMode::Code);
-    });
-}
-
-#[test]
-fn same_session_mode_commands_preserve_controls_and_report_manifest() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-        let orchestrator = &handle.inner().orchestrator;
-        let id = orchestrator.current_session_id().await;
-        let permission_before = orchestrator.permission_mode();
-        let cwd_before = handle.session_cwd();
-        for mode in [SessionModeDto::Chat, SessionModeDto::Code, SessionModeDto::Chat, SessionModeDto::Chat] {
-            handle.submit(ClientCommand::SetSessionMode { mode }).await.unwrap();
-        }
-        handle.submit(ClientCommand::GetContextManifest).await.unwrap();
-        assert_eq!(orchestrator.current_session_id().await, id);
-        assert_eq!(orchestrator.permission_mode(), permission_before);
-        assert_eq!(handle.session_cwd(), cwd_before);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let count = listener.received.lock().await.iter().filter(|event| matches!(event,
-                    Ev::SessionModeChanged { session_id, mode: SessionModeDto::Chat, pending_mode: None, .. }
-                        if session_id == &id.as_uuid().to_string())).count();
-                if count >= 3 { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        }).await.unwrap();
-        let events = drained(&listener).await;
-        let delivered_modes = events.iter().filter_map(|event| match event {
-            Ev::SessionModeChanged { session_id, mode, pending_mode: None, .. }
-                if session_id == &id.as_uuid().to_string() => Some(*mode),
-            _ => None,
-        }).collect::<Vec<_>>();
-        assert_eq!(delivered_modes, vec![SessionModeDto::Chat, SessionModeDto::Code,
-            SessionModeDto::Chat, SessionModeDto::Chat]);
-        let manifest = events.iter().find_map(|event| match event {
-            Ev::ContextManifest { manifest_json } => Some(serde_json::from_str::<serde_json::Value>(manifest_json).unwrap()),
-            _ => None,
-        }).expect("context manifest reply");
-        assert_eq!(manifest["session"]["selected"], "chat");
-        handle.submit(ClientCommand::NewSession { cwd: None, model: None }).await.unwrap();
-        handle.submit(ClientCommand::ResumeSession { session_id: id.as_uuid().to_string(), cwd: None }).await.unwrap();
-        assert_eq!(orchestrator.conversation_mode().await.selected, session::jsonl::SessionMode::Chat);
-    });
-}
-
-#[test]
-fn mode_selection_anchors_a_zero_length_draft() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (handle, _) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-        let id = handle
-            .inner()
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string();
-        let path = handle.inner().session_writer.active_path();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "").unwrap();
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        handle
-            .submit(ClientCommand::NewSession {
-                cwd: None,
-                model: None,
-            })
-            .await
-            .unwrap();
-        handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: id,
-                cwd: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            handle
-                .inner()
-                .orchestrator
-                .conversation_mode()
-                .await
-                .selected,
-            session::jsonl::SessionMode::Chat
-        );
-    });
-}
-
-#[test]
-fn mobile_profile_cancellation_keeps_the_owned_handle_until_durable_commit() {
-    let root = tempfile::tempdir().unwrap();
-    let (handle, _) = build_submit_handle(root.path());
-    let foreign = tokio::runtime::Runtime::new().unwrap();
-    foreign.block_on(async move {
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Code,
-            })
-            .await
-            .unwrap();
-        let id = handle.inner().orchestrator.current_session_id().await;
-        let transcript = handle.inner().session_writer.active_path();
-        let state_root = handle
-            .lingxi_home
-            .join("session-state")
-            .join(id.as_uuid().to_string());
-        let durable = session::jsonl::DurableTranscriptWriter::open(state_root).unwrap();
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let blocking = tokio::task::spawn_blocking(move || {
-            durable.with_transaction(|_| {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok(())
-            })
-        });
-        entered_rx.await.unwrap();
-        let weak = Arc::downgrade(&handle);
-        let caller_handle = handle.clone();
-        let caller = tokio::spawn(async move {
-            caller_handle
-                .submit(ClientCommand::SetSessionMode {
-                    mode: SessionModeDto::Chat,
-                })
-                .await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while handle.loop_transition.try_lock().is_ok() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        caller.abort();
-        let _ = caller.await;
-        drop(handle);
-        assert!(
-            weak.upgrade().is_some(),
-            "the selection owns the handle after the foreign caller drops"
-        );
-        release_tx.send(()).unwrap();
-        blocking.await.unwrap().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while weak.upgrade().is_some() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let source = std::fs::read_to_string(transcript).unwrap();
-        let profile = session::JsonlWriter::session_mode_transition_from_source(
-            &source,
-            &id.as_uuid().to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                profile.active,
-                profile.selected,
-                profile.revision,
-                profile.pending
-            ),
-            (
-                session::jsonl::SessionMode::Chat,
-                session::jsonl::SessionMode::Chat,
-                1,
-                false
-            )
-        );
-    });
-}
-
-fn assert_cancelled_mode_waiter_cannot_overwrite_later_selection(
-    replace_session: bool,
-    direct_entry: bool,
-) {
-    let root = tempfile::tempdir().unwrap();
-    let (handle, listener) = build_submit_handle(root.path());
-    let foreign = tokio::runtime::Runtime::new().unwrap();
-    foreign.block_on(async {
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Code,
-            })
-            .await
-            .unwrap();
-        let old_session = handle.inner().orchestrator.current_session_id().await;
-        let transition = handle.loop_transition.clone().lock_owned().await;
-        let owners_before = Arc::strong_count(&handle);
-
-        // Poll once while the host transition is held. Dropping the foreign
-        // caller at this point must not leave a detached mode transaction.
-        let command = ClientCommand::SetSessionMode {
-            mode: SessionModeDto::Chat,
-        };
-        let mut cancelled: std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), ClientError>> + '_>,
-        > = if direct_entry {
-            Box::pin(handle.submit_impl(command))
-        } else {
-            Box::pin(handle.submit(command))
-        };
-        assert!(futures::poll!(cancelled.as_mut()).is_pending());
-        drop(cancelled);
-        assert_eq!(
-            Arc::strong_count(&handle),
-            owners_before,
-            "a cancelled selection waiting for the host lock must not retain a detached handle"
-        );
-        drop(transition);
-
-        if replace_session {
-            handle
-                .submit(ClientCommand::NewSession {
-                    cwd: None,
-                    model: None,
-                })
-                .await
-                .unwrap();
-        }
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Code,
-            })
-            .await
-            .unwrap();
-        let state = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(state.selected, session::jsonl::SessionMode::Code);
-        assert!(!state.pending);
-        if replace_session {
-            assert_ne!(state.session_id, old_session.as_uuid().to_string());
-        } else {
-            assert_eq!(state.session_id, old_session.as_uuid().to_string());
-        }
-        assert!(
-            drained(&listener).await.iter().all(|event| !matches!(
-                event,
-                Ev::SessionModeChanged {
-                    mode: SessionModeDto::Chat,
-                    ..
-                }
-            )),
-            "the cancelled selection must never publish to either owner"
-        );
-    });
-}
-
-#[test]
-fn mobile_cancelled_unclaimed_mode_cannot_overwrite_a_newer_selection() {
-    for direct_entry in [false, true] {
-        assert_cancelled_mode_waiter_cannot_overwrite_later_selection(false, direct_entry);
-    }
-}
-
-#[test]
-fn mobile_cancelled_unclaimed_mode_cannot_mutate_a_replacement_session() {
-    for direct_entry in [false, true] {
-        assert_cancelled_mode_waiter_cannot_overwrite_later_selection(true, direct_entry);
-    }
-}
-
-#[test]
-fn foreign_small_stack_can_select_session_mode_without_a_tokio_runtime() {
-    let root = tempfile::tempdir().expect("foreign mode root");
-    let (handle, _) = build_submit_handle(root.path());
-    std::thread::Builder::new()
-        .name("foreign-mode-selection".into())
-        .stack_size(512 * 1024)
-        .spawn(move || {
-            futures::executor::block_on(handle.submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            }))
-            .expect("a foreign executor can select the session mode");
-            let state =
-                futures::executor::block_on(handle.inner().orchestrator.conversation_mode());
-            assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
 fn mobile_initialized_long_session_does_not_reread_identity_on_commands() {
     use std::io::Write;
     let root = tempfile::tempdir().unwrap();
     let (handle, _) = build_submit_handle(root.path());
     handle.runtime().block_on(async {
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        handle.ensure_mobile_session_anchor().await.unwrap();
         let id = handle.inner().orchestrator.current_session_id().await;
         let path = handle.inner().session_writer.active_path();
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -12261,11 +11900,11 @@ fn mobile_initialized_long_session_does_not_reread_identity_on_commands() {
             assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         }
         let before = crate::session_agent_transcript::identity_snapshot_read_count(&path);
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        handle.ensure_mobile_session_anchor().await.unwrap();
         let imported = crate::session_agent_transcript::identity_snapshot_read_count(&path);
         assert_eq!(imported, before + 1);
         for _ in 0..5 {
-            handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+            handle.ensure_mobile_session_anchor().await.unwrap();
             handle.ensure_mobile_session_anchor().await.unwrap();
         }
         assert_eq!(crate::session_agent_transcript::identity_snapshot_read_count(&path), imported);
@@ -12274,17 +11913,17 @@ fn mobile_initialized_long_session_does_not_reread_identity_on_commands() {
             let real = sidecar.with_extension("saved");
             std::fs::rename(&sidecar, &real).unwrap();
             std::os::unix::fs::symlink(&real, &sidecar).unwrap();
-            assert!(handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.is_err());
+            assert!(handle.ensure_mobile_session_anchor().await.is_err());
             std::fs::remove_file(&sidecar).unwrap();
             std::fs::rename(&real, &sidecar).unwrap();
-            handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+            handle.ensure_mobile_session_anchor().await.unwrap();
         }
-        handle.submit(ClientCommand::NewSession { cwd: None, model: None }).await.unwrap();
+        handle.submit(ClientCommand::NewSession { cwd: None, model: None, mode: client::protocol::listings::SessionModeDto::Code, }).await.unwrap();
         let next = handle.inner().session_writer.active_path();
         assert_ne!(next, path);
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        handle.ensure_mobile_session_anchor().await.unwrap();
         let next_reads = crate::session_agent_transcript::identity_snapshot_read_count(&next);
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        handle.ensure_mobile_session_anchor().await.unwrap();
         assert_eq!(crate::session_agent_transcript::identity_snapshot_read_count(&next), next_reads);
     });
 }
@@ -12302,6 +11941,7 @@ fn mobile_initial_and_new_session_modes_use_versioned_records() {
                     .submit(ClientCommand::NewSession {
                         cwd: None,
                         model: None,
+                        mode: client::protocol::listings::SessionModeDto::Code,
                     })
                     .await
                     .unwrap();
@@ -12313,94 +11953,10 @@ fn mobile_initial_and_new_session_modes_use_versioned_records() {
                 .find(|row| row["type"] == "session-mode")
                 .unwrap();
             assert_eq!(mode["sessionMode"], "chat");
-            let expected_epoch = if create_new { 0 } else { 1 };
+            let expected_epoch = 0;
             assert_eq!(mode["contextRevision"], expected_epoch);
             assert_eq!(mode["profileEpoch"], expected_epoch);
         }
-    });
-}
-
-#[test]
-fn initial_chat_mode_only_session_is_anchored_once_and_can_reopen() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut config = test_config(tmp.path());
-    config.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, listener) = build_submit_handle_with_config(config.clone(), tmp.path());
-    let (source_id, context_id) = handle.runtime().block_on(async {
-        let source_id = handle.inner().orchestrator.current_session_id().await.as_uuid().to_string();
-        let path = handle.inner().session_writer.active_path();
-        let before = std::fs::read_to_string(&path).unwrap();
-        assert!(session::jsonl::route_lines(&before).mobile_empty_sessions.is_empty());
-        let hook = serde_json::json!({
-            "type":"attachment", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
-            "sessionId":source_id, "timestamp":"2026-10-29T00:00:00Z", "cwd":config.cwd,
-            "version":"test", "isSidechain":false,
-            "attachment":{"type":"hook_success", "hookEvent":"SessionStart", "hookName":"SessionStart:startup",
-                "toolUseID":uuid::Uuid::new_v4(), "content":"x".repeat(70 * 1024), "stdout":"", "stderr":"", "exitCode":0,
-                "command":"true", "durationMs":0}
-        });
-        let context_id = uuid::Uuid::new_v4();
-        let context = serde_json::json!({
-            "type":"attachment", "uuid":context_id, "parentUuid":hook["uuid"],
-            "sessionId":source_id, "timestamp":"2026-10-29T00:00:01Z", "cwd":config.cwd,
-            "version":"test", "isSidechain":false,
-            "attachment":{"type":"hook_additional_context", "hookEvent":"SessionStart", "hookName":"SessionStart",
-                "toolUseID":"SessionStart", "content":["startup-context-marker"]}
-        });
-        use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(file, "{hook}").unwrap();
-        writeln!(file, "{context}").unwrap();
-        drop(file);
-        let startup = std::fs::read_to_string(&path).unwrap();
-        let scans_before = mobile_anchor_startup_scan_count(&path);
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
-        let anchored = std::fs::read_to_string(&path).unwrap();
-        let scans_after = mobile_anchor_startup_scan_count(&path);
-        assert_eq!(scans_after, scans_before + 1);
-        assert!(session::jsonl::route_lines(&anchored).mobile_empty_sessions.contains(&source_id));
-        assert!(anchored.contains(&hook.to_string()));
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), anchored);
-        assert_eq!(mobile_anchor_startup_scan_count(&path), scans_after);
-
-        // The warm cache must be invalidated when the same file is truncated
-        // or a replacement arrives at the same path with a larger size.
-        std::fs::write(&path, &before).unwrap();
-        handle.ensure_mobile_session_anchor().await.unwrap();
-        assert_eq!(mobile_anchor_startup_scan_count(&path), scans_after + 1);
-        let replacement = path.with_extension("replacement");
-        std::fs::write(&replacement, &startup).unwrap();
-        std::fs::rename(&replacement, &path).unwrap();
-        handle.ensure_mobile_session_anchor().await.unwrap();
-        assert_eq!(mobile_anchor_startup_scan_count(&path), scans_after + 2);
-        assert!(session::jsonl::route_lines(&std::fs::read_to_string(&path).unwrap())
-            .mobile_empty_sessions.contains(&source_id));
-        handle.submit(ClientCommand::ListSessions { limit: None }).await.unwrap();
-        assert!(drained(&listener).await.iter().any(|event| matches!(event,
-            Ev::SessionList { sessions } if sessions.iter().any(|row| row.uuid == source_id && row.mode == SessionModeDto::Chat)
-        )));
-        (source_id, context_id)
-    });
-    drop(handle);
-    let (reopened, listener) = build_submit_handle(tmp.path());
-    reopened.runtime().block_on(async {
-        reopened.submit(ClientCommand::ResumeSession { session_id: source_id.clone(), cwd: None }).await.unwrap();
-        let state = reopened.inner().orchestrator.conversation_mode().await;
-        assert_eq!((state.active, state.selected), (session::jsonl::SessionMode::Chat, session::jsonl::SessionMode::Chat));
-        assert_eq!(state.revision, 1);
-        let restored_source = std::fs::read_to_string(reopened.inner().session_writer.active_path()).unwrap();
-        let profile = session::JsonlWriter::session_mode_transition_from_source(&restored_source, &source_id).unwrap();
-        assert_eq!((profile.active_epoch, profile.selected_epoch), (1, 1));
-        let session = reopened.inner().orchestrator.session();
-        let history = session.lock().await;
-        assert!(history.history.iter().any(|message| {
-            message.id().as_uuid() == context_id && message.text_content().contains("startup-context-marker")
-        }), "startup hook context must be restored for the first model request");
-        drop(history);
-        assert!(drained(&listener).await.iter().any(|event| matches!(event,
-            Ev::SessionResumed { session_id, mode: SessionModeDto::Chat, .. } if session_id == &source_id
-        )));
     });
 }
 
@@ -12411,7 +11967,6 @@ fn anchored_session_with_deferred_tool_is_not_restored_as_empty() {
     config.session_mode = session::jsonl::SessionMode::Chat;
     let (handle, _) = build_submit_handle_with_config(config, tmp.path());
     let (source_id, path, source) = handle.runtime().block_on(async {
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
         let source_id = handle.inner().orchestrator.current_session_id().await.as_uuid().to_string();
         let path = handle.inner().session_writer.active_path();
         let deferred = serde_json::json!({
@@ -12430,14 +11985,17 @@ fn anchored_session_with_deferred_tool_is_not_restored_as_empty() {
         (source_id, path, source)
     });
     drop(handle);
-    let (reopened, _) = build_submit_handle(tmp.path());
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    let (reopened, _) = build_submit_handle_with_config(config, tmp.path());
     reopened.runtime().block_on(async {
         let prior = reopened.inner().orchestrator.current_session_id().await;
         assert!(matches!(
             reopened
                 .submit(ClientCommand::ResumeSession {
                     session_id: source_id,
-                    cwd: None
+                    cwd: None,
+                    expected_mode: SessionModeDto::Chat,
                 })
                 .await,
             Err(ClientError::Rejected { .. })
@@ -12447,227 +12005,6 @@ fn anchored_session_with_deferred_tool_is_not_restored_as_empty() {
             prior
         );
         assert_eq!(std::fs::read(path).unwrap(), source);
-    });
-}
-
-#[test]
-fn bootstrapped_empty_session_restores_its_created_mode() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (handle, listener) = build_submit_handle(tmp.path());
-    let session_id = "a0111111-2222-3333-4444-555555555555".to_string();
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        handle
-            .resume_empty_session(session_id.clone(), "Empty session".into())
-            .await
-            .unwrap();
-        let snapshot = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(snapshot.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(snapshot.selected, session::jsonl::SessionMode::Chat);
-        let raw = std::fs::read_to_string(handle.inner().session_writer.active_path()).unwrap();
-        let mode = raw
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .find(|row| row["type"] == "session-mode")
-            .unwrap();
-        assert_eq!(mode["contextRevision"], 0);
-        assert!(drained(&listener).await.iter().any(|event| matches!(event,
-            Ev::SessionResumed { session_id: id, mode: SessionModeDto::Chat, .. } if id == &session_id
-        )));
-    });
-}
-
-#[test]
-fn empty_bootstrap_retries_an_anchor_without_a_committed_profile() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (handle, _) = build_submit_handle(tmp.path());
-    let session_id = "a0222222-2222-3333-4444-555555555555".to_string();
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        let cwd = handle.session_cwd();
-        let path = session::jsonl::session_path(&handle.lingxi_home, &cwd, &session_id);
-        let writer = session::jsonl::JsonlWriter::new(path.clone(), handle.fs.clone());
-        writer
-            .append_mobile_empty_session(&session_id, "Empty session", &cwd)
-            .await
-            .unwrap();
-        handle
-            .resume_empty_session(session_id, "Empty session".into())
-            .await
-            .unwrap();
-        assert_eq!(
-            handle.inner().orchestrator.conversation_mode().await.active,
-            session::jsonl::SessionMode::Chat
-        );
-        let raw = std::fs::read_to_string(path).unwrap();
-        let mode = raw
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .find(|row| row["type"] == "session-mode")
-            .unwrap();
-        assert_eq!(mode["sessionMode"], "chat");
-        assert_eq!(mode["contextRevision"], 0);
-    });
-}
-
-#[test]
-fn mobile_cold_resume_reports_active_then_pending_mode_in_order() {
-    use lingxi_core::host::session_context::{ConversationMode, SessionModeTransition};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let (first, _) = build_submit_handle(tmp.path());
-    let session_id = first.runtime().block_on(async {
-        first
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Code,
-            })
-            .await
-            .unwrap();
-        let id = first
-            .inner()
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string();
-        first
-            .inner()
-            .session_writer
-            .append_session_mode_transition(
-                &id,
-                &SessionModeTransition {
-                    selected: ConversationMode::Chat,
-                    active: ConversationMode::Code,
-                    revision: 1,
-                    selected_epoch: 1,
-                    active_epoch: 0,
-                    pending: true,
-                },
-            )
-            .await
-            .unwrap();
-        id
-    });
-    drop(first);
-    let (resumed, listener) = build_submit_handle(tmp.path());
-    resumed.runtime().block_on(async {
-        resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
-            .await
-            .unwrap();
-        let snapshot = resumed.inner().orchestrator.conversation_mode().await;
-        assert_eq!(snapshot.active, ConversationMode::Code);
-        assert_eq!(snapshot.selected, ConversationMode::Chat);
-        assert!(snapshot.pending);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if listener.received.lock().await.iter().any(|event| {
-                    matches!(event, Ev::SessionModeChanged {
-                        session_id: id,
-                        mode: SessionModeDto::Code,
-                        pending_mode: Some(SessionModeDto::Chat),
-                        revision: 1,
-                    } if id == &session_id)
-                }) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let events = drained(&listener).await;
-        let resumed_index = events
-            .iter()
-            .position(|event| {
-                matches!(event, Ev::SessionResumed {
-                    session_id: id, mode: SessionModeDto::Code, ..
-                } if id == &session_id)
-            })
-            .expect("resume event reports the active mode");
-        let pending_index = events
-            .iter()
-            .position(|event| {
-                matches!(event, Ev::SessionModeChanged {
-                    session_id: id,
-                    mode: SessionModeDto::Code,
-                    pending_mode: Some(SessionModeDto::Chat),
-                    revision: 1,
-                } if id == &session_id)
-            })
-            .expect("mode event reports the pending selection");
-        assert!(resumed_index < pending_index);
-    });
-}
-
-#[test]
-fn resume_empty_session_uses_latest_captured_mode_not_stale_writer_cache() {
-    use std::io::Write;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let (handle, listener) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        let id = handle
-            .inner()
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string();
-        let path = handle.inner().session_writer.active_path();
-        handle
-            .submit(ClientCommand::NewSession {
-                cwd: None,
-                model: None,
-            })
-            .await
-            .unwrap();
-        // Simulate another owner committing a new selection while this engine
-        // is on a different conversation; its old metadata mirror is now stale.
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        writeln!(
-            file,
-            "{}",
-            serde_json::json!({"type":"session-mode", "sessionId":id,
-            "sessionMode":"code", "contextRevision":10})
-        )
-        .unwrap();
-        file.sync_all().unwrap();
-        handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: id.clone(),
-                cwd: None,
-            })
-            .await
-            .unwrap();
-        let state = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(state.selected, session::jsonl::SessionMode::Code);
-        assert_eq!(state.revision, 10);
-        assert!(drained(&listener).await.iter().any(|event| matches!(event,
-            Ev::SessionResumed { session_id, mode: SessionModeDto::Code, .. } if session_id == &id
-        )));
     });
 }
 
@@ -12705,704 +12042,7 @@ impl ClientEventListener for ReentrantModeListener {
     }
 }
 
-#[test]
-fn mobile_mode_event_listener_can_reenter_the_engine() {
-    let tmp = tempfile::tempdir().unwrap();
-    let listener = Arc::new(ReentrantModeListener {
-        handle: StdMutex::new(None),
-        completed: Notify::new(),
-    });
-    let handle = build_mobile_engine(
-        test_config(tmp.path()),
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        listener.clone(),
-        Arc::new(RecordingPermissionSink::default()),
-    )
-    .unwrap();
-    *listener.handle.lock().unwrap() = Some(Arc::downgrade(&handle));
-    handle.runtime().block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            handle
-                .submit(ClientCommand::SetSessionMode {
-                    mode: SessionModeDto::Chat,
-                })
-                .await
-                .unwrap();
-            listener.completed.notified().await;
-        })
-        .await
-        .expect("mode event callback must not deadlock on the session transition");
-    });
-}
-
-#[test]
-fn mobile_mode_switch_during_turn_is_admitted_by_next_query() {
-    use crate::mobile::test_support::new_engine_with_streaming;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let listener = Arc::new(FakeListener::default());
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let streaming = Arc::new(PendingPromptStreamClient::new(entered_tx));
-    let handle = new_engine_with_streaming(
-        test_config(tmp.path()),
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        listener.clone(),
-        Arc::new(RecordingPermissionSink::default()),
-        Some(streaming.clone()),
-    )
-    .unwrap();
-    handle.runtime().block_on(async {
-        handle.submit(ClientCommand::SendPrompt {
-            text: "first".into(), prompt_mode: None, images: Vec::new(),
-            turn_id: Some(9911), visualization_context: None,
-        }).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx).await.unwrap().unwrap();
-        let id = handle.inner().orchestrator.current_session_id().await;
-        let permissions = handle.inner().orchestrator.permission_mode();
-        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
-        let state = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(state.active, session::jsonl::SessionMode::Code);
-        assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
-        assert!(state.pending);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if listener.received.lock().await.iter().any(|event| matches!(event,
-                    Ev::SessionModeChanged { session_id, mode: SessionModeDto::Code,
-                        pending_mode: Some(SessionModeDto::Chat), .. } if session_id == &id.as_uuid().to_string()
-                )) { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        }).await.unwrap();
-        let _ = drained(&listener).await;
-        assert_eq!(handle.inner().orchestrator.permission_mode(), permissions);
-        handle.submit(ClientCommand::GetContextManifest).await.unwrap();
-        let events = drained(&listener).await;
-        let manifest = events.iter().find_map(|event| match event {
-            Ev::ContextManifest { manifest_json } => Some(serde_json::from_str::<serde_json::Value>(manifest_json).unwrap()),
-            _ => None,
-        }).expect("pending context manifest");
-        assert_eq!(manifest["session"]["active"], "code");
-        assert_eq!(manifest["session"]["selected"], "chat");
-        assert_eq!(manifest["projected"], false);
-        handle.submit(ClientCommand::Cancel { turn_id: Some(9911) }).await.unwrap();
-        let cancelled = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(cancelled.active, session::jsonl::SessionMode::Code);
-        assert!(cancelled.pending, "cancellation must not admit a pending profile");
-        handle.submit(ClientCommand::SendPrompt {
-            text: "second".into(), prompt_mode: None, images: Vec::new(),
-            turn_id: Some(9912), visualization_context: None,
-        }).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while streaming.captured_calls().len() < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        }).await.unwrap();
-        let state = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(state.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
-        assert!(!state.pending);
-        assert_eq!(handle.inner().orchestrator.current_session_id().await, id);
-        handle.submit(ClientCommand::Cancel { turn_id: Some(9912) }).await.unwrap();
-    });
-}
-
-fn mobile_fixture_response_model(config: &MobileConfig) -> String {
-    let listings = super::model_listings(&llm_runtime::builtin_presets().providers);
-    super::resolve_default_model_ref(&config.default_model, &listings).0
-}
-
-fn assert_persisted_assistant_models(path: &Path, expected: &str, minimum: usize) {
-    let raw = std::fs::read_to_string(path).unwrap();
-    let models = raw
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|row| row["type"] == "assistant")
-        .filter_map(|row| row["message"]["model"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    assert!(
-        models.len() >= minimum,
-        "expected completed assistant rows: {models:?}"
-    );
-    assert!(
-        models.iter().all(|model| model == expected),
-        "wrong persisted model: {models:?}"
-    );
-}
-
-#[test]
-fn mobile_mode_switch_retires_slash_skill_body_and_keeps_conversation_on_resume() {
-    use crate::mobile::test_support::new_engine_with_streaming;
-    use orchestrator::test_support_stream::{
-        content_block_start_text, content_block_stop, message_delta_stop, message_start,
-        message_stop, text_delta, MockStreamingApiClient,
-    };
-
-    fn reply(id: &str, model: &str) -> Vec<llm_runtime::HistoryEvent> {
-        vec![
-            message_start(id, model),
-            content_block_start_text(0),
-            text_delta(0, "Earlier answer"),
-            content_block_stop(0),
-            message_delta_stop("end_turn"),
-            message_stop(),
-        ]
-    }
-    fn contains(
-        calls: &[orchestrator::test_support_stream::CapturedStreamCall],
-        index: usize,
-        text: &str,
-    ) -> bool {
-        calls[index].messages.iter().any(|message| match message {
-            lingxi_core::types::ConversationMessage::User { content, .. }
-            | lingxi_core::types::ConversationMessage::Assistant { content, .. } => content
-                .iter()
-                .any(|block| native_text_block_contains(block, text)),
-            _ => false,
-        })
-    }
-
-    let tmp = tempfile::tempdir().unwrap();
-    let skill_dir = tmp.path().join(".lingxi/skills/research");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\ndescription: Test research\n---\nOBSOLETE-SKILL-BODY-2381\n",
-    )
-    .unwrap();
-    let config = test_config(tmp.path());
-    let response_model = mobile_fixture_response_model(&config);
-    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
-        reply("skill", &response_model),
-        reply("next", &response_model),
-    ]));
-    let engine = new_engine_with_streaming(
-        config.clone(),
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        Arc::new(FakeListener::default()),
-        Arc::new(RecordingPermissionSink::default()),
-        Some(streaming.clone()),
-    )
-    .unwrap();
-    let session_id = engine.runtime().block_on(async {
-        engine
-            .submit(ClientCommand::RunSlashCommand {
-                raw: "/research".into(),
-                images: Vec::new(),
-                turn_id: Some(9921),
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if !streaming.captured_calls().await.is_empty()
-                    && engine.active_cancel.lock().await.is_none()
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(contains(
-            &streaming.captured_calls().await,
-            0,
-            "OBSOLETE-SKILL-BODY-2381"
-        ));
-        let id = engine
-            .inner()
-            .orchestrator
-            .current_session_id()
-            .await
-            .as_uuid()
-            .to_string();
-        engine
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        engine
-            .submit(ClientCommand::SendPrompt {
-                text: "Keep the earlier conversation".into(),
-                prompt_mode: None,
-                images: Vec::new(),
-                turn_id: Some(9922),
-                visualization_context: None,
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if streaming.captured_calls().await.len() >= 2
-                    && engine.active_cancel.lock().await.is_none()
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let calls = streaming.captured_calls().await;
-        assert!(!contains(&calls, 1, "OBSOLETE-SKILL-BODY-2381"));
-        assert!(contains(&calls, 1, "Earlier answer"));
-        assert_persisted_assistant_models(
-            &engine.inner().session_writer.active_path(),
-            &response_model,
-            2,
-        );
-        id
-    });
-    drop(engine);
-    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![reply(
-        "resumed",
-        &response_model,
-    )]));
-    let resumed_listener = Arc::new(FakeListener::default());
-    let resumed = new_engine_with_streaming(
-        config,
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        resumed_listener.clone(),
-        Arc::new(RecordingPermissionSink::default()),
-        Some(resumed_stream.clone()),
-    )
-    .unwrap();
-    resumed.runtime().block_on(async {
-        resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id,
-                cwd: None,
-            })
-            .await
-            .unwrap();
-        resumed
-            .submit(ClientCommand::SendPrompt {
-                text: "Continue".into(),
-                prompt_mode: None,
-                images: Vec::new(),
-                turn_id: Some(9923),
-                visualization_context: None,
-            })
-            .await
-            .unwrap();
-        let wait = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if !resumed_stream.captured_calls().await.is_empty()
-                    && resumed.active_cancel.lock().await.is_none()
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await;
-        if wait.is_err() {
-            panic!(
-                "cold resume made no request; events: {:?}",
-                drained(&resumed_listener).await
-            );
-        }
-        let calls = resumed_stream.captured_calls().await;
-        assert!(!contains(&calls, 0, "OBSOLETE-SKILL-BODY-2381"));
-        assert!(contains(&calls, 0, "Keep the earlier conversation"));
-        assert_persisted_assistant_models(
-            &resumed.inner().session_writer.active_path(),
-            &response_model,
-            3,
-        );
-    });
-}
-
-#[test]
-fn mobile_fork_retires_copied_skill_but_preserves_source_and_conversation() {
-    use crate::mobile::test_support::new_engine_with_streaming;
-    use orchestrator::test_support_stream::{
-        content_block_start_text, content_block_stop, message_delta_stop, message_start,
-        message_stop, text_delta, CapturedStreamCall, MockStreamingApiClient,
-    };
-
-    fn reply(id: &str, model: &str) -> Vec<llm_runtime::HistoryEvent> {
-        vec![
-            message_start(id, model),
-            content_block_start_text(0),
-            text_delta(0, "Original answer"),
-            content_block_stop(0),
-            message_delta_stop("end_turn"),
-            message_stop(),
-        ]
-    }
-    fn contains(call: &CapturedStreamCall, text: &str) -> bool {
-        call.messages.iter().any(|message| match message {
-            lingxi_core::types::ConversationMessage::User { content, .. }
-            | lingxi_core::types::ConversationMessage::Assistant { content, .. } => content
-                .iter()
-                .any(|block| native_text_block_contains(block, text)),
-            _ => false,
-        })
-    }
-
-    let tmp = tempfile::tempdir().unwrap();
-    let commands = tmp.path().join(".lingxi/commands");
-    std::fs::create_dir_all(&commands).unwrap();
-    std::fs::write(
-        commands.join("forkskill.md"),
-        "---\ndescription: Fork test\n---\nSOURCE-SKILL-INSTRUCTIONS-514\n",
-    )
-    .unwrap();
-    let config = test_config(tmp.path());
-    let response_model = mobile_fixture_response_model(&config);
-    let listener = Arc::new(FakeListener::default());
-    let stream = Arc::new(MockStreamingApiClient::with_turns(vec![
-        reply("source-skill", &response_model),
-        reply("source-followup", &response_model),
-    ]));
-    let engine = new_engine_with_streaming(
-        config.clone(),
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        listener.clone(),
-        Arc::new(RecordingPermissionSink::default()),
-        Some(stream.clone()),
-    )
-    .unwrap();
-    let (fork_id, generic_id) = engine.runtime().block_on(async {
-        engine
-            .submit(ClientCommand::RunSlashCommand {
-                raw: "/forkskill".into(),
-                images: Vec::new(),
-                turn_id: Some(9931),
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if !stream.captured_calls().await.is_empty()
-                    && engine.active_cancel.lock().await.is_none()
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(contains(
-            &stream.captured_calls().await[0],
-            "SOURCE-SKILL-INSTRUCTIONS-514"
-        ));
-        let source_id = engine.inner().orchestrator.current_session_id().await;
-        let source_path = engine.inner().session_writer.active_path();
-        let before = std::fs::read(&source_path).unwrap();
-        engine
-            .submit(ClientCommand::ForkSession {
-                session_id: source_id.as_uuid().to_string(),
-                target_mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        let fork_id = drained(&listener)
-            .await
-            .iter()
-            .find_map(|event| match event {
-                Ev::SessionForked { session_id, .. } => Some(session_id.clone()),
-                _ => None,
-            })
-            .expect("fork event");
-        assert_eq!(std::fs::read(&source_path).unwrap(), before);
-        let fork_path =
-            session::jsonl::session_path(&config.lingxi_home, &engine.session_cwd(), &fork_id);
-        let fork_raw = std::fs::read_to_string(fork_path).unwrap();
-        assert!(fork_raw.contains("SOURCE-SKILL-INSTRUCTIONS-514"));
-        let profile = fork_raw
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .find(|row| row["type"] == "session-mode")
-            .unwrap();
-        assert_eq!(profile["sessionMode"], "chat");
-        assert_eq!(profile["profileEpoch"], 1);
-
-        engine
-            .submit(ClientCommand::SendPrompt {
-                text: "Source follow-up".into(),
-                prompt_mode: None,
-                images: Vec::new(),
-                turn_id: Some(9932),
-                visualization_context: None,
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if stream.captured_calls().await.len() >= 2
-                    && engine.active_cancel.lock().await.is_none()
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(contains(
-            &stream.captured_calls().await[1],
-            "SOURCE-SKILL-INSTRUCTIONS-514"
-        ));
-        assert_persisted_assistant_models(&source_path, &response_model, 2);
-        assert_eq!(
-            engine.inner().orchestrator.conversation_mode().await.active,
-            session::jsonl::SessionMode::Code
-        );
-        // The generic branch API has no target-mode parameter. After two
-        // switches, its new task must still retire the old epoch-0 skill.
-        for mode in [SessionModeDto::Chat, SessionModeDto::Code] {
-            engine
-                .submit(ClientCommand::SetSessionMode { mode })
-                .await
-                .unwrap();
-        }
-        let generic = session::branch::create_branch(
-            &config.lingxi_home,
-            &engine.session_cwd(),
-            source_id.as_uuid(),
-            None,
-            engine.fs.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(generic.source_context_revision_max, 2);
-        (fork_id, generic.new_session_id.to_string())
-    });
-    drop(engine);
-
-    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![
-        reply("fork", &response_model),
-        reply("generic", &response_model),
-    ]));
-    let resumed_listener = Arc::new(FakeListener::default());
-    let resumed = new_engine_with_streaming(
-        config,
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
-        resumed_listener.clone(),
-        Arc::new(RecordingPermissionSink::default()),
-        Some(resumed_stream.clone()),
-    )
-    .unwrap();
-    resumed.runtime().block_on(async {
-        resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id: fork_id,
-                cwd: None,
-            })
-            .await
-            .unwrap();
-        resumed
-            .submit(ClientCommand::SendPrompt {
-                text: "Continue the fork".into(),
-                prompt_mode: None,
-                images: Vec::new(),
-                turn_id: Some(9933),
-                visualization_context: None,
-            })
-            .await
-            .unwrap();
-        let wait = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if !resumed_stream.captured_calls().await.is_empty()
-                    && resumed.active_cancel.lock().await.is_none()
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await;
-        if wait.is_err() {
-            panic!(
-                "fork resume made no request; events: {:?}",
-                drained(&resumed_listener).await
-            );
-        }
-        let calls = resumed_stream.captured_calls().await;
-        assert!(!contains(&calls[0], "SOURCE-SKILL-INSTRUCTIONS-514"));
-        assert!(contains(&calls[0], "Original answer"));
-        assert!(!contains(&calls[0], "Source follow-up"));
-        assert_persisted_assistant_models(
-            &resumed.inner().session_writer.active_path(),
-            &response_model,
-            2,
-        );
-        assert_eq!(
-            resumed
-                .inner()
-                .orchestrator
-                .conversation_mode()
-                .await
-                .active,
-            session::jsonl::SessionMode::Chat
-        );
-        resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id: generic_id,
-                cwd: None,
-            })
-            .await
-            .unwrap();
-        resumed
-            .submit(ClientCommand::SendPrompt {
-                text: "Continue the generic fork".into(),
-                prompt_mode: None,
-                images: Vec::new(),
-                turn_id: Some(9934),
-                visualization_context: None,
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if resumed_stream.captured_calls().await.len() >= 2
-                    && resumed.active_cancel.lock().await.is_none()
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let calls = resumed_stream.captured_calls().await;
-        assert!(!contains(&calls[1], "SOURCE-SKILL-INSTRUCTIONS-514"));
-        assert!(contains(&calls[1], "Source follow-up"));
-        assert_persisted_assistant_models(
-            &resumed.inner().session_writer.active_path(),
-            &response_model,
-            3,
-        );
-        assert_eq!(
-            resumed
-                .inner()
-                .orchestrator
-                .conversation_mode()
-                .await
-                .active,
-            session::jsonl::SessionMode::Code
-        );
-    });
-}
-
 #[cfg(unix)]
-#[test]
-fn failed_mode_persistence_keeps_the_committed_mobile_state() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let (handle, listener) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-        // The idempotent command first creates and persists the empty draft.
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Code,
-            })
-            .await
-            .unwrap();
-        let before = handle.inner().orchestrator.conversation_mode().await;
-        let _ = drained(&listener).await;
-        let path = handle.inner().session_writer.active_path();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
-        // Root can bypass the fixture's read-only file; skip only in that environment.
-        if std::fs::OpenOptions::new().append(true).open(&path).is_ok() {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-            return;
-        }
-        let result = handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(
-            result.is_err(),
-            "a failed durable append cannot report success"
-        );
-        assert_eq!(
-            handle.inner().orchestrator.conversation_mode().await,
-            before
-        );
-        assert!(!drained(&listener).await.iter().any(|event| matches!(
-            event,
-            Ev::SessionModeChanged {
-                mode: SessionModeDto::Chat,
-                ..
-            }
-        )));
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            handle
-                .inner()
-                .orchestrator
-                .conversation_mode()
-                .await
-                .selected,
-            session::jsonl::SessionMode::Chat
-        );
-    });
-}
-
-#[test]
-fn mobile_mode_switch_retires_only_the_current_main_skill_scope() {
-    use compaction::invoked_skills::{self, InvokedSkillScopeRef};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let (handle, _) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-        let session_id = handle
-            .inner()
-            .orchestrator
-            .current_session_id()
-            .await
-            .to_string();
-        let other_session = lingxi_core::types::SessionId::new().to_string();
-        let main = InvokedSkillScopeRef::new(Some(&session_id), None);
-        let child = InvokedSkillScopeRef::new(Some(&session_id), Some("agent:child"));
-        let other = InvokedSkillScopeRef::new(Some(&other_session), None);
-        let retired_message = lingxi_core::types::MessageId::new();
-        invoked_skills::register_scoped_for_message(
-            &"main".into(),
-            Path::new("/skill/main"),
-            &"main instructions".into(),
-            main,
-            retired_message,
-        );
-        invoked_skills::register_scoped(
-            &"child".into(),
-            Path::new("/skill/child"),
-            &"child instructions".into(),
-            child,
-        );
-        invoked_skills::register_scoped(
-            &"other".into(),
-            Path::new("/skill/other"),
-            &"other instructions".into(),
-            other,
-        );
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Chat,
-            })
-            .await
-            .unwrap();
-        assert!(invoked_skills::filter_for_scope(main).is_empty());
-        assert!(invoked_skills::expired_message_ids_for_scope(main).contains(&retired_message));
-        assert_eq!(invoked_skills::filter_for_scope(child).len(), 1);
-        assert_eq!(invoked_skills::filter_for_scope(other).len(), 1);
-        invoked_skills::clear_session(&other_session);
-    });
-}
-
 #[test]
 fn submit_fork_session_copies_context_into_target_mode_without_mutating_source() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -13417,10 +12057,10 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
         handle
             .submit(ClientCommand::ForkSession {
                 session_id: source_session_id.clone(),
-                target_mode: SessionModeDto::Chat,
+                target_mode: SessionModeDto::Code,
             })
             .await
-            .expect("fork session into Chat");
+            .expect("fork session in Code");
 
         let events = drained(&listener).await;
         let fork_session_id = events
@@ -13430,7 +12070,7 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
                     source_session_id: reported_source,
                     session_id,
                     mode,
-                } if reported_source == &source_session_id && *mode == SessionModeDto::Chat => {
+                } if reported_source == &source_session_id && *mode == SessionModeDto::Code => {
                     Some(session_id.clone())
                 }
                 _ => None,
@@ -13448,7 +12088,7 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
         let fork_raw = std::fs::read_to_string(&fork_path).expect("read fork transcript");
         assert!(fork_raw.contains("resume me from disk"));
         assert!(fork_raw.contains("resumed!"));
-        assert!(fork_raw.contains("\"sessionMode\":\"chat\""));
+        assert!(fork_raw.contains("\"sessionMode\":\"code\""));
 
         let rows = session::jsonl::list_recent_sessions(
             &cfg.lingxi_home,
@@ -13462,7 +12102,7 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
             .iter()
             .find(|row| row.uuid.to_string() == fork_session_id)
             .expect("fork row");
-        assert_eq!(fork_row.mode, session::jsonl::SessionMode::Chat);
+        assert_eq!(fork_row.mode, session::jsonl::SessionMode::Code);
         assert_eq!(fork_row.message_count, visible_message_count);
     });
 }
@@ -13479,8 +12119,7 @@ fn submit_fork_session_rejects_deferred_tools_for_current_and_other_source() {
         handle.runtime().block_on(async {
             if current_source {
                 handle.submit(ClientCommand::ResumeSession {
-                    session_id: source_id.clone(), cwd: None,
-                }).await.unwrap();
+                    session_id: source_id.clone(), cwd: None, expected_mode: SessionModeDto::Code, }).await.unwrap();
             }
             let assistant = uuid::Uuid::new_v4();
             use std::io::Write as _;
@@ -13500,7 +12139,7 @@ fn submit_fork_session_rejects_deferred_tools_for_current_and_other_source() {
             let before_files = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
             let previous = handle.inner().orchestrator.conversation_mode().await;
             let error = handle.submit(ClientCommand::ForkSession {
-                session_id: source_id.clone(), target_mode: SessionModeDto::Chat,
+                session_id: source_id.clone(), target_mode: SessionModeDto::Code,
             }).await.unwrap_err();
             assert!(matches!(error, ClientError::Rejected { message } if message.contains("Resume the original session first")));
             assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -13560,7 +12199,7 @@ fn submit_fork_session_rejects_unsettled_native_receipt_without_source_changes()
         let source_before = std::fs::read(&path).unwrap();
         let before_files = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
         let error = handle.submit(ClientCommand::ForkSession {
-            session_id:source_id.clone(), target_mode:SessionModeDto::Chat,
+            session_id:source_id.clone(), target_mode:SessionModeDto::Code,
         }).await.unwrap_err();
         assert!(matches!(error, ClientError::Rejected { message } if message.contains("unsettled computer receipt")));
         assert_eq!(std::fs::read(&path).unwrap(), source_before);
@@ -13581,68 +12220,23 @@ fn chat_and_code_expose_the_same_standard_slash_catalog() {
         "---\ndescription: Research\n---\nResearch $ARGUMENTS\n",
     )
     .unwrap();
-    let mut cfg = test_config(tmp.path());
-    cfg.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
-    handle.runtime().block_on(async {
-        let before = handle.slash_command_catalog_snapshot().await;
-        assert!(before
-            .iter()
-            .any(|command| command.name.display() == "research"));
-        handle
-            .submit(ClientCommand::SetSessionMode {
-                mode: SessionModeDto::Code,
-            })
-            .await
-            .unwrap();
-        let after = handle.slash_command_catalog_snapshot().await;
-        assert_eq!(
-            before.iter().map(|c| c.name.display()).collect::<Vec<_>>(),
-            after.iter().map(|c| c.name.display()).collect::<Vec<_>>()
-        );
-    });
-}
-
-#[test]
-fn resume_empty_session_bootstraps_legacy_project_index_uuid() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-    let expected = "dddddddd-4444-4444-8444-dddddddddddd";
-
-    handle.runtime().block_on(async {
-        use lingxi_core::host::OrchestratorHandle;
-
-        handle
-            .resume_empty_session(expected.into(), "旧空会话".into())
-            .await
-            .expect("legacy indexed empty session resumes");
-
-        assert_eq!(
-            handle
-                .inner()
-                .orchestrator
-                .current_session_id()
-                .await
-                .as_uuid()
-                .to_string(),
-            expected,
-        );
-        let path =
-            session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd(), expected);
-        let raw = std::fs::read_to_string(path).expect("migration anchor exists");
-        assert!(raw.contains("\"mobileEmptySession\":1"));
-        assert!(raw.contains("旧空会话"));
-
-        let events = drained(&listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::SessionResumed {
-                session_id,
-                mode,
-                messages,
-            } if session_id == expected && mode == &SessionModeDto::Code && messages.is_empty()
-        )));
-    });
+    let mut chat = test_config(tmp.path());
+    chat.session_mode = session::jsonl::SessionMode::Chat;
+    let (chat_handle, _) = build_submit_handle_with_config(chat, tmp.path());
+    let (code_handle, _) = build_submit_handle(tmp.path());
+    let before = chat_handle
+        .runtime()
+        .block_on(chat_handle.slash_command_catalog_snapshot());
+    let after = code_handle
+        .runtime()
+        .block_on(code_handle.slash_command_catalog_snapshot());
+    assert!(before
+        .iter()
+        .any(|command| command.name.display() == "research"));
+    assert_eq!(
+        before.iter().map(|c| c.name.display()).collect::<Vec<_>>(),
+        after.iter().map(|c| c.name.display()).collect::<Vec<_>>()
+    );
 }
 
 /// Seed a REPLAY-VALID session JSONL under
@@ -13718,6 +12312,7 @@ fn submit_resume_session_rehydrates_and_emits() {
             .submit(ClientCommand::ResumeSession {
                 session_id: file_uuid.clone(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await;
         assert!(
@@ -13784,6 +12379,7 @@ fn submit_resume_session_accepts_legacy_display_prefix() {
             .submit(ClientCommand::ResumeSession {
                 session_id: format!("sess:{file_uuid}"),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await
             .expect("legacy prefixed session id must resume");
@@ -13819,6 +12415,7 @@ fn submit_resume_session_missing_is_rejected() {
                 // A well-formed uuid that names no on-disk session.
                 session_id: "dddddddd-4444-4444-8444-dddddddddddd".into(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await;
         assert!(
@@ -13848,6 +12445,7 @@ fn submit_resume_session_malformed_id_is_rejected() {
             .submit(ClientCommand::ResumeSession {
                 session_id: "not-a-uuid".into(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await;
         assert!(
@@ -13894,6 +12492,7 @@ fn submit_resume_session_mid_turn_is_rejected() {
             .submit(ClientCommand::ResumeSession {
                 session_id: file_uuid,
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await;
         assert!(
@@ -14171,7 +12770,8 @@ fn new_session_accepts_another_existing_directory_and_rejects_missing_paths() {
         assert!(handle
             .submit(ClientCommand::NewSession {
                 cwd: Some(tmp.path().join("missing").display().to_string()),
-                model: None
+                model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .is_err());
@@ -14180,6 +12780,7 @@ fn new_session_accepts_another_existing_directory_and_rejects_missing_paths() {
             .submit(ClientCommand::NewSession {
                 cwd: Some(other.display().to_string()),
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .unwrap();
@@ -14355,26 +12956,14 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
             )
             .await
             .unwrap();
-        handle
-            .inner
-            .session_writer
-            .append_session_mode(
-                handle
-                    .inner
-                    .orchestrator
-                    .conversation_mode()
-                    .await
-                    .selected
-                    .as_str(),
-            )
-            .await
-            .unwrap();
+
         let original_scope = handle.inner.task_registry.handback_scope().await.unwrap();
 
         handle
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .unwrap();
@@ -14398,6 +12987,7 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
             .submit(ClientCommand::ResumeSession {
                 session_id: original.as_uuid().to_string(),
                 cwd: None,
+                expected_mode: SessionModeDto::Code,
             })
             .await
             .unwrap();

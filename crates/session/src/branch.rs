@@ -53,8 +53,10 @@ pub enum BranchError {
     NoConversation,
     /// The source has no main-conversation messages (`"No messages to branch"`).
     NoMessages,
-    /// The source exhausted the exact integer range for a fresh profile epoch.
-    ContextEpochExhausted,
+    /// Raw-history forks cannot cross the fixed conversation-mode boundary.
+    ModeMismatch,
+    /// The captured source contains malformed mode metadata.
+    InvalidModeMetadata(String),
     /// An independent branch must have a different identity from its source.
     TargetIsSource,
     /// A filesystem read/write failed.
@@ -66,7 +68,8 @@ impl std::fmt::Display for BranchError {
         match self {
             Self::NoConversation => write!(f, "No conversation to branch"),
             Self::NoMessages => write!(f, "No messages to branch"),
-            Self::ContextEpochExhausted => write!(f, "conversation context revision exhausted"),
+            Self::ModeMismatch => write!(f, "cannot fork a session into another mode"),
+            Self::InvalidModeMetadata(error) => write!(f, "invalid session mode: {error}"),
             Self::TargetIsSource => write!(f, "branch target must differ from the source session"),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -79,13 +82,11 @@ impl std::error::Error for BranchError {}
 /// `custom_title` is the trimmed `/branch [name]` argument (empty / `None` ⇒
 /// derive the base name from the first user message). Returns the new session
 /// id + saved title so the caller can switch into the branch. A branch is a
-/// new task: it retains the source's selected mode but starts a fresh skill
-/// epoch, so skills can be explicitly invoked again for the new task.
+/// new task: it retains the source's fixed mode and admitted skill epoch.
 ///
 /// # Errors
 /// [`BranchError::NoConversation`] when the source file is missing/empty,
 /// [`BranchError::NoMessages`] when it holds no chain messages,
-/// [`BranchError::ContextEpochExhausted`] when no fresh epoch exists, or
 /// [`BranchError::Io`] on any read/write failure.
 pub async fn create_branch(
     lingxi_home: &Path,
@@ -131,14 +132,11 @@ pub async fn create_branch_from_path(
     .await
 }
 
-/// Create a branch with a new, independent conversation profile. Its copied
-/// skill instructions retain their transcript provenance but are retired by
-/// a fresh epoch newer than every captured source revision and skill epoch.
-/// The profile and copied history are published atomically as one file.
+/// Create a branch only when the requested mode matches the source. The
+/// captured profile and history are published atomically as one file.
 ///
 /// # Errors
-/// Returns the same errors as [`create_branch`], or
-/// [`BranchError::ContextEpochExhausted`] if no fresh exact epoch is available.
+/// Returns the same errors as [`create_branch`], including mode mismatch.
 pub async fn create_branch_with_mode(
     lingxi_home: &Path,
     cwd: &str,
@@ -223,7 +221,7 @@ pub struct CapturedBranch<'a> {
     pub messages: &'a [JsonlMessage],
     /// Optional branch-title base; otherwise derive it from the messages.
     pub custom_title: Option<&'a str>,
-    /// Explicit profile override; `None` retains the source's selected mode.
+    /// Expected source mode; a different value is rejected.
     pub mode: Option<crate::jsonl::SessionMode>,
 }
 
@@ -241,9 +239,8 @@ pub struct RenderedBranch {
 ///
 /// # Errors
 /// Returns [`BranchError`] if the capture is empty, its target is the source,
-/// no fresh exact profile epoch exists, or publication fails (including an
-/// existing target). The caller must validate source recovery before invoking
-/// this helper; copied pending work must not run under the new profile.
+/// the requested mode differs from the source, or publication fails (including
+/// an existing target). The caller must validate source recovery first.
 pub async fn create_branch_from_captured(
     options: CapturedBranch<'_>,
     fs: Arc<dyn FileSystem>,
@@ -402,19 +399,12 @@ pub async fn render_branch_from_captured(
     let routed = route_lines(content);
     let src_sid = source_session_id.to_string();
     let source_context_revision_max = source_context_revision_max(content, &src_sid, messages);
-    let mode = mode
-        .or_else(|| {
-            routed
-                .session_modes
-                .get(&src_sid)
-                .and_then(|value| crate::jsonl::SessionMode::from_str(value))
-        })
-        .unwrap_or_default();
-    // Profile revisions are represented as exactly round-trippable JSON
-    // numbers, and an explicit fork needs a strictly newer instruction epoch.
-    if source_context_revision_max >= (1_u64 << 53) - 1 {
-        return Err(BranchError::ContextEpochExhausted);
+    let profile = crate::jsonl::JsonlWriter::fixed_session_mode_from_source(content, &src_sid)
+        .map_err(BranchError::InvalidModeMetadata)?;
+    if mode.is_some_and(|mode| mode != profile.active) {
+        return Err(BranchError::ModeMismatch);
     }
+    let mode = profile.active;
 
     // 3. Base name = provided title, else the first-prompt derivation
     //    (`deriveFirstPrompt`). Then append the collision-numbered "(Branch)".
@@ -537,13 +527,13 @@ pub async fn render_branch_from_captured(
         }))
         .expect("custom-title serializes"),
     );
-    let epoch = source_context_revision_max + 1;
+    let epoch = profile.active_epoch;
     lines.push(
         serde_json::to_string(&json!({
             "type": "session-mode",
             "sessionId": new_sid,
             "sessionMode": mode.as_str(),
-            "contextRevision": epoch,
+            "contextRevision": profile.revision,
             "profileEpoch": epoch,
             "admittedMode": mode.as_str(),
             "admittedEpoch": epoch,
@@ -819,7 +809,7 @@ mod tests {
             rendered_route
                 .session_context_revisions
                 .get(&dst.to_string()),
-            Some(&13)
+            Some(&11)
         );
         let result = create_branch_from_captured(options, fs).await.unwrap();
         assert_eq!(result.new_session_id, dst);
@@ -888,11 +878,11 @@ mod tests {
                 (value["type"] == "session-mode").then_some(value)
             })
             .unwrap();
-        assert_eq!(profile["sessionMode"], "chat");
-        assert_eq!(profile["admittedMode"], "chat");
-        assert_eq!(profile["contextRevision"], 13);
-        assert_eq!(profile["profileEpoch"], 13);
-        assert_eq!(profile["admittedEpoch"], 13);
+        assert_eq!(profile["sessionMode"], "code");
+        assert_eq!(profile["admittedMode"], "code");
+        assert_eq!(profile["contextRevision"], 11);
+        assert_eq!(profile["profileEpoch"], 8);
+        assert_eq!(profile["admittedEpoch"], 8);
         assert_eq!(profile["pending"], false);
     }
 
@@ -949,68 +939,37 @@ mod tests {
         ));
 
         let override_target = Uuid::new_v4();
-        let rendered = render_branch_from_captured(
-            CapturedBranch {
-                target_session_id: override_target,
-                mode: Some(crate::jsonl::SessionMode::Chat),
-                ..options
-            },
-            fs.clone(),
-        )
-        .await
-        .unwrap();
-        let restored = route_lines(&rendered.content);
-        assert_eq!(restored.messages_in_order[0].cwd, cwd);
-        assert_eq!(
-            restored
-                .session_modes
-                .get(&override_target.to_string())
-                .map(String::as_str),
-            Some("chat")
-        );
+        assert!(matches!(
+            render_branch_from_captured(
+                CapturedBranch {
+                    target_session_id: override_target,
+                    mode: Some(crate::jsonl::SessionMode::Chat),
+                    ..options
+                },
+                fs.clone(),
+            )
+            .await,
+            Err(BranchError::ModeMismatch)
+        ));
+        assert!(!session_path(home.path(), cwd, &override_target.to_string()).exists());
 
-        let last_available = format!(
-            "{source}\n{{\"type\":\"session-mode\",\"sessionId\":\"{src}\",\"sessionMode\":\"code\",\"profileEpoch\":9007199254740990}}\n"
-        );
-        let last_target = Uuid::new_v4();
-        let rendered = render_branch_from_captured(
-            CapturedBranch {
-                target_session_id: last_target,
-                source_content: &last_available,
-                ..options
-            },
-            fs.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            route_lines(&rendered.content)
-                .session_context_revisions
-                .get(&last_target.to_string()),
-            Some(&9007199254740991)
-        );
-
-        let exhausted = format!(
-            "{source}\n{{\"type\":\"session-mode\",\"sessionId\":\"{src}\",\"sessionMode\":\"code\",\"profileEpoch\":9007199254740991.0}}\n"
-        );
-        let fresh_target = Uuid::new_v4();
+        let invalid = format!("{source}\n{{\"type\":\"session-mode\",\"sessionId\":\"{src}\",\"sessionMode\":\"unknown\"}}\n");
         assert!(matches!(
             create_branch_from_captured(
                 CapturedBranch {
-                    target_session_id: fresh_target,
-                    source_content: &exhausted,
+                    target_session_id: Uuid::new_v4(),
+                    source_content: &invalid,
                     ..options
                 },
-                fs
+                fs,
             )
             .await,
-            Err(BranchError::ContextEpochExhausted)
+            Err(BranchError::InvalidModeMetadata(_))
         ));
-        assert!(!session_path(home.path(), cwd, &fresh_target.to_string()).exists());
     }
 
     #[tokio::test]
-    async fn profiled_branch_uses_newer_captured_epoch_and_rejects_exhaustion() {
+    async fn profiled_branch_keeps_source_mode_and_admitted_epoch() {
         let home = tempfile::tempdir().unwrap();
         let cwd = "/profiled-branch";
         let src = Uuid::new_v4();
@@ -1035,12 +994,24 @@ mod tests {
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
 
         tokio::fs::write(&source, write_source(4)).await.unwrap();
+        assert!(matches!(
+            create_branch_with_mode(
+                home.path(),
+                cwd,
+                src,
+                None,
+                crate::jsonl::SessionMode::Chat,
+                fs.clone()
+            )
+            .await,
+            Err(BranchError::ModeMismatch)
+        ));
         let branch = create_branch_with_mode(
             home.path(),
             cwd,
             src,
             None,
-            crate::jsonl::SessionMode::Chat,
+            crate::jsonl::SessionMode::Code,
             fs.clone(),
         )
         .await
@@ -1058,10 +1029,10 @@ mod tests {
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .find(|row| row["type"] == "session-mode")
             .unwrap();
-        assert_eq!(mode["sessionMode"], "chat");
-        assert_eq!(mode["contextRevision"], 8);
-        assert_eq!(mode["profileEpoch"], 8);
-        assert_eq!(mode["admittedEpoch"], 8);
+        assert_eq!(mode["sessionMode"], "code");
+        assert_eq!(mode["contextRevision"], 4);
+        assert_eq!(mode["profileEpoch"], 4);
+        assert_eq!(mode["admittedEpoch"], 4);
         assert_eq!(mode["pending"], false);
         assert!(branch_raw.contains("copied instruction"));
 
@@ -1071,7 +1042,7 @@ mod tests {
             cwd,
             src,
             None,
-            crate::jsonl::SessionMode::Chat,
+            crate::jsonl::SessionMode::Code,
             fs.clone(),
         )
         .await
@@ -1099,7 +1070,7 @@ mod tests {
             .find(|row| row["type"] == "session-mode")
             .unwrap();
         assert_eq!(generic_mode["sessionMode"], "code");
-        assert_eq!(generic_mode["profileEpoch"], 4);
+        assert_eq!(generic_mode["profileEpoch"], 3);
         assert!(generic_raw.contains("copied instruction"));
         tokio::fs::write(&source, write_source((1_u64 << 53) - 1))
             .await
@@ -1115,7 +1086,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(error, BranchError::ContextEpochExhausted));
+        assert!(matches!(error, BranchError::ModeMismatch));
         assert_eq!(
             std::fs::read_dir(source.parent().unwrap()).unwrap().count(),
             files_before

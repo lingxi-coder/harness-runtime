@@ -811,6 +811,7 @@ fn session_retarget_stops_pending_handoff_and_active_owner_resources() {
             .submit(client::protocol::commands::ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("retarget to a new session");

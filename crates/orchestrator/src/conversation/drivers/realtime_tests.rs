@@ -207,19 +207,22 @@ async fn media_handoff_commit_matches_successful_json_tool_result_text() {
 }
 
 #[tokio::test]
-async fn realtime_preparation_admits_pending_behavior_before_capturing_context() {
+async fn realtime_preparation_uses_restored_fixed_behavior() {
     use lingxi_core::host::session_context::ConversationMode;
 
-    let orchestrator = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
-        Arc::new(MockApiClient::new(Vec::new())),
-        Arc::new(ToolRegistry::new()),
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()),
-        std::env::temp_dir(),
-    ));
+    let orchestrator = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_conversation_mode(ConversationMode::Chat),
+    );
     let old_id = MessageId::new();
     let user_id = MessageId::new();
     let empty_id = MessageId::new();
@@ -239,14 +242,20 @@ async fn realtime_preparation_admits_pending_behavior_before_capturing_context()
             .history
             .push(ConversationMessage::user(empty_id, "".into()));
     }
-    let prior_turn = orchestrator.turn_gate.lock().await;
-    let pending = orchestrator
-        .select_conversation_mode(ConversationMode::Chat)
+    orchestrator
+        .restore_captured_conversation_profile(
+            ConversationMode::Chat,
+            Some(lingxi_core::host::session_context::SessionModeTransition {
+                active: ConversationMode::Chat,
+                selected: ConversationMode::Chat,
+                revision: 1,
+                active_epoch: 1,
+                selected_epoch: 1,
+                pending: false,
+            }),
+        )
         .await
         .unwrap();
-    assert!(pending.pending);
-    assert_eq!(pending.active, ConversationMode::Code);
-    drop(prior_turn);
 
     let prepared = orchestrator.prepare_realtime_agent().await.unwrap();
     assert_eq!(prepared.conversation_mode.active, ConversationMode::Chat);

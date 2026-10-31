@@ -779,7 +779,7 @@ impl OutputStream for AdapterOutputStream {
             .emit(ClientEvent::SessionModeChanged {
                 session_id: state.session_id.clone(),
                 mode: lower(state.active),
-                pending_mode: state.pending.then(|| lower(state.selected)),
+                pending_mode: None,
                 revision: state.revision,
             })
             .await;

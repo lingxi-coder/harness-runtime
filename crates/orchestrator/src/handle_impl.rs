@@ -1428,6 +1428,9 @@ impl ConversationOrchestrator {
             .await;
         self.recover_main_reports_after_activation();
         self.invoked_skill_session_guard.replace(new_session_id);
+        // The new UUID inherits the source session's fixed mode. Persist it
+        // before any startup hook can observe or write the new conversation.
+        self.initialize_conversation_mode_locked().await?;
         *self.compaction_runtime.compaction_tracking.lock().await =
             compaction::AutoCompactTrackingState::default();
         self.hooks.clear_session_hooks(old_session_id).await;
@@ -1447,6 +1450,24 @@ impl ConversationOrchestrator {
         active_goal: Option<ActiveGoalSnapshot>,
         runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
+        let metadata_source = runtime
+            .transcript_metadata
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|row| {
+                row.to_json_string().map_err(|error| {
+                    HandleError::ActionFailed(format!("invalid resume metadata: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        let fixed = session::JsonlWriter::fixed_session_mode_from_source(
+            &metadata_source,
+            &session_id.as_uuid().to_string(),
+        )
+        .map_err(HandleError::ActionFailed)?;
+        self.ensure_conversation_mode(fixed.active).await?;
         let (old_session_id, from_model, from_profile, from_binding) = {
             let session = self.session.lock().await;
             let binding = match session.user_model_setting_source {
@@ -1914,43 +1935,6 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
-    async fn set_conversation_mode(
-        &self,
-        mode: lingxi_core::host::session_context::ConversationMode,
-    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        // A durable append runs on a blocking worker and cannot be cancelled
-        // with its waiter. Keep the complete selection transaction alive until
-        // its in-memory projection and notification have also settled.
-        if let Some(owner) = self.upgrade_streaming_tool_dispatch_owner() {
-            let claim = self.lifecycle_runtime.session_switch_supervisor.claim()
-                .map_err(HandleError::ActionFailed)?;
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let result = owner.select_conversation_mode(mode).await;
-                match tx.send(result) {
-                    Ok(()) => claim.complete(None),
-                    Err(result) => claim.complete(result.err().map(|error| {
-                        format!("detached conversation profile selection failed: {error}")
-                    })),
-                }
-            });
-            rx.await.map_err(|_| HandleError::ActionFailed(
-                "conversation profile task failed".into(),
-            ))?
-        } else {
-            Err(HandleError::ActionFailed(
-                "conversation profile selection requires a shared orchestrator owner".into(),
-            ))
-        }
-    }
-
-    async fn restore_conversation_mode(
-        &self,
-        mode: lingxi_core::host::session_context::ConversationMode,
-    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        self.restore_conversation_profile(mode).await
-    }
-
     async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
         self.conversation_profile().await
     }
@@ -4219,9 +4203,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Vec::new();
         };
         let cwd = self.cwd.to_string_lossy();
-        let project_dir = memory::lingxi_md::user_config_dir(&home)
-            .join("projects")
-            .join(session::project_dir_name(&cwd));
+        let project_dir = self
+            .transcript
+            .jsonl_writer
+            .as_ref()
+            .and_then(|writer| {
+                writer
+                    .active_path()
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .unwrap_or_else(|| {
+                memory::lingxi_md::user_config_dir(&home)
+                    .join("projects")
+                    .join(session::project_dir_name(&cwd))
+            });
+        let mode = self.conversation_profile().await.active;
         let Ok(entries) = std::fs::read_dir(&project_dir) else {
             return Vec::new();
         };
@@ -4234,6 +4231,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            if uuid::Uuid::parse_str(stem).is_err()
+                || !entry.file_type().is_ok_and(|kind| kind.is_file())
+            {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !session::JsonlWriter::fixed_session_mode_from_source(&source, stem)
+                .is_ok_and(|profile| profile.active == mode)
+            {
+                continue;
+            }
             let mtime = entry
                 .metadata()
                 .and_then(|m| m.modified())
@@ -6334,6 +6344,7 @@ mod tests {
             None,
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
+                lifetime_guard: None,
                 transcript_path: None,
                 working_directory: None,
                 worktree_session: None,
@@ -7764,6 +7775,16 @@ mod tests {
         );
         orchestrator.attach_owned_session_switches();
 
+        struct ReservationDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for ReservationDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let reservation_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resume_guard = lingxi_core::host::orchestrator::ResumeLifetimeGuard::new(
+            ReservationDrop(reservation_dropped.clone()),
+        );
         let resuming = {
             let orchestrator = orchestrator.clone();
             tokio::spawn(async move {
@@ -7773,7 +7794,10 @@ mod tests {
                     Vec::new(),
                     None,
                     None,
-                    lingxi_core::host::ResumeRuntimeSnapshot::default(),
+                    lingxi_core::host::ResumeRuntimeSnapshot {
+                        lifetime_guard: Some(resume_guard),
+                        ..Default::default()
+                    },
                 )
                 .await
             })
@@ -7794,6 +7818,7 @@ mod tests {
         tokio::task::yield_now().await;
         resuming.abort();
         let _ = resuming.await;
+        assert!(!reservation_dropped.load(std::sync::atomic::Ordering::SeqCst));
 
         assert_eq!(mounted_a.session_id, session_a);
         assert_eq!(tracker.session_id().await, session_a);
@@ -7820,6 +7845,7 @@ mod tests {
             .expect("owned resume drains")
             .expect("drain task joins");
         assert!(errors.is_empty(), "owned switch errors: {errors:?}");
+        assert!(reservation_dropped.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(orchestrator.current_session_id().await, session_b);
         assert_eq!(tracker.session_id().await, session_b);
         assert_eq!(
@@ -7872,7 +7898,7 @@ mod background_context_tests {
     use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 
     #[tokio::test]
-    async fn pending_foreground_mode_does_not_retarget_background_snapshot() {
+    async fn fixed_foreground_mode_is_preserved_in_background_snapshot() {
         let orch = ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(Vec::new())),
@@ -7882,7 +7908,8 @@ mod background_context_tests {
             Arc::new(MockOutputStream::new()),
             Arc::new(StaticMemoryProvider::empty()),
             std::env::temp_dir(),
-        );
+        )
+        .with_conversation_mode(ConversationMode::Chat);
         let old_id = MessageId::new();
         let user_id = MessageId::new();
         let old = ConversationMessage::user_meta(old_id, "retired skill".into())
@@ -7890,47 +7917,44 @@ mod background_context_tests {
         let user = ConversationMessage::user(user_id, "retired skill".into());
         orch.session.lock().await.history.extend([old, user]);
         let chat = orch
-            .select_conversation_mode(ConversationMode::Chat)
+            .ensure_conversation_mode(ConversationMode::Chat)
             .await
             .unwrap();
-        assert_eq!((chat.active, chat.revision), (ConversationMode::Chat, 1));
+        assert_eq!((chat.active, chat.revision), (ConversationMode::Chat, 0));
         orch.save_current_turn_system_prompt(Some(&SystemPromptInput::custom_prompt(
             "captured chat instructions".into(),
         )))
         .await;
 
         let turn = orch.turn_gate.lock().await;
-        let foreground = orch
-            .select_conversation_mode(ConversationMode::Code)
+        assert!(orch
+            .ensure_conversation_mode(ConversationMode::Code)
             .await
-            .unwrap();
-        assert!(foreground.pending);
-        assert_eq!(foreground.active, ConversationMode::Chat);
+            .is_err());
         let (snapshot, _, prompt) = orch.background_session_snapshot().await;
         assert_eq!(snapshot.history.len(), 2);
-        assert!(snapshot.model_context_excluded_messages.contains(&old_id));
+        assert!(!snapshot.model_context_excluded_messages.contains(&old_id));
         assert!(!snapshot.model_context_excluded_messages.contains(&user_id));
         assert_eq!(snapshot.profile.active, ConversationMode::Chat);
         assert_eq!(snapshot.profile.selected, ConversationMode::Chat);
         assert_eq!(
             (snapshot.profile.revision, snapshot.profile.active_epoch),
-            (2, 1)
+            (0, 0)
         );
-        assert_eq!(snapshot.profile.selected_epoch, 1);
+        assert_eq!(snapshot.profile.selected_epoch, 0);
         assert!(!snapshot.profile.pending);
         assert_eq!(
             prompt.as_ref().and_then(|source| source.string_at("")),
             Some("captured chat instructions")
         );
 
-        orch.admit_conversation_profile_inner().await.unwrap();
         assert_eq!(
             orch.conversation_profile().await.active,
-            ConversationMode::Code
+            ConversationMode::Chat
         );
-        assert_eq!(orch.profile_epoch().await, 2);
+        assert_eq!(orch.profile_epoch().await, 0);
         assert_eq!(snapshot.profile.active, ConversationMode::Chat);
-        assert_eq!(snapshot.profile.active_epoch, 1);
+        assert_eq!(snapshot.profile.active_epoch, 0);
         drop(turn);
     }
 }

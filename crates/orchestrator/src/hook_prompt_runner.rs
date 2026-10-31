@@ -976,7 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_switch_excludes_retired_skill_from_prompt_hook_provider_request() {
+    async fn restored_profile_excludes_retired_skill_from_prompt_hook_provider_request() {
         use crate::test_support::{
             noop_hook_executor, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
         };
@@ -993,7 +993,7 @@ mod tests {
             Arc::new(StaticMemoryProvider::empty()),
             std::path::PathBuf::from("/work/repo"),
         )
-        .with_conversation_mode(ConversationMode::Code);
+        .with_conversation_mode(ConversationMode::Chat);
         let user = ConversationMessage::user(MessageId::new(), "earlier user text".into());
         let retired = ConversationMessage::user_meta(MessageId::new(), "old skill body".into())
             .with_origin(compaction::invoked_skills::skill_activation_origin(0));
@@ -1017,9 +1017,19 @@ mod tests {
                 .insert(assistant_id, (true, false));
         }
         assert_eq!(orch.prompt_hook_transcript().await.messages, audit_history);
-        orch.select_conversation_mode(ConversationMode::Chat)
-            .await
-            .unwrap();
+        orch.restore_captured_conversation_profile(
+            ConversationMode::Chat,
+            Some(lingxi_core::host::session_context::SessionModeTransition {
+                active: ConversationMode::Chat,
+                selected: ConversationMode::Chat,
+                revision: 1,
+                active_epoch: 1,
+                selected_epoch: 1,
+                pending: false,
+            }),
+        )
+        .await
+        .unwrap();
         let snapshot = orch.prompt_hook_transcript().await;
         assert_eq!(snapshot.messages, vec![user.clone(), assistant.clone()]);
         assert_eq!(

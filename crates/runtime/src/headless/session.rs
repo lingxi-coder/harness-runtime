@@ -140,6 +140,22 @@ pub async fn prepare(
         .map_err(|error| error.to_string())?
         .into();
     let loaded = session::jsonl::route_lines(&content);
+    let source_profile =
+        session::JsonlWriter::fixed_session_mode_from_source(&content, &source_id.to_string())?;
+    if config
+        .initial_conversation_mode
+        .is_some_and(|expected| expected != source_profile.active)
+    {
+        return Err(format!(
+            "session mode mismatch: expected {}, found {}",
+            config
+                .initial_conversation_mode
+                .expect("checked mode")
+                .as_str(),
+            source_profile.active.as_str()
+        ));
+    }
+    config.initial_conversation_mode = Some(source_profile.active);
     // Keep the selected file authoritative. Workspace restoration changes
     // runtime composition only; a missing workspace does not rehome JSONL.
     let resumed_cwd = if !fork {
@@ -364,10 +380,10 @@ async fn mount_prepared(
         } else {
             config.permission_mode
         };
-        let profile = session::JsonlWriter::session_mode_transition_from_source(
+        let profile = Some(session::JsonlWriter::fixed_session_mode_from_source(
             &prepared.mounted_content,
             &prepared.session_id.to_string(),
-        );
+        )?);
         // Preserve the headless resume's established model selection rule even
         // when the transcript has no human-turn model setting. Install it
         // before restoration so dependent reasoning state uses the same model.
@@ -401,27 +417,16 @@ async fn mount_prepared(
         }
         "resume"
     } else {
-        if let Some(mode) = config.initial_conversation_mode {
-            runtime
-                .orchestrator
-                .set_conversation_mode(mode)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
         "startup"
     };
+    runtime
+        .orchestrator
+        .initialize_conversation_mode()
+        .await
+        .map_err(|error| error.to_string())?;
     let effects = runtime.orchestrator.fire_session_start(source).await;
     let _ = runtime.apply_session_start_effects(&effects).await;
     runtime.orchestrator.fire_instructions_loaded().await;
-    if source == "resume" {
-        if let Some(mode) = config.initial_conversation_mode {
-            runtime
-                .orchestrator
-                .set_conversation_mode(mode)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-    }
     Ok(())
 }
 

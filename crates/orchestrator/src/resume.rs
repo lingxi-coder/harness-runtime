@@ -558,6 +558,7 @@ impl ReplayedSession {
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
+            lifetime_guard: None,
             transcript_path: Some(self.transcript_path.clone()),
             working_directory: self.working_directory.clone(),
             worktree_session: self.worktree_session.clone(),
@@ -776,7 +777,8 @@ fn replay_captured_session_with_text_projection(
     // the assistant response. Recover from the full routed entry stream.
     let profile_epoch = JsonlWriter::session_mode_transition_from_source(&source, &sid_str)
         .map_or(0, |profile| profile.active_epoch);
-    let (snapshot, rendering) = prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
+    let (snapshot, rendering) =
+        prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
     runtime_metadata.prompt_snapshot = snapshot;
     runtime_metadata.prompt_snapshot_epoch = Some(profile_epoch);
     runtime_metadata.context_rendering_hint = rendering;
@@ -943,7 +945,8 @@ pub fn prompt_state_for_epoch_from_source(
         let Ok(row) = Utf16JsonProjection::parse(line) else {
             continue;
         };
-        if !row.string_at("/sessionId")
+        if !row
+            .string_at("/sessionId")
             .and_then(|value| Uuid::parse_str(value).ok())
             .is_some_and(|value| value == target_id)
         {
@@ -951,7 +954,9 @@ pub fn prompt_state_for_epoch_from_source(
         }
         match row.string_at("/type") {
             Some("session-mode") => {
-                if let Some(profile) = JsonlWriter::session_mode_transition_from_source(line, session_id) {
+                if let Some(profile) =
+                    JsonlWriter::session_mode_transition_from_source(line, session_id)
+                {
                     active_epoch = profile.active_epoch;
                 }
             }
@@ -3400,6 +3405,17 @@ impl ConversationOrchestrator {
         profile: Option<lingxi_core::host::session_context::SessionModeTransition>,
         source: &str,
     ) -> Result<(), String> {
+        let persisted =
+            JsonlWriter::fixed_session_mode_from_source(source, &session_id.to_string())?;
+        if profile.as_ref().is_some_and(|supplied| {
+            supplied.active != persisted.active || supplied.active_epoch != persisted.active_epoch
+        }) {
+            return Err("captured session mode does not match the supplied profile".into());
+        }
+        self.ensure_conversation_mode(persisted.active)
+            .await
+            .map_err(|error| error.to_string())?;
+        let profile = Some(persisted);
         let (replayed, last_uuid, metadata) = build_state_from_jsonl(session_id, messages);
         let model_recovered = messages.iter().any(|message| {
             carries_human_turn_settings(message)
@@ -3653,6 +3669,18 @@ impl ConversationOrchestrator {
     ) -> Result<Self, ResumeError> {
         config.resume_session_id = Some(session_id);
         let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs.clone()).await?;
+        let metadata_source = replayed
+            .transcript_metadata
+            .iter()
+            .map(|row| {
+                row.to_json_string()
+                    .map_err(|error| ResumeError::Profile(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        let fixed_profile =
+            JsonlWriter::fixed_session_mode_from_source(&metadata_source, &session_id.to_string())
+                .map_err(ResumeError::Profile)?;
         let effort_was_explicit = config.effort.is_some();
         if config.effort.is_none() {
             config.effort.clone_from(&replayed.runtime_metadata.effort);
@@ -3673,7 +3701,8 @@ impl ConversationOrchestrator {
             output,
             memory,
             cwd,
-        );
+        )
+        .with_conversation_mode(fixed_profile.active);
         orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(
             &replayed.messages,
         ));
@@ -3767,18 +3796,15 @@ impl ConversationOrchestrator {
         }
         // The metadata was captured with the same source that supplied the
         // history and prompt snapshot, even when no writer is attached.
-        let metadata_source = replayed.transcript_metadata.iter()
-            .filter_map(|row| row.to_json_string().ok())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let profile = JsonlWriter::session_mode_transition_from_source(
-            &metadata_source,
-            &session_id.to_string(),
-        );
         orch.restore_captured_conversation_profile(
             lingxi_core::host::session_context::ConversationMode::Code,
-            profile,
-        ).await.map_err(|error| ResumeError::Profile(error.to_string()))?;
+            Some(fixed_profile),
+        )
+        .await
+        .map_err(|error| ResumeError::Profile(error.to_string()))?;
+        orch.initialize_conversation_mode()
+            .await
+            .map_err(|error| ResumeError::Profile(error.to_string()))?;
         orch.sync_active_goal_stop_hook_for_current_state().await;
         orch.restore_file_read_state().await;
         if !replayed.runtime_metadata.deferred_tools.is_empty() {

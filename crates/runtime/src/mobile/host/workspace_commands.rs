@@ -370,6 +370,7 @@ impl MobileEngineHandle {
         &self,
         scope: MobileSessionDiscoveryScope,
         limit: u32,
+        mode: Option<session::jsonl::SessionMode>,
     ) -> Result<Vec<SessionRowDto>, ClientError> {
         let scope = match scope {
             MobileSessionDiscoveryScope::Current => session::jsonl::SessionDiscoveryScope::Current,
@@ -415,25 +416,28 @@ impl MobileEngineHandle {
                     }
                 }
             }
-            session::jsonl::list_recent_sessions_in_scope_with_worktrees(
+            session::jsonl::list_recent_sessions_in_scope_with_worktrees_and_mode(
                 &self.lingxi_home,
                 &self.session_cwd(),
                 scope,
                 limit as usize,
                 self.host_fs.clone(),
                 &roots,
+                mode,
             )
             .await
             .map(|catalog| catalog.sessions)
         } else {
-            session::jsonl::list_recent_sessions_in_scope(
+            session::jsonl::list_recent_sessions_in_scope_with_mode(
                 &self.lingxi_home,
                 &self.session_cwd(),
                 scope,
                 limit as usize,
                 self.host_fs.clone(),
+                mode,
             )
             .await
+            .map(|catalog| catalog.sessions)
         };
         let rows = match rows {
             Ok(rows) => rows,
@@ -544,7 +548,7 @@ impl MobileEngineHandle {
                 message: "selected transcript does not match the requested session UUID".into(),
             });
         }
-        self.resume_session_impl(session_id, None, None, Some(path))
+        self.resume_session_impl(session_id, None, Some(path), None)
             .await
     }
 
@@ -554,7 +558,7 @@ impl MobileEngineHandle {
         limit: u32,
     ) -> Result<Vec<SessionRowDto>, ClientError> {
         let _transition = self.loop_transition.lock().await;
-        self.workspace_sessions_inner(scope, limit).await
+        self.workspace_sessions_inner(scope, limit, None).await
     }
 }
 
@@ -933,11 +937,19 @@ mod tests {
         handle.runtime().block_on(async {
             let id = uuid::Uuid::new_v4();
             let b = format!("{}/b", directories.projects_guest_path);
-            handle
-                .persist_mobile_empty_session_anchor(id, &b, "Empty in B", true)
+            let path = session::jsonl::session_path(&handle.lingxi_home, &b, &id.to_string());
+            let writer = session::jsonl::JsonlWriter::new(path.clone(), handle.host_fs.clone());
+            writer
+                .append_mobile_empty_session(&id.to_string(), "Empty in B", &b)
                 .await
                 .unwrap();
-            let path = session::jsonl::session_path(&handle.lingxi_home, &b, &id.to_string());
+            writer
+                .initialize_fixed_session_mode(
+                    &id.to_string(),
+                    &lingxi_core::host::session_context::SessionModeTransition::default(),
+                )
+                .await
+                .unwrap();
             let rows = handle
                 .workspace_sessions(MobileSessionDiscoveryScope::All, 100)
                 .await
@@ -977,6 +989,7 @@ mod tests {
                 .submit(client::protocol::commands::ClientCommand::NewSession {
                     cwd: None,
                     model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
                 })
                 .await
                 .unwrap();

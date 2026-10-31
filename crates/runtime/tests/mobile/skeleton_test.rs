@@ -48,6 +48,7 @@ async fn start_new_session(handle: &std::sync::Arc<harness_runtime::mobile::Mobi
     loop {
         match handle
             .submit(ClientCommand::NewSession {
+                mode: client::protocol::listings::SessionModeDto::Code,
                 cwd: None,
                 model: None,
             })
@@ -425,7 +426,8 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
         }
 
         handle
-            .submit(ClientCommand::ListSessions { limit: None })
+            .submit(ClientCommand::ListSessions {
+                mode: None, limit: None })
             .await
             .expect("list persisted sessions");
         let listed = listener

@@ -211,10 +211,10 @@ pub(crate) async fn restore(
                 &session::jsonl::route_lines(source.source()).messages_in_order,
                 true,
                 permission::PermissionMode::Default,
-                JsonlWriter::session_mode_transition_from_source(
+                Some(JsonlWriter::fixed_session_mode_from_source(
                     source.source(),
                     &source.session_id().to_string(),
-                ),
+                ).map_err(|_| BuildError::Orchestrator("chat_transcript_unavailable".into()))?),
                 source.source(),
             )
             .await

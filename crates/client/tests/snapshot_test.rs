@@ -1350,8 +1350,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
-        ("event/session_mode_changed.json", ClientEvent::SessionModeChanged { session_id: "session-1".into(), mode: SessionModeDto::Code, pending_mode: Some(SessionModeDto::Chat), revision: 2 }),
+        ("event/session_mode_changed.json", ClientEvent::SessionModeChanged { session_id: "session-1".into(), mode: SessionModeDto::Code, pending_mode: None, revision: 2 }),
         ("event/context_manifest.json", ClientEvent::ContextManifest { manifest_json: "{\"projected\":false}".into() }),
+        ("event/session_handoff_prepared.json", ClientEvent::SessionHandoffPrepared { request_id: "handoff-1".into(), source_session_id: "session-1".into(), source_mode: SessionModeDto::Code, target_mode: SessionModeDto::Chat, cutoff: "sha256:example:42".into(), summary: ClientTextDto::from_utf8("Summary") }),
+        ("event/session_handoff_failed.json", ClientEvent::SessionHandoffFailed { request_id: "handoff-1".into(), message: "unavailable".into() }),
         (
             "event/media_control_request.json",
             ClientEvent::MediaControlRequest {
@@ -1590,6 +1592,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::NewSession {
                 cwd: Some("/home/dev/project".to_string()),
                 model: Some(ClientTextDto::from_utf8("claude-opus-4-7")),
+                mode: SessionModeDto::Code,
             },
         ),
         (
@@ -1597,11 +1600,12 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::ResumeSession {
                 session_id: "44444444-4444-4444-8444-444444444444".to_string(),
                 cwd: Some("/home/dev/project".to_string()),
+                expected_mode: SessionModeDto::Code,
             },
         ),
         (
             "command/list_sessions.json",
-            ClientCommand::ListSessions { limit: Some(20) },
+            ClientCommand::ListSessions { limit: Some(20), mode: Some(SessionModeDto::Chat) },
         ),
         (
             "command/fork_session.json",
@@ -2055,7 +2059,9 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 },
             },
         ),
-        ("command/set_session_mode.json", ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }),
+        ("command/prepare_session_handoff.json", ClientCommand::PrepareSessionHandoff { request_id: "handoff-1".into(), target_mode: SessionModeDto::Chat }),
+        ("command/cancel_session_handoff.json", ClientCommand::CancelSessionHandoff { request_id: "handoff-1".into() }),
+        ("command/retry_session_handoff.json", ClientCommand::RetrySessionHandoff { request_id: "handoff-1".into() }),
         ("command/get_context_manifest.json", ClientCommand::GetContextManifest),
         (
             "command/update_media_session_modes.json",
