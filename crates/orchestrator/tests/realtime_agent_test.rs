@@ -12,7 +12,7 @@ use orchestrator::test_support::{
 };
 use orchestrator::{
     realtime_history, ConversationOrchestrator, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits,
+    RealtimeAgentLimits, RealtimeAgentOutput, RealtimeCompletionBoundary,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -314,7 +314,22 @@ impl RealtimeCodec for Codec {
             panic!("fixture")
         };
         let kind = String::from_utf8(bytes.to_vec()).unwrap();
+        if matches!(kind.as_str(), "gemini-progress" | "gemini-idle" | "gemini-missing") {
+            let status = match kind.as_str() { "gemini-progress" => Some("IN_PROGRESS"), "gemini-idle" => Some("IDLE"), _ => None };
+            let mut content = json!({"turnComplete":true});
+            if let Some(status) = status { content["interactionStatus"] = json!(status); }
+            return Ok(vec![
+                RealtimeEvent::TurnCompleted { turn_id: None, status: Some("completed".into()) },
+                RealtimeEvent::ProviderEvent { name: "generationComplete".into(), native: json!(true) },
+                RealtimeEvent::ProviderEvent { name: "serverContent".into(), native: json!({"serverContent":content}) },
+            ]);
+        }
         Ok(vec![match kind.as_str() {
+            "start" => RealtimeEvent::TurnStarted { turn_id: Some("response-first".into()) },
+            "start-continuation" => RealtimeEvent::TurnStarted { turn_id: Some("response-next".into()) },
+            "done" => RealtimeEvent::TurnCompleted { turn_id: Some("response-first".into()), status: Some("completed".into()) },
+            "done-continuation" => RealtimeEvent::TurnCompleted { turn_id: Some("response-next".into()), status: Some("completed".into()) },
+            "done-cancelled" => RealtimeEvent::TurnCompleted { turn_id: Some("response-first".into()), status: Some("cancelled".into()) },
             "tool" => RealtimeEvent::ToolCall {
                 call_id: "call".into(),
                 name: "fixture".into(),
@@ -478,6 +493,29 @@ async fn connection() -> (
     Arc<std::sync::Mutex<Vec<String>>>,
 ) {
     connection_with_codec(Arc::new(Codec)).await
+}
+
+async fn gemini_connection() -> (
+    RealtimeControl,
+    RealtimeEvents,
+    tokio::task::JoinHandle<Result<(), RealtimeError>>,
+    futures::channel::mpsc::UnboundedSender<Result<RealtimeFrame, RealtimeError>>,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use lingxi_llm_client::providers::google::live::{GeminiLiveConfig, GeminiLiveSession};
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    tx.unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#))).unwrap();
+    let sent = Arc::new(std::sync::Mutex::new(vec![]));
+    let transport = Arc::new(Transport { incoming: std::sync::Mutex::new(Some(rx)), sent: sent.clone() });
+    let (session, driver) = GeminiLiveSession::connect(
+        transport,
+        RealtimeConnectRequest { endpoint: "wss://fixture.example/ws".into(), headers: vec![], max_frame_bytes: 4096 },
+        GeminiLiveConfig::new("gemini-3.8-live", "fixture-account").with_agent_history(),
+        RealtimeLimits::default(),
+    ).await.unwrap();
+    let (control, events) = session.into_realtime_parts();
+    control.import_history(vec![]).unwrap();
+    (control, events, tokio::spawn(driver.run()), tx, sent)
 }
 
 async fn connection_with_codec(
@@ -675,6 +713,244 @@ async fn realtime_tool_loop_keeps_idle_paused_during_permission_and_uses_common_
     let _ = driver.await;
     assert_eq!(orch.snapshot_history().await.len(), 2);
 }
+
+#[tokio::test]
+async fn agent_terminal_waits_for_permission_tools_and_the_continuation() {
+    // Cover both the tool waiting at provider completion and the tool having
+    // finished before that completion is observed.
+    for release_before_done in [false, true] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()),
+            approved: AtomicBool::new(false),
+        });
+        let (orch, _) = fixture(gate.clone()).await;
+        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let (control, events, driver, provider, sent) = connection().await;
+        let (_inputs_tx, inputs) = mpsc::channel(4);
+        let (output, mut output_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await }
+        });
+        for kind in ["start", "tool"] {
+            provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap();
+        }
+        wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "permission requested").await;
+        if release_before_done {
+            release.notify_one();
+            wait_until(|| sent.lock().unwrap().iter().any(|value| value == "ContinueResponse"), "continuation requested").await;
+        }
+        provider.unbounded_send(Ok(RealtimeFrame::text("done"))).unwrap();
+        let mut id = None;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
+                RealtimeAgentOutput::AgentResponseStarted { turn_id } => id = Some(turn_id),
+                RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("tool response cannot finish the Agent input"),
+                RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. }) => break,
+                _ => {}
+            }
+        }
+        assert!(output_rx.try_recv().is_err());
+        if !release_before_done { release.notify_one(); }
+        wait_until(|| sent.lock().unwrap().iter().any(|value| value == "ContinueResponse"), "continuation requested").await;
+        for kind in ["start-continuation", "done-continuation"] {
+            provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap();
+        }
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(Some(turn_id), id); break; }
+                RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("continuation changed the local input identity"),
+                _ => {}
+            }
+        }
+        cancel.cancel();
+        assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
+        let _ = driver.await;
+    }
+}
+
+#[tokio::test]
+async fn agent_terminal_supports_automatic_continuation_without_provider_start() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
+    let (orch, _) = fixture(gate.clone()).await;
+    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let (control, events, driver, provider, sent) = gemini_connection().await;
+    let (inputs_tx, inputs) = mpsc::channel(4);
+    let (output, mut output_rx) = mpsc::channel(32);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
+        orch.run_realtime_agent(prepared, control, events, inputs, output,
+            RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
+    }});
+    inputs_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+    let id = loop {
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; }
+    };
+    provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"turnComplete":true,"generationComplete":true,"interactionStatus":"IN_PROGRESS"}}"#))).unwrap();
+    loop {
+        match output_rx.recv().await.unwrap() {
+            RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("IN_PROGRESS is not final"),
+            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { name, .. }) if name == "serverContent" => break,
+            _ => {}
+        }
+    }
+    provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"toolCall":{"functionCalls":[{"id":"call","name":"fixture","args":{}},{"id":"call-second","name":"fixture","args":{}}]}}"#))).unwrap();
+    wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "Gemini permission requested").await;
+    assert!(output_rx.try_recv().is_ok());
+    release.notify_one();
+    wait_until(|| sent.lock().unwrap().iter().filter(|value| value.contains("toolResponse")).count() == 2, "both tool results").await;
+    provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"turnComplete":true,"generationComplete":true,"interactionStatus":"IDLE"}}"#))).unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
+            RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("continuation changed the local input identity"),
+            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, id); break; }
+            _ => {}
+        }
+    }
+    cancel.cancel();
+    assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
+    let _ = driver.await;
+}
+
+#[tokio::test]
+async fn cancelled_provider_waits_for_cancelled_tool_cleanup_before_local_terminal() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
+    let (orch, _) = fixture(gate.clone()).await;
+    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let (control, events, driver, provider, _) = connection().await;
+    let (_inputs_tx, inputs) = mpsc::channel(4);
+    let (output, mut output_rx) = mpsc::channel(32);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
+        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
+    }});
+    for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "permission requested").await;
+    provider.unbounded_send(Ok(RealtimeFrame::text("done-cancelled"))).unwrap();
+    let mut id = None;
+    loop {
+        match output_rx.recv().await.unwrap() {
+            RealtimeAgentOutput::AgentResponseStarted { turn_id } => id = Some(turn_id),
+            RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. }) => break,
+            RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("terminal before provider cancellation"),
+            _ => {}
+        }
+    }
+    release.notify_one();
+    loop {
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
+            assert_eq!(Some(turn_id), id); break;
+        }
+    }
+    cancel.cancel();
+    assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
+    let _ = driver.await;
+}
+
+#[tokio::test]
+async fn gemini_interruption_in_a_separate_frame_waits_for_tool_drain() {
+    for release_before_done in [false, true] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
+        let (orch, _) = fixture(gate.clone()).await;
+        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let (control, events, driver, provider, _) = gemini_connection().await;
+        let (inputs_tx, inputs) = mpsc::channel(4);
+        let (output, mut output_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({ let cancel = cancel.clone(); async move {
+            orch.run_realtime_agent(prepared, control, events, inputs, output,
+                RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
+        }});
+        inputs_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+        let id = loop { if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; } };
+        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"toolCall":{"functionCalls":[{"id":"call","name":"fixture","args":{}}]}}"#))).unwrap();
+        wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "Gemini permission requested").await;
+        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"interrupted":true}}"#))).unwrap();
+        loop {
+            if matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::Provider(RealtimeEvent::Interrupted)) { break; }
+        }
+        if release_before_done { release.notify_one(); }
+        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"turnComplete":true,"interactionStatus":"IDLE"}}"#))).unwrap();
+        if !release_before_done { release.notify_one(); }
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, id); break; }
+                RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("interruption created another input"),
+                _ => {}
+            }
+        }
+        cancel.cancel();
+        assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
+        let _ = driver.await;
+    }
+}
+
+#[tokio::test]
+async fn stale_provider_completion_cannot_finish_new_local_input() {
+    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let (orch, _) = fixture(gate).await;
+    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let (control, events, driver, provider, _) = connection().await;
+    let (_inputs_tx, inputs) = mpsc::channel(4);
+    let (output, mut output_rx) = mpsc::channel(32);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
+        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
+    }});
+    for kind in ["start", "done"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    let first = loop {
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; }
+    };
+    for kind in ["start-continuation", "done"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    let second = loop {
+        match output_rx.recv().await.unwrap() {
+            RealtimeAgentOutput::AgentResponseStarted { turn_id } => { assert_ne!(turn_id, first); break turn_id; }
+            _ => {}
+        }
+    };
+    loop {
+        match output_rx.recv().await.unwrap() {
+            RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { turn_id: Some(id), .. }) if id == "response-first" => break,
+            RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("old response finished the new input"),
+            _ => {}
+        }
+    }
+    assert!(output_rx.try_recv().is_err());
+    provider.unbounded_send(Ok(RealtimeFrame::text("done-continuation"))).unwrap();
+    loop {
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap() { assert_eq!(turn_id, second); break; }
+    }
+    cancel.cancel();
+    assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
+    let _ = driver.await;
+}
+
+#[tokio::test]
+async fn gemini_missing_idle_status_fails_closed_without_a_terminal() {
+    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let (orch, _) = fixture(gate).await;
+    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let (control, events, driver, provider, _) = connection().await;
+    let (inputs_tx, inputs) = mpsc::channel(4);
+    let (output, mut output_rx) = mpsc::channel(32);
+    let task = tokio::spawn(async move {
+        orch.run_realtime_agent(prepared, control, events, inputs, output,
+            RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, CancellationToken::new()).await
+    });
+    inputs_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+    provider.unbounded_send(Ok(RealtimeFrame::text("gemini-missing"))).unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap_err();
+    assert!(error.to_string().contains("cannot confirm interactionStatus IDLE"));
+    while let Ok(event) = output_rx.try_recv() {
+        assert!(!matches!(event, RealtimeAgentOutput::AgentTurnCompleted { .. }));
+    }
+    let _ = driver.await;
+}
 #[tokio::test]
 async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permission_boundary() {
     let gate = Arc::new(Gate {
@@ -722,7 +998,7 @@ async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permis
     // The host's owner cancellation drains a pending native permission ask.
     while !matches!(
         output_rx.recv().await.unwrap(),
-        RealtimeEvent::ToolCancelled { .. }
+        RealtimeAgentOutput::Provider(RealtimeEvent::ToolCancelled { .. })
     ) {}
     gate.release.as_ref().unwrap().notify_one();
     assert_eq!(
@@ -964,7 +1240,7 @@ async fn realtime_transcripts_commit_after_playback_ack_and_skip_interrupted_aud
         events_tx
             .unbounded_send(Ok(RealtimeFrame::text(event)))
             .unwrap();
-        output_rx.recv().await.unwrap();
+        while !matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::Provider(_)) {}
     }
     assert_eq!(orch.snapshot_history().await.len(), 1);
     inputs_tx
@@ -980,7 +1256,7 @@ async fn realtime_transcripts_commit_after_playback_ack_and_skip_interrupted_aud
         events_tx
             .unbounded_send(Ok(RealtimeFrame::text(event)))
             .unwrap();
-        output_rx.recv().await.unwrap();
+        while !matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::Provider(_)) {}
     }
     inputs_tx
         .send(RealtimeAgentInput::PlaybackCompleted {
@@ -1177,7 +1453,7 @@ async fn separate_realtime_tool_calls_do_not_overlap_mutation_batches() {
     provider
         .unbounded_send(Ok(RealtimeFrame::text("tool-second")))
         .unwrap();
-    while !matches!(output_rx.recv().await.unwrap(),RealtimeEvent::ToolCall {call_id,..} if call_id=="call-second")
+    while !matches!(output_rx.recv().await.unwrap(),RealtimeAgentOutput::Provider(RealtimeEvent::ToolCall {call_id,..}) if call_id=="call-second")
     {
     }
     tokio::time::sleep(Duration::from_millis(20)).await;

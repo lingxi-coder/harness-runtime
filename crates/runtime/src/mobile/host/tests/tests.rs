@@ -10077,7 +10077,7 @@ struct SuccessfulHandoffAttachment {
     _io_guards: StdMutex<
         Option<(
             tokio::sync::mpsc::Sender<orchestrator::RealtimeAgentInput>,
-            tokio::sync::mpsc::Receiver<llm_runtime::services::sdk::realtime::RealtimeEvent>,
+            tokio::sync::mpsc::Receiver<orchestrator::RealtimeAgentOutput>,
         )>,
     >,
 }

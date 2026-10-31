@@ -26,7 +26,7 @@ mod streaming;
 pub use realtime::{
     realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledMediaChild, ScheduledMediaChildRoute,
+    RealtimeAgentLimits, RealtimeAgentOutput, RealtimeAgentSessionIo, RealtimeCompletionBoundary, ScheduledMediaChild, ScheduledMediaChildRoute,
     ScheduledMediaParentCheck,
 };
 

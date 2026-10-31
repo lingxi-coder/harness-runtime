@@ -317,6 +317,7 @@ pub async fn build_mobile_inner(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -330,7 +331,8 @@ pub(super) async fn build_mobile_inner_for_scheduled(
     permission_sink: Arc<dyn PermissionRequestSink>,
     borrowed_sessions: Option<Arc<crate::mobile::transcript::MobileTranscriptSessionSwitcher>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
-    build_mobile_inner_with_ask(
+    let receipt = Arc::new(super::MobileRetirementReceipt::default());
+    let result = build_mobile_inner_with_ask(
         cfg,
         platform,
         listener,
@@ -340,8 +342,15 @@ pub(super) async fn build_mobile_inner_for_scheduled(
         None,
         None,
         borrowed_sessions,
+        Some(receipt.clone()),
     )
-    .await
+    .await;
+    if result.is_err() {
+        // Failed assembly may already have launched work under the borrowed
+        // owner. Keep the caller's session gate until that work has drained.
+        receipt.wait_if_installed().await;
+    }
+    result
 }
 
 #[allow(clippy::too_many_lines)]
@@ -355,6 +364,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     media_agent_handoffs: Option<Arc<MobileMediaAgentHandoffQueue>>,
     initial_turn_queue: Option<(Arc<msgqueue::MessageQueueManager>, Arc<DurableTurnStore>)>,
     borrowed_sessions: Option<Arc<crate::mobile::transcript::MobileTranscriptSessionSwitcher>>,
+    retirement_receipt: Option<Arc<super::MobileRetirementReceipt>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let mut cfg = cfg;
     cfg.lingxi_home = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.lingxi_home));
@@ -3018,6 +3028,14 @@ pub(super) async fn build_mobile_inner_with_ask(
     let orch = orchestrator::ConversationOrchestrator::into_shared(
         orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed),
     );
+    // Install before registry population: any later error or cancelled build
+    // must drain this exact composition and break its handler back edges.
+    let retirement = super::MobileSessionRetirement::new(
+        orch.clone(),
+        shared_command_registry.clone(),
+        task_registry.clone(),
+        retirement_receipt,
+    );
     if let Some(initial) = &initial_session {
         let permission = if initial.replayed.state.plan_mode {
             PermissionMode::Plan
@@ -3601,6 +3619,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         wakeup_scheduler,
         dispatcher,
         slash_registry: shared_command_registry,
+        retirement: Some(retirement),
         workspace_catalog,
         #[cfg(test)]
         wired_skill_listing_provider,
@@ -3799,6 +3818,7 @@ fn build_mobile_engine_on_worker(
             Some(ask_user_question_tx.clone()),
             Some(media_agent_handoffs),
             Some((message_queue.clone(), durable_turns.clone())),
+            None,
             None,
         ))
         .map_err(|e| MobileEngineError::Internal(e.to_string()))?;

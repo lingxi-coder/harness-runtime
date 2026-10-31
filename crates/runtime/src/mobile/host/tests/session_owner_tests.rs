@@ -92,6 +92,79 @@ fn duplicate_cold_mount_is_rejected_until_the_first_owner_drains() {
 }
 
 #[test]
+fn direct_mobile_runtime_retires_its_registry_and_releases_the_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = test_config(tmp.path());
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let runtime = executor
+        .block_on(build_mobile(
+            config.clone(),
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+            Arc::new(FakeListener::default()),
+            Arc::new(RecordingPermissionSink::default()),
+        ))
+        .unwrap();
+    let id = executor.block_on(async {
+        runtime
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string()
+    });
+    drop(runtime);
+    wait_for_session_release(&config.lingxi_home, &id);
+}
+
+#[test]
+fn cancelled_assembly_retires_the_partially_built_owner() {
+    struct PausedListener(std::sync::mpsc::Sender<()>);
+
+    #[async_trait]
+    impl ClientEventListener for PausedListener {
+        async fn on_event(&self, event: ClientEvent) {
+            if matches!(event, ClientEvent::PermissionModeChanged { .. }) {
+                let _ = self.0.send(());
+                std::future::pending::<()>().await;
+            }
+        }
+
+        async fn on_workflow_progress(
+            &self,
+            _origin_session_id: String,
+            _task_id: String,
+            _run_id: String,
+            _progress: client::protocol::listings::WorkflowProgressDto,
+        ) {
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (id, _) = seed_replay_valid_session(tmp.path());
+    let mut config = test_config(tmp.path());
+    config.initial_session_id = Some(id.clone());
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let build = executor.spawn(build_mobile(
+        config.clone(),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(PausedListener(ready_tx)),
+        Arc::new(RecordingPermissionSink::default()),
+    ));
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("assembly must reach the post-registry event");
+    let home = std::path::PathBuf::from(super::super::canonical_cwd_string(&config.lingxi_home));
+    let session_id = SessionId::from_uuid(uuid::Uuid::parse_str(&id).unwrap());
+    assert!(crate::mobile::transcript::session_owner_is_live(home, session_id));
+    build.abort();
+    executor.block_on(async {
+        assert!(matches!(build.await, Err(error) if error.is_cancelled()));
+    });
+    wait_for_session_release(&config.lingxi_home, &id);
+}
+
+#[test]
 fn hot_resume_cannot_steal_a_live_owner_and_new_sessions_are_also_claimed() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(tmp.path());
@@ -162,7 +235,7 @@ fn same_uuid_is_independent_across_config_homes() {
 #[tokio::test]
 async fn release_receipt_only_succeeds_after_the_owner_is_gone() {
     let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path().to_path_buf();
+    let home = tmp.path().canonicalize().unwrap();
     let id = SessionId::new();
     let switcher = crate::mobile::transcript::MobileTranscriptSessionSwitcher::new(home.clone());
     switcher.claim_initial(id).unwrap();

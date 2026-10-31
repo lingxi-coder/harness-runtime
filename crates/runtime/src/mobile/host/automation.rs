@@ -451,28 +451,18 @@ where
 {
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    tokio::spawn(operation(cancel))
+    mobile_automation_runtime()
+        .spawn(operation(cancel))
         .await
         .map_err(|error| format!("scheduled execution owner failed: {error}"))?
 }
 
-async fn drain_scheduled_child(orchestrator: Arc<orchestrator::ConversationOrchestrator>) {
-    orchestrator.close_background_producer_admission();
-    let retained = super::wait_for_mobile_background_producers(
-        orchestrator.clone(),
-        || orchestrator.drain_background_session_launches(),
-        || orchestrator.shutdown_startup_responses_websocket_prewarm(),
-        std::time::Duration::from_secs(2),
-        std::time::Duration::from_secs(1),
-        std::time::Duration::from_secs(60),
-    )
-    .await;
-    retained.shutdown_idle_compaction().await;
-    let errors = retained.close_and_drain_session_switches().await;
-    for error in errors {
-        tracing::warn!(%error, "scheduled session switch drain reported an error");
+async fn drain_scheduled_child(runtime: &mut super::MobileRuntime) {
+    if let Some(retirement) = runtime.retirement.take() {
+        // The foreground reader remains fenced until task workers and command
+        // handlers from this child can no longer write or launch more work.
+        retirement.retire().await;
     }
-    retained.wait_for_turn_idle().await;
 }
 
 #[async_trait]
@@ -811,7 +801,7 @@ impl MobileTurnFirer {
         debug_assert!(rt.media_attachment_confirmed_callback.is_none());
         drop(rt.media_attachment_handle.take());
         if cancel.is_cancelled() {
-            drain_scheduled_child(rt.orchestrator.clone()).await;
+            drain_scheduled_child(&mut rt).await;
             return Err("cancelled: Scheduled execution was cancelled by the host".into());
         }
 
@@ -849,7 +839,7 @@ impl MobileTurnFirer {
         }
         .await;
         if let Err(error) = preparation {
-            drain_scheduled_child(rt.orchestrator.clone()).await;
+            drain_scheduled_child(&mut rt).await;
             return Err(error);
         }
         if let Some(route) = cleanup
@@ -982,7 +972,7 @@ impl MobileTurnFirer {
                 }
             }
         };
-        drain_scheduled_child(rt.orchestrator.clone()).await;
+        drain_scheduled_child(&mut rt).await;
         let result = match outcome {
             Ok(Ok(_outcome)) => Ok(cron::AutomationRunResult {
                 session_id,
@@ -2301,6 +2291,40 @@ mod owned_cron_tests {
         tokio::time::timeout(Duration::from_secs(2), done.notified())
             .await
             .unwrap();
+        assert!(gate.try_lock().is_ok());
+    }
+
+    #[test]
+    fn dropped_caller_runtime_cannot_abandon_the_scheduled_owner() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let gate = Arc::new(Mutex::new(()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (cleaning_tx, cleaning_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let owned_gate = gate.clone();
+        runtime.spawn(async move {
+            let _ = run_owned_mobile_cron(move |cancel| async move {
+                let held = owned_gate.lock().await;
+                let _ = entered_tx.send(());
+                cancel.cancelled().await;
+                let _ = cleaning_tx.send(());
+                let _ = release_rx.await;
+                drop(held);
+                let _ = done_tx.send(());
+                Ok(cron::AutomationRunResult {
+                    session_id: "same".into(),
+                    summary: String::new(),
+                })
+            })
+            .await;
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        runtime.shutdown_timeout(Duration::from_secs(2));
+        cleaning_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(gate.try_lock().is_err());
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(gate.try_lock().is_ok());
     }
 }

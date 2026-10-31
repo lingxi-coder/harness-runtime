@@ -44,6 +44,111 @@ pub enum RealtimeAgentInput {
     PlaybackCompleted { item_id: Option<String> },
 }
 
+/// Events from the provider and lifecycle evidence owned by the Agent loop.
+/// A provider event cannot construct either of the local lifecycle variants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RealtimeAgentOutput {
+    Provider(RealtimeEvent),
+    /// A locally identified input and its Agent work have begun.
+    AgentResponseStarted { turn_id: String },
+    /// The input's Agent work, including tool continuations, has completed.
+    AgentTurnCompleted { turn_id: String },
+}
+
+#[derive(Default)]
+struct RealtimeTurnTracker {
+    next_id: u64,
+    current: Option<String>,
+    response_started: bool,
+    response_done: bool,
+    response_had_tool: bool,
+    continuation_requested: bool,
+    provider_id: Option<String>,
+    completed_provider_ids: HashSet<String>,
+    completed_anonymous: bool,
+    cancelled_terminal: bool,
+    interrupted: bool,
+    google_candidate: Option<(bool, bool)>,
+    google_projection_seen: bool,
+}
+
+impl RealtimeTurnTracker {
+    fn begin(&mut self) -> Result<Option<String>, OrchestratorError> {
+        if self.current.is_some() { return Ok(None); }
+        self.next_id = self.next_id.checked_add(1).ok_or_else(|| failure("realtime turn identity exhausted"))?;
+        let id = format!("agent-{}", self.next_id);
+        self.current = Some(id.clone());
+        self.response_started = false;
+        self.response_done = false;
+        self.response_had_tool = false;
+        self.continuation_requested = false;
+        self.provider_id = None;
+        self.cancelled_terminal = false;
+        self.interrupted = false;
+        self.google_candidate = None;
+        self.google_projection_seen = false;
+        Ok(Some(id))
+    }
+
+    fn response_started(&mut self, provider_id: &Option<String>, pending_tools: bool) -> Result<(), OrchestratorError> {
+        if provider_id.as_ref().is_some_and(|id| self.completed_provider_ids.contains(id)) {
+            return Err(failure("realtime provider reused a completed response identity"));
+        }
+        if self.continuation_requested && !pending_tools {
+            if self.response_started && self.response_had_tool && !self.response_done {
+                return Err(failure("realtime continuation started before its prior response completed"));
+            }
+            self.response_had_tool = false;
+            self.continuation_requested = false;
+        }
+        self.response_started = true;
+        self.response_done = false;
+        self.provider_id = provider_id.clone();
+        Ok(())
+    }
+
+    fn tool_called(&mut self) { self.response_had_tool = true; }
+
+    fn continued(&mut self) { self.continuation_requested = true; }
+
+    fn completed(&mut self, provider_id: &Option<String>, interrupted: bool, pending_tools: bool) -> Result<Option<String>, OrchestratorError> {
+        if !self.response_started { return Ok(None); }
+        if let Some(id) = provider_id {
+            if self.completed_provider_ids.contains(id) { return Ok(None); }
+            if self.provider_id.as_ref().is_some_and(|expected| expected != id) { return Ok(None); }
+            self.completed_provider_ids.insert(id.clone());
+        } else {
+            if self.provider_id.is_some() || self.completed_anonymous {
+                return Err(failure("realtime provider completion has ambiguous response identity"));
+            }
+            self.completed_anonymous = true;
+        }
+        self.response_done = true;
+        if interrupted && pending_tools { self.cancelled_terminal = true; }
+        if interrupted && !pending_tools { return Ok(self.finish()); }
+        if pending_tools || self.response_had_tool { return Ok(None); }
+        Ok(self.finish())
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        let id = self.current.take()?;
+        self.response_started = false;
+        self.response_done = false;
+        self.response_had_tool = false;
+        self.continuation_requested = false;
+        self.provider_id = None;
+        self.cancelled_terminal = false;
+        self.interrupted = false;
+        self.google_candidate = None;
+        self.google_projection_seen = false;
+        Some(id)
+    }
+
+    fn cancelled_tools_drained(&mut self) -> Option<String> {
+        if self.cancelled_terminal { self.finish() } else { None }
+    }
+}
+
 /// Bounded transport endpoints for one host-opened native realtime session.
 ///
 /// This contract lives with the Agent orchestration layer so app hosts can
@@ -56,7 +161,7 @@ pub struct RealtimeAgentSessionIo {
     /// Bounded host audio, image, and transcript input queue.
     pub inputs: mpsc::Receiver<RealtimeAgentInput>,
     /// Bounded native playback/event output queue.
-    pub output: mpsc::Sender<RealtimeEvent>,
+    pub output: mpsc::Sender<RealtimeAgentOutput>,
     /// Realtime session limits.
     pub limits: RealtimeAgentLimits,
     /// Whether the selected realtime provider accepts image inputs.
@@ -151,8 +256,18 @@ pub trait MediaConversationAttachment: Send + Sync {
 }
 
 /// Hard session and resource bounds, independent from chat retry budgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealtimeCompletionBoundary {
+    /// OpenAI response IDs and a separate response after each tool batch.
+    ExplicitResponse,
+    /// Gemini 3.8 Live requires the same-frame interactionStatus to be IDLE.
+    Gemini38,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RealtimeAgentLimits {
+    /// Contract selected from the trusted, pinned provider and model route.
+    pub completion_boundary: RealtimeCompletionBoundary,
     /// Absolute session lifetime, including tool and permission waits.
     pub max_duration: Duration,
     /// Idle lifetime; paused while a tool or permission request is pending.
@@ -173,6 +288,7 @@ pub struct RealtimeAgentLimits {
 impl Default for RealtimeAgentLimits {
     fn default() -> Self {
         Self {
+            completion_boundary: RealtimeCompletionBoundary::ExplicitResponse,
             max_duration: Duration::from_secs(30 * 60),
             idle_timeout: Duration::from_secs(2 * 60),
             max_pending_tools: 8,
@@ -980,7 +1096,7 @@ impl ConversationOrchestrator {
         control: RealtimeControl,
         mut events: RealtimeEvents,
         mut inputs: mpsc::Receiver<RealtimeAgentInput>,
-        output: mpsc::Sender<RealtimeEvent>,
+        output: mpsc::Sender<RealtimeAgentOutput>,
         limits: RealtimeAgentLimits,
         image_input_supported: bool,
         cancel: CancellationToken,
@@ -1050,6 +1166,7 @@ impl ConversationOrchestrator {
         let deadline = Instant::now() + limits.max_duration;
         let mut idle = Instant::now() + limits.idle_timeout;
         let mut ledger = TranscriptLedger::default();
+        let mut turn = RealtimeTurnTracker::default();
         let mut tool_tokens: HashMap<String, CancellationToken> = HashMap::new();
         let mut seen_calls = HashSet::new();
         let mut usage_turns = HashSet::new();
@@ -1077,7 +1194,14 @@ impl ConversationOrchestrator {
                 _ = tokio::time::sleep_until(idle), if pending.is_empty()=>return Ok(RealtimeAgentEnd::Idle),
                 completed = pending.next(), if !pending.is_empty()=>{
                     let completed=completed.expect("nonempty tool futures")?;let cancelled = tool_tokens.remove(&completed.call_id).is_some_and(|token| token.is_cancelled());idle=Instant::now()+limits.idle_timeout;
-                    if cancelled { continue; }
+                    if cancelled {
+                        if pending.is_empty() {
+                            if let Some(turn_id) = turn.cancelled_tools_drained() {
+                                output.try_send(RealtimeAgentOutput::AgentTurnCompleted { turn_id }).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                            }
+                        }
+                        continue;
+                    }
                     for image in &completed.images {
                         accept_realtime_image(&image.data, &image.mime_type, image_input_supported, limits, &mut image_input_count, &mut image_input_bytes)?;
                     }
@@ -1087,7 +1211,7 @@ impl ConversationOrchestrator {
                     }
                     if completed.prevent{return Ok(RealtimeAgentEnd::ToolStopped);}
                     // Submit every concurrent result before requesting the next response.
-                    if pending.is_empty(){control.continue_response().map_err(|error|failure(error.to_string()))?;}
+                    if pending.is_empty(){control.continue_response().map_err(|error|failure(error.to_string()))?;turn.continued();}
                 },
                 input = inputs.recv()=>{
                     let Some(input)=input else{return Ok(RealtimeAgentEnd::Closed);};idle=Instant::now()+limits.idle_timeout;
@@ -1099,20 +1223,33 @@ impl ConversationOrchestrator {
                             if let RealtimeInput::Image { data, mime_type } = &input {
                                 accept_realtime_image(data.as_ref(), mime_type, image_input_supported, limits, &mut image_input_count, &mut image_input_bytes)?;
                             }
-                            if matches!(input,RealtimeInput::Interrupt){ledger.interrupt();for token in tool_tokens.values(){CancellationToken::cancel(token);}}
+                            if matches!(input,RealtimeInput::Interrupt){turn.interrupted=true;ledger.interrupt();for token in tool_tokens.values(){CancellationToken::cancel(token);}}
                             if let RealtimeInput::Text(text)=&input{self.append_realtime_text(text.clone(),true).await;}
+                            if matches!(&input, RealtimeInput::CommitAudio | RealtimeInput::Text(_)) {
+                                if let Some(turn_id) = turn.begin()? {
+                                    output.try_send(RealtimeAgentOutput::AgentResponseStarted { turn_id }).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                                }
+                            }
                             control.send(input).map_err(|error|failure(error.to_string()))?;
                         }
                     }
                 },
                 event = events.next()=>{
                     let Some(event)=event else{return Ok(RealtimeAgentEnd::Closed);};idle=Instant::now()+limits.idle_timeout;
-                    if seen_calls.len() + usage_turns.len() + ledger.finalized_input.len() + ledger.finalized_output.len() + ledger.discarded.len() > limits.max_pending_transcripts.saturating_mul(64) { return Err(failure("realtime session history resource bound reached")); }
+                    if seen_calls.len() + usage_turns.len() + turn.completed_provider_ids.len() + ledger.finalized_input.len() + ledger.finalized_output.len() + ledger.discarded.len() > limits.max_pending_transcripts.saturating_mul(64) { return Err(failure("realtime session history resource bound reached")); }
+                    if matches!(&event, RealtimeEvent::TurnStarted { .. } | RealtimeEvent::ToolCall { .. } | RealtimeEvent::AudioDelta { .. } | RealtimeEvent::TextDelta { .. } | RealtimeEvent::Transcript { direction: RealtimeTranscriptDirection::Output, .. }) {
+                        if let Some(turn_id) = turn.begin()? {
+                            output.try_send(RealtimeAgentOutput::AgentResponseStarted { turn_id }).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                        }
+                    }
+                    let mut terminal = None;
                     match &event {
+                        RealtimeEvent::TurnStarted { turn_id } if limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse => turn.response_started(turn_id, !pending.is_empty())?,
                         RealtimeEvent::ToolCall{call_id,name,arguments}=>{
                             if !seen_calls.insert(call_id.clone()){return Err(failure("provider repeated a realtime tool call identity"));}
                             if pending.len()>=limits.max_pending_tools{return Err(failure("realtime tool queue is full"));}
                             if !allowed.contains(name)||self.find_dispatchable_tool(name).is_none(){return Err(failure("provider requested an unavailable realtime Agent tool"));}
+                            turn.tool_called();
                             let id=ToolUseId::new();let assistant=MessageId::new();let message=ConversationMessage::Assistant{id:assistant,content:vec![ContentBlock::ToolUse{id:id.clone(),name:name.clone(),input:Utf16JsonProjection::from_serde_value(arguments).map_err(|error|failure(error.to_string()))?,provider_id:Some(call_id.clone())}],stop_reason:Some("tool_use".into()),per_turn_effort:None,resumable:None};
                             self.session.lock().await.history.push(message.clone());self.persist_message_to_jsonl(&message).await;
                             let token=session_cancel.child_token();tool_tokens.insert(call_id.clone(),token.clone());let orch=self.clone();let call_id=call_id.clone();let name=name.clone();let arguments=arguments.clone();
@@ -1123,7 +1260,7 @@ impl ConversationOrchestrator {
                             }));
                         },
                         RealtimeEvent::ToolCancelled{call_ids}=>{for id in call_ids{if let Some(token)=tool_tokens.get(id){token.cancel();}}},
-                        RealtimeEvent::Interrupted|RealtimeEvent::UserSpeechStarted=>{ ledger.interrupt(); for token in tool_tokens.values() { token.cancel(); } },
+                        RealtimeEvent::Interrupted|RealtimeEvent::UserSpeechStarted=>{ turn.interrupted=true; ledger.interrupt(); for token in tool_tokens.values() { token.cancel(); } },
                         RealtimeEvent::AudioDelta { item_id, .. } => {
                             if !ledger.generated.contains(item_id) && ledger.generated.len() >= limits.max_pending_transcripts { return Err(failure("realtime pending playback queue is full")); }
                             ledger.generated.insert(item_id.clone());
@@ -1142,11 +1279,47 @@ impl ConversationOrchestrator {
                                 RealtimeTranscriptDirection::Output=>{if let Some(text)=ledger.output_final(item_id.clone(),text.clone(),limits)?{self.append_realtime_text(text,false).await;}},
                             }
                         },
+                        RealtimeEvent::TurnCompleted { turn_id, status } => {
+                            let interrupted = turn.interrupted || matches!(status.as_deref(), Some("cancelled" | "interrupted"));
+                            if interrupted { for token in tool_tokens.values() { token.cancel(); } }
+                            match limits.completion_boundary {
+                                RealtimeCompletionBoundary::ExplicitResponse => terminal = turn.completed(turn_id, interrupted, !pending.is_empty())?,
+                                RealtimeCompletionBoundary::Gemini38 => {
+                                    if turn.google_candidate.is_some() { return Err(failure("Gemini completion lacks its matching provider frame")); }
+                                    turn.google_candidate = Some((!pending.is_empty(), interrupted));
+                                    turn.google_projection_seen = false;
+                                }
+                            }
+                        },
+                        RealtimeEvent::ProviderEvent { name, native } if limits.completion_boundary == RealtimeCompletionBoundary::Gemini38 && turn.google_candidate.is_some() => {
+                            // The pinned codec may insert this projection from the
+                            // same frame before it forwards the full serverContent.
+                            if name == "generationComplete" && native == &serde_json::Value::Bool(true) {
+                                if turn.google_projection_seen { return Err(failure("Gemini completion has repeated provider projections")); }
+                                turn.google_projection_seen = true;
+                                output.try_send(RealtimeAgentOutput::Provider(event.clone())).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                                continue;
+                            }
+                            let Some(content) = (name == "serverContent").then(|| native.get("serverContent")).flatten() else { return Err(failure("Gemini completion lacks its matching provider frame")); };
+                            if content.get("turnComplete").and_then(serde_json::Value::as_bool) != Some(true) { return Err(failure("Gemini completion frame is inconsistent")); }
+                            let (was_pending, interrupted) = turn.google_candidate.take().expect("checked candidate");
+                            match content.get("interactionStatus").and_then(serde_json::Value::as_str) {
+                                Some("IN_PROGRESS") => {},
+                                Some("IDLE") => {
+                                    if interrupted && (was_pending || !pending.is_empty()) { turn.cancelled_terminal = true; }
+                                    if pending.is_empty() && (interrupted || (!was_pending && (!turn.response_had_tool || turn.continuation_requested))) { terminal = turn.finish(); }
+                                },
+                                _ => return Err(failure("Gemini completion cannot confirm interactionStatus IDLE")),
+                            }
+                        },
                         RealtimeEvent::ProviderError{message,..}|RealtimeEvent::ConnectionInterrupted{message}=>return Err(failure(format!("native realtime provider failed: {message}"))),
                         RealtimeEvent::Closed{..}=>return Ok(RealtimeAgentEnd::Closed),
                         _=>{},
                     }
-                    output.try_send(event).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                    output.try_send(RealtimeAgentOutput::Provider(event)).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                    if let Some(turn_id) = terminal {
+                        output.try_send(RealtimeAgentOutput::AgentTurnCompleted { turn_id }).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                    }
                 }
             }
         }

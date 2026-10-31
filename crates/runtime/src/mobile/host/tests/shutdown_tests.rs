@@ -5,6 +5,7 @@ use std::time::Duration;
 use lingxi_core::host::bg_session_forker::lifecycle::{
     BackgroundLaunchLifecycle, BackgroundLaunchRecovery,
 };
+use lingxi_core::host::OrchestratorHandle;
 use tokio::sync::Notify;
 
 struct SignalTaskDrop(std::sync::mpsc::Sender<()>);
@@ -258,6 +259,10 @@ fn mobile_drop_waits_for_tracked_turn_after_its_slot_is_cleared() {
 
     let root = tempfile::tempdir().unwrap();
     let handle = build_test_handle(root.path());
+    let home = std::path::PathBuf::from(super::canonical_cwd_string(&handle.lingxi_home));
+    let session_id = handle
+        .runtime()
+        .block_on(handle.inner.orchestrator.current_session_id());
     let (slot_cleared_tx, slot_cleared_rx) = mpsc::channel();
     let (turn_release_tx, turn_release_rx) = tokio::sync::oneshot::channel();
     let (sentinel_started_tx, sentinel_started_rx) = mpsc::channel();
@@ -292,10 +297,19 @@ fn mobile_drop_waits_for_tracked_turn_after_its_slot_is_cleared() {
         sentinel_dropped_rx.recv_timeout(Duration::from_millis(250)),
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
+    assert!(crate::mobile::transcript::session_owner_is_live(
+        home.clone(),
+        session_id
+    ));
     turn_release_tx.send(()).unwrap();
     sentinel_dropped_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("runtime should shut down after the turn future is released");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while crate::mobile::transcript::session_owner_is_live(home.clone(), session_id) {
+        assert!(std::time::Instant::now() < deadline, "session claim did not drain");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

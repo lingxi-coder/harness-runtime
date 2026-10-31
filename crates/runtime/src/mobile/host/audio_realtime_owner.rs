@@ -1,9 +1,9 @@
 //! Native audio uses the connection's existing turn and permission ownership.
 use super::*;
-use llm_runtime::services::sdk::realtime::{RealtimeControl, RealtimeEvent, RealtimeEvents};
+use llm_runtime::services::sdk::realtime::{RealtimeControl, RealtimeEvents};
 use orchestrator::{
     OrchestratorError, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits,
+    RealtimeAgentLimits, RealtimeAgentOutput,
 };
 use tokio::sync::{mpsc, oneshot};
 pub use tool_api::MediaAgentHandoffRequest;
@@ -17,7 +17,7 @@ impl MobileEngineHandle {
         control: RealtimeControl,
         events: RealtimeEvents,
         inputs: mpsc::Receiver<RealtimeAgentInput>,
-        output: mpsc::Sender<RealtimeEvent>,
+        output: mpsc::Sender<RealtimeAgentOutput>,
         limits: RealtimeAgentLimits,
         cancel: CancellationToken,
     ) -> Result<RealtimeAgentEnd, OrchestratorError> {
@@ -49,7 +49,7 @@ impl MobileEngineHandle {
         let questions = self.ask_user_question_broker.clone();
         let task_turn = turn.clone();
         let (mut result_tx, result_rx) = oneshot::channel();
-        let task = self.runtime().spawn(async move {
+        let task = self.runtime().spawn(self.turn_tasks.track_future(async move {
             let audio_cancel = task_turn.cancel.child_token();
             let run = orch.run_realtime_agent(
                 prepared,
@@ -111,7 +111,7 @@ impl MobileEngineHandle {
             message_queue.clear_active_turn().await;
             task_turn.mark_completed();
             let _ = result_tx.send(result);
-        });
+        }));
         turn.set_task_handle(task);
         drop(scheduled_guard);
         drop(transition);

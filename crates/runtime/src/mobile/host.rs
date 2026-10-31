@@ -273,6 +273,137 @@ use crate::mobile::turn_durability::{
     QueueDeliveryState, QueueOperationKind, ResumeDisposition,
 };
 
+/// Own the command registry's back edge for exactly one mobile composition.
+/// The guard is installed during assembly, so cancellation and build errors
+/// retire the same graph as a successfully returned runtime.
+struct MobileSessionRetirement {
+    state: Option<MobileSessionRetirementState>,
+}
+
+struct MobileSessionRetirementState {
+    orchestrator: Arc<ConversationOrchestrator>,
+    registry: Arc<RwLock<command_api::CommandRegistry>>,
+    tasks: Arc<tasks::registry::TaskRegistry>,
+    receipt: Option<Arc<MobileRetirementReceipt>>,
+}
+
+/// A scheduled mount must keep its reader lease until failed assembly cleanup
+/// has also retired the partially constructed child.
+#[derive(Default)]
+struct MobileRetirementReceipt {
+    installed: std::sync::atomic::AtomicBool,
+    complete: std::sync::atomic::AtomicBool,
+    changed: tokio::sync::Notify,
+}
+
+impl MobileRetirementReceipt {
+    async fn wait_if_installed(&self) {
+        if !self.installed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.complete.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl MobileSessionRetirement {
+    fn new(
+        orchestrator: Arc<ConversationOrchestrator>,
+        registry: Arc<RwLock<command_api::CommandRegistry>>,
+        tasks: Arc<tasks::registry::TaskRegistry>,
+        receipt: Option<Arc<MobileRetirementReceipt>>,
+    ) -> Self {
+        if let Some(receipt) = &receipt {
+            receipt.installed.store(true, std::sync::atomic::Ordering::Release);
+        }
+        Self {
+            state: Some(MobileSessionRetirementState {
+                orchestrator,
+                registry,
+                tasks,
+                receipt,
+            }),
+        }
+    }
+
+    async fn retire(mut self) {
+        if let Some(state) = self.state.take() {
+            state.retire().await;
+        }
+    }
+}
+
+impl MobileSessionRetirementState {
+    async fn retire(self) {
+        let orchestrator = &self.orchestrator;
+        orchestrator.close_background_producer_admission();
+        orchestrator.cancel_idle_compaction();
+        wait_for_mobile_background_producers(
+            (),
+            || orchestrator.drain_background_session_launches(),
+            || orchestrator.shutdown_startup_responses_websocket_prewarm(),
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(60),
+        )
+        .await;
+        orchestrator.shutdown_idle_compaction().await;
+        // No handler graph is retired while an admitted turn can use it.
+        orchestrator.wait_for_turn_idle().await;
+        let mut retry = std::time::Duration::from_secs(1);
+        loop {
+            match self.tasks.shutdown_background_tasks().await {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "mobile background task drain is unconfirmed");
+                    tokio::time::sleep(retry).await;
+                    retry = retry.saturating_mul(2).min(std::time::Duration::from_secs(60));
+                }
+            }
+        }
+        for error in orchestrator.close_and_drain_session_switches().await {
+            tracing::warn!(%error, "mobile session switch drain reported an error");
+        }
+        orchestrator.wait_for_turn_idle().await;
+        let handlers = { self.registry.write().await.take_builtin_handlers() };
+        // A handler may release the orchestrator, whose listing provider reads
+        // this registry; never run those destructors under the write lock.
+        drop(handlers);
+        if let Some(receipt) = self.receipt {
+            receipt.complete.store(true, std::sync::atomic::Ordering::Release);
+            receipt.changed.notify_waiters();
+        }
+    }
+}
+
+impl Drop for MobileSessionRetirement {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        state.orchestrator.close_background_producer_admission();
+        state.orchestrator.cancel_idle_compaction();
+        match try_mobile_automation_runtime() {
+            Ok(runtime) => {
+                runtime.spawn(state.retire());
+            }
+            Err(error) => {
+                // No executor can prove the old work has stopped. Keep the
+                // claim and authorities alive instead of admitting a new owner.
+                tracing::error!(%error, "mobile session retirement could not start");
+                std::mem::forget(state);
+            }
+        }
+    }
+}
+
 /// Everything a mobile host needs to drive a conversation, built deterministically
 /// by [`build_mobile`] from a [`MobileConfig`] + an `Arc<dyn Platform>`.
 ///
@@ -326,6 +457,8 @@ pub struct MobileRuntime {
     /// must not maintain a second slash-command table beside the live engine
     /// registry.
     pub slash_registry: Arc<RwLock<command_api::CommandRegistry>>,
+    /// Retires the per-engine command graph only after its owners have drained.
+    retirement: Option<MobileSessionRetirement>,
     workspace_catalog: workspace_commands::MobileWorkspaceCatalog,
     /// D1 (P-1.5 review): the VERY handle `build_mobile` passed to
     /// `.with_skill_listing(...)`, retained so a test can interrogate the
@@ -1752,6 +1885,9 @@ impl Drop for MobileEngineHandle {
         );
         let turn_tasks = self.turn_tasks.clone();
         let producer_orchestrator = orchestrator.clone();
+        // MobileRuntime's fallback handles aborted assembly and Rust-only
+        // owners. For an engine, the watcher and turn tracker must drain first.
+        let retirement = self.inner.retirement.take();
         let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
         mobile_automation_runtime().spawn(async move {
             let (runtime, retained_authorities) = wait_for_mobile_background_producers(
@@ -1774,10 +1910,23 @@ impl Drop for MobileEngineHandle {
                 turn_tasks.wait().await;
             }
             producer_orchestrator.shutdown_idle_compaction().await;
-            if let Err(error) = side_chats.shutdown().await {
-                tracing::warn!(%error, "mobile side chat teardown did not finish");
+            let mut side_chat_retry = std::time::Duration::from_secs(1);
+            loop {
+                match side_chats.shutdown().await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "mobile side chat teardown is unconfirmed");
+                        tokio::time::sleep(side_chat_retry).await;
+                        side_chat_retry = side_chat_retry
+                            .saturating_mul(2)
+                            .min(std::time::Duration::from_secs(60));
+                    }
+                }
             }
             lsp_registry.shutdown_all().await;
+            if let Some(retirement) = retirement {
+                retirement.retire().await;
+            }
             if let Some(runtime) = runtime {
                 runtime.shutdown_background();
             }
