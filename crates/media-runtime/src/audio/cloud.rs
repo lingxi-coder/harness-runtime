@@ -56,6 +56,18 @@ impl HostedCloudRoute {
         sdk::audio::AudioRoute::new(self.profile_name.clone(), self.account_scope.clone())
     }
 
+    /// Bind the operation to one eligible account through its trusted source.
+    pub async fn resolve_account(
+        &self,
+        context: &AudioOperationContext,
+        operation: sdk::audio::AudioOperation,
+        model: Option<&str>,
+    ) -> Result<Self, AudioError> {
+        self.credential_source
+            .resolve_account(self, context, operation, model)
+            .await
+    }
+
     /// Resolve credentials through this operation's pinned host source.
     pub async fn request_options(
         &self,
@@ -73,6 +85,20 @@ pub trait CloudAudioCredentialSource: Send + Sync {
         &self,
         context: &AudioOperationContext,
     ) -> Result<sdk::RequestOptions, AudioError>;
+    /// Resolve one concrete account before provider I/O. Already pinned hosts
+    /// retain their exact route; account pools replace the complete SDK route.
+    async fn resolve_account(
+        &self,
+        route: &HostedCloudRoute,
+        _context: &AudioOperationContext,
+        _operation: sdk::audio::AudioOperation,
+        _model: Option<&str>,
+    ) -> Result<HostedCloudRoute, AudioError> {
+        Ok(route.clone())
+    }
+    /// Settle only the provider operation's result; device capture/playback is
+    /// independent of credential health. This never authorizes replay.
+    async fn provider_outcome(&self, _error: Option<&sdk::audio::AudioError>) {}
 }
 /// Host credential and trusted-session boundary. Local audio requires no host.
 #[async_trait]
@@ -201,21 +227,6 @@ pub(crate) async fn execute(
     operation: AudioOperation,
     started: Instant,
 ) -> Result<AudioOperationSuccess, AudioError> {
-    let mut options = route.request_options(&context).await?;
-    // An authenticator may be host-provided, but the SDK's stable resource
-    // account identity must match the route captured before asynchronous work.
-    if options
-        .account_scope
-        .as_ref()
-        .is_some_and(|scope| scope != &route.account_scope)
-    {
-        return Err(AudioError::new(
-            AudioErrorKind::InvalidRequest,
-            "audio credentials do not match the pinned account",
-        ));
-    }
-    options.account_scope = Some(route.account_scope.clone());
-    options.fallback_credentials.clear();
     let play = matches!(&operation, AudioOperation::Speak { .. });
     let operation = match operation {
         AudioOperation::Listen { language } => {
@@ -245,6 +256,33 @@ pub(crate) async fn execute(
         }
         operation => operation,
     };
+    let account_context = remaining(&context, started)?;
+    let route = route
+        .resolve_account(
+            &account_context,
+            sdk_kind(
+                operation
+                    .kind()
+                    .ok_or_else(|| super::unsupported("cloud operation is unsupported"))?,
+            )?,
+            model.as_deref(),
+        )
+        .await?;
+    let mut options = route.request_options(&context).await?;
+    // An authenticator may be host-provided, but the SDK's stable resource
+    // account identity must match the route captured before asynchronous work.
+    if options
+        .account_scope
+        .as_ref()
+        .is_some_and(|scope| scope != &route.account_scope)
+    {
+        return Err(AudioError::new(
+            AudioErrorKind::InvalidRequest,
+            "audio credentials do not match the pinned account",
+        ));
+    }
+    options.account_scope = Some(route.account_scope.clone());
+    options.fallback_credentials.clear();
     options.total_timeout = remaining(&context, started)?
         .timeout_budget_ms
         .map(Duration::from_millis);
@@ -286,8 +324,17 @@ pub(crate) async fn execute(
                     },
                     &options,
                 )
-                .await
-                .map_err(sdk_error)?;
+                .await;
+            let result = match result {
+                Ok(value) => {
+                    route.credential_source.provider_outcome(None).await;
+                    value
+                }
+                Err(error) => {
+                    route.credential_source.provider_outcome(Some(&error)).await;
+                    return Err(sdk_error(error));
+                }
+            };
             host.record_usage(&context, &result.usage);
             Ok(AudioOperationSuccess::Transcript {
                 transcript: SttTranscript {
@@ -328,15 +375,30 @@ pub(crate) async fn execute(
                     },
                     &options,
                 )
-                .await
-                .map_err(sdk_error)?;
+                .await;
+            let output = match output {
+                Ok(value) => value,
+                Err(error) => {
+                    route.credential_source.provider_outcome(Some(&error)).await;
+                    return Err(sdk_error(error));
+                }
+            };
             let sdk::audio::AudioOutput::Stream(stream) = output else {
                 return Err(super::unsupported(
                     "provider returned URL audio; device playback requires a bounded PCM stream",
                 ));
             };
             let max_bytes = usize::try_from(context.max_payload_bytes).unwrap_or(usize::MAX);
-            let collected = stream.collect(max_bytes).await.map_err(sdk_error)?;
+            let collected = match stream.collect(max_bytes).await {
+                Ok(value) => {
+                    route.credential_source.provider_outcome(None).await;
+                    value
+                }
+                Err(error) => {
+                    route.credential_source.provider_outcome(Some(&error)).await;
+                    return Err(sdk_error(error));
+                }
+            };
             let metadata = collected.metadata;
             if metadata.format != sdk::audio::AudioFormat::Pcm16Le
                 || metadata.channels != Some(1)

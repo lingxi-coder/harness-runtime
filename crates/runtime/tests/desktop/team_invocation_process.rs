@@ -3,6 +3,9 @@
 //! Actual dedicated worker + actual SDK HTTP requests, synthetic loopback only.
 //! Environment fixtures require --test-threads=1 and always restore old values.
 
+#[path = "team_account_fixture.rs"]
+mod team_account_fixture;
+
 use harness_runtime::desktop::team_invocation::TeamInvocationProfile;
 use harness_runtime::desktop::team_invocation::{TeamInvocationIdentity, TeamInvocationLimits};
 use harness_runtime::desktop::team_process::{
@@ -58,7 +61,7 @@ fn request(endpoint: String, id: uuid::Uuid, duration_ms: u64) -> TeamProcessReq
         instructions: PERSONA.into(),
         input: "Please reply to this isolated human request.".into(),
         limits: TeamInvocationLimits::default(),
-        model: TeamProcessModel::anthropic_api_key(MODEL.into(), endpoint, KEY.into()).unwrap(),
+        model: team_account_fixture::model(MODEL.into(), endpoint, KEY.into()).unwrap(),
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + duration_ms).unwrap(),
     }
 }
@@ -256,11 +259,9 @@ fn model_and_backend_deadlines_fail_closed_without_exposing_credentials() {
         "https://example.com?token=x",
         "https://example.com/#token",
     ] {
-        assert!(
-            TeamProcessModel::anthropic_api_key(MODEL.into(), endpoint.into(), KEY.into()).is_err()
-        );
+        assert!(team_account_fixture::model(MODEL.into(), endpoint.into(), KEY.into()).is_err());
     }
-    assert!(TeamProcessModel::anthropic_api_key(
+    assert!(team_account_fixture::model(
         "other/model".into(),
         "https://example.com".into(),
         KEY.into()
@@ -268,9 +269,8 @@ fn model_and_backend_deadlines_fail_closed_without_exposing_credentials() {
     .is_err());
     assert!(TeamProcessDeadline::from_backend_unix_millis(now_ms() - 1).is_err());
     assert!(TeamProcessDeadline::from_backend_unix_millis(now_ms() + 600_000).is_err());
-    let model =
-        TeamProcessModel::anthropic_api_key(MODEL.into(), "https://example.com".into(), KEY.into())
-            .unwrap();
+    let model = team_account_fixture::model(MODEL.into(), "https://example.com".into(), KEY.into())
+        .unwrap();
     assert!(!format!("{model:?}").contains(KEY));
 }
 
@@ -553,8 +553,7 @@ async fn invalid_executable_and_pre_cancel_do_not_consume_launch_but_spawn_failu
 }
 
 fn raw_bootstrap(root: &Path, id: uuid::Uuid, endpoint: &str) -> Value {
-    let model =
-        TeamProcessModel::anthropic_api_key(MODEL.into(), endpoint.into(), KEY.into()).unwrap();
+    let model = team_account_fixture::model(MODEL.into(), endpoint.into(), KEY.into()).unwrap();
     let route = model.route();
     json!({
         "version":1,"storage_root":root,"owner_uid":"fixture-owner","bot_key":"fixture-bot",

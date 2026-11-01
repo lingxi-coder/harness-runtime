@@ -37,7 +37,7 @@ pub(super) struct Bootstrap {
     pub model_profile: lingxi_llm_client::protocol::ProviderProfile,
     pub model_id: String,
     pub endpoint: String,
-    pub api_key: String,
+    pub credentials: super::TeamAccountEnvelope,
 }
 
 impl Bootstrap {
@@ -63,17 +63,15 @@ impl Bootstrap {
     }
 
     pub fn model(&self) -> Result<TeamProcessModel, TeamProcessError> {
-        TeamProcessModel::selected_api_key(
-            super::TeamModelRoute {
-                model_provider: self.model_provider.clone(),
-                model_protocol: self.model_protocol,
-                model_id: self.model_id.clone(),
-                model_endpoint: self.endpoint.clone(),
-                credential_id: super::model::PRIVATE_CREDENTIAL.into(),
-                model_profile: self.model_profile.clone(),
-            },
-            self.api_key.clone(),
-        )
+        let route = super::TeamModelRoute {
+            model_provider: self.model_provider.clone(),
+            model_protocol: self.model_protocol,
+            model_id: self.model_id.clone(),
+            model_endpoint: self.endpoint.clone(),
+            credential_id: super::model::PRIVATE_CREDENTIAL.into(),
+            model_profile: self.model_profile.clone(),
+        };
+        TeamProcessModel::selected_account_pool(route, self.credentials.clone_private()?)
     }
 }
 
@@ -88,33 +86,32 @@ pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, TeamProcessErro
     Ok(frame)
 }
 
-pub(super) fn decode_result(bytes: &[u8]) -> Result<TeamProcessResult, TeamProcessError> {
-    if bytes.len() < 4 {
-        return Err(TeamProcessError::Protocol);
-    }
-    let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
-    if length == 0 || length > MAX_FRAME || bytes.len() != length + 4 {
-        return Err(TeamProcessError::Protocol);
-    }
-    let result: TeamProcessResult =
-        serde_json::from_slice(&bytes[4..]).map_err(|_| TeamProcessError::Protocol)?;
-    validate_result(&result, 1)?;
-    Ok(result)
-}
-
 /// Version two carries only one correlated interaction at a time. These types
 /// are private to anonymous worker pipes, never product IPC or settings.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum WorkerFrame {
-    OwnerPermission { request: TeamOwnerPermission },
-    HumanQuestion { request: TeamHumanQuestion },
-    Result { result: TeamProcessResult },
+    ProviderAccountRefresh {
+        request: super::TeamProviderAccountRefresh,
+    },
+    OwnerPermission {
+        request: TeamOwnerPermission,
+    },
+    HumanQuestion {
+        request: TeamHumanQuestion,
+    },
+    Result {
+        result: TeamProcessResult,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum ParentFrame {
+    ProviderAccountsUpdated {
+        id: String,
+        credentials: super::TeamAccountEnvelope,
+    },
     OwnerPermission {
         id: String,
         allow_once: bool,

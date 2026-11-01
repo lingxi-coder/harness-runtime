@@ -42,7 +42,6 @@ pub use coordinator::TeamRegistry;
 pub use tasks::handlers::in_process_teammate::teammate_message_envelope_with_summary;
 
 mod background_agent;
-mod connect;
 mod cron_command;
 pub mod cron_management;
 mod cron_native;
@@ -92,7 +91,7 @@ use command_api::builtins::{
     register_core_batch_4, register_core_batch_5,
 };
 
-use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
+use lingxi_core::host::{OrchestratorHandle, OutputStream};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 pub use lingxi_llm_client::protocol::computer::NativeComputerProvider;
 pub use orchestrator::native_computer::VerifiedComputerProfile;
@@ -1883,12 +1882,8 @@ pub(super) fn resolve_workflow_session_enabled_from_effective(
 #[must_use]
 async fn desktop_command_registry(
     handle: Arc<dyn OrchestratorHandle>,
-    auth: Arc<dyn AuthHandle>,
     cwd: &std::path::Path,
     lingxi_home: &std::path::Path,
-    connect_writer: Arc<dyn command_api::builtins::ConnectCredentialWriter>,
-    connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver>,
-    connect_chatgpt: Arc<dyn command_api::builtins::ChatGptConnectDriver>,
     gates: CustomizationGates,
     strict_plugin_only_skills: bool,
     // Native `host.extensionsConfig.additionalDirectoriesForClaudeMd()` roots
@@ -1897,7 +1892,7 @@ async fn desktop_command_registry(
     // `permissions.additionalDirectories` widen tool access but are not this
     // host callback and must not create skill roots.
     native_skill_roots: &[std::path::PathBuf],
-    managed_policy_snapshot_cache: settings_watch::ManagedPolicySnapshotCache,
+    _managed_policy_snapshot_cache: settings_watch::ManagedPolicySnapshotCache,
     // SKILLEXEC: the SAME shared command-registry slot the slash dispatcher and
     // `Skill` tool loader observe (filled by `build()` right after this returns).
     // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
@@ -1918,27 +1913,9 @@ async fn desktop_command_registry(
         cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref());
     command_api::builtins::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
-    register_core_batch_2(&mut reg, handle.clone(), auth.clone());
-    // (H-BIN-09) Override the generic `/login` handler with one that enforces the
-    // managed `forceLoginOrgUUID` org pin — the SAME pin `/connect` enforces via
-    // `EngineOAuthConnect`. `register_builtin_handler` overwrites in place, so this
-    // wins over the plain handler `register_core_batch_2` just registered. Hosts
-    // without a managed policy tier (mobile) keep the plain, unrestricted handler.
-    reg.register_builtin_handler(Arc::new(
-        command_api::builtins::LoginHandler::new(auth).with_org_policy(Arc::new(
-            crate::desktop::connect::DesktopLoginOrgPolicy::new(managed_policy_snapshot_cache),
-        )),
-    ));
+    register_core_batch_2(&mut reg, handle.clone());
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle.clone());
-    // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
-    // Copilot device-flow + ChatGPT OAuth seams.
-    command_api::builtins::register::register_core_connect(
-        &mut reg,
-        connect_writer,
-        connect_copilot,
-        connect_chatgpt,
-    );
     // Desktop-only command handlers: currently none — the desktop command names
     // (/commit, /diff, /review, /chrome, /ide, …) are served as command-core
     // unimplemented stubs. Register real desktop handlers on `reg` directly here
@@ -2576,7 +2553,6 @@ pub struct DesktopRuntime {
     /// → `register_core_batch_2` sequence).
     pub dispatcher: RegistrySlashDispatcher,
     /// Auth handle for `/login` and `/logout`.
-    pub auth: Arc<dyn AuthHandle>,
     /// The desktop task registry shared with the tool context (the TUI / a
     /// transport wraps it in a poller to read live background-task state).
     pub task_registry: Arc<tasks::registry::TaskRegistry>,
@@ -2694,10 +2670,7 @@ pub struct DesktopRuntime {
     /// Phase 2a: the concrete routing adapter, surfaced read-only so host/tests
     /// can inspect the wired fallback chains.
     pub provider_adapter: Arc<ProviderApiAdapter>,
-    /// Phase 2a C1: the shared credential manager (keychain-backed). Surfaced so
-    /// the host can thread it onto the TUI App, where the `/connect` screen
-    /// persists a collected key (`CredentialManager::set_provider_key`). Same
-    /// `Arc` the orchestrator already holds — no second store is constructed.
+    /// Credential authority shared by the Host's accounts, plugins and model runtime.
     pub credentials: Arc<secret::CredentialManager>,
     /// Shared HTTP transport for TUI-owned client-side WebSearch test runs.
     pub http: Arc<dyn lingxi_core::host::HttpTransport>,
@@ -2739,11 +2712,9 @@ pub struct DesktopRuntime {
     /// GitHub Copilot in `/connect` runs the real web sign-in (browser open +
     /// device-code poll + token store) instead of an inert key field. Also
     /// registered in the engine `/connect` command group (same Arc).
-    pub connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver>,
     /// (T2b) Unified OAuth sign-in driver for the TUI `/connect` picker. Drives
     /// the browser flow for the first-party OAuth providers (Anthropic Pro/Max,
     /// OpenAI ChatGPT) — replacing the honest-but-inert `Unavailable` screen.
-    pub oauth_connect_driver: Arc<dyn command_api::builtins::OAuthConnectDriver>,
     /// (P1-08 runtime `/add-dir`) The SAME `Arc<SessionCwd>` the file tools gate
     /// on. The CLI `/add-dir` effect calls `add_trusted_dir(...)` on it so a
     /// directory added mid-session is immediately accessible to
@@ -3330,77 +3301,6 @@ pub enum BuildError {
 ///   `cfg.use_noop_permission_gate` is `false`; the CLI passes a sink that is
 ///   never used because it opts into `NoOpPermissionGate`.
 ///
-/// Resolve the Claude.ai-subscriber flag (`isClaudeAISubscriber`, `auth.ts:1564`)
-/// for a session that holds a stored OAuth token.
-///
-/// `isClaudeAISubscriber()` is `isAnthropicAuthEnabled() && shouldUseClaudeAIAuth(scopes)`.
-/// `isAnthropicAuthEnabled()` reduces to "the auth resolver picks the stored
-/// OAuth session" — `resolve` is driven with the FULL
-/// [`llm_runtime::auth::anthropic::resolver::ResolverContext`] (M13), so every
-/// documented ranking applies: managed OAuth forcing outranks env keys, env
-/// `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` and an FD-inherited key outrank
-/// stored OAuth, and stored OAuth outranks the stored/settings/helper/Bedrock
-/// keys. When OAuth is the effective source, `shouldUseClaudeAIAuth(scopes)`
-/// (== presence of the `user:inference` scope, via
-/// `llm_runtime::auth::anthropic::subscription_from_scopes`) decides.
-///
-/// KNOWN RESIDUAL DIVERGENCE (`zb()` @228933355). The oracle suppresses on
-/// TWO arms with TWO DIFFERENT host predicates:
-/// ```js
-/// let a = (n||i) && !KWr() || (r||s) && !YIt();   // n=AUTH_TOKEN, i=API_KEY|apiKeyHelper,
-/// return !(e||a);                                //  r=settings apiKeyHelper, s=FD key
-/// ```
-/// `KWr()` is `YIt() && !CLAUDE_CODE_HOST_AUTH_ENV_VAR && entrypoint !== "claude-desktop-3p"`,
-/// so `KWr() ⊆ YIt()`. Routing everything through the resolver's single
-/// `managed_oauth_only` (the `KWr()` reading) collapses the two arms: in a
-/// context where `YIt()` holds but `KWr()` does NOT — `CLAUDE_CODE_HOST_AUTH_ENV_VAR`
-/// set, or the `claude-desktop-3p` entrypoint — the oracle EXEMPTS an
-/// apiKeyHelper / FD-inherited key (still a subscriber) while this port
-/// suppresses. The env-bearer/API-key arm (the common case, and the one AUTH-1
-/// fixed) is correct. Closing this needs the resolver to carry the `YIt()`
-/// reading alongside `managed_oauth_only`.
-fn oauth_subscriber_flag(
-    source: &llm_runtime::auth::anthropic::resolver::AuthSource,
-    scopes: &[String],
-) -> bool {
-    matches!(
-        source,
-        llm_runtime::auth::anthropic::resolver::AuthSource::OAuthClaudeAi
-    ) && lingxi_llm_client::auth::oauth::anthropic::subscription_from_scopes(scopes)
-}
-
-/// Seed of the shared subscription slot for a session that holds a stored
-/// Claude.ai credential.
-///
-/// The tier persisted inside the credential is readable through
-/// `getSubscriptionType()` (`Aa()` @228959617) and `getRateLimitTier()` (`jW()`,
-/// same region), and BOTH short-circuit to `null` unless
-/// `isAnthropicAuthEnabled()` (`zb()` @228933355) holds — i.e. a leftover stored
-/// blob under an env key / bearer / FD key reports NO tier at all. So the tier
-/// is gated on the RESOLVER's pick alone: `Aa()` does NOT additionally require
-/// the `user:inference` scope that `isClaudeAISubscriber` folds into
-/// [`oauth_subscriber_flag`], so an inference-less OAuth session still reports
-/// its tier while `is_subscriber` is false.
-fn subscription_seed(
-    source: &llm_runtime::auth::anthropic::resolver::AuthSource,
-    scopes: &[String],
-    subscription_type: Option<&String>,
-    rate_limit_tier: Option<&String>,
-) -> lingxi_core::host::subscription::SubscriptionSnapshot {
-    let oauth_effective = matches!(
-        source,
-        llm_runtime::auth::anthropic::resolver::AuthSource::OAuthClaudeAi
-    );
-    lingxi_core::host::subscription::SubscriptionSnapshot {
-        is_subscriber: oauth_subscriber_flag(source, scopes),
-        subscription_type: oauth_effective
-            .then(|| subscription_type.cloned())
-            .flatten(),
-        rate_limit_tier: oauth_effective.then(|| rate_limit_tier.cloned()).flatten(),
-        ..Default::default()
-    }
-}
-
 /// Fold the profile + roles responses into the shared snapshot. Pure —
 /// unit-tested without IO. Tier mapping mirrors
 /// `OAuthProfileResponse::subscription_type()` (TS string union values);
@@ -3793,8 +3693,9 @@ fn load_merged_settings(
     Ok(value)
 }
 
-/// Resolve the startup region with the same file, CLI, managed and env layers
-/// used by the execution stack. Catalog previews must use this too.
+/// Resolve the Host's global provider region, including its managed policy.
+/// Project settings and session flags cannot change the provider directory.
+/// Delegated Team invocations use their admitted, isolated owner snapshot.
 pub fn resolve_provider_region(
     cfg: &DesktopConfig,
     managed: &Utf16JsonProjection,
@@ -3812,11 +3713,11 @@ pub fn resolve_provider_region(
     } else {
         Vec::new()
     };
-    let env = settings_environment_for_config(cfg);
-    let (include_user, include_project) = if cfg.restricted {
-        (false, false)
+    let delegated = cfg.team_invocation.is_some();
+    let env = if delegated {
+        settings_environment_for_config(cfg)
     } else {
-        cfg.setting_source_scope
+        BTreeMap::new()
     };
     let effective = lingxi_core::settings::Settings::load_with_layers_from_user_path(
         lingxi_core::settings::LoadInputs {
@@ -3825,12 +3726,16 @@ pub fn resolve_provider_region(
             defaults: lingxi_core::settings::SettingsJson::default(),
         },
         lingxi_core::settings::FileLayerScope {
-            include_user,
-            include_project,
-            include_local: include_project,
+            include_user: !delegated,
+            include_project: false,
+            include_local: false,
         },
         lingxi_core::settings::SupplementalLayers {
-            cli_layer: cfg.flag_settings.as_ref(),
+            cli_layer: if delegated {
+                cfg.flag_settings.as_ref()
+            } else {
+                None
+            },
             managed_layers: &managed_layers,
         },
         Some(&cfg.lingxi_home.join("settings.json")),
@@ -6678,10 +6583,6 @@ mod legacy_opening_balance_test;
 mod tests;
 
 #[cfg(test)]
-#[path = "tests/environment_oauth_tests.rs"]
-mod environment_oauth_tests;
-
-#[cfg(test)]
 #[path = "tests/connected_fallback_tests.rs"]
 mod connected_fallback_tests;
 
@@ -6752,7 +6653,7 @@ pub use credentials::build_shared_credential_stack_with_policy;
 use credentials::capture_legacy_opening_balance;
 pub use credentials::resolve_llm_stack;
 use credentials::resolve_llm_stack_with_credentials;
-use credentials::CredentialStoreAuthProvider;
+use credentials::AccountClaudeAiAuthProvider;
 pub use credentials::LlmStack;
 pub use credentials::SharedCredentialStack;
 use fusion_services::desktop_fusion_attempts;
@@ -6761,23 +6662,12 @@ use fusion_services::desktop_fusion_layers;
 #[cfg(test)]
 use fusion_services::desktop_fusion_runtime_config;
 use fusion_services::filter_fusion_catalog;
-pub use fusion_services::fusion_credential_restart_required_message;
-use fusion_services::fusion_route_flag;
-pub use fusion_services::publish_fusion_catalog_credential;
-pub use fusion_services::refresh_fusion_catalog_after_credential_delete;
-pub use fusion_services::refresh_fusion_catalog_after_credential_write;
 pub use fusion_services::register_fusion_catalog_refresher;
-pub use fusion_services::spawn_fusion_catalog_refresh;
 use fusion_services::DesktopFusionConfigSource;
 use fusion_services::DesktopFusionExecutor;
 use fusion_services::DesktopFusionPriceBook;
-use fusion_services::FusionCatalogClearingAuth;
 use fusion_services::FusionCatalogModelSource;
 pub use fusion_services::FusionCatalogRefresher;
-use fusion_services::FusionCatalogRefreshingChatGptConnect;
-use fusion_services::FusionCatalogRefreshingCopilotConnect;
-use fusion_services::FusionCatalogRefreshingCredentialWriter;
-use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
 pub use mcp_startup::McpStartupProgress;
 pub use media_handoff::{DesktopMediaAgentHandoffQueue, ScheduledTerminalDeferralGuard};
@@ -6794,7 +6684,6 @@ use permission_config::effective_model_source_for_config;
 use permission_config::expand_trusted_dir;
 use permission_config::lingxi_temp_dir;
 use permission_config::load_boot_permission_tiers_with_policy_snapshot;
-use permission_config::managed_force_login_org_pin;
 pub use permission_config::managed_model_allowlist;
 use permission_config::managed_model_policy_source;
 use permission_config::managed_model_setting_for_config;
@@ -6821,10 +6710,11 @@ use assembly::resolve_workspace_trust;
 #[cfg(test)]
 use async_trait::async_trait;
 #[cfg(test)]
-use fusion_services::publish_fusion_catalog_credential_to;
-#[cfg(test)]
 use orchestrator::{QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK};
 #[cfg(test)]
 use permission_config::fold_managed_otel_env_overrides;
 
 mod side_chat;
+
+#[cfg(test)]
+mod provider_global_region_tests;

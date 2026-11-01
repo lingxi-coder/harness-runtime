@@ -185,7 +185,7 @@ async fn many_dispatches_against_one_registry() {
 async fn concurrent_dispatches_against_one_registry() {
     let d = Arc::new(build_dispatcher());
     let mut handles = vec![];
-    for name in ["agents", "config", "version", "login", "hooks", "init"] {
+    for name in ["agents", "config", "version", "hooks", "init"] {
         let dispatcher = d.clone();
         let raw = format!("/{name}");
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");

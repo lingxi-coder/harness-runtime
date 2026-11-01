@@ -46,7 +46,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     let deadline = TeamProcessDeadline::from_backend_unix_millis(bootstrap.deadline_unix_ms)?;
     let model = bootstrap.model()?;
     let limits = bootstrap.limits()?;
-    if !matches!(bootstrap.version, 1 | 2) {
+    if bootstrap.version != 2 {
         return Err(TeamProcessError::Protocol);
     }
     let mut profile = TeamInvocationProfile::prepare(
@@ -79,22 +79,10 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         )
         .map_err(|_| TeamProcessError::Worker)?;
     }
-    let (interaction, questions) = if bootstrap.version == 2 {
-        let bridge = ChildInteraction::start(cancel.clone())?;
-        let (sender, questions) = tokio::sync::mpsc::channel(4);
-        profile = profile.with_original_human_question_sender(sender);
-        (Some(bridge), Some(questions))
-    } else {
-        let parent_gone = cancel.clone();
-        // Version one preserves the bootstrap/result-only explicit-deny route.
-        std::thread::Builder::new()
-            .name("team-parent-lease".into())
-            .spawn(move || {
-                let _ = std::io::stdin().read(&mut [0u8; 1]);
-                parent_gone.cancel();
-            })?;
-        (None, None)
-    };
+    let bridge = ChildInteraction::start(cancel.clone())?;
+    let (sender, questions) = tokio::sync::mpsc::channel(4);
+    profile = profile.with_original_human_question_sender(sender);
+    let (interaction, questions) = (Some(bridge), Some(questions));
     let mut cfg = DesktopConfig::default();
     cfg.default_model = format!("{}/{}", model.route().model_provider, model.model_id);
     profile.apply_to(&mut cfg)?;
@@ -108,7 +96,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             biased;
             _ = tokio::time::sleep_until(deadline.instant.into()) => Err(TeamProcessError::Deadline),
             _ = cancel.cancelled() => Err(TeamProcessError::Cancelled),
-            result = run(cfg, &profile, bootstrap.input, limits.physical_dispatches.get(), cancel.child_token(), interaction, questions) => result,
+            result = run(cfg, &profile, bootstrap.input, limits.physical_dispatches.get(), cancel.child_token(), interaction, questions,bootstrap.credentials) => result,
         }
     });
     // Runtime tasks (including an in-flight model request) cannot outlive this
@@ -120,11 +108,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         return Err(TeamProcessError::Cancelled);
     }
     result.version = bootstrap.version;
-    let frame = if bootstrap.version == 2 {
-        protocol::encode(&protocol::WorkerFrame::Result { result })?
-    } else {
-        protocol::encode(&result)?
-    };
+    let frame = protocol::encode(&protocol::WorkerFrame::Result { result })?;
     std::io::stdout().write_all(&frame)?;
     std::io::stdout().flush()?;
     Ok(())
@@ -193,6 +177,7 @@ async fn run(
     questions: Option<
         tokio::sync::mpsc::Receiver<tool_api::ask_user_question::AskUserQuestionExchange>,
     >,
+    envelope: super::TeamAccountEnvelope,
 ) -> Result<TeamProcessResult, TeamProcessError> {
     let output = Arc::new(BoundedOutput {
         received_bytes: AtomicUsize::new(0),
@@ -201,9 +186,37 @@ async fn run(
         cancel: cancel.clone(),
     });
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
-    let rt = crate::desktop::build(cfg, output.clone(), Arc::new(PermissionSink(tx)))
+    let rt = {
+        let interaction = interaction
+            .as_ref()
+            .ok_or(TeamProcessError::Protocol)?
+            .clone();
+        let mut shared = crate::desktop::build_shared_credential_stack_for_config(&cfg)
+            .await
+            .map_err(|_| TeamProcessError::Worker)?;
+        envelope.seed(&shared.credentials).await?;
+        shared.provider_accounts = Some(envelope.provider_accounts.clone());
+        shared.provider_account_home = Some(envelope.provider_account_home.clone());
+        shared
+            .credentials
+            .set_account_credential_refresher(Arc::new(super::accounts::WorkerAccountRefresher {
+                credentials: Arc::downgrade(&shared.credentials),
+                bridge: interaction,
+                registry: shared.catalog_registry.clone(),
+                home: envelope.provider_account_home,
+                scope: envelope.provider_accounts.store_scope,
+                profiles: envelope.provider_account_profiles.clone(),
+                locks: Default::default(),
+            }));
+        crate::desktop::build_with_credential_stack(
+            cfg,
+            output.clone(),
+            Arc::new(PermissionSink(tx)),
+            shared,
+        )
         .await
-        .map_err(|_| TeamProcessError::Worker)?;
+        .map_err(|_| TeamProcessError::Worker)?
+    };
     let gate = rt
         .permission_gate
         .as_ref()

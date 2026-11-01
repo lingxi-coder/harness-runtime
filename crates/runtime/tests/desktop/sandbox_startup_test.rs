@@ -86,13 +86,8 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::PlainTextFixture;
     cfg.api_base = "https://api.anthropic.com".to_string();
     cfg.anthropic_client_metadata = None;
-    cfg.api_key = String::new();
-    cfg.api_key_source = llm_runtime::CredentialSource::Configured;
-    cfg.api_key_helper = None;
     // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
     // FD-inherited key.
-    cfg.managed_oauth_only = false;
-    cfg.anthropic_key_fd_present = false;
     cfg.cwd = cwd.clone();
     cfg.lingxi_home = lingxi_home;
     // Deterministic across host machines: a dev keychain with real provider
@@ -123,7 +118,6 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     cfg.permission_mode_preference = None;
     cfg.permission_mode_cli_explicit = false;
     cfg.allow_dangerously_skip_permissions = false;
-    cfg.connect_prompt = None;
     cfg.max_turns = None;
     cfg.plan_mode_instructions = None;
     cfg.max_budget_usd = None;

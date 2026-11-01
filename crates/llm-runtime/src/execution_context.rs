@@ -302,6 +302,8 @@ impl PartialEq for RequestCredentials {
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
+    /// Selected resource identity; token rotation keeps this identity stable.
+    pub selected_account: Option<crate::accounts::AccountResourceScope>,
     /// Optional operation-wide physical API attempt budget. Host-only; never
     /// serialized into provider input. Cloned retry requests share its count.
     pub api_attempts_left: Option<ApiAttemptsLeft>,

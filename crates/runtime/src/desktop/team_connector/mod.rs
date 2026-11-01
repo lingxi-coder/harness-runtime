@@ -94,6 +94,7 @@ pub struct TeamBotSnapshot {
 }
 impl TeamBotSnapshot {
     fn validate(&self) -> Result<(), Error> {
+        self.model.validate().map_err(|_| Error::Configuration)?;
         if self.instructions.trim().is_empty()
             || self.instructions.len() > 65536
             || self.instructions.contains('\0')

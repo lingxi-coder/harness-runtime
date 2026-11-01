@@ -34,6 +34,8 @@ struct Start {
     worker_executable: PathBuf,
     target: TeamBotTarget,
     snapshot: Option<Snapshot>,
+    #[serde(default)]
+    credentials: Option<crate::desktop::team_process::TeamAccountEnvelope>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,29 +46,34 @@ struct Snapshot {
     model_protocol: lingxi_llm_client::protocol::ProtocolFamily,
     model_profile: lingxi_llm_client::protocol::ProviderProfile,
     model_endpoint: String,
-    model_api_key: String,
     max_turns: u32,
     max_input_bytes: u32,
     output_tokens_per_request: u32,
     physical_dispatches: u32,
 }
 impl Snapshot {
-    fn into_snapshot(self) -> Result<TeamBotSnapshot, Error> {
+    fn into_snapshot(
+        self,
+        credentials: Option<crate::desktop::team_process::TeamAccountEnvelope>,
+    ) -> Result<TeamBotSnapshot, Error> {
         let nonzero = |n| NonZeroU32::new(n).ok_or(Error::Configuration);
         Ok(TeamBotSnapshot {
             instructions: self.instructions,
-            model: TeamProcessModel::selected_api_key(
-                crate::desktop::team_process::TeamModelRoute {
+            model: {
+                let route = crate::desktop::team_process::TeamModelRoute {
                     model_provider: self.model_provider,
                     model_protocol: self.model_protocol,
                     model_id: self.model_id,
                     model_endpoint: self.model_endpoint,
                     credential_id: crate::desktop::team_process::model::PRIVATE_CREDENTIAL.into(),
                     model_profile: self.model_profile,
-                },
-                self.model_api_key,
-            )
-            .map_err(|_| Error::Configuration)?,
+                };
+                TeamProcessModel::selected_account_pool(
+                    route,
+                    credentials.ok_or(Error::Configuration)?,
+                )
+                .map_err(|_| Error::Configuration)?
+            },
             limits: TeamInvocationLimits {
                 max_turns: nonzero(self.max_turns)?,
                 max_input_bytes: nonzero(self.max_input_bytes)?,
@@ -80,6 +87,11 @@ impl Snapshot {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Response {
+    ProviderAccountsUpdated {
+        version: u32,
+        id: String,
+        credentials: crate::desktop::team_process::TeamAccountEnvelope,
+    },
     Credential {
         version: u32,
         id: String,
@@ -96,6 +108,9 @@ enum Response {
 impl Response {
     fn correlation(&self) -> (u32, &str, &'static str) {
         match self {
+            Self::ProviderAccountsUpdated { version, id, .. } => {
+                (*version, id, "provider_account_refresh")
+            }
             Self::Credential { version, id, .. } => (*version, id, "credential"),
             Self::Permission { version, id, .. } => (*version, id, "permission"),
         }
@@ -218,6 +233,13 @@ impl TeamConnectorAccount for Bridge {
 }
 #[async_trait]
 impl TeamOwnerApproval for Bridge {
+    async fn refresh_provider_account(
+        &self,
+        request: crate::desktop::team_process::TeamProviderAccountRefresh,
+        cancel: CancellationToken,
+    ) -> Result<crate::desktop::team_process::TeamAccountEnvelope, Error> {
+        match self.request("provider_account_refresh",json!({"account_id":request.account_id,"identity_generation":request.identity_generation,"credential_revision":request.credential_revision}),&cancel).await? {Response::ProviderAccountsUpdated{credentials,..}=>{Ok(credentials)},_=>Err(Error::Protocol)}
+    }
     async fn approve(
         &self,
         request: TeamOwnerPermission,
@@ -380,7 +402,10 @@ fn entry() -> Result<(), Error> {
                 .observe_saved(boot.target, bridge.cancel.child_token())
                 .await
         } else {
-            let snapshot = boot.snapshot.map(Snapshot::into_snapshot).transpose()?;
+            let snapshot = boot
+                .snapshot
+                .map(|snapshot| snapshot.into_snapshot(boot.credentials))
+                .transpose()?;
             connector
                 .run_optional(boot.target, snapshot, bridge.cancel.child_token())
                 .await

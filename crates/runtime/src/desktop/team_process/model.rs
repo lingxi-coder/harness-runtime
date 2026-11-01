@@ -54,11 +54,22 @@ fn credential_id(value: &str) -> bool {
 }
 
 fn static_protocol(profile: &wire::ProviderProfile) -> bool {
-    (matches!(
-        profile.auth,
-        wire::AuthStrategy::ApiKey | wire::AuthStrategy::Bearer
-    ) || (profile.auth == wire::AuthStrategy::AzureToken
-        && profile.protocol == wire::ProtocolFamily::AzureOpenAi))
+    static_or_account_protocol(profile, false)
+}
+fn static_or_account_protocol(profile: &wire::ProviderProfile, accounts: bool) -> bool {
+    ((accounts
+        && matches!(
+            profile.auth,
+            wire::AuthStrategy::ChatGptPlan
+                | wire::AuthStrategy::ChatGptOAuth
+                | wire::AuthStrategy::OAuthBearer
+        ))
+        || matches!(
+            profile.auth,
+            wire::AuthStrategy::ApiKey | wire::AuthStrategy::Bearer
+        )
+        || (profile.auth == wire::AuthStrategy::AzureToken
+            && profile.protocol == wire::ProtocolFamily::AzureOpenAi))
         && (profile.protocol != wire::ProtocolFamily::AzureOpenAi
             || profile.azure.as_ref().is_some_and(|azure| {
                 azure.api_version.as_ref().is_some_and(|version| {
@@ -80,10 +91,41 @@ fn static_protocol(profile: &wire::ProviderProfile) -> bool {
         && profile.chat_enabled
 }
 pub(super) fn sanitized(
-    mut profile: wire::ProviderProfile,
+    profile: wire::ProviderProfile,
     model: &str,
 ) -> Result<wire::ProviderProfile, TeamProcessError> {
-    if !static_protocol(&profile)
+    sanitized_inner(profile, model, false)
+}
+fn sanitized_inner(
+    mut profile: wire::ProviderProfile,
+    model: &str,
+    accounts: bool,
+) -> Result<wire::ProviderProfile, TeamProcessError> {
+    if accounts
+        && matches!(
+            profile.auth,
+            wire::AuthStrategy::ChatGptPlan
+                | wire::AuthStrategy::ChatGptOAuth
+                | wire::AuthStrategy::OAuthBearer
+        )
+    {
+        let url = url::Url::parse(&profile.base_url).map_err(|_| TeamProcessError::Model)?;
+        let allowed = match profile.auth {
+            wire::AuthStrategy::ChatGptPlan | wire::AuthStrategy::ChatGptOAuth => {
+                url.host_str() == Some("chatgpt.com")
+                    && profile.protocol == wire::ProtocolFamily::OpenAiResponses
+            }
+            wire::AuthStrategy::OAuthBearer => {
+                url.host_str() == Some("api.anthropic.com")
+                    && profile.protocol == wire::ProtocolFamily::AnthropicMessages
+            }
+            _ => false,
+        };
+        if !allowed || url.scheme() != "https" || url.port().is_some_and(|port| port != 443) {
+            return Err(TeamProcessError::Model);
+        }
+    }
+    if !static_or_account_protocol(&profile, accounts)
         || !endpoint(&profile.base_url)
         || !name(&profile.profile_name)
         || !name(model)
@@ -158,12 +200,36 @@ pub(super) fn sanitized(
     Ok(frozen)
 }
 impl TeamModelRoute {
+    /// Freeze one explicitly selected configured binding for account-backed Team use.
+    pub fn for_account(
+        profile: wire::ProviderProfile,
+        model: &str,
+    ) -> Result<Self, TeamProcessError> {
+        let profile = sanitized_inner(profile, model, true)?;
+        let route = Self {
+            model_provider: profile.profile_name.clone(),
+            model_protocol: profile.protocol,
+            model_id: model.into(),
+            model_endpoint: profile.base_url.clone(),
+            credential_id: PRIVATE_CREDENTIAL.into(),
+            model_profile: profile,
+        };
+        route.validate_accounts()?;
+        Ok(route)
+    }
     pub fn validate(&self) -> Result<(), TeamProcessError> {
+        self.validate_inner(false)
+    }
+    pub(crate) fn validate_accounts(&self) -> Result<(), TeamProcessError> {
+        self.validate_inner(true)
+    }
+    fn validate_inner(&self, accounts: bool) -> Result<(), TeamProcessError> {
         if !credential_id(&self.credential_id)
             || self.model_provider != self.model_profile.profile_name
             || self.model_protocol != self.model_profile.protocol
             || self.model_endpoint != self.model_profile.base_url
-            || self.model_profile != sanitized(self.model_profile.clone(), &self.model_id)?
+            || self.model_profile
+                != sanitized_inner(self.model_profile.clone(), &self.model_id, accounts)?
         {
             return Err(TeamProcessError::Model);
         }
@@ -217,6 +283,9 @@ pub(crate) fn routes(
     listings
         .into_iter()
         .filter_map(|listing| {
+            if listing.profile_name.starts_with("account.") {
+                return None;
+            }
             if identities.get(&(listing.profile_name.clone(), listing.request_model.clone()))
                 != Some(&1)
             {
@@ -234,7 +303,8 @@ pub(crate) fn routes(
                 .iter()
                 .find(|p| p.profile_name == resolved.profile_name)?
                 .clone();
-            let profile = sanitized(profile, &resolved.request_model).ok()?;
+            let managed = client.has_account_pool();
+            let profile = sanitized_inner(profile, &resolved.request_model, managed).ok()?;
             let route = TeamModelRoute {
                 model_provider: profile.profile_name.clone(),
                 model_protocol: profile.protocol,
@@ -243,39 +313,48 @@ pub(crate) fn routes(
                 credential_id: id.clone(),
                 model_profile: profile,
             };
-            route.validate().ok()?;
+            if managed {
+                route.validate_accounts().ok()?;
+            } else {
+                route.validate().ok()?;
+            }
             Some(((listing.profile_name, listing.request_model), route))
         })
         .collect()
 }
 
 impl TeamProcessModel {
-    /// Consume one exact native route and one explicitly selected static key.
-    pub fn selected_api_key(
+    pub fn selected_account_pool(
         route: TeamModelRoute,
-        api_key: String,
+        credentials: super::TeamAccountEnvelope,
     ) -> Result<Self, TeamProcessError> {
-        route.validate()?;
-        if api_key.trim().is_empty()
-            || api_key.len() > 8192
-            || api_key.chars().any(char::is_control)
-        {
+        route.validate_accounts()?;
+        credentials.validate()?;
+        if !credentials.supports(&route) {
             return Err(TeamProcessError::Model);
         }
         Ok(Self {
             model_id: route.model_id.clone(),
             endpoint: route.model_endpoint.clone(),
-            api_key,
             route,
+            credentials: std::sync::Arc::new(credentials),
         })
+    }
+    pub(crate) fn validate(&self) -> Result<(), TeamProcessError> {
+        self.route.validate_accounts()?;
+        self.credentials.validate()?;
+        if !self.credentials.supports(&self.route) {
+            return Err(TeamProcessError::Model);
+        }
+        Ok(())
+    }
+    pub(crate) fn account_credentials(&self) -> &super::TeamAccountEnvelope {
+        &self.credentials
     }
     /// The immutable nonsecret descriptor, suitable for trusted pipe fixtures.
     #[must_use]
     pub fn route(&self) -> &TeamModelRoute {
         &self.route
-    }
-    pub(crate) fn api_key(&self) -> &str {
-        &self.api_key
     }
 }
 
@@ -357,7 +436,7 @@ mod tests {
                     .unwrap(),
                 serde_json::from_value(json!(protocol)).unwrap()
             );
-            assert!(TeamProcessModel::selected_api_key(selected, "synthetic-key".into()).is_ok());
+            selected.validate_accounts().unwrap();
         }
     }
     #[test]

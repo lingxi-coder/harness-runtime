@@ -1,6 +1,9 @@
 #![cfg(target_os = "macos")]
 
 //! Real connector HTTP and real all-tools-denied worker, synthetic loopback.
+#[path = "team_account_fixture.rs"]
+mod team_account_fixture;
+
 use async_trait::async_trait;
 use harness_runtime::desktop::team_connector::{
     Error, TeamBotSnapshot, TeamBotState, TeamBotTarget, TeamConnector, TeamConnectorAccount,
@@ -70,7 +73,7 @@ fn snapshot(model: &str) -> TeamBotSnapshot {
     TeamBotSnapshot {
         instructions: "Frozen connector test persona.".into(),
         limits: TeamInvocationLimits::default(),
-        model: TeamProcessModel::anthropic_api_key(MODEL.into(), model.into(), KEY.into()).unwrap(),
+        model: team_account_fixture::model(MODEL.into(), model.into(), KEY.into()).unwrap(),
     }
 }
 

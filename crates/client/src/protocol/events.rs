@@ -21,11 +21,11 @@ use crate::protocol::audio::{
 };
 use crate::protocol::controls::ConversationControlsDto;
 use crate::protocol::listings::{
-    AgentDto, AuthStateDto, ConfigurationDomainDto, ConfigurationEffectDto,
-    ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentMessageRowDto,
-    SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
-    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    AgentDto, ConfigurationDomainDto, ConfigurationEffectDto, ConfigurationOperationStatusDto,
+    CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto, MemoryEntryDto, ModelDetailsDto,
+    ProviderModelCatalogEntryDto, SessionAgentMessageRowDto, SessionAgentSummaryDto,
+    SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
+    TaskStatusDto,
 };
 use crate::protocol::media::{
     MediaConnectionRequestDto, MediaControlRequestDto, MediaDeviceRequestEnvelopeDto,
@@ -38,52 +38,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use std::collections::HashMap;
 
-/// Host-private Codex session. Never forward this payload to a renderer.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[serde(deny_unknown_fields)]
-pub struct OpenAiOAuthSessionDto {
-    /// OAuth bearer token.
-    pub access_token: String,
-    /// Rotating refresh token.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<String>,
-    /// Expiration in Unix seconds.
-    pub expires_at: u64,
-    /// `ChatGPT` account identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
-    /// Government account routing flag.
-    #[serde(default)]
-    pub fedramp: bool,
-    /// Signed-in email, for display only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
-}
-
-impl std::fmt::Debug for OpenAiOAuthSessionDto {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpenAiOAuthSessionDto")
-            .finish_non_exhaustive()
-    }
-}
-
-// Outbound events the engine streams to a client.
-//
-// Each live-turn variant notes its engine source (from the area maps).
-// `ThinkingDelta` and `UsageUpdate` are now LIVE-FED by the §0.7 "light up
-// thinking/usage" follow-up: `event_router` emits them via
-// `OutputStream::emit_thinking` / `emit_usage`. The remaining reserved
-// variants (e.g. `CoordinatorStatus`) are defined so the contract freezes now
-// but still have no live engine source in the foundation (decisions §0.7 /
-// §0.9) and round-trip only.
-// Boxing the app payload would change the generated Swift/Kotlin protocol API.
-#[allow(clippy::large_enum_variant)]
-// UniFFI 0.32.2 stores an enum's variant/field documentation in the same
-// fixed-size metadata buffer as its wire schema. Keep this high-cardinality
-// envelope undocumented at the derive site; the payload DTOs and protocol
-// snapshots remain the source of API documentation without risking a build
-// failure when an additive event is introduced.
 macro_rules! define_client_event {
     ($($variants:tt)*) => {
         #[doc = "Outbound events the engine streams to a client."]
@@ -286,20 +240,24 @@ define_client_event! {
         mode: String,
     },
 
-    ProviderCredentialStatus {
+    ProviderAccountsUpdated {
         operation_id: u64,
-        configured_provider_ids: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        unavailable_provider_ids: Vec<String>,
-        storage_encrypted: bool,
-        // Display-safe credential previews keyed by provider id. Values are
-        // fixed masks plus at most the final four characters; plaintext
-        // credentials never cross the client protocol.
-        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        credential_previews: HashMap<String, String>,
+        snapshot_json: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
+    ProviderAccountRouting {
+        event_json: String,
+    },
+
+    // Private request to the credential authority; contains no token material.
+    ProviderAccountRefreshRequested {
+        account_id: String,
+        identity_generation: u64,
+        credential_revision: u64,
+    },
+
 
     McpServers {
         servers: Vec<McpServerDto>,
@@ -401,9 +359,6 @@ define_client_event! {
         merged_keys: Option<Vec<String>>,
     },
 
-    AuthState {
-        state: AuthStateDto,
-    },
 
     DoctorReport {
         report: DoctorReportDto,
@@ -544,19 +499,6 @@ define_client_event! {
         mode: SessionModeDto,
     },
 
-    ProviderConnectionTested {
-        operation_id: u64,
-        provider_id: String,
-        connected: bool,
-        reachable: bool,
-        authenticated: bool,
-        model_available: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        http_status: Option<u16>,
-        latency_ms: u64,
-        message: String,
-        used_stored_credential: bool,
-    },
 
     ConfigurationOperation {
         domain: ConfigurationDomainDto,
@@ -636,14 +578,9 @@ define_client_event! {
         since_ms: u64,
     },
 
-    // Additive SDK task lifecycle receipt. Keep new variants after the
-    // frozen prefix so existing UniFFI variant ordinals remain unchanged.
+    // SDK task lifecycle receipt.
     TaskLifecycle {
         event_json: String,
-    },
-    #[serde(rename = "openai_oauth_updated")]
-    OpenAiOAuthUpdated {
-        session: OpenAiOAuthSessionDto,
     },
     CronRunBound {
         run_id: String,
@@ -1147,20 +1084,26 @@ impl From<ClientEventWire> for ClientEvent {
                 model_source,
             },
             ClientEventWire::PermissionModeChanged { mode } => Self::PermissionModeChanged { mode },
-            ClientEventWire::ProviderCredentialStatus {
+            ClientEventWire::ProviderAccountRouting { event_json } => {
+                Self::ProviderAccountRouting { event_json }
+            }
+            ClientEventWire::ProviderAccountsUpdated {
                 operation_id,
-                configured_provider_ids,
-                unavailable_provider_ids,
-                storage_encrypted,
-                credential_previews,
+                snapshot_json,
                 error,
-            } => Self::ProviderCredentialStatus {
+            } => Self::ProviderAccountsUpdated {
                 operation_id,
-                configured_provider_ids,
-                unavailable_provider_ids,
-                storage_encrypted,
-                credential_previews,
+                snapshot_json,
                 error,
+            },
+            ClientEventWire::ProviderAccountRefreshRequested {
+                account_id,
+                identity_generation,
+                credential_revision,
+            } => Self::ProviderAccountRefreshRequested {
+                account_id,
+                identity_generation,
+                credential_revision,
             },
             ClientEventWire::McpServers { servers } => Self::McpServers { servers },
             ClientEventWire::Hooks { hooks } => Self::Hooks { hooks },
@@ -1196,7 +1139,6 @@ impl From<ClientEventWire> for ClientEvent {
                 layers_json,
                 merged_keys,
             },
-            ClientEventWire::AuthState { state } => Self::AuthState { state },
             ClientEventWire::DoctorReport { report } => Self::DoctorReport { report },
             ClientEventWire::TaskRow { task } => Self::TaskRow { task },
             ClientEventWire::TaskOutputChunk {
@@ -1313,29 +1255,6 @@ impl From<ClientEventWire> for ClientEvent {
                 session_id,
                 mode,
             },
-            ClientEventWire::ProviderConnectionTested {
-                operation_id,
-                provider_id,
-                connected,
-                reachable,
-                authenticated,
-                model_available,
-                http_status,
-                latency_ms,
-                message,
-                used_stored_credential,
-            } => Self::ProviderConnectionTested {
-                operation_id,
-                provider_id,
-                connected,
-                reachable,
-                authenticated,
-                model_available,
-                http_status,
-                latency_ms,
-                message,
-                used_stored_credential,
-            },
             ClientEventWire::ConfigurationOperation {
                 domain,
                 operation_id,
@@ -1390,7 +1309,6 @@ impl From<ClientEventWire> for ClientEvent {
                 since_ms,
             },
             ClientEventWire::TaskLifecycle { event_json } => Self::TaskLifecycle { event_json },
-            ClientEventWire::OpenAiOAuthUpdated { session } => Self::OpenAiOAuthUpdated { session },
             ClientEventWire::CronRunBound { run_id, error } => Self::CronRunBound { run_id, error },
             ClientEventWire::ScheduledRunFinished {
                 run_id,
@@ -2034,5 +1952,27 @@ mod session_agent_identity_contract_tests {
             r#"{"type":"terminal_api_error","terminal_reason":"api_error","stop_reason":"refusal"}"#
         );
         assert_eq!(serde_json::from_str::<ClientEvent>(&json).unwrap(), refusal);
+    }
+}
+
+#[cfg(test)]
+mod provider_account_routing_contract_tests {
+    use super::ClientEvent;
+    #[test]
+    fn routing_event_preserves_structured_failures_without_credentials() {
+        let event_json=serde_json::json!({"logicalCallId":"logical-1","model":"m","attempt":2,"status":"all_unavailable","selectedAccountId":null,"profile":null,"identityGeneration":null,"configRevision":null,"failedAccounts":[{"accountId":"a","reasonCode":"rate_limited","scopeKind":"model","scopeId":"m","retryable":true,"recoveryAtMs":30000}],"earliestRecoveryMs":30000}).to_string();
+        let event = ClientEvent::ProviderAccountRouting {
+            event_json: event_json.clone(),
+        };
+        let source = serde_json::to_string(&event).unwrap();
+        assert!(!source.contains("access_token"));
+        assert!(!source.contains("api_key"));
+        let decoded: ClientEvent = serde_json::from_str(&source).unwrap();
+        match decoded {
+            ClientEvent::ProviderAccountRouting { event_json: actual } => {
+                assert_eq!(actual, event_json)
+            }
+            _ => panic!("routing event lost"),
+        }
     }
 }

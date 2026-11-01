@@ -13,6 +13,9 @@ use crate::{
 /// return a validated immutable execution snapshot for new operations.
 pub trait ModelRuntimeSource: std::fmt::Debug + Send + Sync {
     fn current(&self, template: &ModelRuntime) -> Arc<ModelRuntime>;
+    fn rebind_accounts(&self, captured: &ModelRuntime) -> Arc<ModelRuntime> {
+        Arc::new(captured.clone())
+    }
 }
 
 /// Host execution composition: immutable routing, request-local credentials,
@@ -20,6 +23,7 @@ pub trait ModelRuntimeSource: std::fmt::Debug + Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ModelRuntime {
     source: Option<Arc<dyn ModelRuntimeSource>>,
+    account_pool: Option<Arc<crate::accounts::AccountPool>>,
     cache: Arc<crate::execution::ClientCache>,
     registry: Arc<ModelRegistry>,
     routes: Arc<BTreeMap<String, RouteEntry>>,
@@ -28,6 +32,7 @@ pub struct ModelRuntime {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RouteEntry {
+    identity_generation: Option<u64>,
     profile: lingxi_llm_client::protocol::ProviderProfile,
     protocol: ProtocolFamily,
     provider_id: ProviderId,
@@ -40,8 +45,9 @@ pub(crate) struct RouteEntry {
 }
 
 fn credential_scope(entry: &RouteEntry, profile_name: &str) -> CredentialScope {
-    let scope = CredentialScope::new(entry.provider_id.clone(), profile_name)
+    let mut scope = CredentialScope::new(entry.provider_id.clone(), profile_name)
         .with_route(entry.base_url.clone(), entry.protocol);
+    scope.expected_identity_generation = entry.identity_generation;
     match &entry.credential {
         CredentialConfig::HostManaged { id } | CredentialConfig::Static { id } => {
             scope.with_credential_id(id.clone())
@@ -434,6 +440,75 @@ impl ModelRuntime {
             .filter(|credential| matches!(credential, Credential::AnthropicOAuth { .. })))
     }
 
+    pub(crate) async fn refresh_rejected_account_credential(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        rejected: &Credential,
+    ) -> Result<
+        Option<crate::auth::provider::VersionedCredential>,
+        crate::auth::provider::VersionedCredentialError,
+    > {
+        if !matches!(
+            rejected,
+            Credential::AnthropicOAuth { .. }
+                | Credential::ChatGptOAuth { .. }
+                | Credential::BearerToken(_)
+        ) {
+            return Ok(None);
+        }
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let scope = credential_scope(entry, &route.profile_name);
+        if entry.identity_generation.is_none() {
+            return Ok(None);
+        }
+        match &self.credentials {
+            Some(provider) => provider.refresh_versioned(&scope, rejected).await,
+            None => Ok(None),
+        }
+    }
+    pub(crate) async fn current_account_credential_revision(
+        &self,
+        model: &str,
+        profile: &str,
+    ) -> Result<Option<u64>, LlmError> {
+        let route = self.registry.resolve_in(model, Some(profile))?;
+        self.current_service_credential_revision(&route.profile_name)
+            .await
+    }
+    pub(crate) async fn current_service_credential_revision(
+        &self,
+        profile: &str,
+    ) -> Result<Option<u64>, LlmError> {
+        let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
+        match &self.credentials {
+            Some(provider) => {
+                provider
+                    .current_credential_revision(&credential_scope(entry, profile))
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+    pub(crate) async fn rejected_account_credential_is_current(
+        &self,
+        profile: &str,
+        rejected: &Credential,
+    ) -> Result<bool, LlmError> {
+        let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
+        match &self.credentials {
+            Some(provider) => provider
+                .rejected_credential_is_current(&credential_scope(entry, profile), rejected)
+                .await
+                .map(|current| current.unwrap_or(true)),
+            None => Ok(true),
+        }
+    }
+
     /// Resolve current Fast admission without authentication or transport.
     pub(crate) fn fast_model_allowed(
         &self,
@@ -630,6 +705,7 @@ impl ModelRuntime {
             routes.insert(
                 provider.profile_name.clone(),
                 RouteEntry {
+                    identity_generation: None,
                     profile: crate::upstream::profile(&provider)?,
                     protocol: provider.protocol,
                     provider_id: provider.provider_id,
@@ -645,6 +721,7 @@ impl ModelRuntime {
 
         Ok(Self {
             source: None,
+            account_pool: None,
             cache: Arc::new(Default::default()),
             registry: Arc::new(registry),
             routes: Arc::new(routes),
@@ -661,6 +738,21 @@ impl ModelRuntime {
     pub fn current(&self) -> Arc<Self> {
         crate::catalog_task::client(self)
     }
+    /// Resolve a composed catalog source without recursively entering the
+    /// per-turn cache mutex. Intended for ModelRuntimeSource implementations.
+    pub fn current_without_task_scope(&self) -> Arc<Self> {
+        self.unscoped_current()
+    }
+    pub(crate) async fn account_call_snapshot(&self) -> Result<Arc<Self>, LlmError> {
+        let captured = self.current();
+        if let Some(pool) = self.account_pool.as_ref() {
+            pool.refresh_from_store().await?;
+        }
+        Ok(self
+            .source
+            .as_ref()
+            .map_or(captured.clone(), |source| source.rebind_accounts(&captured)))
+    }
     pub(crate) fn unscoped_current(&self) -> Arc<Self> {
         self.source
             .as_ref()
@@ -676,6 +768,8 @@ impl ModelRuntime {
         let mut current = self.clone();
         current.source = None;
         current.credentials = template.credentials.clone();
+        current.account_pool = template.account_pool.clone();
+        current.capture_account_identities();
         current.cache = template.cache.clone();
         Arc::new(current)
     }
@@ -700,8 +794,454 @@ impl ModelRuntime {
     pub fn reconfigured(&self, config: ClientConfig) -> Result<Self, LlmError> {
         let mut current = Self::from_config(config)?;
         current.credentials = self.credentials.clone();
+        current.account_pool = self.account_pool.clone();
+        current.capture_account_identities();
         current.cache = self.cache.clone();
         Ok(current)
+    }
+
+    /// Share one host account health domain across main, auxiliary and child calls.
+    pub fn with_account_pool(mut self, pool: Arc<crate::accounts::AccountPool>) -> Self {
+        self.account_pool = Some(pool);
+        self.capture_account_identities();
+        self
+    }
+
+    fn capture_account_identities(&mut self) {
+        if let Some(pool) = self.account_pool.as_ref() {
+            let snapshot = pool.snapshot();
+            for (name, entry) in Arc::make_mut(&mut self.routes).iter_mut() {
+                entry.identity_generation = snapshot
+                    .accounts
+                    .iter()
+                    .find(|account| *name == format!("account.{}", account.account_id))
+                    .map(|account| account.identity_generation);
+            }
+        }
+    }
+
+    pub fn has_account_pool(&self) -> bool {
+        self.account_pool.is_some()
+    }
+    pub(crate) fn derives_account_bearer(&self, profile: &str) -> bool {
+        self.routes
+            .get(profile)
+            .is_some_and(|entry| entry.auth == AuthStrategy::CopilotBearer)
+    }
+    /// Project account-specific model readiness without loading credentials,
+    /// claiming recovery probes, or treating discovery as authorization.
+    /// `config` contains the visible bindings and their exact account profiles.
+    pub fn project_account_model_availability(
+        config: &ClientConfig,
+        snapshot: &lingxi_core::host::provider_accounts::AccountSnapshot,
+        now_ms: u64,
+    ) -> Result<Vec<lingxi_core::host::provider_accounts::AccountModelAvailability>, LlmError> {
+        use lingxi_core::host::provider_accounts::{
+            AccountHealthScopeKind, AccountHealthStatus, AccountModelAvailability,
+            AccountModelEntitlementStatus,
+        };
+        let pool = Arc::new(crate::accounts::AccountPool::from_directory(
+            Arc::new(std::sync::RwLock::new(snapshot.clone())),
+            Arc::new(crate::accounts::MemoryAccountPoolStore::default()),
+        ));
+        let runtime = Self::from_config(config.clone())?.with_account_pool(pool);
+        let mut result = Vec::new();
+        for profile in config.providers.iter().filter(|profile| {
+            !profile.connection.hidden && !profile.profile_name.starts_with("account.")
+        }) {
+            let provider_id = snapshot
+                .accounts
+                .iter()
+                .find(|account| account.execution_binding_id == profile.profile_name)
+                .map(|account| account.provider_id.clone())
+                .unwrap_or_else(|| {
+                    profile
+                        .connection
+                        .group
+                        .clone()
+                        .unwrap_or_else(|| profile.profile_name.clone())
+                });
+            let mut seen = std::collections::BTreeSet::new();
+            for model in &profile.models {
+                if !seen.insert(model.request_model.clone()) {
+                    continue;
+                }
+                let mut row = AccountModelAvailability {
+                    provider_id: provider_id.clone(),
+                    execution_binding_id: profile.profile_name.clone(),
+                    model_id: model.request_model.clone(),
+                    eligible_account_ids: vec![],
+                    confirmed_account_ids: vec![],
+                    unverified_account_ids: vec![],
+                    forbidden_account_ids: vec![],
+                };
+                if !runtime.model_enabled(&model.request_model, Some(&profile.profile_name)) {
+                    result.push(row);
+                    continue;
+                }
+                let coordinator = match runtime
+                    .account_coordinator(&model.request_model, Some(&profile.profile_name))
+                {
+                    Ok(Some(coordinator)) => coordinator,
+                    Ok(None) | Err(LlmError::AllAccountsUnavailable { .. }) => {
+                        result.push(row);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                for candidate in coordinator.candidate_profiles() {
+                    let Some(account) = snapshot
+                        .accounts
+                        .iter()
+                        .find(|account| candidate == format!("account.{}", account.account_id))
+                    else {
+                        continue;
+                    };
+                    if !account.enabled {
+                        continue;
+                    }
+                    let target = runtime
+                        .registry
+                        .resolve_in(&model.request_model, Some(&candidate))?;
+                    let entitlement = snapshot.model_entitlements.iter().find(|entry| {
+                        entry.account_id == account.account_id
+                            && entry.identity_generation == account.identity_generation
+                            && entry.model_id == target.request_model
+                    });
+                    let forbidden = entitlement.is_some_and(|entry| {
+                        entry.status == AccountModelEntitlementStatus::Forbidden
+                            && entry.retry_at_ms.is_none_or(|retry| retry > now_ms)
+                    });
+                    if forbidden {
+                        row.forbidden_account_ids.push(account.account_id.clone());
+                        continue;
+                    }
+                    let endpoint = runtime.routes.get(&candidate).map(|entry| {
+                        lingxi_llm_client::files::provider_file_endpoint_fingerprint(
+                            &entry.base_url,
+                        )
+                    });
+                    let scoped_unavailable = snapshot.scoped_health.iter().any(|health| {
+                        health.account_id == account.account_id
+                            && health.identity_generation == account.identity_generation
+                            && match &health.scope_kind {
+                                AccountHealthScopeKind::Model => {
+                                    health.scope_id == target.request_model
+                                }
+                                AccountHealthScopeKind::Endpoint => {
+                                    endpoint.as_deref() == Some(health.scope_id.as_str())
+                                }
+                            }
+                            && health
+                                .unavailable_until_ms
+                                .is_none_or(|until| until > now_ms)
+                    });
+                    if scoped_unavailable {
+                        continue;
+                    }
+                    let healthy = snapshot
+                        .health
+                        .iter()
+                        .filter(|health| {
+                            health.account_id == account.account_id
+                                && health.identity_generation == account.identity_generation
+                        })
+                        .all(|health| match health.status {
+                            AccountHealthStatus::Ready => true,
+                            AccountHealthStatus::CoolingDown
+                            | AccountHealthStatus::QuotaExhausted
+                            | AccountHealthStatus::StorageUnavailable => health
+                                .cooldown_until_ms
+                                .is_some_and(|until| until <= now_ms),
+                            AccountHealthStatus::NeedsAuth | AccountHealthStatus::Disabled => false,
+                        });
+                    if !healthy {
+                        continue;
+                    }
+                    row.eligible_account_ids.push(account.account_id.clone());
+                    if entitlement.is_some_and(|entry| {
+                        entry.status == AccountModelEntitlementStatus::Confirmed
+                    }) {
+                        row.confirmed_account_ids.push(account.account_id.clone());
+                    } else {
+                        row.unverified_account_ids.push(account.account_id.clone());
+                    }
+                }
+                result.push(row);
+            }
+        }
+        Ok(result)
+    }
+    pub(crate) fn account_supports_request(
+        &self,
+        request: &LlmRequest,
+        hop: &crate::ConnectionHop,
+    ) -> bool {
+        self.registry
+            .resolve_in(&hop.request_model, Some(&hop.profile_name))
+            .is_ok_and(|route| {
+                let mut capabilities = route.capabilities;
+                // Thinking is an existing optional degradation; hard capabilities
+                // (streaming, tools, structured output, media) must be supported.
+                capabilities.reasoning = true;
+                crate::validate_capabilities(request, capabilities).is_ok()
+            })
+    }
+    fn logical_account_provider(
+        &self,
+        snapshot: &lingxi_core::host::provider_accounts::AccountSnapshot,
+        binding: &str,
+    ) -> Option<String> {
+        if let Some(account) = snapshot
+            .accounts
+            .iter()
+            .find(|account| account.execution_binding_id == binding)
+        {
+            return Some(account.provider_id.clone());
+        }
+        let config = self.registry.configuration();
+        let group = config
+            .providers
+            .iter()
+            .find(|profile| profile.profile_name == binding)?
+            .connection
+            .group
+            .as_deref()?;
+        snapshot
+            .accounts
+            .iter()
+            .find(|account| {
+                config.providers.iter().any(|profile| {
+                    profile.profile_name == account.execution_binding_id
+                        && profile.connection.group.as_deref() == Some(group)
+                })
+            })
+            .map(|account| account.provider_id.clone())
+    }
+    pub(crate) fn service_account_coordinator(
+        &self,
+        profile: &str,
+        operation_model: &str,
+    ) -> Result<Option<crate::accounts::AttemptCoordinator>, LlmError> {
+        let Some(pool) = self.account_pool.as_ref() else {
+            return Ok(None);
+        };
+        let original = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
+        let snapshot = pool.snapshot();
+        let selected = pool.account_for_profile(profile);
+        let binding = selected
+            .as_ref()
+            .map_or(profile, |account| account.execution_binding_id.as_str());
+        let provider = selected
+            .as_ref()
+            .map(|account| account.provider_id.clone())
+            .or_else(|| self.logical_account_provider(&snapshot, binding));
+        let Some(provider) = provider else {
+            return Err(LlmError::AllAccountsUnavailable {
+                accounts: vec![],
+                earliest_recovery_ms: None,
+            });
+        };
+        let allow_metered = snapshot
+            .provider_policies
+            .get(&provider)
+            .is_some_and(|policy| policy.allow_subscription_to_metered);
+        let mut candidates = Vec::new();
+        for account in snapshot
+            .accounts
+            .iter()
+            .filter(|account| account.provider_id == provider)
+        {
+            let name = format!("account.{}", account.account_id);
+            let Some(entry) = self.routes.get(&name) else {
+                continue;
+            };
+            if !matches!(
+                entry.auth,
+                AuthStrategy::ApiKey
+                    | AuthStrategy::Bearer
+                    | AuthStrategy::OAuthBearer
+                    | AuthStrategy::GcpToken
+            ) {
+                continue;
+            }
+            let compatible = entry.profile.pricing.billing_mode
+                == original.profile.pricing.billing_mode
+                || (allow_metered
+                    && original.profile.pricing.billing_mode
+                        == lingxi_llm_client::protocol::BillingMode::Subscription
+                    && entry.profile.pricing.billing_mode
+                        == lingxi_llm_client::protocol::BillingMode::PerToken);
+            if compatible {
+                candidates.push(crate::ConnectionHop {
+                    profile_name: name,
+                    request_model: operation_model.into(),
+                });
+            }
+        }
+        if candidates.is_empty() {
+            return Err(LlmError::AllAccountsUnavailable {
+                accounts: snapshot
+                    .accounts
+                    .iter()
+                    .filter(|account| account.provider_id == provider)
+                    .map(|account| crate::accounts::AccountUnavailable {
+                        account_id: account.account_id.clone(),
+                        reason: "service_auth_or_billing_ineligible".into(),
+                        scope: crate::accounts::FailureScope::Model(operation_model.into()),
+                        retryable: false,
+                        recovery_at_ms: None,
+                    })
+                    .collect(),
+                earliest_recovery_ms: None,
+            });
+        }
+        let endpoints = self
+            .routes
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    lingxi_llm_client::files::provider_file_endpoint_fingerprint(&entry.base_url),
+                )
+            })
+            .collect();
+        let mut coordinator =
+            pool.coordinator_from_candidates(operation_model, candidates, &endpoints);
+        if let Some(coordinator) = coordinator.as_mut() {
+            if profile.starts_with("account.") {
+                coordinator.prefer_profile(profile);
+            }
+        }
+        coordinator
+            .map(Some)
+            .ok_or(LlmError::AllAccountsUnavailable {
+                accounts: vec![],
+                earliest_recovery_ms: None,
+            })
+    }
+    pub fn account_coordinator(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<crate::accounts::AttemptCoordinator>, LlmError> {
+        let Some(pool) = self.account_pool.as_ref() else {
+            return Ok(None);
+        };
+        let mut route = self.registry.resolve_in(model, profile)?;
+        let snapshot = pool.snapshot();
+        let selected = pool.account_for_profile(&route.profile_name);
+        let binding = selected
+            .as_ref()
+            .map_or(route.profile_name.as_str(), |account| {
+                account.execution_binding_id.as_str()
+            });
+        let logical_provider = selected
+            .as_ref()
+            .map(|account| account.provider_id.clone())
+            .or_else(|| self.logical_account_provider(&snapshot, binding));
+        let Some(logical_provider) = logical_provider else {
+            return Err(LlmError::AllAccountsUnavailable {
+                accounts: vec![],
+                earliest_recovery_ms: None,
+            });
+        };
+        let billing = self.routes.get(&route.profile_name).map(|entry| {
+            entry
+                .profile
+                .models
+                .iter()
+                .find(|model| model.request_model == route.request_model)
+                .and_then(|model| model.billing_mode)
+                .unwrap_or(entry.profile.pricing.billing_mode)
+        });
+        let allow_metered = snapshot
+            .provider_policies
+            .get(&logical_provider)
+            .is_some_and(|policy| policy.allow_subscription_to_metered);
+        let mut hops = Vec::new();
+        for account in snapshot
+            .accounts
+            .iter()
+            .filter(|account| account.provider_id == logical_provider)
+        {
+            let account_profile = format!("account.{}", account.account_id);
+            let target_billing = self.routes.get(&account_profile).map(|entry| {
+                entry
+                    .profile
+                    .models
+                    .iter()
+                    .find(|model| model.request_model == route.request_model)
+                    .and_then(|model| model.billing_mode)
+                    .unwrap_or(entry.profile.pricing.billing_mode)
+            });
+            let compatible = billing == target_billing
+                || (allow_metered
+                    && billing == Some(lingxi_llm_client::protocol::BillingMode::Subscription)
+                    && target_billing == Some(lingxi_llm_client::protocol::BillingMode::PerToken));
+            if !compatible {
+                continue;
+            }
+            // Equivalence comes from the binding canonical model id. Display
+            // labels and brand strings never establish model compatibility.
+            if let Ok(target) = self
+                .registry
+                .resolve_in(&route.request_model, Some(&account_profile))
+            {
+                if self.registry.model_disabled(&target) {
+                    continue;
+                }
+                hops.push(crate::ConnectionHop {
+                    profile_name: account_profile,
+                    request_model: target.request_model,
+                });
+            }
+        }
+        if hops.is_empty() {
+            return Err(LlmError::AllAccountsUnavailable {
+                accounts: snapshot
+                    .accounts
+                    .iter()
+                    .filter(|account| account.provider_id == logical_provider)
+                    .map(|account| crate::accounts::AccountUnavailable {
+                        account_id: account.account_id.clone(),
+                        reason: if account.enabled {
+                            "model_or_billing_ineligible".into()
+                        } else {
+                            "disabled".into()
+                        },
+                        scope: crate::accounts::FailureScope::Model(route.request_model.clone()),
+                        retryable: false,
+                        recovery_at_ms: None,
+                    })
+                    .collect(),
+                earliest_recovery_ms: None,
+            });
+        }
+        route.connection_chain = hops;
+        let endpoints = self
+            .routes
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    lingxi_llm_client::files::provider_file_endpoint_fingerprint(&entry.base_url),
+                )
+            })
+            .collect();
+        let mut coordinator = pool.coordinator(&route, &endpoints);
+        if let (Some(coordinator), Some(profile)) = (
+            coordinator.as_mut(),
+            profile.filter(|profile| profile.starts_with("account.")),
+        ) {
+            coordinator.prefer_profile(profile);
+        }
+        coordinator
+            .map(Some)
+            .ok_or(LlmError::AllAccountsUnavailable {
+                accounts: vec![],
+                earliest_recovery_ms: None,
+            })
     }
 
     /// Attach a host-managed credential store consulted for
@@ -751,6 +1291,18 @@ impl ModelRuntime {
         &self,
         profile: &str,
     ) -> Result<lingxi_llm_client::protocol::Secret<String>, LlmError> {
+        self.service_credential_versioned(profile)
+            .await
+            .map(|(credential, _)| credential)
+            .map_err(|error| error.error)
+    }
+    pub(crate) async fn service_credential_versioned(
+        &self,
+        profile: &str,
+    ) -> Result<
+        (lingxi_llm_client::protocol::Secret<String>, Option<u64>),
+        crate::auth::provider::VersionedCredentialError,
+    > {
         let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
         if !matches!(
             entry.auth,
@@ -762,14 +1314,16 @@ impl ModelRuntime {
             return Err(LlmError::UnsupportedCapability {
                 capability:
                     "this profile's authentication cannot be reduced to a service key/token".into(),
-            });
-        }
-        let credential = self.load_credential(entry, profile).await?.ok_or_else(|| {
-            LlmError::Authentication {
-                message: "the selected service profile has no configured credential".into(),
             }
-        })?;
-        let token = match credential {
+            .into());
+        }
+        let credential = self
+            .load_versioned_credential(entry, profile)
+            .await?
+            .ok_or_else(|| LlmError::Authentication {
+                message: "the selected service profile has no configured credential".into(),
+            })?;
+        let token = match credential.credential {
             Credential::ApiKey(token)
             | Credential::BearerToken(token)
             | Credential::AnthropicOAuth {
@@ -780,15 +1334,42 @@ impl ModelRuntime {
                 return Err(LlmError::UnsupportedCapability {
                     capability: "the selected credential requires account headers or signing"
                         .into(),
-                });
+                }
+                .into());
             }
         };
         if token.is_empty() {
-            return Err(LlmError::Authentication {
-                message: "the selected service credential is empty".into(),
+            return Err(crate::auth::provider::VersionedCredentialError {
+                error: LlmError::Authentication {
+                    message: "the selected service credential is empty".into(),
+                },
+                credential_revision: credential.credential_revision,
             });
         }
-        Ok(lingxi_llm_client::protocol::Secret::new(token))
+        Ok((
+            lingxi_llm_client::protocol::Secret::new(token),
+            credential.credential_revision,
+        ))
+    }
+    pub(crate) async fn service_credential_source_exact(
+        &self,
+        profile: &str,
+    ) -> Result<crate::CredentialSource, LlmError> {
+        let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
+        if entry.auth == AuthStrategy::None {
+            return Ok(crate::CredentialSource::None);
+        }
+        let scope = credential_scope(entry, profile);
+        match &entry.credential {
+            CredentialConfig::None => Ok(crate::CredentialSource::None),
+            CredentialConfig::Env { var } => EnvCredentialProvider::new(var).source(&scope).await,
+            CredentialConfig::Static { .. } | CredentialConfig::HostManaged { .. } => {
+                match self.credentials.as_ref() {
+                    Some(provider) => provider.source(&scope).await,
+                    None => Ok(crate::CredentialSource::None),
+                }
+            }
+        }
     }
     /// Export exact independent-service profiles with their original authentication.
     /// This does not dispatch requests or read host credentials.
@@ -1066,8 +1647,9 @@ impl ModelRuntime {
                 host_failure.clone(),
             )
             .with_request_credentials(
-                (resolved_route.provider_id == ProviderId::AnthropicFirstParty
-                    && entry.protocol == ProtocolFamily::AnthropicMessages)
+                (request.execution.selected_account.is_some()
+                    || (resolved_route.provider_id == ProviderId::AnthropicFirstParty
+                        && entry.protocol == ProtocolFamily::AnthropicMessages))
                     .then_some(request.execution.request_credentials.as_ref())
                     .flatten(),
             ),
@@ -1196,7 +1778,34 @@ impl ModelRuntime {
                 || request.execution.expected_computer_binding.is_some()
                 || request.execution.computer_submission.is_some();
             if credential.is_some() || account_required {
-                let account_scope = crate::computer::credential_account_scope(credential.as_ref())?;
+                let account_scope = if self.account_pool.is_some() {
+                    let selected =
+                        request.execution.selected_account.as_ref().ok_or_else(|| {
+                            LlmError::InvalidRequest {
+                            message:
+                                "native provider resources require an explicitly selected account"
+                                    .into(),
+                        }
+                        })?;
+                    if resolved_route.profile_name != format!("account.{}", selected.account_id)
+                        || entry.identity_generation != Some(selected.identity_generation)
+                        || self
+                            .account_pool
+                            .as_ref()
+                            .and_then(|pool| pool.account_for_profile(&resolved_route.profile_name))
+                            .is_none_or(|account| {
+                                account.credential_ref.store_scope != selected.store_scope
+                                    || account.identity_generation != selected.identity_generation
+                            })
+                    {
+                        return Err(LlmError::InvalidRequest {
+                            message: "native provider resource account identity is stale".into(),
+                        });
+                    }
+                    serde_json::to_string(selected).expect("account resource scope")
+                } else {
+                    crate::computer::credential_account_scope(credential.as_ref())?
+                };
                 if request
                     .input
                     .continuation
@@ -2211,11 +2820,32 @@ impl ModelRuntime {
         entry: &RouteEntry,
         profile_name: &str,
     ) -> Result<Option<Credential>, LlmError> {
+        self.load_versioned_credential(entry, profile_name)
+            .await
+            .map(|credential| credential.map(|value| value.credential))
+            .map_err(|error| error.error)
+    }
+    async fn load_versioned_credential(
+        &self,
+        entry: &RouteEntry,
+        profile_name: &str,
+    ) -> Result<
+        Option<crate::auth::provider::VersionedCredential>,
+        crate::auth::provider::VersionedCredentialError,
+    > {
+        if entry.identity_generation.is_none() && self.account_pool.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "host provider credentials require an explicitly selected account".into(),
+            }
+            .into());
+        }
         let scope = credential_scope(entry, profile_name);
         let credential = match &entry.credential {
             CredentialConfig::None => return Ok(None),
             CredentialConfig::Env { var } => {
-                EnvCredentialProvider::new(var.clone()).load(&scope).await?
+                EnvCredentialProvider::new(var.clone())
+                    .load_versioned(&scope)
+                    .await?
             }
             CredentialConfig::Static { .. } | CredentialConfig::HostManaged { .. } => {
                 self.credentials
@@ -2223,11 +2853,35 @@ impl ModelRuntime {
                     .ok_or(LlmError::Authentication {
                         message: String::new(),
                     })?
-                    .load(&scope)
+                    .load_versioned(&scope)
                     .await?
             }
         };
         Ok(Some(credential))
+    }
+
+    async fn load_snapshot_credential(
+        &self,
+        entry: &RouteEntry,
+        snapshot: &crate::execution::RequestCredentialSnapshot,
+    ) -> Result<Option<Credential>, LlmError> {
+        let value = match self
+            .load_versioned_credential(entry, &snapshot.profile)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                *snapshot
+                    .rejected_credential_revision
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = error.credential_revision;
+                return Err(error.error);
+            }
+        };
+        let _ = snapshot
+            .credential_revision
+            .set(value.as_ref().and_then(|value| value.credential_revision));
+        Ok(value.map(|value| value.credential))
     }
 
     pub(crate) async fn capture_request_credential(
@@ -2243,7 +2897,7 @@ impl ModelRuntime {
         }
         snapshot
             .credential
-            .get_or_try_init(|| self.load_credential(entry, &snapshot.profile))
+            .get_or_try_init(|| self.load_snapshot_credential(entry, snapshot))
             .await
             .cloned()
     }
@@ -2771,7 +3425,7 @@ impl ModelRuntime {
         let credential = if let Some(snapshot) = snapshot {
             snapshot
                 .credential
-                .get_or_try_init(|| self.load_credential(entry, profile))
+                .get_or_try_init(|| self.load_snapshot_credential(entry, snapshot))
                 .await?
         } else {
             live = self.load_credential(entry, profile).await?;
@@ -3114,6 +3768,95 @@ mod shared_client_regression {
                 .string_at("/tools/0/name")
                 .as_deref(),
             Some("Read")
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_native_resource_scope_survives_token_rotation_and_fences_identity_replacement()
+    {
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountMetadata, CredentialRef,
+        };
+        let config: ClientConfig = serde_json::from_value(serde_json::json!({"providers":[{
+            "provider_id":"open_ai", "profile_name":"account.a", "base_url":"https://api.openai.com/v1", "protocol":"open_ai_responses", "auth":"bearer", "credential":{"type":"host_managed","id":"acct.a"},
+            "models":[{"display_model":"gpt-test","request_model":"gpt-test","billing_model":"gpt-test","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        }]})).unwrap();
+        let account = AccountMetadata {
+            account_id: "a".into(),
+            provider_id: "openai".into(),
+            display_name: "A".into(),
+            auth_kind: AccountAuthKind::ApiKey,
+            execution_binding_id: "openai".into(),
+            credential_ref: CredentialRef {
+                store_scope: "domain".into(),
+                secret_ref: "acct.a".into(),
+            },
+            enabled: true,
+            user_priority: 0,
+            config_revision: 1,
+            identity_generation: 1,
+        };
+        let pool = Arc::new(crate::accounts::AccountPool::new(
+            vec![account],
+            Arc::new(crate::accounts::MemoryAccountPoolStore::default()),
+        ));
+        let base = ModelRuntime::from_config(config)
+            .unwrap()
+            .with_account_pool(pool.clone());
+        let mut request = LlmRequest::new("gpt-test")
+            .with_profile("account.a")
+            .with_user_text("test");
+        request.input.max_tokens = Some(4096);
+        request.execution.computer_request = true;
+        request.execution.selected_account = Some(crate::accounts::AccountResourceScope {
+            store_scope: "domain".into(),
+            account_id: "a".into(),
+            identity_generation: 1,
+        });
+        let mut bindings = Vec::new();
+        for token in ["token-before-refresh", "token-after-refresh"] {
+            let runtime = base.clone().with_credential_provider(Arc::new(
+                crate::StaticCredentialProvider::new(crate::Credential::BearerToken(token.into())),
+            ));
+            bindings.push(
+                runtime
+                    .prepare(&request)
+                    .await
+                    .unwrap()
+                    .computer_binding
+                    .unwrap(),
+            );
+        }
+        assert_eq!(bindings[0], bindings[1]);
+        let mut snapshot = pool.snapshot();
+        snapshot.config_revision += 1;
+        snapshot.accounts[0].config_revision += 1;
+        snapshot.accounts[0].identity_generation += 1;
+        pool.refresh(snapshot).unwrap();
+        let replaced = base
+            .with_account_pool(pool)
+            .with_credential_provider(Arc::new(crate::StaticCredentialProvider::new(
+                crate::Credential::BearerToken("token-after-refresh".into()),
+            )));
+        assert!(matches!(
+            replaced.prepare(&request).await,
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        request
+            .execution
+            .selected_account
+            .as_mut()
+            .unwrap()
+            .identity_generation = 2;
+        let replacement = replaced
+            .prepare(&request)
+            .await
+            .unwrap()
+            .computer_binding
+            .unwrap();
+        assert_ne!(
+            bindings[1].account, replacement.account,
+            "same token bytes cannot join different account generations"
         );
     }
 

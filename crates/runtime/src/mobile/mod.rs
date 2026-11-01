@@ -32,7 +32,7 @@ use command_api::builtins::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
-use lingxi_core::host::{AuthHandle, OrchestratorHandle};
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_ui::ask_user_question::AskUserQuestionResolver;
@@ -98,8 +98,7 @@ pub use host::{
     spawn_mobile_lifecycle_task, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
     FiredCronJobDto, MediaAgentHandoffRequest, MediaConversationAttachment, MediaSessionContext,
     MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
-    MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime, MobileSessionDiscoveryScope,
-    ProviderCatalogEntryDto, ProviderConnectionTestDto, RealtimeAgentSessionIo,
+    MobileRuntime, MobileSessionDiscoveryScope, ProviderCatalogEntryDto, RealtimeAgentSessionIo,
 };
 #[cfg(feature = "mobile")]
 pub use session::jsonl::SessionMode as MobileSessionMode;
@@ -480,10 +479,7 @@ mod android_ui_registration_tests {
 /// Assemble the mobile slash-command registry: the core handlers plus the
 /// mobile-only handlers (`/mobile` `/voice` `/share` `/camera`).
 #[must_use]
-pub fn mobile_command_registry(
-    handle: Arc<dyn OrchestratorHandle>,
-    auth: Arc<dyn AuthHandle>,
-) -> CommandRegistry {
+pub fn mobile_command_registry(handle: Arc<dyn OrchestratorHandle>) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     reg.register_builtin_handler(Arc::new(
@@ -493,7 +489,7 @@ pub fn mobile_command_registry(
         ),
     ));
     register_core_batch_1(&mut reg, handle.clone());
-    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_2(&mut reg, handle.clone());
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle);
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,

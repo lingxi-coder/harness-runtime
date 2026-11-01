@@ -69,7 +69,7 @@ use client::protocol::events::{
     TurnRecoveryStateDto,
 };
 use client::protocol::listings::{
-    AgentDto, AuthStateDto, CheckStatusDto, ConfigurationDomainDto, ConfigurationEffectDto,
+    AgentDto, CheckStatusDto, ConfigurationDomainDto, ConfigurationEffectDto,
     ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto,
@@ -166,6 +166,9 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        ("event/provider_accounts_updated.json", ClientEvent::ProviderAccountsUpdated {operation_id: 7, snapshot_json: "{}".into(), error: None}),
+        ("event/provider_account_routing.json", ClientEvent::ProviderAccountRouting {event_json: "{}".into()}),
+        ("event/provider_account_refresh_requested.json", ClientEvent::ProviderAccountRefreshRequested {account_id: "account-a".into(), identity_generation: 2, credential_revision: 3}),
         ("event/prompt_suggestion.json", ClientEvent::PromptSuggestion { suggestion: "Continue reviewing the implementation".into(), uuid: "suggestion-1".into(), session_id: "session-1".into() }),
         ("event/prompt_suggestion_state.json", ClientEvent::PromptSuggestionState { enabled: true, notice: None }),
         ("event/fusion_catalog.json", ClientEvent::FusionCatalog { catalog_json: r#"{"scopes":[],"effective_globals":{},"default_strategy":null,"diagnostics":[]}"#.into() }),
@@ -767,48 +770,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::FastModeChanged { enabled: true },
         ),
         (
-            "event/provider_credential_status.json",
-            ClientEvent::ProviderCredentialStatus {
-                operation_id: 17,
-                configured_provider_ids: vec!["deepseek".to_string()],
-                unavailable_provider_ids: Vec::new(),
-                storage_encrypted: true,
-                credential_previews: HashMap::from([(
-                    "deepseek".to_string(),
-                    "••••cdef".to_string(),
-                )]),
-                error: None,
-            },
-        ),
-        (
-            "event/openai_oauth_updated.json",
-            ClientEvent::OpenAiOAuthUpdated {
-                session: client::protocol::events::OpenAiOAuthSessionDto {
-                    access_token: "access-fixture".into(),
-                    refresh_token: Some("refresh-fixture".into()),
-                    expires_at: 2_000_000_000,
-                    account_id: Some("account-fixture".into()),
-                    fedramp: false,
-                    email: Some("user@example.com".into()),
-                },
-            },
-        ),
-        (
-            "event/provider_connection_tested.json",
-            ClientEvent::ProviderConnectionTested {
-                operation_id: 20,
-                provider_id: "deepseek".to_string(),
-                connected: true,
-                reachable: true,
-                authenticated: true,
-                model_available: true,
-                http_status: Some(200),
-                latency_ms: 86,
-                message: "连接成功 · 86 ms".to_string(),
-                used_stored_credential: true,
-            },
-        ),
-        (
             "event/configuration_operation.json",
             ClientEvent::ConfigurationOperation {
                 domain: ConfigurationDomainDto::Plugin,
@@ -975,15 +936,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 locked: None,
                 layers_json: None,
                 merged_keys: None,
-            },
-        ),
-        (
-            "event/auth_state.json",
-            ClientEvent::AuthState {
-                state: AuthStateDto::SignedIn {
-                    email: "dev@example.com".to_string(),
-                    org_id: "org_abc123".to_string(),
-                },
             },
         ),
         (
@@ -1388,6 +1340,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/provider_accounts.json", ClientCommand::ProviderAccounts {operation_id: 7, action: "list".into(), request_json: "{}".into(), credential: None}),
         ("command/update_prompt_suggestion_context.json", ClientCommand::UpdatePromptSuggestionContext { session_id: "session-1".into(), focus: "focused".into(), input_empty: true, pending_permission: false, elicitation_active: false }),
         ("command/prompt_suggestion_feedback.json", ClientCommand::PromptSuggestionFeedback { session_id: "session-1".into(), uuid: "suggestion-1".into(), action: "accepted".into() }),
         ("command/record_prompt_suggestion_submission.json", ClientCommand::RecordPromptSuggestionSubmission { text: "Continue reviewing the implementation".into() }),
@@ -1503,39 +1456,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
-            "command/list_provider_credentials.json",
-            ClientCommand::ListProviderCredentials {
-                operation_id: 17,
-                provider_ids: vec!["deepseek".to_string(), "openrouter".to_string()],
-                preview_provider_ids: Vec::new(),
-            },
-        ),
-        (
-            "command/set_provider_credential.json",
-            ClientCommand::SetProviderCredential {
-                operation_id: 18,
-                provider_id: "deepseek".to_string(),
-                credential: ProviderCredentialSecretDto::new("sk-redacted-snapshot".to_string()),
-            },
-        ),
-        (
-            "command/delete_provider_credential.json",
-            ClientCommand::DeleteProviderCredential {
-                operation_id: 19,
-                provider_id: "deepseek".to_string(),
-            },
-        ),
-        (
-            "command/test_provider_connection.json",
-            ClientCommand::TestProviderConnection {
-                operation_id: 20,
-                provider_id: "deepseek".to_string(),
-                api_base: "https://api.deepseek.com".to_string(),
-                model: "deepseek-flash".to_string(),
-                credential_override: None,
-            },
-        ),
-        (
             "command/set_model.json",
             ClientCommand::SetModel {
                 model: ClientTextDto::from_utf8("claude-sonnet-4-5"),
@@ -1608,8 +1528,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 target_mode: SessionModeDto::Chat,
             },
         ),
-        ("command/login.json", ClientCommand::Login),
-        ("command/logout.json", ClientCommand::Logout),
         ("command/force_compact.json", ClientCommand::ForceCompact),
         ("command/clear_session.json", ClientCommand::ClearSession),
         (

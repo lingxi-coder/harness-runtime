@@ -7,7 +7,6 @@
 //!
 //! M5-11 Task 15.
 
-use async_trait::async_trait;
 use command_api::builtins::{
     register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
     register_core_batch_2,
@@ -15,55 +14,19 @@ use command_api::builtins::{
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
 use lingxi_core::host::{
-    AgentInfo, AuthError, AuthHandle, HookInfo, LoginInfo, McpServerInfo, McpStatus,
-    SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
+    AgentInfo, HookInfo, McpServerInfo, McpStatus, SlashCommandDispatcher, SlashDispatchResult,
+    StatusSnapshot,
 };
 use orchestrator::test_support::MockOrchestratorHandle;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use tokio::sync::RwLock;
-
-struct MockAuth {
-    result: StdMutex<Result<LoginInfo, AuthError>>,
-}
-
-impl MockAuth {
-    fn ok(info: LoginInfo) -> Self {
-        Self {
-            result: StdMutex::new(Ok(info)),
-        }
-    }
-}
-
-#[async_trait]
-impl AuthHandle for MockAuth {
-    fn register_account_change_observer(
-        &self,
-        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-    ) {
-    }
-
-    async fn login(&self) -> Result<LoginInfo, AuthError> {
-        self.result.lock().unwrap().clone()
-    }
-    async fn logout(&self) -> Result<(), AuthError> {
-        Ok(())
-    }
-    async fn current_user(&self) -> Option<LoginInfo> {
-        self.result.lock().unwrap().as_ref().ok().cloned()
-    }
-}
 
 fn fresh() -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>) {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
     register_core_batch_1(&mut reg, handle.clone());
-    let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth::ok(LoginInfo {
-        email: "u@x.com".into(),
-        org_id: "org".into(),
-    }));
-    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_2(&mut reg, handle.clone());
     register_bundled_skills(&mut reg, false);
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
     (d, handle)
@@ -77,11 +40,7 @@ fn builtin_command_aliases_resolve_to_targets() {
     register_all_builtin_commands(&mut reg);
     let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
     register_core_batch_1(&mut reg, handle.clone());
-    let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth::ok(LoginInfo {
-        email: "u@x.com".into(),
-        org_id: "org".into(),
-    }));
-    register_core_batch_2(&mut reg, handle, auth);
+    register_core_batch_2(&mut reg, handle);
     register_bundled_skills(&mut reg, false);
     for (alias, target) in [
         ("reset", "clear"),
@@ -262,35 +221,6 @@ async fn agents_dispatch() {
             branding::DOT_DIR,
         );
         assert_eq!(display, expected.into());
-    } else {
-        panic!("{r:?}");
-    }
-}
-
-#[tokio::test]
-async fn login_dispatch() {
-    let (d, _) = fresh();
-    let r = d
-        .dispatch("/login".into(), lingxi_core::host::CancellationToken::new())
-        .await;
-    if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "Logged in as u@x.com (org: org).".into());
-    } else {
-        panic!("{r:?}");
-    }
-}
-
-#[tokio::test]
-async fn logout_dispatch() {
-    let (d, _) = fresh();
-    let r = d
-        .dispatch(
-            "/logout".into(),
-            lingxi_core::host::CancellationToken::new(),
-        )
-        .await;
-    if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "Logged out.".into());
     } else {
         panic!("{r:?}");
     }

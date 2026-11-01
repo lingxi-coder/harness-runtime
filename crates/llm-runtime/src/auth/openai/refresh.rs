@@ -201,9 +201,7 @@ impl AuthState {
     ///
     /// The identity is taken from the in-memory `TokenInfo`, which the caller
     /// has already refreshed from the new `id_token` claims (or carried
-    /// forward when the response had none), so no read-back is needed. `scopes`
-    /// is `vec![]` to match the login path (`OpenAiOAuthHandle`'s three persist
-    /// sites); nothing reads OpenAI scopes back.
+    /// forward when the response had none), so no read-back is needed.
     async fn persist_to_keychain(&self, info: &TokenInfo) -> Result<(), OAuthError> {
         let Some(cm) = &self.credentials else {
             return Ok(());

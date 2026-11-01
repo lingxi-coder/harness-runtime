@@ -149,6 +149,8 @@ fn snapshot(profile: &str) -> RequestCredentialSnapshot {
     RequestCredentialSnapshot {
         profile: profile.into(),
         credential: tokio::sync::OnceCell::new(),
+        credential_revision: std::sync::OnceLock::new(),
+        rejected_credential_revision: std::sync::Mutex::new(None),
     }
 }
 

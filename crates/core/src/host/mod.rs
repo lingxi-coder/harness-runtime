@@ -176,6 +176,7 @@ pub mod plan_files;
 pub mod plan_slug;
 pub mod platform;
 pub mod process;
+pub mod provider_accounts;
 pub mod prompting_gate;
 pub mod read_auto_allow;
 pub mod refusal_api_text;

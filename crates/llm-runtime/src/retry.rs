@@ -30,7 +30,9 @@ impl RetryPolicy {
             // SSL/cert transport failures are terminal — never retried (parity
             // 2.1.201 `isSSLError` short-circuit; retrying a failing handshake
             // just burns the budget).
-            LlmError::TlsCert { .. }
+            LlmError::AllAccountsUnavailable { .. }
+            | LlmError::AccountStorageUnavailable
+            | LlmError::TlsCert { .. }
             | LlmError::Authentication { .. }
             // The IdP rejected the refresh token: no number of retries will
             // make it valid again, and each one burns the budget.

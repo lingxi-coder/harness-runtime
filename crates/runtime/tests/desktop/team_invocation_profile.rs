@@ -145,7 +145,6 @@ fn applying_a_profile_discards_owner_capabilities_and_never_resets_shared_author
     let mut cfg = config_base();
     cfg.cwd = PathBuf::from("/owner/repository");
     cfg.lingxi_home = PathBuf::from("/owner/home");
-    cfg.api_key_helper = Some("owner helper".into());
     cfg.memory_provider = Some(Arc::new(
         orchestrator::test_support::StaticMemoryProvider::empty(),
     ));
@@ -171,9 +170,7 @@ fn applying_a_profile_discards_owner_capabilities_and_never_resets_shared_author
     p.apply_to(&mut cfg).unwrap();
     assert_eq!(cfg.cwd, p.scope_root().join("workspace"));
     assert_eq!(cfg.lingxi_home, p.scope_root().join("home"));
-    assert!(
-        cfg.api_key_helper.is_none() && cfg.memory_provider.is_none() && cfg.mcp_paths.is_empty()
-    );
+    assert!(cfg.memory_provider.is_none() && cfg.mcp_paths.is_empty());
     assert!(
         cfg.add_dir.is_empty() && cfg.cli_plugin_dirs.is_empty() && cfg.flag_settings.is_none()
     );
@@ -627,37 +624,19 @@ async fn private_bash_refuses_unavailable_sandbox_and_explicit_background() {
 async fn public_headless_service_reenforces_the_profile_and_retains_its_own_policy_cache() {
     let (_dir, base) = root();
     let p = profile(&base, identity());
-    let marker = base.join("helper-must-not-run");
     let mut cfg = config(&p);
-    // Host code can accidentally edit a config after apply_to. Every public
-    // service entry must freeze it again before opening credentials/helpers.
-    cfg.api_key_helper = Some(format!("touch {}; printf synthetic", quote(&marker)));
     cfg.fallback_model = Some("owner-other/private-model".into());
-    let _environment = EnvironmentFixture::set(&[
-        (
-            "ANTHROPIC_AUTH_TOKEN",
-            std::ffi::OsStr::new("synthetic-owner-oauth"),
-        ),
-        (
-            "OPENAI_PERSONAL_ACCESS_TOKEN",
-            std::ffi::OsStr::new("synthetic-owner-pat"),
-        ),
-    ]);
-    let stack = desktop::resolve_llm_stack(&cfg).await.unwrap();
-    assert!(stack.resolved_anthropic_api_key.is_none() && !stack.has_oauth_token);
     let _service = desktop::build_api_service(&cfg, &cfg.cwd).await.unwrap();
-    assert!(!marker.exists());
     p.revoke();
     assert!(desktop::build_api_service(&cfg, &cfg.cwd).await.is_err());
 }
 
 #[test]
-fn selecting_another_provider_discards_the_unrelated_anthropic_credential_slot() {
+fn selecting_another_provider_discards_unrelated_provider_configuration() {
     let (_dir, base) = root();
     let p = profile(&base, identity());
     let mut cfg = config_base();
     cfg.default_model = "selected/model".into();
-    cfg.api_key = "synthetic-owner-key".into();
     cfg.api_base = "https://synthetic-owner.invalid".into();
     cfg.provider_profiles = Some(std::collections::BTreeMap::from([
         ("selected".into(), serde_json::json!({"models":[]})),
@@ -667,8 +646,6 @@ fn selecting_another_provider_discards_the_unrelated_anthropic_credential_slot()
         ),
     ]));
     p.apply_to(&mut cfg).unwrap();
-    assert!(cfg.api_key.is_empty());
-    assert_eq!(cfg.api_key_source, DesktopConfig::default().api_key_source);
     assert_eq!(cfg.api_base, DesktopConfig::default().api_base);
     assert_eq!(
         cfg.provider_profiles
@@ -777,6 +754,5 @@ async fn untrusted_git_metadata_cannot_run_host_commands_at_boot_prompt_or_trans
         .await;
     let transcript = std::fs::read_to_string(config(&p).session_transcript_path.unwrap()).unwrap();
     assert!(!transcript.contains("gitBranch"));
-    assert!(!marker.exists());
     rt.session_lifecycle.shutdown_and_drain().await;
 }

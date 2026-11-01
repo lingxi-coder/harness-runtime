@@ -10,12 +10,10 @@ use client::protocol::events::ClientEvent;
 use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
-use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream, Platform};
-use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use lingxi_core::host::{OrchestratorHandle, OutputStream, Platform};
 use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
-use llm_runtime::auth::anthropic::{OAuthCredentialProvider, OAuthHandle, RefreshDriver};
 use llm_runtime::auth::openai as openai_oauth;
-use llm_runtime::{CredentialProvider, ModelRuntime, Transport};
+use llm_runtime::{ModelRuntime, Transport};
 use mcp::registry::OAuthDeps;
 use mcp::{McpRegistry, RawConnectionProvider};
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -48,8 +46,8 @@ use super::{
     provider_model_catalog_from_listings, rebuild_mobile_prompt_dispatch_cache,
     resolve_default_model_ref, settings_commands, settle_mobile_loop_turn, ActiveTurn,
     MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob,
-    MobileMediaAgentHandoffQueue, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
-    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
+    MobileMediaAgentHandoffQueue, MobileMsgQueueInput, MobileRuntime, MobileSessionAgentObserver,
+    MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
 // Recompute from admitted mobile settings for each plugin-owner connect. This
@@ -535,98 +533,17 @@ pub(super) async fn build_mobile_inner_with_ask(
     let process = platform.process();
     let sandbox = platform.sandbox();
     let worktree = platform.worktree();
-    // Build the shared credential manager and provider-specific OAuth handles
-    // before assembling the client. This lets a native Keychain session restore
-    // into the live provider graph on every engine boot.
-    // Every retained engine, including Cron and settings-only hosts, resolves
-    // the native store for each request. A manager-local TTL would otherwise
-    // keep another engine's acknowledged key rotation/deletion stale for 5 min.
-    let credentials = Arc::new(
-        CredentialManager::new(storage, clock.clone(), http.clone()).without_api_key_cache(),
-    );
+    // Each account credential read uses the native store or an explicit host injection.
+    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
     let llm_transport: Arc<dyn Transport> = Arc::new(
         platform_common::provider_transport()
             .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
     );
-    let anthropic_oauth_config = ClaudeAiOAuthConfig::default_with_port(0);
-    let anthropic_oauth_handle = Arc::new(OAuthHandle::new(
-        anthropic_oauth_config.clone(),
-        llm_transport.clone(),
-        credentials.clone(),
-        clock.clone(),
-    ));
     let openai_oauth_config = OpenAiOAuthConfig::default();
     let openai_oauth_handle = Arc::new(
-        openai_oauth::OpenAiOAuthHandle::new(
-            openai_oauth_config.clone(),
-            llm_transport.clone(),
-            credentials.clone(),
-        )
-        .with_clock(clock.clone()),
+        openai_oauth::AccountOAuthClient::new(openai_oauth_config.clone(), llm_transport.clone())
+            .with_clock(clock.clone()),
     );
-    let anthropic_refresh_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner> =
-        Arc::new(platform_posix_minimal::PosixRuntime::new());
-    let openai_refresh_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner> =
-        Arc::new(platform_posix_minimal::PosixRuntime::new());
-
-    let anthropic_oauth_state = match credentials.get_oauth_tokens().await {
-        Ok(Some(tokens)) => {
-            match llm_runtime::auth::anthropic::login::init_refresh_driver(
-                anthropic_oauth_config,
-                tokens.access_token,
-                tokens.refresh_token,
-                tokens.expires_at,
-                tokens.scopes,
-                llm_transport.clone(),
-                clock.clone(),
-                None,
-                Some(credentials.clone()),
-                anthropic_refresh_spawner.clone(),
-            )
-            .await
-            {
-                Ok(state) => Some(state),
-                Err(error) => {
-                    tracing::warn!(%error, "failed to restore Anthropic OAuth session");
-                    None
-                }
-            }
-        }
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(%error, "could not read Anthropic OAuth session");
-            None
-        }
-    };
-    let openai_oauth_state = match credentials.get_openai_oauth_tokens().await {
-        Ok(Some(tokens)) => match openai_oauth::login::init_refresh_driver(
-            openai_oauth_config,
-            tokens.access_token,
-            tokens.refresh_token,
-            tokens.expires_at,
-            tokens.account_id,
-            tokens.fedramp,
-            tokens.email,
-            llm_transport.clone(),
-            clock.clone(),
-            None,
-            Some(credentials.clone()),
-            openai_refresh_spawner.clone(),
-        )
-        .await
-        {
-            Ok(state) => Some(state),
-            Err(error) => {
-                tracing::warn!(%error, "failed to restore OpenAI ChatGPT OAuth session");
-                None
-            }
-        },
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(%error, "could not read OpenAI ChatGPT OAuth session");
-            None
-        }
-    };
     // Audit fix (telemetry parity): ONE shared AnalyticsBus drives the whole
     // pipeline — the `ApiService` (so `tengu_api_*` events are not dropped), the
     // tool context (`tool_ctx.bus`), and the orchestrator (`.with_analytics_bus`)
@@ -643,9 +560,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     //      through the provider credential ids below. Anthropic's API-key flag
     //      intentionally remains true when both credentials exist because the
     //      shared assembler gives API Key precedence over OAuth.
-    let stored_anthropic_key = credentials.get_anthropic_api_key().await.ok().flatten();
-    let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
-    let has_anthropic_oauth = anthropic_oauth_state.is_some();
+    let has_api_key = false;
+    let has_anthropic_oauth = false;
     let provider_settings = mobile_provider_settings(&cfg)
         .map_err(|error| MobileBuildError::Orchestrator(format!("provider settings: {error}")))?;
     let vision_delegation_enabled = provider_settings
@@ -674,9 +590,28 @@ pub(super) async fn build_mobile_inner_with_ask(
     };
     let mut assembled =
         provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
+    let provider_account_catalog = crate::provider_accounts::ProviderAccountCatalog::new(
+        catalog_inputs.clone(),
+        provider_region,
+        cfg.startup_catalog.clone(),
+        super::provider_services::mobile_enabled_profiles(provider_settings.routing.as_ref()),
+    );
+
+    let account_snapshot = crate::account_pool_store::load_native_account_snapshot(
+        cfg.lingxi_home.clone(),
+        credentials.clone(),
+    )
+    .await
+    .map_err(MobileBuildError::ApiBase)?;
     let full_provider_model_catalog =
         provider_model_catalog_from_listings(&model_listings(&assembled.client_config.providers));
     apply_mobile_profile_allowlist(&mut assembled, provider_settings.routing.as_ref());
+    let account_pool = crate::account_pool_store::assemble_pool(
+        &mut assembled,
+        account_snapshot,
+        cfg.lingxi_home.clone(),
+    )
+    .map_err(MobileBuildError::ApiBase)?;
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly (mobile)");
     }
@@ -718,57 +653,30 @@ pub(super) async fn build_mobile_inner_with_ask(
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     if let Some(source) = &cfg.startup_catalog {
-        client = client.with_catalog_source(source.runtime_source(catalog_inputs, provider_region));
+        client = client
+            .with_catalog_source(source.runtime_source(catalog_inputs.clone(), provider_region));
     }
-    // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
-    // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
-    // Swift; API-key profiles retain the existing keychain → env fallback.
-    let mut oauth_delegates: std::collections::BTreeMap<String, Arc<dyn CredentialProvider>> =
-        std::collections::BTreeMap::new();
-    let anthropic_refresh = anthropic_oauth_state
-        .clone()
-        .map(|state| Arc::new(RefreshDriver::new(state)));
-    let openai_refresh = openai_oauth_state
-        .clone()
-        .map(|state| Arc::new(openai_oauth::RefreshDriver::new(state)));
-    let oauth = Arc::new(MobileOAuthManager::new(
-        anthropic_oauth_handle.clone(),
-        openai_oauth_handle.clone(),
-        anthropic_refresh.clone(),
-        openai_refresh.clone(),
-        anthropic_oauth_state
-            .as_ref()
-            .map(|_| anthropic_refresh_spawner.clone()),
-        openai_oauth_state
-            .as_ref()
-            .map(|_| openai_refresh_spawner.clone()),
-        http.clone(),
-    ));
-    if let Some(driver) = anthropic_refresh {
-        oauth_delegates.insert(
-            "anthropic-oauth".to_string(),
-            Arc::new(OAuthCredentialProvider::new(driver)) as Arc<dyn CredentialProvider>,
-        );
-    }
-    if let Some(driver) = openai_refresh {
-        oauth_delegates.insert(
-            "openai-chatgpt".to_string(),
-            Arc::new(openai_oauth::OpenAiOAuthCredentialProvider::new(driver))
-                as Arc<dyn CredentialProvider>,
-        );
-    }
-    let composite = provider_config::MultiCredentialProvider::new(
-        credentials.clone(),
-        assembled.credential_sources.clone(),
-        if !cfg.api_key.trim().is_empty() {
-            Some(cfg.api_key.clone())
-        } else {
-            None
-        },
-        None,
-        oauth_delegates,
+    let composite = provider_config::MultiCredentialProvider::new(credentials.clone())
+        .with_account_version_root(cfg.lingxi_home.clone())
+        .with_account_directory(account_pool.directory());
+    let account_store = Arc::new(
+        crate::provider_accounts::ProviderAccountStore::new(
+            cfg.lingxi_home.clone(),
+            account_pool.snapshot().store_scope,
+            credentials.clone(),
+        )
+        .with_catalog(provider_account_catalog.clone()),
     );
+    let account_authority = Arc::new(crate::provider_accounts::AccountOAuthCoordinator::new(
+        account_store,
+        openai_oauth_handle.clone(),
+    ));
+    if !credentials.has_account_credential_refresher() {
+        credentials.set_account_credential_refresher(account_authority.clone());
+    }
     client = client.with_credential_provider(Arc::new(composite));
+    let (client, account_runtime) =
+        crate::account_pool_store::attach_mobile_account_runtime(client, account_pool);
     let llm_runtime = Arc::new(client);
     let model_resolution_context_provider: Arc<
         dyn agent::model_resolution::ModelResolutionContextProvider,
@@ -951,9 +859,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         streaming_override.unwrap_or(provider_adapter.clone() as Arc<dyn StreamingApiClient>);
     // `/login` remains the Anthropic trait-shaped command. Provider settings
     // use `oauth` above so ChatGPT's account-shaped identity stays separate.
-    let auth: Arc<dyn AuthHandle> = anthropic_oauth_handle.clone();
-    auth.register_account_change_observer(Arc::downgrade(&api_service.account_change_observer()));
-    let instruction_identity = crate::instruction_identity::InstructionIdentity::new(auth.clone());
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
     let persisted_reasoning_selection =
@@ -1043,6 +948,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     let event_sink = ListenerSink::arc(listener.clone());
     let message_output = AdapterOutputStream::new(event_sink.clone());
     let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
+    api_service.set_account_routing_reporter(Arc::new(
+        crate::account_pool_store::OutputAccountRoutingReporter(output.clone()),
+    ));
 
     // (3c) No `.with_persist` on mobile: a device session has no project
     // `.lingxi/settings.local.json` convention to write back to, so AllowAlways
@@ -2738,7 +2646,6 @@ pub(super) async fn build_mobile_inner_with_ask(
             .ok()
             .as_ref(),
     ))
-    .with_instruction_user_email_provider(instruction_identity.clone())
     .with_workflow_size_guideline(workflow_size_guideline_state)
     .with_session_id(main_session_id)
     // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
@@ -2864,7 +2771,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     let orch = orchestrator::ConversationOrchestrator::into_shared(
         orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed),
     );
-    instruction_identity.bind_root(&orch);
     root_instruction_provider
         .bind(&orch)
         .map_err(MobileBuildError::Orchestrator)?;
@@ -2973,7 +2879,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     orch.spawn_startup_responses_websocket_prewarm();
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
     // per-turn skill listing, and the Skill tool all observe ONE command set.
-    let mut reg = mobile_command_registry(handle.clone(), auth.clone());
+    let mut reg = mobile_command_registry(handle.clone());
     // Mobile has no bundled Bun/Node worker. A host can opt in only by
     // injecting a complete executor and explicit local policy facts.
     let insights_availability = command_api::builtins::InsightsCommandAvailability {
@@ -3341,6 +3247,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .await
         .map_err(MobileBuildError::Orchestrator)?;
     Ok(MobileRuntime {
+        provider_account_catalog,
         session_cwd,
         provider_catalog,
         official_catalog: cfg.startup_catalog.clone(),
@@ -3402,8 +3309,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         wired_subagent_agent_catalog_cell: subagent_agent_catalog_cell,
         #[cfg(test)]
         wired_subagent_skill_loader_cell: subagent_skill_loader_cell,
-        auth,
-        oauth,
+        account_authority,
         permission_gate: adapter_gate,
         permission_policy_gate,
         requested_permission_mode: Arc::new(StdMutex::new(requested_permission_mode)),
@@ -3416,6 +3322,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         session_writer,
         oauth_supported,
         credentials,
+        account_runtime,
         mobile_linux,
         mcp_registry,
         mcp_tool_registry: tools,

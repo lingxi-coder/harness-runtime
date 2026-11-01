@@ -4,7 +4,6 @@
 //! host owns environment overlays, account metadata and background-job identity.
 
 use lingxi_core::host::OrchestratorHandle;
-pub use llm_runtime::auth::anthropic::environment::OAuthDescriptorCredential;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -20,12 +19,6 @@ pub trait HeadlessHostServices: Send + Sync {
     /// Read the host's environment overlay, including SDK updates received on
     /// this connection. Implementations decide whether to include process env.
     fn environment_variable(&self, name: &str) -> Option<String>;
-
-    /// Model OAuth descriptor/file material acquired by the host. The runtime
-    /// selects this before stored OAuth and never opens a process descriptor.
-    fn oauth_descriptor_credential(&self) -> Option<OAuthDescriptorCredential> {
-        None
-    }
 
     /// Apply an SDK environment update to this host's execution environment.
     /// The runtime never mutates the process-global environment.

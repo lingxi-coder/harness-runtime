@@ -734,6 +734,17 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.resolve_media_route(model, profile)
     }
 
+    async fn audio_account_binding_is_current(
+        &self,
+        original_profile: &str,
+        actual_profile: &str,
+        scope: &str,
+    ) -> bool {
+        self.service
+            .audio_account_binding_is_current(original_profile, actual_profile, scope)
+            .await
+    }
+
     async fn analyze_vision_delegation(
         &self,
         packet: sidequery::VisionPacket,

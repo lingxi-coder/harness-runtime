@@ -44,7 +44,6 @@ pub struct MobileConfig {
     /// Anthropic API key. Empty string is valid — the orchestrator builds and
     /// only fails at `run_turn` with a 401, so slash-command dispatch still
     /// works with no key configured (mirrors the desktop config contract).
-    pub api_key: String,
     /// Native backing directory used for configuration/bootstrap I/O. Device
     /// sessions require a directory inside the Linux runtime user's home.
     pub cwd: std::path::PathBuf,
@@ -154,7 +153,6 @@ impl std::fmt::Debug for MobileConfig {
             .field("host_git_root_cache", &"<host-owned cache>")
             .field("build_info", &self.build_info)
             .field("api_base", &self.api_base)
-            .field("api_key", &self.api_key)
             .field(
                 "projects_session_startup_url",
                 &self
@@ -247,7 +245,6 @@ impl Default for MobileConfig {
             build_info: command_api::builtins::BuildInfo::default(),
             api_base: "https://api.anthropic.com".to_string(),
             projects_session_startup_url: None,
-            api_key: String::new(),
             cwd: std::path::PathBuf::from("."),
             logical_cwd: None,
             lingxi_home: std::path::PathBuf::new(),

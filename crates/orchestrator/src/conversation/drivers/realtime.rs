@@ -730,7 +730,7 @@ impl ConversationOrchestrator {
             )
         };
         let profile_name = self.current_audio_profile().await?;
-        let account_scope = format!("profile:{profile_name}");
+        let account_scope = lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned();
         let tools = self
             .build_wire_tools()
             .await?
@@ -959,8 +959,14 @@ impl ConversationOrchestrator {
             }
         }
         let current_profile = self.current_audio_profile().await?;
-        if Some(current_profile.clone()) != prepared.profile_name
-            || Some(format!("profile:{current_profile}")) != prepared.account_scope
+        if !self
+            .api
+            .audio_account_binding_is_current(
+                &current_profile,
+                prepared.profile_name.as_deref().unwrap_or_default(),
+                prepared.account_scope.as_deref().unwrap_or_default(),
+            )
+            .await
         {
             return Err(failure(
                 "Agent provider profile changed before realtime admission",

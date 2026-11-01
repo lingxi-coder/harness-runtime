@@ -15,6 +15,13 @@ use tokio_util::sync::CancellationToken;
 
 #[async_trait]
 pub trait TeamOwnerApproval: Send + Sync {
+    async fn refresh_provider_account(
+        &self,
+        _request: crate::desktop::team_process::TeamProviderAccountRefresh,
+        _cancel: CancellationToken,
+    ) -> Result<crate::desktop::team_process::TeamAccountEnvelope, Error> {
+        Err(Error::ModelUnavailable)
+    }
     async fn approve(
         &self,
         request: TeamOwnerPermission,
@@ -90,6 +97,24 @@ impl Broker {
 }
 #[async_trait]
 impl TeamProcessBroker for Broker {
+    async fn refresh_provider_account(
+        &self,
+        request: crate::desktop::team_process::TeamProviderAccountRefresh,
+        cancel: CancellationToken,
+    ) -> Result<crate::desktop::team_process::TeamAccountEnvelope, TeamProcessError> {
+        self.poll(&cancel)
+            .await
+            .map_err(|_| TeamProcessError::Model)?;
+        let envelope = self
+            .owner
+            .refresh_provider_account(request, cancel.clone())
+            .await
+            .map_err(|_| TeamProcessError::Model)?;
+        self.poll(&cancel)
+            .await
+            .map_err(|_| TeamProcessError::Model)?;
+        Ok(envelope)
+    }
     async fn approve(
         &self,
         request: TeamOwnerPermission,

@@ -88,7 +88,7 @@
 //!   it never reaches the command table at all.
 
 /// Every native built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **83** for the 2.1.295 source surface. The
+/// ASCII-sorted. Locked at length **81** for the 2.1.295 source surface. The
 /// reachable bundled prompts `/commit` and `/doctor` live in the bundled skill
 /// catalog; `/commit-push-pr`, `/files`, and `/init-verifiers` have no reachable
 /// default command producer in the pinned source and are not registered here.
@@ -97,7 +97,7 @@
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 83] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 81] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -141,8 +141,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 83] = &[
     "install-github-app",
     "install-slack-app",
     "keybindings",
-    "login",
-    "logout",
     "mcp",
     "memory",
     "mobile",
@@ -199,7 +197,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 83] = &[
     "workflows",
 ];
 
-/// The 18 core builtin commands that ship with real implementations in M5-10 / M5-11.
+/// The 16 core builtin commands that ship with real implementations in M5-10 / M5-11.
 /// Subset of [`BUILTIN_COMMAND_NAMES`], ASCII-sorted.
 ///
 /// In M5-09 each of these gets a per-name placeholder struct in
@@ -207,7 +205,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 83] = &[
 /// literal as the shared `UnimplementedCommandHandler` until the real bodies
 /// land in M5-10 (batch 1: clear/compact/help/exit/memory/init) and M5-11
 /// (batch 2: the remaining 12).
-pub const BUILTIN_CORE_NAMES: &[&str; 18] = &[
+pub const BUILTIN_CORE_NAMES: &[&str; 16] = &[
     "agents",
     "auto-mode-setup",
     "clear",
@@ -217,8 +215,6 @@ pub const BUILTIN_CORE_NAMES: &[&str; 18] = &[
     "help",
     "hooks",
     "init",
-    "login",
-    "logout",
     "mcp",
     "memory",
     "model",
@@ -437,7 +433,7 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 /// - [`STATICALLY_DISABLED_COMMANDS`] — the 1 command (`version`) whose every
 ///   upstream twin is `isEnabled:()=>!1` (SLASH-14).
 ///
-/// Total = 3 + 3 + 1 + 1 = **8** filtered builtin names, leaving 83 − 8 = 75
+/// Total = 3 + 3 + 1 + 1 = **8** filtered builtin names, leaving 81 − 8 = 73
 /// visible builtins in `/help`. Native's separately registered bundled
 /// `/doctor` prompt adds one default-visible row; `/commit` adds a row only
 /// when its default-off GrowthBook gate is enabled. The host-bound `btw` command and the implemented
@@ -501,8 +497,6 @@ pub fn command_describe_immediate(name: &str) -> bool {
 ///
 /// ```text
 /// name:"doctor",...,isEnabled:()=>!je.DISABLE_DOCTOR_COMMAND
-/// name:"login",...,isEnabled:()=>!je.DISABLE_LOGIN_COMMAND
-/// name:"logout",...,isEnabled:()=>!je.DISABLE_LOGOUT_COMMAND
 /// name:"upgrade",...,isEnabled:()=>!kz()&&!je.DISABLE_UPGRADE_COMMAND&&sa()!=="enterprise"
 /// name:"install-github-app",...,isEnabled:()=>!je.DISABLE_INSTALL_GITHUB_APP_COMMAND
 /// ```
@@ -518,8 +512,6 @@ pub fn command_describe_immediate(name: &str) -> bool {
 pub const ENV_DISABLE_GATED_COMMANDS: &[(&str, &str)] = &[
     ("doctor", "DISABLE_DOCTOR_COMMAND"),
     ("install-github-app", "DISABLE_INSTALL_GITHUB_APP_COMMAND"),
-    ("login", "DISABLE_LOGIN_COMMAND"),
-    ("logout", "DISABLE_LOGOUT_COMMAND"),
     ("upgrade", "DISABLE_UPGRADE_COMMAND"),
 ];
 
@@ -578,8 +570,6 @@ pub fn core_description(name: &str) -> &'static str {
         "help" => "Show help and available commands",
         "hooks" => "View hook configurations for tool events",
         "init" => "Initialize a new LINGXI.md file with codebase documentation",
-        "login" => "Sign in with your Anthropic account",
-        "logout" => "Sign out from your Anthropic account",
         "mcp" => "Manage MCP servers",
         "memory" => "Edit LINGXI.md files and memory settings",
         "model" => "Set the AI model for LingXi",
@@ -701,7 +691,7 @@ pub fn core_description(name: &str) -> &'static str {
 /// whose `render_help_screen()` consults those gates. Rust runs a crate's tests
 /// in-process and in parallel, so without ONE shared lock a mutation here can
 /// race a concurrent render in another module and intermittently drop a command
-/// (e.g. `/login`) — the latent flake behind `every_visible_command_appears_once`
+/// (e.g. `/doctor`) — the latent flake behind `every_visible_command_appears_once`
 /// / `output_has_exactly_77_lines_at_default_native_factory_gates`. `pub(crate)` so
 /// help_render can lock it too.
 #[cfg(test)]
@@ -712,8 +702,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_83() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
+    fn total_count_locked_at_81() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 81);
     }
 
     #[test]
@@ -939,8 +929,6 @@ mod tests {
             vec![
                 ("doctor", "DISABLE_DOCTOR_COMMAND"),
                 ("install-github-app", "DISABLE_INSTALL_GITHUB_APP_COMMAND"),
-                ("login", "DISABLE_LOGIN_COMMAND"),
-                ("logout", "DISABLE_LOGOUT_COMMAND"),
                 ("upgrade", "DISABLE_UPGRADE_COMMAND"),
             ]
         );
@@ -1015,30 +1003,8 @@ mod tests {
     }
 
     #[test]
-    fn env_disabled_command_is_dropped_from_help_render() {
-        use crate::builtin_support::help_render::render_help_screen;
-        let _g = ENV_LOCK.lock().unwrap();
-        let var = "DISABLE_LOGIN_COMMAND";
-        std::env::remove_var(var);
-        let before = render_help_screen();
-        assert!(before.contains("  /login "), "login visible by default");
-        std::env::set_var(var, "1");
-        let after = render_help_screen();
-        assert!(
-            !after.contains("  /login "),
-            "login must be dropped from /help when DISABLE_LOGIN_COMMAND is set"
-        );
-        assert_eq!(
-            after.matches('\n').count(),
-            before.matches('\n').count() - 1,
-            "exactly one command (login) is removed"
-        );
-        std::env::remove_var(var);
-    }
-
-    #[test]
-    fn core_count_locked_at_18() {
-        assert_eq!(BUILTIN_CORE_NAMES.len(), 18);
+    fn core_count_locked_at_16() {
+        assert_eq!(BUILTIN_CORE_NAMES.len(), 16);
     }
 
     #[test]
@@ -1199,7 +1165,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 81);
     }
 
     // ========================================================================
@@ -1304,7 +1270,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "all disabled commands are correct-by-design"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 81);
     }
 
     #[test]

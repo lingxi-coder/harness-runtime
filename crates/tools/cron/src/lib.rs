@@ -49,7 +49,7 @@ pub use cron::{
 };
 pub use cron_delete::CronDeleteTool;
 pub use cron_list::CronListTool;
-pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
+pub use remote_trigger::{ClaudeAiAuthProvider, ClaudeAiCredentials, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
 mod runtime_wakeup;
 pub use cron::scheduler::{

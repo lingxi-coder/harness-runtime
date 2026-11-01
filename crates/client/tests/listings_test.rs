@@ -17,7 +17,7 @@
 use client::protocol::controls::{ReasoningControlSpecDto, ReasoningSelectionDto};
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::{
-    AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
+    AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ProviderDirectoryDefinitionDto, ProviderModelCatalogEntryDto, SessionModeDto, SessionRowDto,
@@ -751,35 +751,6 @@ fn settings_snapshot_decodes_a_payload_without_the_added_fields() {
             merged_keys: None,
         }
     );
-}
-
-// ── Auth ─────────────────────────────────────────────────────────────────────
-
-/// `AuthState` — mirrors `Option<LoginInfo>` (`platform-api/src/auth.rs:13`) as a
-/// tagged enum: signed-out carries no payload; signed-in carries email + org.
-#[test]
-fn auth_state_round_trips() {
-    let signed_out = ClientEvent::AuthState {
-        state: AuthStateDto::SignedOut,
-    };
-    let json = serde_json::to_value(&signed_out).expect("serialize AuthState SignedOut");
-    assert_eq!(json["type"], "auth_state");
-    assert_eq!(json["state"]["type"], "signed_out");
-    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AuthState SignedOut");
-    assert_eq!(back, signed_out);
-
-    let signed_in = ClientEvent::AuthState {
-        state: AuthStateDto::SignedIn {
-            email: "u@x.com".to_string(),
-            org_id: "org_123".to_string(),
-        },
-    };
-    let json = serde_json::to_value(&signed_in).expect("serialize AuthState SignedIn");
-    assert_eq!(json["state"]["type"], "signed_in");
-    assert_eq!(json["state"]["email"], "u@x.com");
-    assert_eq!(json["state"]["org_id"], "org_123");
-    let back: ClientEvent = serde_json::from_value(json).expect("deserialize AuthState SignedIn");
-    assert_eq!(back, signed_in);
 }
 
 // ── Doctor ───────────────────────────────────────────────────────────────────

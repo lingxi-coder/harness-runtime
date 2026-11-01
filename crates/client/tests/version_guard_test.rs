@@ -271,6 +271,48 @@ fn current_contract_index() -> ContractIndex {
         ix.insert(path.to_string(), ty.to_string());
     };
 
+    put("ClientCommand::ProviderAccounts", "provider_accounts");
+    put("ClientCommand::ProviderAccounts.operation_id", "u64");
+    put("ClientCommand::ProviderAccounts.action", "String");
+    put("ClientCommand::ProviderAccounts.request_json", "String");
+    put(
+        "ClientCommand::ProviderAccounts.credential",
+        "Option<ProviderCredentialSecretDto>",
+    );
+    put(
+        "ClientEvent::ProviderAccountsUpdated",
+        "provider_accounts_updated",
+    );
+    put("ClientEvent::ProviderAccountsUpdated.operation_id", "u64");
+    put(
+        "ClientEvent::ProviderAccountsUpdated.snapshot_json",
+        "String",
+    );
+    put(
+        "ClientEvent::ProviderAccountsUpdated.error",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::ProviderAccountRouting",
+        "provider_account_routing",
+    );
+    put("ClientEvent::ProviderAccountRouting.event_json", "String");
+    put(
+        "ClientEvent::ProviderAccountRefreshRequested",
+        "provider_account_refresh_requested",
+    );
+    put(
+        "ClientEvent::ProviderAccountRefreshRequested.account_id",
+        "String",
+    );
+    put(
+        "ClientEvent::ProviderAccountRefreshRequested.identity_generation",
+        "u64",
+    );
+    put(
+        "ClientEvent::ProviderAccountRefreshRequested.credential_revision",
+        "u64",
+    );
     put("ClientCommand::SkillAdmin", "skill_admin");
     put("ClientCommand::SkillAdmin.command", "SkillAdminCommandDto");
     put("ClientCommand::FusionAdmin", "fusion_admin");
@@ -583,67 +625,6 @@ fn current_contract_index() -> ContractIndex {
     );
     put("ClientEvent::FastModeChanged", "fast_mode_changed");
     put("ClientEvent::FastModeChanged.enabled", "bool");
-    put(
-        "ClientEvent::ProviderCredentialStatus",
-        "provider_credential_status",
-    );
-    put("ClientEvent::ProviderCredentialStatus.operation_id", "u64");
-    put(
-        "ClientEvent::ProviderCredentialStatus.configured_provider_ids",
-        "Vec<String>",
-    );
-    put(
-        "ClientEvent::ProviderCredentialStatus.unavailable_provider_ids",
-        "Vec<String>",
-    );
-    put(
-        "ClientEvent::ProviderCredentialStatus.storage_encrypted",
-        "bool",
-    );
-    put(
-        "ClientEvent::ProviderCredentialStatus.error",
-        "Option<String>",
-    );
-    put(
-        "ClientEvent::ProviderConnectionTested",
-        "provider_connection_tested",
-    );
-    put("ClientEvent::OpenAiOAuthUpdated", "openai_oauth_updated");
-    put(
-        "ClientEvent::OpenAiOAuthUpdated.session",
-        "OpenAiOAuthSessionDto",
-    );
-    put("OpenAiOAuthSessionDto.access_token", "String");
-    put("OpenAiOAuthSessionDto.refresh_token", "Option<String>");
-    put("OpenAiOAuthSessionDto.expires_at", "u64");
-    put("OpenAiOAuthSessionDto.account_id", "Option<String>");
-    put("OpenAiOAuthSessionDto.email", "Option<String>");
-    put("OpenAiOAuthSessionDto.fedramp", "bool");
-    put("ClientEvent::ProviderConnectionTested.operation_id", "u64");
-    put(
-        "ClientEvent::ProviderConnectionTested.provider_id",
-        "String",
-    );
-    put("ClientEvent::ProviderConnectionTested.connected", "bool");
-    put("ClientEvent::ProviderConnectionTested.reachable", "bool");
-    put(
-        "ClientEvent::ProviderConnectionTested.authenticated",
-        "bool",
-    );
-    put(
-        "ClientEvent::ProviderConnectionTested.model_available",
-        "bool",
-    );
-    put(
-        "ClientEvent::ProviderConnectionTested.http_status",
-        "Option<u16>",
-    );
-    put("ClientEvent::ProviderConnectionTested.latency_ms", "u64");
-    put("ClientEvent::ProviderConnectionTested.message", "String");
-    put(
-        "ClientEvent::ProviderConnectionTested.used_stored_credential",
-        "bool",
-    );
 
     put("ClientEvent::McpServers", "mcp_servers");
     put("ClientEvent::McpServers.servers", "Vec<McpServerDto>");
@@ -701,9 +682,6 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::SettingsSnapshot.merged_keys",
         "Option<Vec<String>>",
     );
-
-    put("ClientEvent::AuthState", "auth_state");
-    put("ClientEvent::AuthState.state", "AuthStateDto");
 
     put("ClientEvent::DoctorReport", "doctor_report");
     put("ClientEvent::DoctorReport.report", "DoctorReportDto");
@@ -1054,53 +1032,6 @@ fn current_contract_index() -> ContractIndex {
         "Option<bool>",
     );
 
-    put(
-        "ClientCommand::ListProviderCredentials",
-        "list_provider_credentials",
-    );
-    put("ClientCommand::ListProviderCredentials.operation_id", "u64");
-    put(
-        "ClientCommand::ListProviderCredentials.provider_ids",
-        "Vec<String>",
-    );
-    put(
-        "ClientCommand::SetProviderCredential",
-        "set_provider_credential",
-    );
-    put("ClientCommand::SetProviderCredential.operation_id", "u64");
-    put("ClientCommand::SetProviderCredential.provider_id", "String");
-    put(
-        "ClientCommand::SetProviderCredential.credential",
-        "ProviderCredentialSecretDto",
-    );
-    put(
-        "ClientCommand::DeleteProviderCredential",
-        "delete_provider_credential",
-    );
-    put(
-        "ClientCommand::DeleteProviderCredential.operation_id",
-        "u64",
-    );
-    put(
-        "ClientCommand::TestProviderConnection",
-        "test_provider_connection",
-    );
-    put("ClientCommand::TestProviderConnection.operation_id", "u64");
-    put(
-        "ClientCommand::TestProviderConnection.provider_id",
-        "String",
-    );
-    put("ClientCommand::TestProviderConnection.api_base", "String");
-    put("ClientCommand::TestProviderConnection.model", "String");
-    put(
-        "ClientCommand::TestProviderConnection.credential_override",
-        "Option<ProviderCredentialSecretDto>",
-    );
-    put(
-        "ClientCommand::DeleteProviderCredential.provider_id",
-        "String",
-    );
-
     put("ProviderCredentialSecretDto.value", "String");
 
     put("ClientCommand::SetModel", "set_model");
@@ -1158,8 +1089,6 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::ListSessions", "list_sessions");
     put("ClientCommand::ListSessions.limit", "Option<u32>");
 
-    put("ClientCommand::Login", "login");
-    put("ClientCommand::Logout", "logout");
     put("ClientCommand::ForceCompact", "force_compact");
     put("ClientCommand::ClearSession", "clear_session");
 
@@ -1504,7 +1433,6 @@ fn current_contract_index() -> ContractIndex {
     put("ListingKindDto::Memory", "memory");
     put("ListingKindDto::Status", "status");
     put("ListingKindDto::Settings", "settings");
-    put("ListingKindDto::Auth", "auth");
     put("ListingKindDto::Doctor", "doctor");
     put("ListingKindDto::Tasks", "tasks");
     put("ListingKindDto::Coordinator", "coordinator");
@@ -2029,11 +1957,6 @@ fn current_contract_index() -> ContractIndex {
     put("StatusSnapshotDto.cwd", "String");
     put("StatusSnapshotDto.status_line", "Option<String>");
     put("StatusSnapshotDto.active_workers", "Option<u32>");
-
-    put("AuthStateDto::SignedOut", "signed_out");
-    put("AuthStateDto::SignedIn", "signed_in");
-    put("AuthStateDto::SignedIn.email", "String");
-    put("AuthStateDto::SignedIn.org_id", "String");
 
     put("DoctorReportDto.checks", "Vec<DoctorCheckDto>");
     put("DoctorReportDto.summary", "DoctorSummaryDto");
@@ -3153,11 +3076,11 @@ fn contract_index_covers_every_dto() {
         TurnRecoveryStateDto,
     };
     use client::protocol::listings::{
-        AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
-        DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, ModelContextBudgetDto, ProviderDirectoryDefinitionDto,
-        ProviderModelCatalogEntryDto, SessionAgentMessageRowDto, SessionAgentSummaryDto,
-        SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+        AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
+        DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
+        ModelContextBudgetDto, ProviderDirectoryDefinitionDto, ProviderModelCatalogEntryDto,
+        SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionRowDto, SkillDto,
+        SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client::protocol::media::*;
     use client::protocol::message::{MessageBlockDto, MessageDto};
@@ -3268,14 +3191,6 @@ fn contract_index_covers_every_dto() {
                 id: String::new(),
                 revision: 1,
             }),
-        },
-        ClientEvent::ProviderCredentialStatus {
-            operation_id: 0,
-            configured_provider_ids: Vec::new(),
-            unavailable_provider_ids: Vec::new(),
-            storage_encrypted: false,
-            credential_previews: std::collections::HashMap::new(),
-            error: None,
         },
         ClientEvent::ConversationControlsChanged {
             controls: ConversationControlsDto {
@@ -3610,19 +3525,11 @@ fn contract_index_covers_every_dto() {
     };
     let _skill_admin = skill_admin_command.clone();
     let _cmd: Vec<ClientCommand> = vec![
-        ClientCommand::ListProviderCredentials {
+        ClientCommand::ProviderAccounts {
             operation_id: 0,
-            provider_ids: Vec::new(),
-            preview_provider_ids: Vec::new(),
-        },
-        ClientCommand::SetProviderCredential {
-            operation_id: 0,
-            provider_id: String::new(),
-            credential: ProviderCredentialSecretDto::new(String::new()),
-        },
-        ClientCommand::DeleteProviderCredential {
-            operation_id: 0,
-            provider_id: String::new(),
+            action: String::new(),
+            request_json: String::new(),
+            credential: Some(ProviderCredentialSecretDto::new(String::new())),
         },
         ClientCommand::ListModels,
         ClientCommand::RequestExit,
@@ -4718,7 +4625,6 @@ fn contract_index_covers_every_dto() {
             status_line: None,
             active_workers: None,
         },
-        AuthStateDto::SignedOut,
         DoctorReportDto {
             checks: vec![DoctorCheckDto {
                 name: String::new(),
