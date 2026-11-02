@@ -33,10 +33,10 @@ use tokio::sync::{Notify, RwLock};
 use tool_skill::skill::SkillCommandType;
 
 use super::{
-    build_mobile, builtin_provider_catalog, classify_provider_connection_response,
-    collect_session_agent_transcript_paths, enqueue_mobile_prompt_dispatch,
-    find_session_agent_transcript_path, lower_session_agent_snapshot,
-    mobile_anchor_startup_scan_count, mobile_cron_schedule_error, mobile_mcp_config_unchanged,
+    build_mobile, builtin_provider_catalog, collect_session_agent_transcript_paths,
+    enqueue_mobile_prompt_dispatch, find_session_agent_transcript_path,
+    lower_session_agent_snapshot, mobile_anchor_startup_scan_count, mobile_cron_schedule_error,
+    mobile_mcp_config_unchanged,
     mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight, mobile_mcp_record_reload_intent,
     mobile_mcp_reload_requires_replacement, mobile_mcp_run_reload_job,
     mobile_mcp_state_is_transitional, session_agent_conversation_is_visible,
@@ -1253,94 +1253,6 @@ fn android_recurring_schedule_enforces_fifteen_minute_floor() {
     assert!(mobile_cron_schedule_error("61 * * * *", false).is_some());
 }
 
-#[test]
-fn provider_connection_requires_selected_model_in_recognized_catalog() {
-    let connected = classify_provider_connection_response(
-        Ok(llm_runtime::services::sdk::directory::probe::ProbeResult {
-            status: 200,
-            model_ids: Some(vec!["deepseek-flash".into()]),
-        }),
-        "deepseek-flash",
-        42,
-        true,
-    );
-    assert!(connected.connected);
-    assert!(connected.authenticated);
-    assert!(connected.model_available);
-    assert_eq!(Some(200), connected.http_status);
-    assert!(connected.used_stored_credential);
-
-    let missing = classify_provider_connection_response(
-        Ok(llm_runtime::services::sdk::directory::probe::ProbeResult {
-            status: 200,
-            model_ids: Some(vec!["gemini-2.5-flash".into()]),
-        }),
-        "gemini-2.5-pro",
-        9,
-        false,
-    );
-    assert!(!missing.connected);
-    assert!(missing.authenticated);
-    assert!(!missing.model_available);
-    assert!(!missing.used_stored_credential);
-}
-
-#[test]
-fn provider_connection_maps_auth_failure_without_echoing_response_body() {
-    let result = classify_provider_connection_response(
-        Err(lingxi_core::host::HttpError::Status {
-            status: 401,
-            body: "secret-bearing upstream response".to_string(),
-        }),
-        "deepseek-flash",
-        18,
-        true,
-    );
-
-    assert!(!result.connected);
-    assert!(result.reachable);
-    assert!(!result.authenticated);
-    assert_eq!(Some(401), result.http_status);
-    assert!(!result.message.contains("upstream"));
-    assert!(!result.message.contains("secret"));
-}
-
-#[test]
-fn provider_connection_maps_forbidden_rate_limit_and_timeout_without_secrets() {
-    for (response, status, expected_fragment) in [
-        (
-            Err(lingxi_core::host::HttpError::Status {
-                status: 403,
-                body: "private upstream detail".to_string(),
-            }),
-            Some(403),
-            "拒绝访问",
-        ),
-        (
-            Err(lingxi_core::host::HttpError::Status {
-                status: 429,
-                body: "retry-after: 30".to_string(),
-            }),
-            Some(429),
-            "频率",
-        ),
-        (
-            Err(lingxi_core::host::HttpError::Timeout(
-                std::time::Duration::from_secs(1),
-            )),
-            None,
-            "超时",
-        ),
-    ] {
-        let result = classify_provider_connection_response(response, "model", 20, true);
-        assert!(!result.connected);
-        assert_eq!(result.http_status, status);
-        assert!(result.message.contains(expected_fragment));
-        assert!(!result.message.contains("private"));
-        assert!(!result.message.contains("secret"));
-    }
-}
-
 #[tokio::test]
 async fn lightweight_cron_store_crud_and_due_occurrence_need_no_engine() {
     use platform_posix_minimal::{PosixClock, PosixFileSystem};
@@ -1453,7 +1365,6 @@ impl lingxi_core::host::SecureStorage for FakeEncryptedStore {
 fn mobile_config_default_is_constructible() {
     let cfg = MobileConfig::default();
     assert_eq!(cfg.api_base, "https://api.anthropic.com");
-    assert!(cfg.api_key.is_empty());
     assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
     assert_eq!(cfg.default_model, "anthropic/claude-sonnet-5");
     // The boot default must be a CURATED Anthropic id, so a client with no
@@ -3141,6 +3052,72 @@ fn build_submit_handle_with_config(
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
     let handle = build_mobile_engine(cfg, platform, listener_dyn, perm_sink)
         .expect("build_mobile_engine failed");
+    (handle, listener)
+}
+
+async fn seed_mobile_inference_account(
+    runtime: &super::MobileRuntime,
+    home: &std::path::Path,
+) -> lingxi_core::host::provider_accounts::AccountMetadata {
+    use lingxi_core::host::provider_accounts::{
+        AccountAuthKind, ProviderAccountAction, ProviderAccountCommand,
+    };
+    let scope = crate::provider_accounts::account_store_scope(
+        home,
+        &format!("{:?}", runtime.credentials.account_storage_backend()),
+    );
+    let store = crate::provider_accounts::ProviderAccountStore::new(
+        home.to_path_buf(),
+        scope,
+        runtime.credentials.clone(),
+    )
+    .with_catalog(runtime.provider_account_catalog.clone());
+    let before = store.snapshot().await.expect("read test account directory");
+    let snapshot = store
+        .execute(
+            ProviderAccountCommand {
+                expected_revision: before.config_revision,
+                operation_id: None,
+                action: ProviderAccountAction::Add {
+                    provider_id: "anthropic".into(),
+                    display_name: "Inference fixture".into(),
+                    execution_binding_id: "anthropic".into(),
+                    auth_kind: AccountAuthKind::ApiKey,
+                    account_id: None,
+                },
+            },
+            Some("test-fixture-key".into()),
+        )
+        .await
+        .expect("create exact inference test account");
+    let account = snapshot.accounts.last().expect("created account").clone();
+    runtime
+        .account_runtime
+        .refresh(snapshot)
+        .expect("publish test account");
+    account
+}
+
+fn build_submit_handle_with_account_config(
+    cfg: MobileConfig,
+    root: &std::path::Path,
+) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
+    let home = cfg.lingxi_home.clone();
+    let platform = Arc::new(
+        HostFakePlatform::new(root.to_path_buf())
+            .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
+    );
+    let listener = Arc::new(FakeListener::default());
+    let handle = build_mobile_engine(
+        cfg,
+        platform,
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .expect("account test engine");
+    handle
+        .runtime()
+        .block_on(seed_mobile_inference_account(&handle.inner, &home));
     (handle, listener)
 }
 
@@ -4965,9 +4942,8 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
     let mut cfg = test_config(tmp.path());
     cfg.workspace_trusted = true;
     cfg.api_base = base;
-    cfg.api_key = "test-fixture-key".into();
     cfg.default_model = "claude-sonnet-4-5".into();
-    let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+    let (handle, _) = build_submit_handle_with_account_config(cfg, tmp.path());
     // Observe the resumed child itself; no unrelated main-loop wake request
     // is needed to prove this targeted producer reaches a real model turn.
     handle.task_notification_watcher.abort();
@@ -5151,76 +5127,38 @@ fn submit_task_stop_skips_second_workflow_status_event() {
 }
 
 #[test]
-fn provider_credentials_round_trip_through_mobile_submit() {
+fn provider_accounts_round_trip_through_mobile_submit() {
     use client::protocol::commands::ProviderCredentialSecretDto;
-
     let tmp = tempfile::tempdir().expect("tempdir");
     let (handle, listener) = build_submit_handle_with_secure_store(tmp.path());
-
+    let account_id = uuid::Uuid::new_v4().to_string();
     handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::SetProviderCredential {
-                operation_id: 11,
-                provider_id: "openai".into(),
-                credential: ProviderCredentialSecretDto::new("sk-test-secret".into()),
-            })
-            .await
-            .expect("set provider credential");
-        handle
-            .submit(ClientCommand::ListProviderCredentials {
-                operation_id: 12,
-                provider_ids: vec!["openai".into()],
-                preview_provider_ids: vec!["openai".into()],
-            })
-            .await
-            .expect("list provider credentials");
-        handle
-            .submit(ClientCommand::DeleteProviderCredential {
-                operation_id: 13,
-                provider_id: "openai".into(),
-            })
-            .await
-            .expect("delete provider credential");
-
+        for (operation_id, action, request, credential) in [
+            (11, "add", serde_json::json!({"action":"add","expectedRevision":0,"providerId":"openai","displayName":"Fixture","executionBindingId":"openai","authKind":"api_key","accountId":account_id}), Some(ProviderCredentialSecretDto::new("sk-test-secret".into()))),
+            (12, "list", serde_json::json!({"action":"list","expectedRevision":1}), None),
+            (13, "remove", serde_json::json!({"action":"remove","expectedRevision":1,"accountId":account_id}), None),
+        ] {
+            handle.submit(ClientCommand::ProviderAccounts { operation_id, action: action.into(), request_json: request.to_string(), credential }).await.expect("account operation");
+        }
         let events = listener.received.lock().await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::ProviderCredentialStatus {
-                operation_id: 11,
-                configured_provider_ids,
-                storage_encrypted: true,
-                error: None,
-                ..
-            } if configured_provider_ids == &vec!["openai".to_string()]
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::ProviderCredentialStatus {
-                operation_id: 12,
-                configured_provider_ids,
-                storage_encrypted: true,
-                error: None,
-                ..
-            } if configured_provider_ids == &vec!["openai".to_string()]
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::ProviderCredentialStatus {
-                operation_id: 13,
-                configured_provider_ids,
-                storage_encrypted: true,
-                error: None,
-                ..
-            } if configured_provider_ids.is_empty()
-        )));
+        for (operation, expected_len) in [(11,1),(12,1),(13,0)] {
+            let snapshot = events.iter().find_map(|event| match event {
+                Ev::ProviderAccountsUpdated { operation_id, snapshot_json, error: None } if *operation_id==operation => Some(snapshot_json), _=>None,
+            }).expect("matching account acknowledgement");
+            assert!(!snapshot.contains("sk-test-secret"));
+            let parsed: lingxi_core::host::provider_accounts::AccountSnapshot = serde_json::from_str(snapshot).unwrap();
+            assert_eq!(parsed.accounts.len(), expected_len);
+            if expected_len==1 { assert_eq!(parsed.accounts[0].account_id, account_id); }
+        }
     });
 }
 
 #[tokio::test]
-async fn retained_mobile_engines_observe_other_engine_credential_changes() {
+async fn retained_mobile_engines_observe_other_engine_account_credential_changes() {
+    use lingxi_core::host::provider_accounts::{ProviderAccountAction, ProviderAccountCommand};
     let tmp = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(FakeEncryptedStore::default());
-    let platform: Arc<dyn lingxi_core::host::Platform> =
+    let platform =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()).with_secure_storage(storage));
     let build = || {
         build_mobile(
@@ -5231,46 +5169,71 @@ async fn retained_mobile_engines_observe_other_engine_credential_changes() {
         )
     };
     let first = build().await.expect("first retained engine");
-    first
-        .credentials
-        .set_provider_key("anthropic", "old-key")
-        .await
-        .unwrap();
+    let home = test_config(tmp.path()).lingxi_home;
+    let account = seed_mobile_inference_account(&first, &home).await;
     let second = build().await.expect("second retained engine");
     let captured = second
         .credentials
-        .get_anthropic_api_key()
+        .get_account_credential(&account.credential_ref)
         .await
         .unwrap()
         .unwrap();
-
-    first
-        .credentials
-        .set_provider_key("anthropic", "new-key")
+    let store = crate::provider_accounts::ProviderAccountStore::new(
+        home,
+        account.credential_ref.store_scope.clone(),
+        first.credentials.clone(),
+    )
+    .with_catalog(first.provider_account_catalog.clone());
+    let snapshot = store.snapshot().await.unwrap();
+    let updated = store
+        .execute(
+            ProviderAccountCommand {
+                expected_revision: snapshot.config_revision,
+                operation_id: None,
+                action: ProviderAccountAction::SetCredential {
+                    account_id: account.account_id.clone(),
+                },
+            },
+            Some("new-key".into()),
+        )
         .await
         .unwrap();
-    assert_eq!(
-        second
-            .credentials
-            .get_anthropic_api_key()
-            .await
-            .unwrap()
-            .unwrap()
-            .expose_secret(),
-        "new-key"
-    );
-    first
+    let current = second
         .credentials
-        .delete_provider_key("anthropic")
+        .get_account_credential(&account.credential_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.identity_generation, account.identity_generation + 1);
+    match current.kind {
+        secret::AccountCredentialKind::ApiKey { key } => assert_eq!(key.expose_secret(), "new-key"),
+        _ => panic!("wrong credential kind"),
+    }
+    store
+        .execute(
+            ProviderAccountCommand {
+                expected_revision: updated.config_revision,
+                operation_id: None,
+                action: ProviderAccountAction::Remove {
+                    account_id: account.account_id,
+                },
+            },
+            None,
+        )
         .await
         .unwrap();
     assert!(second
         .credentials
-        .get_anthropic_api_key()
+        .get_account_credential(&account.credential_ref)
         .await
         .unwrap()
         .is_none());
-    assert_eq!(captured.expose_secret(), "old-key");
+    match captured.kind {
+        secret::AccountCredentialKind::ApiKey { key } => {
+            assert_eq!(key.expose_secret(), "test-fixture-key")
+        }
+        _ => panic!("wrong captured credential"),
+    }
 }
 
 /// The picker must offer ONLY providers the routing allowlist kept.
@@ -10071,6 +10034,7 @@ impl media_api::MediaService for SuccessfulHandoffMediaService {
 
 struct SuccessfulHandoffAttachment {
     expected_audio: Arc<dyn media_api::MediaAudioChannel>,
+    selected_account: StdMutex<Option<(String, String, String)>>,
     same_channel: std::sync::atomic::AtomicBool,
     open_calls: std::sync::atomic::AtomicUsize,
     opened: tokio::sync::Notify,
@@ -10086,6 +10050,7 @@ impl SuccessfulHandoffAttachment {
     fn new(expected_audio: Arc<dyn media_api::MediaAudioChannel>) -> Self {
         Self {
             expected_audio,
+            selected_account: StdMutex::new(None),
             same_channel: std::sync::atomic::AtomicBool::new(false),
             open_calls: std::sync::atomic::AtomicUsize::new(0),
             opened: tokio::sync::Notify::new(),
@@ -10099,12 +10064,23 @@ impl super::MediaConversationAttachment for SuccessfulHandoffAttachment {
     async fn open(
         &self,
         request: tool_api::MediaAgentHandoffRequest,
-        _: orchestrator::RealtimeAgentContext,
+        prepared: orchestrator::RealtimeAgentContext,
         audio: Arc<dyn media_api::MediaAudioChannel>,
     ) -> Result<super::RealtimeAgentSessionIo, String> {
         if request.session.0 .0 != "media-session-success" {
             return Err("unexpected media session reference".into());
         }
+        if prepared.account_scope.as_deref()
+            != Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
+        {
+            return Err("the initial media account must be unbound".into());
+        }
+        let (audio_profile_name, provider_profile, provider_account_scope) = self
+            .selected_account
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "fixture account was not selected".to_owned())?;
         self.same_channel.store(
             Arc::ptr_eq(&self.expected_audio, &audio),
             std::sync::atomic::Ordering::SeqCst,
@@ -10135,6 +10111,9 @@ impl super::MediaConversationAttachment for SuccessfulHandoffAttachment {
         let (output, output_rx) = tokio::sync::mpsc::channel(8);
         *self._io_guards.lock().unwrap() = Some((input_tx, output_rx));
         Ok(super::RealtimeAgentSessionIo {
+            audio_profile_name,
+            provider_profile,
+            provider_account_scope,
             control,
             events,
             inputs,
@@ -10194,9 +10173,10 @@ fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
     config.media_service = Some(service.clone());
     config.media_conversation_attachment = Some(attachment.clone());
     let listener = Arc::new(FakeListener::default());
+    let storage = Arc::new(lingxi_core::host::InMemorySecureStorage::new());
     let engine = new_engine_with_streaming(
         config,
-        Arc::new(HostFakePlatform::new(root.path().to_path_buf())),
+        Arc::new(HostFakePlatform::new(root.path().to_path_buf()).with_secure_storage(storage)),
         listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
         Some(streaming.clone()),
@@ -10204,6 +10184,31 @@ fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
     .expect("build mobile engine with media host");
 
     engine.runtime().block_on(async {
+        let snapshot = engine
+            .provider_account_command(
+                serde_json::json!({
+                    "action":"add", "expectedRevision":0, "providerId":"openai",
+                    "displayName":"Handoff fixture", "executionBindingId":"openai",
+                    "authKind":"api_key"
+                })
+                .to_string(),
+                Some("handoff-fixture-key".into()),
+            )
+            .await
+            .expect("create a current handoff account");
+        let snapshot: lingxi_core::host::provider_accounts::AccountSnapshot =
+            serde_json::from_str(&snapshot).unwrap();
+        let account = snapshot.accounts.first().expect("created account");
+        *attachment.selected_account.lock().unwrap() = Some((
+            "openai".into(),
+            format!("account.{}", account.account_id),
+            serde_json::to_string(&llm_runtime::accounts::AccountResourceScope {
+                store_scope: account.credential_ref.store_scope.clone(),
+                account_id: account.account_id.clone(),
+                identity_generation: account.identity_generation,
+            })
+            .unwrap(),
+        ));
         engine
             .submit(ClientCommand::SendPrompt {
                 text: ClientTextDto::from("Start an audio conversation"),
@@ -10276,6 +10281,10 @@ fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
         .expect("the same active turn continues and ends after native realtime");
 
         let events = listener.received.lock().await;
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ClientEvent::TurnEnded { stop_reason: Some(reason), .. } if reason == "media_handoff_error"
+        )));
         assert_eq!(
             events
                 .iter()
@@ -10350,8 +10359,10 @@ async fn media_conversation_attachment_receives_the_existing_service_channel() {
     };
     let prepared = orchestrator::RealtimeAgentContext {
         session_id: "session-1".into(),
+        session_profile_name: "profile".into(),
+        audio_profile_name: "profile".into(),
         profile_name: Some("profile".into()),
-        account_scope: Some("profile:profile".into()),
+        account_scope: Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into()),
         conversation_mode: Default::default(),
         conversation_profile_epoch: 0,
         attachment_id: None,

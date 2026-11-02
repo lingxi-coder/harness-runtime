@@ -70,15 +70,11 @@ use linux_runtime::{
     gate_mobile_shell_ctx, lower_mobile_linux_status, mobile_launch_is_interactive,
     mobile_typescript_lsp_ready, model_visible_mobile_cwd,
 };
+pub use provider_services::ProviderCatalogEntryDto;
 use provider_services::{
     anthropic_models, apply_mobile_profile_allowlist, builtin_provider_catalog,
-    classify_provider_connection_response, lower_auth_state, mobile_provider_settings,
-    model_listings, probe_provider, provider_catalog_from_profiles, provider_connection_failure,
-    provider_id_is_valid, provider_model_catalog_from_listings, resolve_default_model_ref,
-};
-pub use provider_services::{
-    MobileOAuthManager, MobileOAuthSessionDto, MobileOAuthStateDto, ProviderCatalogEntryDto,
-    ProviderConnectionTestDto,
+    mobile_provider_settings, model_listings, provider_catalog_from_profiles,
+    provider_model_catalog_from_listings, resolve_default_model_ref,
 };
 use restoration::{canonical_cwd_string, lower_session_mode};
 mod workspace_commands;
@@ -132,11 +128,7 @@ fn split_model_selection_source(
 }
 
 #[cfg(test)]
-use provider_services::{
-    anthropic_route_id, parse_mobile_oauth_callback, take_mobile_oauth_session,
-    validate_mobile_oauth_session, MobileOAuthProvider, PendingMobileOAuthSession,
-    IOS_OAUTH_REDIRECT_URI, MOBILE_OAUTH_SESSION_TTL,
-};
+use provider_services::anthropic_route_id;
 
 #[cfg(test)]
 use automation::{
@@ -167,7 +159,6 @@ use client::adapter::{
 };
 use client::protocol::commands::{
     ClientCommand, ImageRefDto, ListingKindDto as ProtocolListingKind, PromptModeDto,
-    ProviderCredentialSecretDto,
 };
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
 use client::protocol::error::ClientError;
@@ -193,7 +184,7 @@ use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationSuccess, AudioOwner, AudioService,
 };
-use lingxi_core::host::{AuthHandle, OrchestratorHandle, Platform, SlashCommandDispatcher};
+use lingxi_core::host::{OrchestratorHandle, Platform, SlashCommandDispatcher};
 
 use secret::CredentialManager;
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, RwLock};
@@ -412,6 +403,8 @@ impl Drop for MobileSessionRetirement {
 /// runtime); F3-05 adds the async `submit` that drives the orchestrator and
 /// resolves the permission gate.
 pub struct MobileRuntime {
+    pub(crate) provider_account_catalog: crate::provider_accounts::ProviderAccountCatalog,
+    pub(crate) account_runtime: Arc<crate::account_pool_store::AccountRuntimeSource>,
     /// Official provider settings data from the same settled startup snapshot.
     pub provider_catalog: Vec<ProviderCatalogEntryDto>,
     pub official_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
@@ -522,11 +515,10 @@ pub struct MobileRuntime {
     pub(crate) wired_subagent_skill_loader_cell:
         Arc<agent::RuntimeLink<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>>,
     /// Auth handle for `/login` and `/logout`.
-    pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
     /// and the one pending PKCE callback, while the foreign UI only receives a
     /// redacted session descriptor and returns the callback URL.
-    pub oauth: Arc<MobileOAuthManager>,
+    pub(crate) account_authority: Arc<crate::provider_accounts::AccountOAuthCoordinator>,
     /// The connection-scoped [`AdapterPermissionGate`] handle. Mobile ALWAYS
     /// binds the adapter gate (no always-allow mode), so unlike desktop this is
     /// never `None`: F3-05's `submit(ApprovePermission/DenyPermission)` calls
@@ -660,7 +652,7 @@ struct SlashAuthoritySnapshot {
     model: String,
     model_source: Option<ClientTextDto>,
     permission_mode: String,
-    auth: client::protocol::listings::AuthStateDto,
+
     catalog: Vec<SlashCommandDto>,
 }
 
@@ -688,9 +680,6 @@ fn lower_model_source(source: Option<&Utf16JsonProjection>) -> Option<ClientText
 }
 
 #[cfg(test)]
-#[path = "host/tests/mobile_oauth_callback_tests.rs"]
-mod mobile_oauth_callback_tests;
-
 #[cfg(test)]
 #[path = "host/tests/mobile_tool_gate_tests.rs"]
 mod mobile_tool_gate_tests;
@@ -2606,6 +2595,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_id.to_string(),
                             name: name.into(),
                             agent_type,
@@ -2661,6 +2651,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                         .emit(ClientEvent::SessionAgentUpdated {
                             session_id: bound.session_id,
                             agent: SessionAgentSummaryDto {
+                                report_delivery: None,
                                 agent_id: agent_key,
                                 name: bound.name.into(),
                                 agent_type: bound.agent_type,
@@ -2719,6 +2710,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -2803,7 +2795,9 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .await;
             }
             lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
-                agent_id, ..
+                agent_id,
+                handback,
+                ..
             } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
@@ -2814,6 +2808,9 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: handback
+                                .as_ref()
+                                .and_then(|state| state.delivery_status().map(str::to_owned)),
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -2844,6 +2841,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -2869,6 +2867,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -7208,57 +7207,106 @@ impl MobileEngineHandle {
             .unwrap_or_else(|| self.inner.provider_catalog.clone())
     }
 
-    /// Start a native OAuth authorization-code flow. PKCE verifier/state stay
-    /// in the Rust-owned coordinator; the foreign host receives only the URL.
-    pub async fn begin_o_auth(
+    /// Read the complete secret-free account directory without modifying credentials.
+    pub async fn provider_accounts_snapshot(&self) -> Result<String, MobileEngineError> {
+        let root = self.lingxi_home.clone();
+        let scope = crate::provider_accounts::account_store_scope(
+            &root,
+            &format!("{:?}", self.inner.credentials.account_storage_backend()),
+        );
+        let store = crate::provider_accounts::ProviderAccountStore::new(
+            root,
+            scope,
+            self.inner.credentials.clone(),
+        )
+        .with_catalog(self.inner.provider_account_catalog.clone());
+        serde_json::to_string(
+            &store
+                .snapshot()
+                .await
+                .map_err(MobileEngineError::Internal)?,
+        )
+        .map_err(|_| MobileEngineError::Internal("account snapshot encoding failed".into()))
+    }
+    /// Revision-fenced account action; the optional secret never enters directory/event JSON.
+    pub async fn provider_account_command(
         &self,
-        provider: String,
-        redirect_uri: String,
-    ) -> Result<MobileOAuthSessionDto, MobileEngineError> {
-        if !self.inner.oauth_supported {
-            return Err(MobileEngineError::Internal(
-                "OAuth requires an encrypted secure credential store".to_string(),
-            ));
+        request_json: String,
+        credential: Option<String>,
+    ) -> Result<String, MobileEngineError> {
+        use lingxi_core::host::provider_accounts::{ProviderAccountAction, ProviderAccountCommand};
+        let command: ProviderAccountCommand = serde_json::from_str(&request_json)
+            .map_err(|_| MobileEngineError::Internal("invalid account command".into()))?;
+        let root = self.lingxi_home.clone();
+        let scope = crate::provider_accounts::account_store_scope(
+            &root,
+            &format!("{:?}", self.inner.credentials.account_storage_backend()),
+        );
+        let store = Arc::new(
+            crate::provider_accounts::ProviderAccountStore::new(
+                root,
+                scope,
+                self.inner.credentials.clone(),
+            )
+            .with_catalog(self.inner.provider_account_catalog.clone()),
+        );
+        let authority = &self.inner.account_authority;
+        let result = match command.action.clone() {
+            ProviderAccountAction::BeginOauth { account_id } => {
+                if !self.inner.oauth_supported {
+                    return Err(MobileEngineError::Internal(
+                        "OAuth requires an encrypted secure credential store".into(),
+                    ));
+                }
+                return serde_json::to_string(
+                    &authority
+                        .begin_device(account_id, command.expected_revision)
+                        .await
+                        .map_err(MobileEngineError::Internal)?,
+                )
+                .map_err(|_| MobileEngineError::Internal("OAuth flow encoding failed".into()));
+            }
+            ProviderAccountAction::PollOauth {
+                account_id,
+                flow_id,
+            } => {
+                let mut result = authority
+                    .poll_device(&account_id, &flow_id)
+                    .await
+                    .map_err(MobileEngineError::Internal)?;
+                if result.snapshot.is_some() {
+                    let snapshot = store
+                        .snapshot()
+                        .await
+                        .map_err(MobileEngineError::Internal)?;
+                    self.inner
+                        .account_runtime
+                        .refresh(snapshot.clone())
+                        .map_err(MobileEngineError::Internal)?;
+                    result.snapshot = Some(snapshot);
+                }
+                return serde_json::to_string(&result)
+                    .map_err(|_| MobileEngineError::Internal("OAuth poll encoding failed".into()));
+            }
+            ProviderAccountAction::CancelOauth {
+                account_id,
+                flow_id,
+            } => {
+                authority
+                    .cancel(&account_id, &flow_id)
+                    .await
+                    .map_err(MobileEngineError::Internal)?;
+                store.snapshot().await
+            }
+            _ => store.execute(command, credential).await,
         }
-        self.inner.oauth.begin(provider, redirect_uri).await
-    }
-
-    /// Complete a native OAuth callback. The callback URL is validated and the
-    /// resulting tokens are persisted inside Rust; no token crosses FFI.
-    pub async fn complete_o_auth(
-        &self,
-        flow_id: String,
-        callback_url: String,
-    ) -> Result<MobileOAuthStateDto, MobileEngineError> {
-        self.inner.oauth.complete(flow_id, callback_url).await
-    }
-
-    /// Cancel one pending native OAuth flow.
-    pub async fn cancel_o_auth(&self, flow_id: String) {
-        self.inner.oauth.cancel(flow_id).await;
-    }
-
-    /// Remove persisted OAuth credentials for one provider.
-    pub async fn logout_o_auth(&self, provider: String) -> Result<(), MobileEngineError> {
-        self.inner.oauth.logout(provider).await
-    }
-
-    /// Return non-secret OAuth account state restored from the secure store.
-    pub async fn auth_state(
-        &self,
-        provider: String,
-    ) -> Result<MobileOAuthStateDto, MobileEngineError> {
-        self.inner.oauth.state(provider).await
-    }
-
-    /// Probe provider metadata with an OAuth token, without an inference call.
-    pub async fn test_o_auth_connection(
-        &self,
-        provider: String,
-        api_base: String,
-        model: String,
-    ) -> ProviderConnectionTestDto {
-        self.inner.oauth.test(provider, api_base, model).await
+        .map_err(MobileEngineError::Internal)?;
+        self.inner
+            .account_runtime
+            .refresh(result.clone())
+            .map_err(MobileEngineError::Internal)?;
+        serde_json::to_string(&result)
+            .map_err(|_| MobileEngineError::Internal("account snapshot encoding failed".into()))
     }
 
     /// Record the iOS risk acknowledgement that permits a subsequent live
@@ -7508,6 +7556,34 @@ impl MobileEngineHandle {
                 .update_shell_session_activity(true, busy, true);
         }
         match command {
+            ClientCommand::ProviderAccounts {
+                operation_id,
+                action,
+                request_json,
+                credential,
+            } => {
+                let result = if action == "list" {
+                    self.provider_accounts_snapshot().await
+                } else {
+                    self.provider_account_command(request_json, credential.map(|s| s.value))
+                        .await
+                };
+                let (snapshot_json, error) = match result {
+                    Ok(json) => (json, None),
+                    Err(_) => (
+                        String::new(),
+                        Some("provider account operation failed".into()),
+                    ),
+                };
+                self.connection_sink
+                    .emit(ClientEvent::ProviderAccountsUpdated {
+                        operation_id,
+                        snapshot_json,
+                        error,
+                    })
+                    .await;
+                Ok(())
+            }
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
             ClientCommand::GetAudioSessionContext { request_id } => {
                 let session_id = self
@@ -7530,7 +7606,9 @@ impl MobileEngineHandle {
                     .emit(ClientEvent::AudioSessionContext {
                         request_id,
                         session_id: Some(session_id),
-                        account_scope: profile.as_ref().map(|profile| format!("profile:{profile}")),
+                        account_scope: profile.as_ref().map(|_| {
+                            lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned()
+                        }),
                         profile_id: profile,
                         media_owner: None,
                     })
@@ -7992,112 +8070,6 @@ impl MobileEngineHandle {
             // Mobile uses the same CredentialManager instance as the live
             // multi-provider client. Settings writes therefore become visible
             // to the next request immediately; secret values are never echoed.
-            ClientCommand::ListProviderCredentials {
-                operation_id,
-                provider_ids,
-                preview_provider_ids,
-            } => {
-                let validation_error = if provider_ids.len() > 32
-                    || provider_ids.iter().any(|id| !provider_id_is_valid(id))
-                    || preview_provider_ids
-                        .iter()
-                        .any(|id| !provider_ids.contains(id))
-                {
-                    Some("invalid provider credential query".to_string())
-                } else {
-                    None
-                };
-                self.emit_provider_credential_status(
-                    operation_id,
-                    &provider_ids,
-                    &preview_provider_ids,
-                    validation_error,
-                )
-                .await;
-                Ok(())
-            }
-            ClientCommand::SetProviderCredential {
-                operation_id,
-                provider_id,
-                credential,
-            } => {
-                let credential_preview =
-                    secret::masked_credential_preview(credential.expose_secret());
-                let error = if !provider_id_is_valid(&provider_id)
-                    || credential.expose_secret().is_empty()
-                    || credential.expose_secret().len() > 16_384
-                    || credential.expose_secret().contains('\0')
-                {
-                    Some("invalid provider credential".to_string())
-                } else {
-                    self.inner
-                        .credentials
-                        .set_provider_key(&provider_id, credential.expose_secret())
-                        .await
-                        .err()
-                        .map(|failure| format!("failed to store provider credential: {failure}"))
-                };
-                let applied = error.is_none();
-                let credential_previews = if applied {
-                    HashMap::from([(provider_id.clone(), credential_preview)])
-                } else {
-                    HashMap::new()
-                };
-                self.event_sink
-                    .emit(ClientEvent::ProviderCredentialStatus {
-                        operation_id,
-                        configured_provider_ids: applied
-                            .then_some(provider_id.clone())
-                            .into_iter()
-                            .collect(),
-                        unavailable_provider_ids: (!applied)
-                            .then_some(provider_id)
-                            .into_iter()
-                            .collect(),
-                        storage_encrypted: self
-                            .inner
-                            .credentials
-                            .provider_key_storage_is_encrypted(),
-                        credential_previews,
-                        error,
-                    })
-                    .await;
-                Ok(())
-            }
-            ClientCommand::DeleteProviderCredential {
-                operation_id,
-                provider_id,
-            } => {
-                let error = if !provider_id_is_valid(&provider_id) {
-                    Some("invalid provider id".to_string())
-                } else {
-                    self.inner
-                        .credentials
-                        .delete_provider_key(&provider_id)
-                        .await
-                        .err()
-                        .map(|failure| format!("failed to delete provider credential: {failure}"))
-                };
-                let applied = error.is_none();
-                self.event_sink
-                    .emit(ClientEvent::ProviderCredentialStatus {
-                        operation_id,
-                        configured_provider_ids: Vec::new(),
-                        unavailable_provider_ids: (!applied)
-                            .then_some(provider_id)
-                            .into_iter()
-                            .collect(),
-                        storage_encrypted: self
-                            .inner
-                            .credentials
-                            .provider_key_storage_is_encrypted(),
-                        credential_previews: HashMap::new(),
-                        error,
-                    })
-                    .await;
-                Ok(())
-            }
-
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let model_selection = model.into_projection();
@@ -8258,62 +8230,6 @@ impl MobileEngineHandle {
             }
 
             // ── Auth ─────────────────────────────────────────────────────────
-            ClientCommand::Login => {
-                // Audit (secure-storage): on a build with no persisting secure
-                // store (mobile currently wires the PlainTextSecureStorage stub),
-                // an OAuth exchange would authenticate but fail to persist its
-                // tokens with a cryptic `BackendUnavailable`. Short-circuit with a
-                // clear, actionable message instead. API-key auth needs no /login.
-                // Lifts automatically once a native Keychain/Keystore store is
-                // injected (then `oauth_supported` is true). §11 / Plan-17 follow-up.
-                if !self.inner.oauth_supported {
-                    self.event_sink
-                        .emit(ClientEvent::Error {
-                            kind: client::protocol::events::ErrorKindDto::Internal,
-                            message: "OAuth login is not yet supported on this platform \
-                                      (no secure credential store); configure an API key instead."
-                                .into(),
-                        })
-                        .await;
-                    self.event_sink
-                        .emit(ClientEvent::AuthState {
-                            state: lower_auth_state(self.inner.auth.current_user().await),
-                        })
-                        .await;
-                    return Ok(());
-                }
-                let state = match self.inner.auth.login().await {
-                    Ok(li) => lower_auth_state(Some(li)),
-                    Err(e) => {
-                        self.event_sink
-                            .emit(ClientEvent::Error {
-                                kind: client::protocol::events::ErrorKindDto::Internal,
-                                message: format!("login failed: {e}").into(),
-                            })
-                            .await;
-                        lower_auth_state(self.inner.auth.current_user().await)
-                    }
-                };
-                self.event_sink.emit(ClientEvent::AuthState { state }).await;
-                Ok(())
-            }
-            ClientCommand::Logout => {
-                if let Err(e) = self.inner.auth.logout().await {
-                    self.event_sink
-                        .emit(ClientEvent::Error {
-                            kind: client::protocol::events::ErrorKindDto::Internal,
-                            message: format!("logout failed: {e}").into(),
-                        })
-                        .await;
-                }
-                self.event_sink
-                    .emit(ClientEvent::AuthState {
-                        state: lower_auth_state(self.inner.auth.current_user().await),
-                    })
-                    .await;
-                Ok(())
-            }
-
             // ── Compaction ─────────────────────────────────────────────────
             ClientCommand::ForceCompact => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
@@ -8912,103 +8828,6 @@ impl MobileEngineHandle {
     /// DNS/TLS, authentication, and the selected model without consuming
     /// inference tokens. An optional draft credential takes precedence over the
     /// secure-store value and is never persisted.
-    pub async fn test_provider_connection(
-        &self,
-        provider_id: String,
-        provider_preset: String,
-        api_base: String,
-        model: String,
-        credential_override: Option<ProviderCredentialSecretDto>,
-    ) -> ProviderConnectionTestDto {
-        if !provider_id_is_valid(&provider_id) {
-            return provider_connection_failure("Provider 标识无效", false, false, None, 0, false);
-        }
-
-        let draft = credential_override
-            .as_ref()
-            .map(ProviderCredentialSecretDto::expose_secret)
-            .filter(|value| !value.trim().is_empty());
-        let used_stored_credential = draft.is_none();
-        let credential = if let Some(value) = draft {
-            value.to_string()
-        } else {
-            match self.inner.credentials.get_provider_key(&provider_id).await {
-                Ok(Some(secret)) => secret.expose_secret().clone(),
-                Ok(None) => {
-                    return provider_connection_failure(
-                        "请先输入或保存 API Key",
-                        false,
-                        false,
-                        None,
-                        0,
-                        true,
-                    );
-                }
-                Err(_) => {
-                    return provider_connection_failure(
-                        "无法读取本机安全存储中的 API Key",
-                        false,
-                        false,
-                        None,
-                        0,
-                        true,
-                    );
-                }
-            }
-        };
-        if credential.len() > 16_384 || credential.contains('\0') {
-            return provider_connection_failure(
-                "API Key 格式无效",
-                false,
-                false,
-                None,
-                0,
-                used_stored_credential,
-            );
-        }
-
-        use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
-        let catalog_protocol = self.inner.official_catalog.as_ref().and_then(|source| {
-            source
-                .snapshot()
-                .providers
-                .iter()
-                .find(|p| {
-                    p.profile_name == provider_preset
-                        || (provider_preset == "google" && p.profile_name == "gemini")
-                })
-                .map(|p| p.protocol)
-        });
-        let kind = match catalog_protocol {
-            Some(llm_runtime::ProtocolFamily::AnthropicMessages) => ProbeProtocol::Anthropic,
-            Some(llm_runtime::ProtocolFamily::GeminiGenerateContent) => ProbeProtocol::Google,
-            Some(_) => ProbeProtocol::OpenAi,
-            None => match provider_preset.as_str() {
-                "anthropic" => ProbeProtocol::Anthropic,
-                "google" => ProbeProtocol::Google,
-                _ => ProbeProtocol::OpenAi,
-            },
-        };
-        let started = std::time::Instant::now();
-        let response = probe_provider(
-            &api_base,
-            kind,
-            ProbeCredential {
-                token: credential.into(),
-                bearer: false,
-                account_id: None,
-                fedramp: false,
-            },
-        )
-        .await;
-        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        classify_provider_connection_response(
-            response,
-            model.trim(),
-            latency_ms,
-            used_stored_credential,
-        )
-    }
 
     /// The tokio runtime [`tokio::runtime::Id`] (as a string token) this async
     /// export RESOLVES ON (plan F3-07).
@@ -9339,75 +9158,6 @@ impl MobileEngineHandle {
         }
     }
 
-    async fn emit_provider_credential_status(
-        &self,
-        operation_id: u64,
-        provider_ids: &[String],
-        preview_provider_ids: &[String],
-        operation_error: Option<String>,
-    ) {
-        if let Some(error) = operation_error {
-            self.event_sink
-                .emit(ClientEvent::ProviderCredentialStatus {
-                    operation_id,
-                    configured_provider_ids: Vec::new(),
-                    unavailable_provider_ids: provider_ids.to_vec(),
-                    storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
-                    credential_previews: HashMap::new(),
-                    error: Some(error),
-                })
-                .await;
-            return;
-        }
-
-        let mut configured_provider_ids = Vec::new();
-        let mut unavailable_provider_ids = Vec::new();
-        let mut credential_previews = HashMap::new();
-        let mut failures = Vec::new();
-        for provider_id in provider_ids {
-            match self.inner.credentials.has_provider_key(provider_id).await {
-                Ok(true) => {
-                    configured_provider_ids.push(provider_id.clone());
-                    if preview_provider_ids.contains(provider_id) {
-                        match self.inner.credentials.get_provider_key(provider_id).await {
-                            Ok(Some(secret)) => {
-                                credential_previews.insert(
-                                    provider_id.clone(),
-                                    secret::masked_credential_preview(secret.expose_secret()),
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(failure) => {
-                                failures.push(format!("{provider_id} preview: {failure}"))
-                            }
-                        }
-                    }
-                }
-                Ok(false) => {}
-                Err(failure) => {
-                    unavailable_provider_ids.push(provider_id.clone());
-                    failures.push(format!("{provider_id}: {failure}"));
-                }
-            }
-        }
-        let error = (!failures.is_empty()).then(|| {
-            format!(
-                "provider credential storage is unavailable ({})",
-                failures.join("; ")
-            )
-        });
-        self.event_sink
-            .emit(ClientEvent::ProviderCredentialStatus {
-                operation_id,
-                configured_provider_ids,
-                unavailable_provider_ids,
-                storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
-                credential_previews,
-                error,
-            })
-            .await;
-    }
-
     /// Enumerate the on-disk resumable-session catalog and emit a `SessionList`
     /// event (SESSIONS/HISTORY).
     ///
@@ -9689,6 +9439,10 @@ impl MobileEngineHandle {
             }
         }
         let row = session::agent_rows::read_row(path.parent()?, &agent_id).await;
+        let report_delivery = row
+            .as_ref()
+            .and_then(|row| row.handback_state.as_ref())
+            .and_then(|state| state.delivery_status().map(str::to_owned));
         let (row_name, row_type, row_model, row_model_profile, parked) = row
             .map(|row| {
                 (
@@ -9735,6 +9489,7 @@ impl MobileEngineHandle {
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
         Some(SessionAgentSummaryDto {
+            report_delivery,
             agent_id,
             name: client::protocol::text::ClientTextDto::from_projection(&name)
                 .expect("agent label is text"),
@@ -9756,6 +9511,7 @@ impl MobileEngineHandle {
             "idle"
         };
         let mut agents = vec![SessionAgentSummaryDto {
+            report_delivery: None,
             agent_id: "main".to_string(),
             name: "Main agent".into(),
             agent_type: "main".to_string(),
@@ -9993,7 +9749,7 @@ impl MobileEngineHandle {
                 // scope here. The orchestrator is authoritative once built,
                 // while Auto is the built-in fallback for new runtimes.
                 .unwrap_or_else(|| PermissionMode::Auto.wire_str().to_string()),
-            auth: lower_auth_state(self.inner.auth.current_user().await),
+
             catalog: self.slash_command_catalog_snapshot().await,
         }
     }
@@ -10024,13 +9780,6 @@ impl MobileEngineHandle {
             self.event_sink
                 .emit(ClientEvent::PermissionModeChanged {
                     mode: after.permission_mode.clone(),
-                })
-                .await;
-        }
-        if before.auth != after.auth {
-            self.event_sink
-                .emit(ClientEvent::AuthState {
-                    state: after.auth.clone(),
                 })
                 .await;
         }
@@ -10164,10 +9913,6 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::DoctorReport { report })
                     .await;
-            }
-            ProtocolListingKind::Auth => {
-                let state = lower_auth_state(self.inner.auth.current_user().await);
-                self.event_sink.emit(ClientEvent::AuthState { state }).await;
             }
             // No engine handle on mobile in the foundation — additive to wire.
             _ => {

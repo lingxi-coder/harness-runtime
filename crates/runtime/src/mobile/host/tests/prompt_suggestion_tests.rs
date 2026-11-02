@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 use client::protocol::events::ClientEvent;
 use lingxi_core::host::{OrchestratorHandle, PromptSuggestionContext};
 
-use super::{build_mobile, test_config, FakeListener, HostFakePlatform, RecordingPermissionSink};
+use super::{
+    build_mobile, seed_mobile_inference_account, test_config, FakeEncryptedStore, FakeListener,
+    HostFakePlatform, RecordingPermissionSink,
+};
 
 #[derive(Default)]
 struct SuggestionAnalytics {
@@ -93,19 +96,22 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
     let mut config = test_config(root.path());
     config.workspace_trusted = true;
     config.api_base = base;
-    config.api_key = "test-fixture-key".into();
     config.default_model = "claude-sonnet-4-5".into();
     let listener = Arc::new(FakeListener::default());
     let build_started = Instant::now();
     let runtime = build_mobile(
         config,
-        Arc::new(HostFakePlatform::new(root.path().into())),
+        Arc::new(
+            HostFakePlatform::new(root.path().into())
+                .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
+        ),
         listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
     )
     .await
     .unwrap();
     let build_elapsed = build_started.elapsed();
+    seed_mobile_inference_account(&runtime, &test_config(root.path()).lingxi_home).await;
     let analytics = Arc::new(SuggestionAnalytics::default());
     runtime
         .mcp_tool_context

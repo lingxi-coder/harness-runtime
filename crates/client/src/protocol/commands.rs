@@ -376,37 +376,14 @@ define_client_command! {
         mode: String,
     },
 
-    // ── Provider credentials ─────────────────────────────────────────────
-    // Return non-secret availability and masked suffix previews for the
-    // requested provider ids. Plaintext secret values are never returned.
-    ListProviderCredentials {
-        // Main-process correlator echoed by `ProviderCredentialStatus`.
+    /// Host account lifecycle command. request_json is a typed ProviderAccountCommand;
+    /// secrets use the authenticated private host channel only.
+    ProviderAccounts {
         operation_id: u64,
-        // Provider/keychain ids to inspect.
-        provider_ids: Vec<String>,
-        // Optional provider ids whose masked suffix should be returned. Keep
-        // this empty for status lists so macOS can use an attribute-only
-        // Keychain query without prompting to decrypt every saved secret.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        preview_provider_ids: Vec<String>,
-    },
-
-    // Persist a provider credential through the engine's shared secure store.
-    SetProviderCredential {
-        // Main-process correlator echoed by `ProviderCredentialStatus`.
-        operation_id: u64,
-        // Provider/keychain id used by CLI, TUI, and Desktop.
-        provider_id: String,
-        // Secret received only over the authenticated loopback bridge.
-        credential: ProviderCredentialSecretDto,
-    },
-
-    // Delete a provider credential from the engine's shared secure store.
-    DeleteProviderCredential {
-        // Main-process correlator echoed by `ProviderCredentialStatus`.
-        operation_id: u64,
-        // Provider/keychain id used by CLI, TUI, and Desktop.
-        provider_id: String,
+        action: String,
+        request_json: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<ProviderCredentialSecretDto>,
     },
 
     // ── Model ─────────────────────────────────────────────────────────────
@@ -499,14 +476,6 @@ define_client_command! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<SessionModeDto>,
     },
-
-    // ── Auth + session control ────────────────────────────────────────────
-    // Begin the login flow. Auth state surfaces via
-    // [`AuthState`](crate::protocol::events::ClientEvent::AuthState).
-    Login,
-
-    // Sign out the current user.
-    Logout,
 
     // Force a context compaction now. Reports via
     // [`CompactionCompleted`](crate::protocol::events::ClientEvent::CompactionCompleted).
@@ -765,20 +734,6 @@ define_client_command! {
     // stored credential back to the client. An optional draft credential is
     // used for this request only and is never persisted. Appended to preserve
     // every previously frozen UniFFI variant ordinal.
-    TestProviderConnection {
-        // Main-process correlator echoed by `ProviderConnectionTested`.
-        operation_id: u64,
-        // Provider/keychain id used to select authentication semantics.
-        provider_id: String,
-        // Provider API base selected from the built-in catalog (or the saved
-        // Anthropic override).
-        api_base: String,
-        // Model id to verify against a recognized model-list response.
-        model: String,
-        // Unsaved form value, when present. Omitted to use secure storage.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        credential_override: Option<ProviderCredentialSecretDto>,
-    },
     /// Manage durable scheduled tasks in the active workspace.
     CronManage {
         request_id: String,
@@ -1049,30 +1004,16 @@ impl From<ClientCommandWire> for ClientCommand {
                 Self::CancelAskUserQuestion { request_id }
             }
             ClientCommandWire::SetPermissionMode { mode } => Self::SetPermissionMode { mode },
-            ClientCommandWire::ListProviderCredentials {
+            ClientCommandWire::ProviderAccounts {
                 operation_id,
-                provider_ids,
-                preview_provider_ids,
-            } => Self::ListProviderCredentials {
-                operation_id,
-                provider_ids,
-                preview_provider_ids,
-            },
-            ClientCommandWire::SetProviderCredential {
-                operation_id,
-                provider_id,
+                action,
+                request_json,
                 credential,
-            } => Self::SetProviderCredential {
+            } => Self::ProviderAccounts {
                 operation_id,
-                provider_id,
+                action,
+                request_json,
                 credential,
-            },
-            ClientCommandWire::DeleteProviderCredential {
-                operation_id,
-                provider_id,
-            } => Self::DeleteProviderCredential {
-                operation_id,
-                provider_id,
             },
             ClientCommandWire::SetModel { model } => Self::SetModel { model },
             ClientCommandWire::ListModels => Self::ListModels,
@@ -1106,8 +1047,6 @@ impl From<ClientCommandWire> for ClientCommand {
                 expected_mode,
             },
             ClientCommandWire::ListSessions { limit, mode } => Self::ListSessions { limit, mode },
-            ClientCommandWire::Login => Self::Login,
-            ClientCommandWire::Logout => Self::Logout,
             ClientCommandWire::ForceCompact => Self::ForceCompact,
             ClientCommandWire::ClearSession => Self::ClearSession,
             ClientCommandWire::TaskList {
@@ -1193,19 +1132,6 @@ impl From<ClientCommandWire> for ClientCommand {
             } => Self::ForkSession {
                 session_id,
                 target_mode,
-            },
-            ClientCommandWire::TestProviderConnection {
-                operation_id,
-                provider_id,
-                api_base,
-                model,
-                credential_override,
-            } => Self::TestProviderConnection {
-                operation_id,
-                provider_id,
-                api_base,
-                model,
-                credential_override,
             },
             ClientCommandWire::CronManage {
                 request_id,
@@ -1461,8 +1387,6 @@ impl<'de> Deserialize<'de> for ClientCommand {
             }),
             "list_models" => Ok(Self::ListModels),
             "list_session_agents" => Ok(Self::ListSessionAgents),
-            "login" => Ok(Self::Login),
-            "logout" => Ok(Self::Logout),
             "force_compact" => Ok(Self::ForceCompact),
             "clear_session" => Ok(Self::ClearSession),
             "request_exit" => Ok(Self::RequestExit),
@@ -1626,8 +1550,6 @@ pub enum ListingKindDto {
     Status,
     /// Effective settings + provenance → `SettingsSnapshot`.
     Settings,
-    /// Auth state → `AuthState`.
-    Auth,
     /// `/doctor` report → `DoctorReport`.
     Doctor,
     /// Task listing → `TaskRow` (one per task).

@@ -32,3 +32,8 @@ Report denied/unavailable/canceled outcomes without manufacturing success.
 Source anchors: Harness `crates/tools/{computer-use,android-use,mobile}`,
 `crates/platforms/macos-computer-control`; product browser integration and
 Android channel feature providers.
+
+The current native browser installation path is macOS Chrome extension/native
+messaging. Do not infer arbitrary browser or Windows/Linux backend availability
+from generic transport types. Android Play's feature provider can report no
+engine/backend; an installed app does not override that channel boundary.

@@ -111,6 +111,94 @@ fn fusion_error(error: impl ToString) -> lingxi_core::host::FusionError {
 }
 
 impl DesktopFusionAttempts {
+    fn rebind_account_route(
+        &self,
+        original: &PinnedRoute,
+        request: &llm_runtime::LlmRequest,
+        prepared: &llm_runtime::PreparedLlmCall,
+    ) -> Result<PinnedRoute, LlmError> {
+        let service = self
+            .service
+            .upgrade()
+            .ok_or_else(|| unavailable("attempt service unavailable"))?;
+        let selected = request
+            .execution
+            .selected_account
+            .as_ref()
+            .ok_or_else(|| unavailable("changed route has no selected account authority"))?;
+        let actual = &prepared.route.resolved_route;
+        let account = service
+            .authorized_account_route(&original.resolved, selected, actual)
+            .ok_or_else(|| unavailable("changed route is not an authorized account candidate"))?;
+        let listing = service
+            .model_listings()
+            .into_iter()
+            .find(|listing| {
+                (listing.profile_name == actual.profile_name
+                    || listing.profile_name == account.execution_binding_id)
+                    && listing.request_model == actual.request_model
+            })
+            .ok_or_else(|| unavailable("selected account model metadata unavailable"))?;
+        let limits = fusion::ModelLimits::from_metadata(&listing.metadata);
+        if !limits.has_usable_capacity(original.output_cap) {
+            return Err(unavailable(
+                "selected account has no bounded model capacity",
+            ));
+        }
+        let configured = service
+            .profile_pricing_config(&actual.profile_name)
+            .ok_or_else(|| unavailable("selected account pricing configuration unavailable"))?;
+        // A newly added account can reuse only its own explicit execution
+        // binding's price sheet. A different account's tariff is never reused.
+        let actual_model = pricing::model_ref(&actual.pricing_model);
+        let (mut price, mut fast) =
+            match pricing::captured_prices(&self.prices, &actual_model, actual, &configured) {
+                Ok(prices) => prices,
+                Err(_) => {
+                    let binding = service
+                        .resolve_media_route(
+                            &actual.request_model,
+                            Some(&account.execution_binding_id),
+                        )
+                        .map_err(unavailable)?
+                        .main;
+                    let (mut price, mut fast) = pricing::captured_prices(
+                        &self.prices,
+                        &pricing::model_ref(&binding.pricing_model),
+                        &binding,
+                        &configured,
+                    )
+                    .map_err(unavailable)?;
+                    price.model_ref = actual_model.clone();
+                    if let Some(fast) = fast.as_mut() {
+                        fast.model_ref = actual_model.clone();
+                    }
+                    (price, fast)
+                }
+            };
+        let bounds = service.attempt_price_bounds(actual).map_err(unavailable)?;
+        let token_pricing_requires_quote = bounds.is_some();
+        let default_fast = bounds.as_ref().is_some_and(|bounds| bounds.default_fast);
+        if let Some(bounds) = bounds {
+            fast = bounds
+                .fast
+                .as_ref()
+                .map(|rates| pricing::with_rate_bounds(&price, rates))
+                .transpose()
+                .map_err(unavailable)?;
+            price = pricing::with_rate_bounds(&price, &bounds.standard).map_err(unavailable)?;
+        }
+        Ok(PinnedRoute {
+            resolved: actual.clone(),
+            limits,
+            output_cap: limits.output_cap(original.output_cap),
+            input_cap: original.input_cap,
+            pricing: price,
+            fast,
+            token_pricing_requires_quote,
+            default_fast,
+        })
+    }
     pub(crate) fn new(
         service: Arc<llm_runtime::ApiService>,
         budget: Arc<cost::BudgetEnforcer>,
@@ -477,9 +565,13 @@ impl llm_runtime::ModelAttemptHooks for DesktopFusionAttempts {
             .routes
             .get(&key)
             .ok_or_else(|| unavailable("invalid registered stage/slot"))?;
-        if prepared.route.resolved_route != route.resolved {
-            return Err(unavailable("prepared route differs from registration"));
-        }
+        let rebound;
+        let route = if prepared.route.resolved_route != route.resolved {
+            rebound = self.rebind_account_route(route, request, prepared)?;
+            &rebound
+        } else {
+            route
+        };
         let (pricing, usage_contract, input, output, money) =
             pricing::quote(route, prepared).map_err(unavailable)?;
         let profile = route.resolved.profile_name.clone();

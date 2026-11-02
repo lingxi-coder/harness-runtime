@@ -42,6 +42,6 @@ fn version_is_semver() {
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_thirty_zero_zero() {
+fn version_is_thirty_two_zero_zero() {
     assert_eq!(CLIENT_PROTOCOL_VERSION, "32.0.0");
 }

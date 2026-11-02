@@ -460,7 +460,7 @@ impl ConversationOrchestrator {
             migrations::global_config::global_config_path()
         } else {
             // A custom/mobile config home must never consult the desktop user's ambient config.
-            Some(home.join(branding::LEGACY_GLOBAL_CONFIG_FILE))
+            Some(home.join(branding::GLOBAL_CONFIG_FILE))
         }
     }
 

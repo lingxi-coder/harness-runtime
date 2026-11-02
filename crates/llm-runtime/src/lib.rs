@@ -38,6 +38,7 @@ mod attempt_pricing;
 mod codec_tests;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
+pub mod accounts;
 pub mod catalog;
 pub mod catalog_task;
 #[allow(missing_docs)]
@@ -102,6 +103,7 @@ pub use auth::external_aws::{
 pub use auth::provider::{
     AnthropicAuthSnapshot, CopilotExchangeCredentialProvider, Credential, CredentialProvider,
     CredentialScope, CredentialSource, EnvCredentialProvider, StaticCredentialProvider,
+    VersionedCredential, VersionedCredentialError,
 };
 pub use catalog::{builtin_presets, catalog_from_profiles, BuiltinCatalog};
 pub use client::{

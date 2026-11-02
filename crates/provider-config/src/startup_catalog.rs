@@ -567,11 +567,22 @@ impl llm_runtime::client::ModelRuntimeSource for LiveRuntime {
                 .as_ref()
                 .and_then(|r| r.get("mobileEnabledProfiles"))
             {
-                assembled.client_config.providers.retain(|p| {
-                    enabled.as_array().is_some_and(|ids| {
-                        ids.iter().any(|id| id.as_str() == Some(&p.profile_name))
+                let profiles = enabled
+                    .as_array()
+                    .filter(|ids| {
+                        ids.iter()
+                            .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
                     })
-                });
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(|id| id.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assembled
+                    .client_config
+                    .providers
+                    .retain(|profile| crate::mobile_profile_allowed(profile, &profiles));
             }
         }
         match template.reconfigured(assembled.client_config) {

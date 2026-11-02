@@ -3752,24 +3752,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        // claude-code has no standalone `config.json`: `/config` reads/writes
-        // `<config-home>/settings.json` (`$LINGXI_CONFIG_DIR` else `~/.claude`).
-        // Edit that real file, not a phantom under `dirs::config_dir()`.
-        let home = dirs::home_dir().ok_or_else(|| {
-            HandleError::ActionFailed("home dir unavailable on this platform".into())
-        })?;
-        let target = memory::lingxi_md::user_config_dir(&home).join("settings.json");
+        let target = self
+            .config_home
+            .as_ref()
+            .map(|home| home.join("settings.json"))
+            .or_else(lingxi_core::settings::loader::user_settings_path)
+            .ok_or_else(|| {
+                HandleError::ActionFailed("user settings path unavailable on this host".into())
+            })?;
         spawn_editor_on(target, "{}\n").await
     }
 
     async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        // claude-code has no `permissions.json`: tool permissions live under the
-        // `permissions` key of `<config-home>/settings.json`. Open that file.
-        let home = dirs::home_dir().ok_or_else(|| {
-            HandleError::ActionFailed("home dir unavailable on this platform".into())
-        })?;
-        let target = memory::lingxi_md::user_config_dir(&home).join("settings.json");
-        spawn_editor_on(target, "{}\n").await
+        self.edit_config_file().await
     }
 
     /// Model names shown by the no-arg `/model` display and the picker's "live"

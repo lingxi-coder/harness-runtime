@@ -805,6 +805,8 @@ pub enum SubagentObservation {
     },
     /// The child completed successfully.
     Completed {
+        /// Report admission is independent of execution completion.
+        handback: Option<crate::host::handback::HandbackState>,
         /// Child that completed.
         agent_id: AgentId,
         /// Final child result payload.

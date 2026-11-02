@@ -517,6 +517,22 @@ fn scheduled_parent_context_check(
     })
 }
 
+fn bind_scheduled_media_route(
+    route: &dyn orchestrator::ScheduledMediaChildRoute,
+    parent_session: &str,
+    child_session: &str,
+    profile: &str,
+    parent_is_current: orchestrator::ScheduledMediaParentCheck,
+) -> Result<(), String> {
+    route.bind_session(
+        parent_session,
+        child_session,
+        profile,
+        lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+        parent_is_current,
+    )
+}
+
 impl MobileTurnFirer {
     pub(super) async fn fire_automation_with_cancel(
         &self,
@@ -906,12 +922,11 @@ impl MobileTurnFirer {
                             parent_session.clone(),
                             parent_profile.clone(),
                         );
-                        let account_scope = format!("profile:{child_profile}");
-                        if let Err(error) = route.bind_session(
+                        if let Err(error) = bind_scheduled_media_route(
+                            route.as_ref(),
                             &parent_session,
                             &child_session,
                             &child_profile,
-                            &account_scope,
                             parent_is_current,
                         ) {
                             tracing::warn!(%error, "scheduled media provider binding unavailable");
@@ -1169,6 +1184,47 @@ mod media_attachment_tests {
             self.released_notify.notify_one();
             Ok(())
         }
+    }
+
+    #[test]
+    fn scheduled_route_forwards_session_identity_with_unbound_account_scope() {
+        #[derive(Default)]
+        struct Capture(StdMutex<Option<(String, String, String, String, bool)>>);
+        impl orchestrator::ScheduledMediaChildRoute for Capture {
+            fn bind_session(
+                &self,
+                parent: &str,
+                child: &str,
+                profile: &str,
+                scope: &str,
+                is_current: orchestrator::ScheduledMediaParentCheck,
+            ) -> Result<(), String> {
+                *self.0.lock().unwrap() = Some((
+                    parent.into(),
+                    child.into(),
+                    profile.into(),
+                    scope.into(),
+                    is_current(),
+                ));
+                Ok(())
+            }
+            fn release_after_media_drain(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let route = Capture::default();
+        bind_scheduled_media_route(&route, "parent", "child", "anthropic", Arc::new(|| true))
+            .unwrap();
+        assert_eq!(
+            *route.0.lock().unwrap(),
+            Some((
+                "parent".into(),
+                "child".into(),
+                "anthropic".into(),
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into(),
+                true,
+            ))
+        );
     }
 
     struct TestScheduledFactory {

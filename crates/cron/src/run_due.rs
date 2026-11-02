@@ -255,11 +255,11 @@ pub async fn next_fire_epoch_ms(
 ) -> Option<u64> {
     let now = clock.now();
     let project_root = crate::tasks_file::project_root_from_tasks_path(tasks_file)?;
-    // Which of the two stores this path names — session cron under `.claude/`,
+    // Which of the two stores this path names — session cron under `.lingxi/session-cron/`,
     // or the v2 task centre under `branding::DOT_DIR`. Decided once; the body
     // and the parser must come from the SAME store or they disagree about what
     // is scheduled.
-    let session_store = tasks_file.parent()?.file_name()? == std::ffi::OsStr::new(".claude");
+    let session_store = tasks_file == crate::tasks_file::session_scheduled_tasks_path(project_root);
     let body = if session_store {
         crate::tasks_file::read_tasks_body(fs.as_ref(), project_root).await
     } else {
@@ -615,7 +615,7 @@ mod tests {
     }
 
     const NOW: u64 = 1_700_000_000; // not on a minute boundary (…020 seconds)
-    const PATH: &str = "/proj/.claude/scheduled_tasks.json";
+    const PATH: &str = "/proj/.lingxi/session-cron/scheduled_tasks.json";
     const AUTOMATION_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
 
     fn file_with(tasks_json: &str) -> Arc<MemFs> {

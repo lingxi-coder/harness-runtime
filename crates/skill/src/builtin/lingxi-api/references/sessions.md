@@ -31,3 +31,8 @@ or completed Agent.
 Source anchors: Harness `crates/session`, `crates/compaction`,
 `crates/runtime/src/mobile/skill_loader.rs`, `crates/runtime/src/app_agent_input.rs`;
 product native conversation and remote session controls.
+
+Mobile currently exposes ForkSession with target_mode and rejects an in-flight
+mode fork. Desktop does not expose that same fork command. Creating a new
+Desktop session and forking a Mobile session are different operations; a future
+session-space design is not proof of current product behavior.

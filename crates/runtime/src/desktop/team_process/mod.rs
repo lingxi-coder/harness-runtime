@@ -2,8 +2,10 @@
 //! all tools. A separately authenticated trusted host may install the narrow
 //! owner/original-human broker; no backend permit decoder or public IPC lives here.
 
+pub(crate) mod accounts;
 mod interaction;
 pub(super) mod model;
+pub use accounts::TeamAccountEnvelope;
 pub use model::TeamModelRoute;
 mod protocol;
 mod worker;
@@ -11,7 +13,7 @@ mod worker;
 use super::team_invocation::{
     TeamInvocationError, TeamInvocationIdentity, TeamInvocationLimits, TeamInvocationProfile,
 };
-use protocol::{Bootstrap, MAX_FRAME};
+use protocol::Bootstrap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -68,8 +70,8 @@ impl TeamProcessDeadline {
 pub struct TeamProcessModel {
     model_id: String,
     endpoint: String,
-    api_key: String,
     route: TeamModelRoute,
+    credentials: Arc<TeamAccountEnvelope>,
 }
 
 impl std::fmt::Debug for TeamProcessModel {
@@ -77,52 +79,6 @@ impl std::fmt::Debug for TeamProcessModel {
         f.debug_struct("TeamProcessModel")
             .field("model_id", &self.model_id)
             .finish_non_exhaustive()
-    }
-}
-
-impl TeamProcessModel {
-    /// Endpoint is chosen by the trusted host, not by model text or a member.
-    /// HTTPS is required except literal loopback HTTP for local model gateways
-    /// and acceptance fixtures. Userinfo, queries and fragments are rejected.
-    pub fn anthropic_api_key(
-        model_id: String,
-        endpoint: String,
-        api_key: String,
-    ) -> Result<Self, TeamProcessError> {
-        if model_id.contains('/') {
-            return Err(TeamProcessError::Model);
-        }
-        let mut profile = llm_runtime::anthropic_provider_profile(
-            &endpoint,
-            llm_runtime::AuthStrategy::ApiKey,
-            llm_runtime::CredentialConfig::Static {
-                id: model::PRIVATE_CREDENTIAL.into(),
-            },
-        );
-        profile
-            .models
-            .retain(|entry| entry.request_model == model_id);
-        let client = llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
-            providers: vec![profile],
-        })
-        .map_err(|_| TeamProcessError::Model)?;
-        let profile = client
-            .provider_service_profiles()
-            .into_iter()
-            .next()
-            .ok_or(TeamProcessError::Model)?;
-        let profile = model::sanitized(profile, &model_id)?;
-        Self::selected_api_key(
-            TeamModelRoute {
-                model_provider: profile.profile_name.clone(),
-                model_protocol: profile.protocol,
-                model_id,
-                model_endpoint: endpoint,
-                credential_id: "anthropic-api-key".into(),
-                model_profile: profile,
-            },
-            api_key,
-        )
     }
 }
 
@@ -205,8 +161,24 @@ pub struct TeamHumanQuestion {
 /// human and recheck membership, account epoch, revocation and the shared lease
 /// after every wait. A generic TUI, renderer or remote-control resolver cannot
 /// implement this authority. Futures are supervised inline and never detached.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamProviderAccountRefresh {
+    pub id: String,
+    pub account_id: String,
+    pub identity_generation: u64,
+    pub credential_revision: u64,
+}
+
 #[async_trait::async_trait]
 pub trait TeamProcessBroker: Send + Sync {
+    async fn refresh_provider_account(
+        &self,
+        _request: TeamProviderAccountRefresh,
+        _cancel: CancellationToken,
+    ) -> Result<TeamAccountEnvelope, TeamProcessError> {
+        Err(TeamProcessError::Model)
+    }
     async fn approve(
         &self,
         request: TeamOwnerPermission,
@@ -241,6 +213,25 @@ pub struct TeamProcessResult {
     pub denied_tools: u32,
 }
 
+struct DenyInteractions;
+#[async_trait::async_trait]
+impl TeamProcessBroker for DenyInteractions {
+    async fn approve(
+        &self,
+        _: TeamOwnerPermission,
+        _: CancellationToken,
+    ) -> Result<bool, TeamProcessError> {
+        Ok(false)
+    }
+    async fn ask(
+        &self,
+        _: TeamHumanQuestion,
+        _: CancellationToken,
+    ) -> Result<Option<BTreeMap<String, String>>, TeamProcessError> {
+        Ok(None)
+    }
+}
+
 impl TeamProcessStart {
     pub fn prepare(
         storage_root: &Path,
@@ -258,7 +249,7 @@ impl TeamProcessStart {
         profile.validate_input(&request.input)?;
         let identity = profile.identity();
         let bootstrap = Bootstrap {
-            version: 1,
+            version: 2,
             storage_root: storage_root.to_owned(),
             owner_uid: identity.owner_uid.clone(),
             bot_key: identity.bot_key.clone(),
@@ -279,7 +270,7 @@ impl TeamProcessStart {
             model_profile: request.model.route.model_profile.clone(),
             model_id: request.model.model_id,
             endpoint: request.model.endpoint,
-            api_key: request.model.api_key,
+            credentials: request.model.credentials.clone_private()?,
         };
         Ok(Self {
             profile,
@@ -290,7 +281,7 @@ impl TeamProcessStart {
 
     /// Run the dedicated binary with no inherited environment/stdio or CLI
     /// options. Cancellation/drop/deadline kill the worker process group.
-    /// This default v1 route denies every tool and installs no question sender.
+    /// Without a host broker, tools are denied and human questions remain unanswered.
     pub async fn run(
         self,
         worker_executable: &Path,
@@ -313,7 +304,7 @@ impl TeamProcessStart {
     }
 
     async fn run_inner(
-        mut self,
+        self,
         worker_executable: &Path,
         cancel: CancellationToken,
         broker: Option<Arc<dyn TeamProcessBroker>>,
@@ -335,7 +326,7 @@ impl TeamProcessStart {
             self.bootstrap.model_id
         );
         self.profile.apply_to(&mut cfg)?;
-        self.bootstrap.version = if broker.is_some() { 2 } else { 1 };
+
         let frame = protocol::encode(&self.bootstrap)?;
         // Persist before spawning, even if spawn itself fails. Never reset
         // quota authority or replay ambiguous work after a lost response.
@@ -367,19 +358,8 @@ impl TeamProcessStart {
             // its entire build/run/drain. Version two admits only correlated
             // permission/question responses after this single bootstrap.
             input.flush().await?;
-            let result = if let Some(broker) = broker {
-                broker_exchange(&mut output, &mut input, broker, broker_cancel).await?
-            } else {
-                let mut bytes = Vec::new();
-                output
-                    .take((MAX_FRAME + 5) as u64)
-                    .read_to_end(&mut bytes)
-                    .await?;
-                if bytes.len() > MAX_FRAME + 4 {
-                    return Err(TeamProcessError::Protocol);
-                }
-                protocol::decode_result(&bytes)?
-            };
+            let broker = broker.unwrap_or_else(|| Arc::new(DenyInteractions));
+            let result = broker_exchange(&mut output, &mut input, broker, broker_cancel).await?;
             let status = child.wait().await?;
             guard.0 = None; // reaped: never signal a potentially reused PID
             if !status.success() {
@@ -462,6 +442,17 @@ async fn broker_exchange(
                     id: request.id,
                     answers,
                 }
+            }
+            WorkerFrame::ProviderAccountRefresh { request } => {
+                if !protocol::valid_id(&request.id)
+                    || uuid::Uuid::parse_str(&request.account_id).is_err()
+                    || !seen.insert(request.id.clone())
+                {
+                    return Err(TeamProcessError::Protocol);
+                }
+                let id = request.id.clone();
+                let credentials = tokio::select! {biased;_ = output.read(&mut unexpected)=>return Err(TeamProcessError::Protocol),result=broker.refresh_provider_account(request,cancel.child_token())=>result?};
+                ParentFrame::ProviderAccountsUpdated { id, credentials }
             }
             WorkerFrame::Result { result } => {
                 protocol::validate_result(&result, 2)?;

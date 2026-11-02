@@ -1,5 +1,8 @@
 #![cfg(target_os = "macos")]
 //! Actual worker/SDK interactions against synthetic loopback only.
+#[path = "team_account_fixture.rs"]
+mod team_account_fixture;
+
 use harness_runtime::desktop::team_invocation::{
     TeamInvocationIdentity, TeamInvocationLimits, TeamInvocationProfile,
 };
@@ -54,7 +57,7 @@ fn request(endpoint: String, id: uuid::Uuid, duration_ms: u64) -> TeamProcessReq
         instructions: PERSONA.into(),
         input: "Please reply to this isolated human request.".into(),
         limits: TeamInvocationLimits::default(),
-        model: TeamProcessModel::anthropic_api_key(MODEL.into(), endpoint, KEY.into()).unwrap(),
+        model: team_account_fixture::model(MODEL.into(), endpoint, KEY.into()).unwrap(),
         deadline: TeamProcessDeadline::from_backend_unix_millis(now_ms() + duration_ms).unwrap(),
     }
 }
@@ -497,8 +500,7 @@ async fn cancellation_and_future_drop_cancel_the_inline_broker() {
 }
 
 fn raw_bootstrap(root: &Path, id: uuid::Uuid, endpoint: &str) -> Value {
-    let model =
-        TeamProcessModel::anthropic_api_key(MODEL.into(), endpoint.into(), KEY.into()).unwrap();
+    let model = team_account_fixture::model(MODEL.into(), endpoint.into(), KEY.into()).unwrap();
     let route = model.route();
     json!({
         "version":2,"storage_root":root,"owner_uid":"fixture-owner","bot_key":"fixture-bot",
@@ -917,7 +919,7 @@ async fn selected_openai_responses_uses_existing_codec_for_owner_bash_and_human_
         model_profile:serde_json::from_value(json!({"provider_id":"openai","profile_name":"openai","protocol":"open_ai_responses","base_url":endpoint,"auth":"api_key","credential":{"source":"host_managed","key":"team-selected-model"},"models":[{"display_model":"gpt-6-luna","request_model":"gpt-6-luna","billing_model":"gpt-6-luna","capability_support":{"streaming":"supported","tools":"supported"}}],"extra":{}})).unwrap(),
     };
     let mut request = request(server.endpoint.clone(), id, 20_000);
-    request.model = TeamProcessModel::selected_api_key(route, KEY.into()).unwrap();
+    request.model = team_account_fixture::selected(route, KEY.into()).unwrap();
     let broker = Broker::new(vec![true]);
     let result = broker_run(&root, request, broker.clone()).await.unwrap();
     assert_eq!(result.outcome, TeamProcessOutcome::Completed, "{result:?}");

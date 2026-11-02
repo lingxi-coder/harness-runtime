@@ -27,8 +27,27 @@ pub use tool_search::ToolSearchTool;
 /// state is disabled by default, so an un-refreshed / non-tool-search session is
 /// byte-identical to the pre-pipeline build.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    let config = ConfigTool::new(ctx.clone());
+    register_with_config(reg, ctx, config);
+}
+
+/// Register meta tools with the exact user-settings owner admitted by this host.
+pub fn register_all_with_settings_path(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    path: std::path::PathBuf,
+) {
+    let config = ConfigTool::with_settings_path(ctx.clone(), path);
+    register_with_config(reg, ctx, config);
+}
+
+fn register_with_config(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    config: ConfigTool,
+) {
     use std::sync::Arc;
-    reg.register_builtin(Arc::new(ConfigTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(config));
     // Install the env-derived deferral state on the registry and share the SAME
     // `Arc` with the ToolSearch tool, so the wire serializer and the search
     // consumer observe one loaded-set.

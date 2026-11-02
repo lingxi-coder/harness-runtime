@@ -5,6 +5,15 @@ use std::time::Duration;
 /// Public provider-neutral error type for LLM client operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LlmError {
+    /// A selected account's secure storage could not be read. This does not
+    /// mean that credentials are invalid and must never become needs_auth.
+    #[error("account credential storage unavailable")]
+    AccountStorageUnavailable,
+    #[error("all provider accounts are unavailable: {accounts:?}; earliest recovery (unix ms): {earliest_recovery_ms:?}")]
+    AllAccountsUnavailable {
+        accounts: Vec<crate::accounts::AccountUnavailable>,
+        earliest_recovery_ms: Option<u64>,
+    },
     /// Exact provider text retained independently of the host recovery classification.
     #[error("{source}")]
     ProviderErrorText {

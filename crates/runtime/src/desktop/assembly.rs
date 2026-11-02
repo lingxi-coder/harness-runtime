@@ -37,11 +37,11 @@ use super::{
     append_restricted_builtin_denies, apple_events_override, apply_worktree_launch,
     auto_mode_propose, aws_auth_refresher, background_agent, build_agent_mcp_tool_set,
     build_shared_credential_stack_for_config, capture_legacy_opening_balance,
-    configure_session_hook_root, cron_command, cron_management, cron_native,
-    cron_scheduler_enabled, current_uid, desktop_command_registry, desktop_fusion_attempts,
-    desktop_fusion_executor, desktop_skill_registry, discover_plugin_set,
-    emit_mcp_servers_inventory, ephemeral_session_home, expand_trusted_dir, file_changed_watch,
-    fork_resume, fusion_command, fusion_recorder, is_env_truthy, job_dir_from_env, lingxi_temp_dir,
+    configure_session_hook_root, cron_command, cron_native, cron_scheduler_enabled, current_uid,
+    desktop_command_registry, desktop_fusion_attempts, desktop_fusion_executor,
+    desktop_skill_registry, discover_plugin_set, emit_mcp_servers_inventory,
+    ephemeral_session_home, expand_trusted_dir, file_changed_watch, fork_resume, fusion_command,
+    fusion_recorder, is_env_truthy, job_dir_from_env, lingxi_temp_dir,
     load_ask_user_question_timeout, load_blocked_marketplaces,
     load_boot_permission_tiers_with_policy_snapshot, load_effective_settings_for_config,
     load_managed_plugin_names, load_merged_agent_push_notif_enabled,
@@ -63,17 +63,15 @@ use super::{
     sec_default_order_from_raw_tiers, session_agents, session_kind_for_job_tmp,
     session_read_allowances_for_boot, session_state, session_task_output_dir, settings_watch,
     should_enforce_permissions, skill_loader, spawn_cli_plugin_dir_collection_watch,
-    strict_allowlist_override, teammate_backend_selector, AgentMcpMergeGates,
-    AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
-    CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
-    DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
-    DesktopMcpTransport, DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
-    DesktopWorkflowEvent, DesktopWorkflowEventSink, DesktopWorktreeCommandHandler,
-    FusionCatalogRefreshingChatGptConnect, FusionCatalogRefreshingCopilotConnect,
-    FusionCatalogRefreshingCredentialWriter, FusionCatalogRefreshingOAuthConnect,
-    JsonlWorktreeStatePersister, LlmStack, OrchestratorTeammatePromptRenderer, OutputRetryReporter,
-    PluginRuntime, ProcessSessionActivationObserver, RegistryStopHookSnapshot,
-    SharedCredentialStack, TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
+    strict_allowlist_override, teammate_backend_selector, AccountClaudeAiAuthProvider,
+    AgentMcpMergeGates, AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
+    CoordinatorTeammateDefinitionResolver, CoordinatorWiring, DeferredToolInvoker,
+    DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker, DesktopMcpTransport,
+    DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle, DesktopWorkflowEvent,
+    DesktopWorkflowEventSink, DesktopWorktreeCommandHandler, JsonlWorktreeStatePersister, LlmStack,
+    OrchestratorTeammatePromptRenderer, OutputRetryReporter, PluginRuntime,
+    ProcessSessionActivationObserver, RegistryStopHookSnapshot, SharedCredentialStack,
+    TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
 };
 
 /// Rebuild the slash-command MCP partition from the same generation-checked
@@ -976,6 +974,21 @@ pub async fn build_with_credential_stack(
     permission_sink: Arc<dyn PermissionRequestSink>,
     shared: SharedCredentialStack,
 ) -> Result<DesktopRuntime, BuildError> {
+    let account_data_root = shared
+        .provider_account_home
+        .clone()
+        .unwrap_or_else(|| cfg.lingxi_home.clone());
+    let account_store_scope = shared
+        .provider_accounts
+        .as_ref()
+        .map(|snapshot| snapshot.store_scope.clone())
+        .unwrap_or_else(|| {
+            crate::provider_accounts::account_store_scope(
+                &account_data_root,
+                &format!("{:?}", shared.credentials.account_storage_backend()),
+            )
+        });
+
     super::team_invocation::enforce_team_config(&mut cfg)?;
     super::app_invocation::enforce_app_config(&mut cfg)?;
     // Resolve and validate fixed ownership before opening a writer or running
@@ -1364,12 +1377,8 @@ pub async fn build_with_credential_stack(
         clock,
         mcp_oauth_storage,
         credentials,
-        auth,
         subscription,
-        subscription_refresh_generation,
-        resolved_anthropic_api_key: _,
         is_subscriber,
-        openai_oauth_handle,
         pricing,
         chains,
         model_providers,
@@ -1554,6 +1563,9 @@ pub async fn build_with_credential_stack(
     .with_retry_reporter(std::sync::Arc::new(OutputRetryReporter {
         output: output.clone(),
     }));
+    service_built.set_account_routing_reporter(Arc::new(
+        crate::account_pool_store::OutputAccountRoutingReporter(output.clone()),
+    ));
     if let Some(metadata) = &cfg.anthropic_client_metadata {
         let mut metadata = metadata.clone();
         metadata.session_id = Some(main_session_uuid.clone());
@@ -1580,7 +1592,7 @@ pub async fn build_with_credential_stack(
     }
     if cfg.composition == Some(super::DesktopSessionComposition::HeadlessCli) {
         let ua = cfg.user_agent_environment.as_ref();
-        let lookup = cfg.oauth_environment_lookup.as_ref();
+        let lookup = cfg.request_environment_lookup.as_ref();
         let attribution_enabled = !lookup
             .and_then(|lookup| lookup.get("CLAUDE_CODE_ATTRIBUTION_HEADER"))
             .is_some_and(|value| {
@@ -1618,8 +1630,6 @@ pub async fn build_with_credential_stack(
         Some(refresher) => service_built.with_aws_auth(refresher),
         None => service_built,
     };
-    let service_built =
-        service_built.retain_account_change_observer(subscription_refresh_generation);
     // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
     // model returns its final result through it (1:1 with claude-code). Untouched
     // for every normal turn (`json_schema` is `None`).
@@ -1648,7 +1658,6 @@ pub async fn build_with_credential_stack(
     // credential as the parent turn (Claude Code's single API pipeline).
     let api_service =
         Arc::new(service_built.with_scope_output_quota(cfg.scope_output_quota.clone()));
-    auth.register_account_change_observer(Arc::downgrade(&api_service.account_change_observer()));
     let provider_adapter = Arc::new(
         ProviderApiAdapter::new(api_service.clone())
             .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
@@ -2492,6 +2501,11 @@ pub async fn build_with_credential_stack(
     } else {
         mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd)
     };
+    if cfg.local_apps && !cfg.strict_mcp_config && !cfg.customization_gates.disables_mcp_discovery()
+        && cfg.app_invocation.is_none() && cfg.team_invocation.is_none()
+    {
+        mcp::local_apps::append(&mut mcp_configs, &cfg.lingxi_home);
+    }
     // CLI `--mcp-config` servers: highest precedence — override a discovered
     // server of the same name, else append. (With `--strict-mcp-config` the host
     // nulled the discovered paths above, so `mcp_configs` starts empty and these
@@ -4272,38 +4286,9 @@ pub async fn build_with_credential_stack(
     //        GrowthBook fleet flag, which itself defaults on).
     let cron_scheduler = if (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
         && !cron_native::is_child_runtime()
-        && cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref())
+        && cron_scheduler_enabled(std::env::var(branding::DISABLE_CRON_ENV).ok().as_deref())
     {
         if cfg.enable_automation_scheduler && cfg.host_workspace_trusted == Some(true) {
-            let migration_model = provider_adapter_handle
-                .list_model_listings()
-                .into_iter()
-                .find(|listing| {
-                    listing.request_model == default_model_id
-                        && default_model_profile
-                            .as_ref()
-                            .is_none_or(|profile| &listing.provider_id == profile)
-                })
-                .map(|listing| {
-                    lingxi_core::host::qualified_model_ref(
-                        &listing.request_model,
-                        Some(&listing.provider_id),
-                    )
-                });
-            let migration_reasoning = cfg.initial_effort.as_ref().map_or_else(
-                || serde_json::json!({"type":"automatic"}),
-                |id| serde_json::json!({"type":"level", "id":id}),
-            );
-            cron_management::migrate_legacy(
-                &DesktopFileSystem::new(cwd.clone()),
-                &cwd,
-                migration_model,
-                migration_reasoning,
-            )
-            .await
-            .map_err(|error| {
-                BuildError::DurableSession(format!("Scheduled task migration failed: {error}"))
-            })?;
             if cron::scheduled_tasks_path(&cwd).exists() {
                 cron::automation::recover_orphaned_automation_runs(
                     &DesktopFileSystem::new(cwd.clone()),
@@ -5076,9 +5061,10 @@ pub async fn build_with_credential_stack(
     // store built at (3). Reads tokens at call-time so the refresh driver wired
     // at (3.1) is always reflected.
     let cron_auth: Arc<dyn tool_cron::ClaudeAiAuthProvider> =
-        Arc::new(CredentialStoreAuthProvider {
+        Arc::new(AccountClaudeAiAuthProvider {
             credentials: credentials.clone(),
-            base_api_url: cfg.api_base.clone(),
+            data_root: account_data_root,
+            store_scope: account_store_scope,
         });
     // SKILLEXEC.2: break the Skill-tool ↔ CommandRegistry init cycle. The tool
     // registry (which holds the `Skill` tool) must exist before the orchestrator,
@@ -5411,6 +5397,7 @@ pub async fn build_with_credential_stack(
     let local_app_tool_ctx = cfg.local_apps.then(|| tool_ctx.clone());
     let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools(
         &mut tools_inner,
+        cfg.lingxi_home.join("settings.json"),
         tool_ctx,
         coordinator_wiring,
         ask_user_question_resolver,
@@ -6086,7 +6073,6 @@ pub async fn build_with_credential_stack(
     // The model-safety observer is installed after the orchestrator exists,
     // while the builder consumes the original hook executor below.
     let model_safety_hooks = hooks.clone();
-    let instruction_identity = crate::instruction_identity::InstructionIdentity::new(auth.clone());
     let mod_surface_roster =
         Arc::new(orchestrator::mod_surface_roster::ModSurfaceRoster::default());
     let native_tool_pool_refresh_callback_available = super::native_tool_pool_refresh_callback_for(
@@ -6132,11 +6118,6 @@ pub async fn build_with_credential_stack(
     .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
     .with_native_tool_pool_refresh_callback_available(native_tool_pool_refresh_callback_available)
     .with_native_settings_agent_context(cfg.native_settings_agent_context);
-    let orch_builder = if cfg.app_invocation.is_none() && cfg.team_invocation.is_none() {
-        orch_builder.with_instruction_user_email_provider(instruction_identity.clone())
-    } else {
-        orch_builder
-    };
     let orch_builder = orch_builder.with_workflow_size_guideline(workflow_size_guideline_state);
     let orch_builder = orch_builder.with_idle_compaction_enabled(cfg.idle_compaction_enabled);
     // Gap #5: wire the production JSONL writer (constructed just above) so the
@@ -6512,7 +6493,6 @@ pub async fn build_with_credential_stack(
             }
         })
     }));
-    instruction_identity.bind_root(&orch);
     instruction_provider
         .bind(&orch)
         .map_err(BuildError::Orchestrator)?;
@@ -6733,72 +6713,10 @@ pub async fn build_with_credential_stack(
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
-    // Round-4 review finding [8] / round-5 finding [15]: EVERY `/connect`
-    // seam below is wrapped so a successful credential write refreshes
-    // Fusion's catalog filter (`FusionCatalogRefresher`) — without this, a
-    // provider connected here stayed invisible to `/fusion` for the rest of
-    // the process even though this same write makes the ordinary turn loop
-    // route it immediately. Round 4 wrapped only the API-key writer and the
-    // Copilot device flow; the ChatGPT and unified-OAuth drivers are wrapped
-    // here too, and the TUI key view (which bypasses all four and writes
-    // straight through `secret::CredentialManager`) reaches the same
-    // refresher through `refresh_fusion_catalog_after_credential_write`.
-    let connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver> =
-        Arc::new(FusionCatalogRefreshingCopilotConnect {
-            inner: Arc::new(crate::desktop::connect::EngineCopilotConnect::new(
-                credentials.clone(),
-                llm_transport.clone(),
-            )),
-            refresher: fusion_catalog_refresher.clone(),
-        });
-    let connect_writer: Arc<dyn command_api::builtins::ConnectCredentialWriter> =
-        Arc::new(FusionCatalogRefreshingCredentialWriter {
-            inner: Arc::new(crate::desktop::connect::EngineCredentialWriter::new(
-                credentials.clone(),
-                cfg.connect_prompt.clone().unwrap_or_else(|| {
-                    Arc::new(crate::desktop::connect::NoopKeyPrompt)
-                        as Arc<dyn crate::desktop::connect::SecureKeyPrompt>
-                }),
-            )),
-            refresher: fusion_catalog_refresher.clone(),
-        });
-    let connect_chatgpt_inner: Arc<dyn command_api::builtins::ChatGptConnectDriver> = Arc::new(
-        crate::desktop::connect::EngineChatGptConnect::new(openai_oauth_handle),
-    );
-    // Round-5 review finding [15] class sweep: EVERY `/connect` seam that
-    // persists a credential refreshes Fusion's catalog, not just the two
-    // round 4 wrapped. The OAuth driver below is built over the UNWRAPPED
-    // ChatGPT driver so a ChatGPT sign-in through the picker refreshes once,
-    // not twice.
-    let connect_chatgpt: Arc<dyn command_api::builtins::ChatGptConnectDriver> =
-        Arc::new(FusionCatalogRefreshingChatGptConnect {
-            inner: connect_chatgpt_inner.clone(),
-            refresher: fusion_catalog_refresher.clone(),
-        });
-    // Unified OAuth sign-in driver for the TUI `/connect` picker (Anthropic
-    // Pro/Max + OpenAI ChatGPT browser flows). Reuses the same backends as
-    // `/login` (the Anthropic `auth` handle) and `/connect chatgpt`
-    // (`connect_chatgpt`); built here while both are still owned (the registry
-    // call below moves `connect_chatgpt`).
-    let oauth_connect_driver: Arc<dyn command_api::builtins::OAuthConnectDriver> =
-        Arc::new(FusionCatalogRefreshingOAuthConnect {
-            inner: Arc::new(
-                crate::desktop::connect::EngineOAuthConnect::new(
-                    auth.clone(),
-                    connect_chatgpt_inner,
-                )
-                .with_managed_policy_snapshot_cache(cfg.managed_policy_snapshot_cache.clone()),
-            ),
-            refresher: fusion_catalog_refresher.clone(),
-        });
     let mut reg = desktop_command_registry(
         handle.clone(),
-        auth.clone(),
         &cfg.cwd,
         &cfg.lingxi_home,
-        connect_writer,
-        connect_copilot.clone(),
-        connect_chatgpt,
         cfg.customization_gates,
         strict_plugin_only_skills,
         &boot_prompt_directories,
@@ -6929,7 +6847,7 @@ pub async fn build_with_credential_stack(
         ),
     ));
     reg.register_builtin_handler(worktree_command_handler);
-    if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
+    if cron_scheduler_enabled(std::env::var(branding::DISABLE_CRON_ENV).ok().as_deref()) {
         // `/cron` is an explicit management action. Keep it out of the model
         // permission loop and invoke the same validated cron tools directly.
         reg.register_builtin_handler(cron_command_handler);
@@ -7908,7 +7826,6 @@ pub async fn build_with_credential_stack(
         mod_command_catalog,
         mod_surface_roster,
         dispatcher,
-        auth,
         task_registry,
         #[cfg(test)]
         wired_workflow_tool: wired_workflow_tool.expect("desktop Workflow tool is registered"),
@@ -7942,8 +7859,6 @@ pub async fn build_with_credential_stack(
             as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         bash_runner,
         shell_expansion: shell_expansion_provider,
-        connect_copilot,
-        oauth_connect_driver,
         // P1-08 runtime `/add-dir` live-effect handles (captured before the
         // orchestrator builder consumed the originals).
         native_insights_policy_gate,

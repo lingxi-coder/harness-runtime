@@ -8,9 +8,10 @@
 
 use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
+use lingxi_core::host::mcp_result::CancellationToken;
 use lingxi_core::host::mcp_result::{
-    connection_error_diagnostic, drive_modern_request, result_error_diagnostic, JsonrpcMcpResultIo,
-    McpInputRequiredOptions, McpResultError,
+    JsonrpcMcpResultIo, McpInputRequiredOptions, McpResultError, connection_error_diagnostic,
+    drive_modern_request, result_error_diagnostic,
 };
 use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError, McpIconDto,
@@ -128,6 +129,7 @@ fn bounded_probe_timeout_ms(requested: Option<u64>) -> u64 {
 /// Shared remote HTTP/SSE MCP transport.
 #[derive(Default)]
 pub struct RemoteMcpTransport {
+    http_cleanup: Mutex<HashMap<lingxi_core::types::McpConnectionId, CancellationToken>>,
     proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
     connections: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, Arc<Connection>>>>,
     negotiated: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, McpNegotiatedProtocol>>>,
@@ -227,6 +229,10 @@ impl RemoteMcpTransport {
     }
 
     fn remove(&self, id: lingxi_core::types::McpConnectionId) {
+        if let Ok(mut cleanup) = self.http_cleanup.lock() {
+            // Preserve unfinished receipts when an async shutdown waiter is cancelled.
+            cleanup.retain(|_, completion| !completion.is_cancelled());
+        }
         if let Ok(mut connections) = self.connections.lock() {
             if let Some(connection) = connections.remove(&id) {
                 connection.close();
@@ -718,7 +724,7 @@ impl McpTransport for RemoteMcpTransport {
                     .map_err(|error| McpError::Connection(error.to_string().into()))?
             }
             McpTransportSpec::Http { url, headers, .. } => {
-                crate::mcp_http::connect_http_with_proxy_auth_helper(
+                let (connection, cleanup) = crate::mcp_http::connect_http_with_proxy_auth_helper(
                     url,
                     None,
                     headers,
@@ -726,7 +732,14 @@ impl McpTransport for RemoteMcpTransport {
                     self.proxy_auth_helper.clone(),
                 )
                 .await
-                .map_err(McpError::from)?
+                .map_err(McpError::from)?;
+                let mut receipts = self
+                    .http_cleanup
+                    .lock()
+                    .map_err(|_| McpError::Internal("MCP cleanup map poisoned".into()))?;
+                receipts.retain(|_, completion| !completion.is_cancelled());
+                receipts.insert(id, cleanup);
+                connection
             }
             other => return Err(McpError::UnsupportedTransport(other.transport_kind())),
         };
@@ -1103,7 +1116,20 @@ impl McpTransport for RemoteMcpTransport {
         &self,
         conn_id: lingxi_core::types::McpConnectionId,
     ) -> Result<(), McpError> {
+        let cleanup = self
+            .http_cleanup
+            .lock()
+            .ok()
+            .and_then(|cleanup| cleanup.get(&conn_id).cloned());
         self.remove(conn_id);
+        if let Some(cleanup) = cleanup {
+            tokio::time::timeout(Duration::from_secs(5), cleanup.cancelled())
+                .await
+                .map_err(|_| McpError::Connection("MCP HTTP session cleanup timed out".into()))?;
+            if let Ok(mut receipts) = self.http_cleanup.lock() {
+                receipts.remove(&conn_id);
+            }
+        }
         Ok(())
     }
 
@@ -1647,7 +1673,7 @@ pub fn directory_read_capability(capabilities: Option<&Utf16JsonProjection>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_probe_timeout_ms, RawResourceTemplate, RawTool};
+    use super::{RawResourceTemplate, RawTool, bounded_probe_timeout_ms};
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
     fn source(value: &serde_json::Value) -> Utf16JsonProjection {
@@ -1696,15 +1722,16 @@ mod tests {
             dto.icons[0].extra.string_at("/vendor~1accent"),
             Some("blue")
         );
-        assert!(dto
-            .meta
-            .as_ref()
-            .unwrap()
-            .semantically_eq(&source(&serde_json::json!({
-                "anthropic/searchHint": "records lookup",
-                "anthropic/alwaysLoad": true,
-                "vendor/opaque": { "keep": [1, 2, 3] }
-            }))));
+        assert!(
+            dto.meta
+                .as_ref()
+                .unwrap()
+                .semantically_eq(&source(&serde_json::json!({
+                    "anthropic/searchHint": "records lookup",
+                    "anthropic/alwaysLoad": true,
+                    "vendor/opaque": { "keep": [1, 2, 3] }
+                })))
+        );
     }
 
     #[test]

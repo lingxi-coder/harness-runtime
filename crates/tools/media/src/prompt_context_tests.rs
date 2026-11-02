@@ -10,7 +10,8 @@ impl SessionBoundHandoff {
         self.0.lock().unwrap().as_str() == context.session_id.as_str()
             && context.model == "shared-model"
             && context.profile_name.as_deref() == Some("trusted-profile")
-            && context.account_scope.as_deref() == Some("profile:trusted-profile")
+            && context.account_scope.as_deref()
+                == Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
     }
 }
 
@@ -66,6 +67,26 @@ fn advertises_conversation(schema: &Value) -> bool {
     schema["properties"]["intent"]["enum"]
         .as_array()
         .is_some_and(|intents| intents.iter().any(|intent| intent == "conversation"))
+}
+
+#[tokio::test]
+async fn invocation_context_keeps_account_unbound_until_host_selection() {
+    let id = lingxi_core::types::SessionId::new();
+    let mut session = lingxi_core::SessionState::empty(id, "shared-model".into());
+    session.model_profile = Some("trusted-profile".into());
+    let mut invocation = tool_api::test_support::fresh_ctx();
+    invocation.session = Some(Arc::new(tokio::sync::Mutex::new(session)));
+
+    let context = invocation
+        .media_agent_capability_context(None)
+        .await
+        .unwrap();
+    assert_eq!(context.session_id, id.as_uuid().to_string());
+    assert_eq!(context.profile_name.as_deref(), Some("trusted-profile"));
+    assert_eq!(
+        context.account_scope.as_deref(),
+        Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
+    );
 }
 
 #[tokio::test]

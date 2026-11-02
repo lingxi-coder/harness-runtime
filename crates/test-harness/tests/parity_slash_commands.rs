@@ -26,9 +26,7 @@ use command_api::{
     CommandRegistry, CommandResult, GitWorktreeContext, ShellExpansionCtx, ShellExpansionProvider,
     ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
 };
-use lingxi_core::host::{
-    AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
-};
+use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::test_support::MockOrchestratorHandle;
 use serde::Deserialize;
@@ -38,10 +36,6 @@ use std::sync::Mutex as StdMutex;
 use tempfile::TempDir;
 use test_harness::parity::load_fixture;
 use tokio::sync::RwLock;
-
-struct MockAuth {
-    result: StdMutex<Result<LoginInfo, AuthError>>,
-}
 
 const PARITY_INSIGHTS_JSON: &str = r#"{"total_sessions":2}"#;
 const PARITY_INSIGHTS_URL: &str = "file:///tmp/report-2026-10-12.html";
@@ -208,27 +202,6 @@ impl ShellExpansionProvider for ParityShellExpansionProvider {
     }
 }
 
-#[async_trait::async_trait]
-impl AuthHandle for MockAuth {
-    fn register_account_change_observer(
-        &self,
-        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-    ) {
-    }
-
-    async fn login(&self) -> Result<LoginInfo, AuthError> {
-        self.result.lock().unwrap().clone()
-    }
-
-    async fn logout(&self) -> Result<(), AuthError> {
-        Ok(())
-    }
-
-    async fn current_user(&self) -> Option<LoginInfo> {
-        self.result.lock().unwrap().as_ref().ok().cloned()
-    }
-}
-
 fn fully_wired_registry(cwd: &std::path::Path) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -238,13 +211,7 @@ fn fully_wired_registry(cwd: &std::path::Path) -> CommandRegistry {
         ..StatusSnapshot::default()
     });
     register_core_batch_1(&mut reg, handle.clone());
-    let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth {
-        result: StdMutex::new(Ok(LoginInfo {
-            email: "u@example.com".to_string(),
-            org_id: "org".to_string(),
-        })),
-    });
-    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_2(&mut reg, handle.clone());
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle.clone());
     register_core_batch_8(
@@ -357,8 +324,6 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "init",
     "insights",
     "keybindings",
-    "login",
-    "logout",
     "mcp",
     "memory",
     "model",

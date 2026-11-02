@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: Explain, configure, troubleshoot or integrate LingXi (灵犀), including Bots, media and Local Apps. Use for product questions; ordinary coding uses its own tools.
+description: Explain, configure, troubleshoot or integrate LingXi (灵犀) product capabilities and host APIs. App authoring uses local-app; ordinary coding uses its own tools.
 ---
 
 # LingXi API guide
@@ -20,10 +20,12 @@ domains; do not load every reference for a general question.
 | Topic | Read when the question concerns |
 | --- | --- |
 | [overview](references/overview.md) | Product surfaces, capability discovery, platform differences, offline use |
+| [teams](references/teams.md) | Teams identity, membership, connectors and Bot boundaries |
+| [accounts](references/accounts.md) | Host-global provider accounts, model permissions, execution routing |
 | [configuration](references/configuration.md) | Settings, MCP, permissions, hooks, plugins, skill customization |
 | [media](references/media.md) | Camera, microphone, audio, transcription, speech, live assistance |
 | [webrtc](references/webrtc.md) | Remote Control, device connections, media transport |
-| [local-app](references/local-app.md) | Local Apps, publication, retained data, AG-UI, WebMCP, visualization |
+| [local-app](references/local-app.md) | Desktop/Mobile Local Apps, publication, retained data, MCP, WebMCP and AG-UI |
 | [bots](references/bots.md) | Persistent Bots, Bot memory, routines, delegation, remote Bot chats |
 | [devices](references/devices.md) | Computer Use, Browser, Android automation, native device tools |
 | [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs, runtime availability |
@@ -47,6 +49,14 @@ then the live tool schema. `media`, `local-app`, `visualize`, `workflow-authorin
 External builder plugins are optional; do not assume one is installed. This
 guide does not extend the caller's tools, permissions, workspace, or Bot grants.
 
+For Local Apps, explain platform support here; route build, modify or publish
+requests to the registered `local-app` skill. Product discussion does not start
+publication. Reuse loaded guidance without recursive skill calls, retaining
+the execution host, source Project, app ID/revision and known permissions.
+Do not require both skills for a self-contained task or repeat resolved questions.
+App-owned Desktop MCP servers use the App lifecycle; separate MCP services use
+the configuration topic. Do not route an App declaration into global settings.
+
 Read-only product questions require no device activation, connection changes,
 configuration writes, or model requests. When the user requests an action,
 perform it through its existing authorized entry and verify its actual result.
@@ -58,3 +68,10 @@ Use the current host's version/status entry when an exact build matters. These
 references are not live availability snapshots or an up-to-date online catalog.
 For SDK symbols and parameters, inspect the selected revision's schema/source
 or compiler-generated documentation instead of guessing from another release.
+
+This is product documentation, not a model-provider API. LingXi configuration
+uses its resolved branded paths. Claude Code conventions are not a substitute
+for LingXi source/schema. Anthropic identifiers remain legitimate only for an
+actual Anthropic backend. Label evidence as bundled documentation, inspected
+source/schema, host status, test result or live operation. Do not present a
+second answer from the same bundled guide as independent verification.

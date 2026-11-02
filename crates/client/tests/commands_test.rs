@@ -203,10 +203,11 @@ fn native_proactivity_commands_keep_initialize_opt_in_separate_from_level_change
 #[test]
 fn provider_credential_command_round_trips_without_debug_leak() {
     let secret = "sk-provider-super-secret";
-    let command = ClientCommand::SetProviderCredential {
+    let command = ClientCommand::ProviderAccounts {
         operation_id: 9,
-        provider_id: "deepseek".to_string(),
-        credential: ProviderCredentialSecretDto::new(secret.to_string()),
+        action: "set_credential".into(),
+        request_json: "{}".into(),
+        credential: Some(ProviderCredentialSecretDto::new(secret.to_string())),
     };
 
     let debug = format!("{command:?}");
@@ -217,7 +218,7 @@ fn provider_credential_command_round_trips_without_debug_leak() {
     assert!(debug.contains("<redacted>"));
 
     let json = serde_json::to_value(&command).expect("serialize credential command");
-    assert_eq!(json["type"], "set_provider_credential");
+    assert_eq!(json["type"], "provider_accounts");
     assert_eq!(json["credential"], secret);
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize credential command");
     assert_eq!(back, command);
@@ -390,7 +391,6 @@ fn listing_kind_variants_round_trip() {
         (ListingKindDto::Memory, "memory"),
         (ListingKindDto::Status, "status"),
         (ListingKindDto::Settings, "settings"),
-        (ListingKindDto::Auth, "auth"),
         (ListingKindDto::Doctor, "doctor"),
         (ListingKindDto::Tasks, "tasks"),
         (ListingKindDto::Coordinator, "coordinator"),
@@ -499,8 +499,6 @@ fn list_sessions_round_trips() {
 #[test]
 fn unit_control_commands_round_trip() {
     let cases = [
-        (ClientCommand::Login, "login"),
-        (ClientCommand::Logout, "logout"),
         (ClientCommand::ForceCompact, "force_compact"),
         (ClientCommand::ClearSession, "clear_session"),
         (ClientCommand::RequestExit, "request_exit"),
@@ -797,8 +795,6 @@ fn no_live_command_carries_session_id() {
             limit: Some(5),
             mode: None,
         },
-        ClientCommand::Login,
-        ClientCommand::Logout,
         ClientCommand::ForceCompact,
         ClientCommand::ClearSession,
         ClientCommand::TaskList {

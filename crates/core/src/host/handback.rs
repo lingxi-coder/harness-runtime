@@ -179,6 +179,20 @@ pub struct HandbackState {
 }
 
 impl HandbackState {
+    /// A receipt, not a plain-text answer, proves report delivery.
+    #[must_use]
+    pub fn delivery_status(&self) -> Option<&'static str> {
+        if !self.active {
+            return None;
+        }
+        Some(match self.disposition {
+            Some(HandbackDisposition::Withheld) => "withheld",
+            Some(HandbackDisposition::Flagged) if self.receipt.is_some() => "flagged",
+            _ if self.receipt.is_some() => "delivered",
+            _ => "pending",
+        })
+    }
+
     /// Select a recipient using native CDo. A dead registered recipient selects
     /// the resumer; only an unregistered agent tries its caller first.
     #[must_use]

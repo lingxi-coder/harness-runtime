@@ -26,7 +26,7 @@ pub use config::{
     HeadlessConfig, HeadlessOptions, ImageSource, InputFormat, OutputFormat, PermissionMode,
     SessionStart, Utf16JsonProjection,
 };
-pub use host::{HeadlessHostServices, OAuthDescriptorCredential};
+pub use host::HeadlessHostServices;
 pub use io::HeadlessIo;
 use lingxi_core::host::OutputStream;
 use std::sync::{Arc, Mutex};
@@ -526,12 +526,10 @@ async fn run_owned(
     }
     host::configure_desktop_request_state(&mut config.desktop, services.as_ref(), options);
     let environment_services = services.clone();
-    let descriptor_services = services.clone();
-    config.desktop.oauth_environment_lookup = Some(
+    config.desktop.request_environment_lookup = Some(
         llm_runtime::auth::anthropic::environment::EnvironmentLookup::new(move |name| {
             environment_services.environment_variable(name)
-        })
-        .with_descriptor_lookup(move || descriptor_services.oauth_descriptor_credential()),
+        }),
     );
     config.desktop.use_noop_permission_gate = true;
     config.desktop.deny_unresolved_ask = true;

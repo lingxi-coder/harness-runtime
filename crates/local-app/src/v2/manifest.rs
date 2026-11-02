@@ -20,6 +20,7 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "network",
     "agent",
     "background",
+    "mcp",
 ];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -35,6 +36,9 @@ pub struct Manifest {
     pub build: Vec<Step>,
     #[serde(default)]
     pub processes: Vec<Process>,
+    /// App-owned standard MCP tool servers. Registration and credentials belong to the host.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, AppMcpServer>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     pub targets: Vec<Target>,
@@ -71,6 +75,25 @@ pub struct Step {
     pub venv: Option<String>,
     #[serde(default)]
     pub python: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum AppMcpServer {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default)]
+        venv: Option<String>,
+        #[serde(default)]
+        python: Option<String>,
+    },
+    Http {
+        process: String,
+        path: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -232,6 +255,10 @@ impl Manifest {
             .chain(&self.build)
             .map(|step| &step.env)
             .chain(self.processes.iter().map(|process| &process.env))
+            .chain(self.mcp_servers.values().filter_map(|server| match server {
+                AppMcpServer::Stdio { env, .. } => Some(env),
+                AppMcpServer::Http { .. } => None,
+            }))
         {
             for key in env.keys() {
                 let upper = key.to_ascii_uppercase();
@@ -269,6 +296,7 @@ impl Manifest {
             || !self.install.is_empty()
             || !self.build.is_empty()
             || !self.processes.is_empty()
+            || !self.mcp_servers.is_empty()
             || matches!(self.entry, Entry::Server { .. })
     }
     pub fn schema_version(&self) -> u32 {
@@ -297,6 +325,41 @@ impl Manifest {
         }
         for target in &self.targets {
             target.validate()?;
+        }
+        if !self.mcp_servers.is_empty() {
+            if self.mcp_servers.len() > 16
+                || !self.capabilities.iter().any(|capability| capability == "mcp")
+                || self.targets.iter().any(|target| {
+                    !matches!(target.platform.as_str(), "macos" | "windows" | "linux")
+                        || target.environment != "native"
+                })
+            {
+                return Err(AppError::Invalid(
+                    "MCP servers require the mcp capability and Desktop native targets (at most 16 servers)".into(),
+                ));
+            }
+            for (name, server) in &self.mcp_servers {
+                if name.is_empty() || name.len() > 64
+                    || !name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+                {
+                    return Err(AppError::Invalid("invalid MCP server name".into()));
+                }
+                match server {
+                    AppMcpServer::Stdio { command, cwd, env, venv, python } => {
+                        check_step(command, cwd, env, venv, python)?;
+                    }
+                    AppMcpServer::Http { process, path } => {
+                        if !self.processes.iter().any(|p| &p.name == process)
+                            || !path.starts_with('/') || path.starts_with("//")
+                            || path.len() > 2048 || path.contains(['\\', '\r', '\n', '\0', '?', '#'])
+                            || path.split('/').any(|part| matches!(part, "." | ".."))
+                            || path.contains('%')
+                        {
+                            return Err(AppError::Invalid("MCP HTTP endpoint must use a declared process and a plain absolute path".into()));
+                        }
+                    }
+                }
+            }
         }
         if let Some(schema) = &self.data_schema {
             if schema.version == 0

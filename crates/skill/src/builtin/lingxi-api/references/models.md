@@ -27,3 +27,13 @@ maintain them. Use the account/provider source when the user needs current data.
 
 Source anchors: llm-client `src/client/{mod,live}.rs`, `src/protocol`,
 `src/providers`; Harness `crates/runtime/src/api.rs` and model/provider commands.
+
+Read the accounts topic for host-global multi-account selection. Logical
+provider profile, account ID and execution binding are different identities.
+A request can select another healthy allowed account at execution/retry time;
+do not infer its route from a display name. Desktop model selection is native
+state; editing a Harness default does not update an existing session's picker.
+Local ToolSearch discovers permitted tools without changing model providers.
+Selected schemas are ordinary functions on generic routes; Anthropic-native
+references/defer_loading apply only to the effective Anthropic wire route.
+SDK support for a provider's hosted search does not mean this host exposes it.

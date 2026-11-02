@@ -1,8 +1,0 @@
-{
-  "type": "auth_state",
-  "state": {
-    "type": "signed_in",
-    "email": "dev@example.com",
-    "org_id": "org_abc123"
-  }
-}

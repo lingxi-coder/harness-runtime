@@ -340,8 +340,6 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
     let selected_profile = config.default_model.split_once('/').unwrap().0;
     if selected_profile == "anthropic" {
         scoped.api_base = config.api_base.clone();
-        scoped.api_key = config.api_key.clone();
-        scoped.api_key_source = config.api_key_source.clone();
     }
     scoped.provider_profiles = config.provider_profiles.as_ref().map(|profiles| {
         profiles
@@ -351,16 +349,12 @@ pub(super) fn enforce_team_config(config: &mut DesktopConfig) -> Result<(), Team
             .collect()
     });
     if let Some(model) = profile.selected_model() {
-        model
-            .route()
-            .validate()
-            .map_err(|_| TeamInvocationError::Model)?;
+        model.validate().map_err(|_| TeamInvocationError::Model)?;
         scoped.default_model = format!(
             "{}/{}",
             model.route().model_provider,
             model.route().model_id
         );
-        scoped.api_key.clear();
         scoped.provider_profiles = None;
     }
     scoped.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::NativeOrMemory;

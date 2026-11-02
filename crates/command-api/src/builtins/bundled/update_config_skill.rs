@@ -36,7 +36,7 @@ const HOOK_CONSTRUCTION: &str = include_str!("update_config_hook_construction.md
 /// The reference's `[hooks-only]` prefix, and the width `e.slice(12)` skips.
 const HOOKS_ONLY_PREFIX: &str = "[hooks-only]";
 
-pub(crate) const UPDATE_CONFIG_DESCRIPTION: &str = "Use this skill to configure the LingXi harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not LingXi, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when LingXi stops show X\". For simple settings like theme/model, suggest the /config command.";
+pub(crate) const UPDATE_CONFIG_DESCRIPTION: &str = "Use this skill to configure the LingXi harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not LingXi, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when LingXi stops show X\". For native appearance and provider account/model selection, use the client Settings UI. /config edits Harness user settings.";
 
 /// The live `settings.json` schema, pretty-printed.
 ///
@@ -74,8 +74,9 @@ impl BundledPromptFn for UpdateConfigPromptFn {
             }
             return crate::model::source_from_units(out);
         }
+        let body = branding::render_namespace_template(UPDATE_CONFIG_BODY);
         let mut out = format!(
-            "{UPDATE_CONFIG_BODY}\n\n## Full Settings JSON Schema\n\n```json\n{}\n```",
+            "{body}\n\n## Full Settings JSON Schema\n\n```json\n{}\n```",
             settings_schema_json()
         )
         .encode_utf16()
@@ -101,6 +102,9 @@ mod tests {
             assert!(!body.contains("claude --debug"), "cli name: {body:.60}");
         }
         assert!(!UPDATE_CONFIG_DESCRIPTION.contains("Claude Code"));
+        for placeholder in ["${Ks}", "${an}", "${ln}"] {
+            assert!(!UPDATE_CONFIG_BODY.contains(placeholder));
+        }
     }
 
     /// The point of the skill: the model is handed the REAL settings shape.
@@ -109,6 +113,10 @@ mod tests {
         let out = UpdateConfigPromptFn.build(&"".into());
         assert!(out.starts_with("# Update Config Skill"));
         assert!(out.contains("## Full Settings JSON Schema"));
+        assert!(
+            !out.contains("{{"),
+            "brand namespace is injected before display"
+        );
         // A key that only exists because it is on the real `SettingsJson`.
         assert!(
             out.contains("permissions"),

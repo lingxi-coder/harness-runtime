@@ -5,7 +5,7 @@ use crate::secure_storage::helpers::KEYCHAIN_CACHE_TTL;
 use async_trait::async_trait;
 use base64::Engine as _;
 use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
-use lingxi_core::types::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
+use lingxi_core::types::SecureStorageData;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,16 +24,9 @@ const BROKER_CLIENT_EXECUTABLE: &str = "lingxi-credential-client";
 const BROKER_PROTOCOL_VERSION: u32 = 1;
 const MAX_BROKER_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_BROKER_RESPONSE_BYTES: usize = 128 * 1024;
-#[derive(Clone, Copy)]
-enum PayloadFormat {
-    Json,
-    Provider(&'static str),
-}
-
 struct BrokerAddress {
     service: String,
     account: String,
-    payload_format: PayloadFormat,
 }
 
 #[derive(Clone)]
@@ -151,26 +144,9 @@ impl MacOsKeychainStorage {
     }
 
     fn broker_address(&self, service: &str, account: &str) -> BrokerAddress {
-        if service == "lingxi" {
-            if account == "anthropic-api-key" {
-                return BrokerAddress {
-                    service: provider_service_name(),
-                    account: "anthropic".to_string(),
-                    payload_format: PayloadFormat::Provider("anthropic_api_key"),
-                };
-            }
-            if let Some(provider_id) = account.strip_prefix("provider-key-") {
-                return BrokerAddress {
-                    service: provider_service_name(),
-                    account: provider_id.to_string(),
-                    payload_format: PayloadFormat::Provider("generic_api_key"),
-                };
-            }
-        }
         BrokerAddress {
             service: self.keychain_service_name(service),
             account: account.to_string(),
-            payload_format: PayloadFormat::Json,
         }
     }
 
@@ -285,7 +261,7 @@ impl SecureStorage for MacOsKeychainStorage {
             op: "store",
             service: Some(&address.service),
             account: Some(&address.account),
-            payload: Some(encode_storage_payload(&data, address.payload_format)?),
+            payload: Some(encode_storage_payload(&data)?),
         };
         let response = self.invoke_broker(&request).await?;
         require_success("store", &response)?;
@@ -354,7 +330,7 @@ impl SecureStorage for MacOsKeychainStorage {
                 async {
                     require_success("retrieve", &response)?;
                     let data = if let Some(payload) = response.payload.as_deref() {
-                        Some(decode_storage_payload(payload, address.payload_format)?)
+                        Some(decode_storage_payload(payload)?)
                     } else {
                         None
                     };
@@ -471,53 +447,21 @@ fn broker_channel() -> &'static str {
     }
 }
 
-fn provider_service_name() -> String {
-    if broker_channel() == "production" {
-        "com.lingxi.provider-credentials.v1".to_string()
-    } else {
-        "com.lingxi.provider-credentials.v1.development".to_string()
-    }
+fn encode_storage_payload(data: &SecureStorageData) -> Result<String, SecureStorageError> {
+    serde_json::to_vec(data)
+        .map(|payload| base64::engine::general_purpose::STANDARD.encode(payload))
+        .map_err(|error| SecureStorageError::Io(format!("serialize storage payload: {error}")))
 }
 
-fn encode_storage_payload(
-    data: &SecureStorageData,
-    payload_format: PayloadFormat,
-) -> Result<String, SecureStorageError> {
-    match payload_format {
-        PayloadFormat::Provider(_) => String::from_utf8(data.expose_secret_bytes().to_vec())
-            .map_err(|_| {
-                SecureStorageError::Io("provider credential is not valid UTF-8".to_string())
-            }),
-        PayloadFormat::Json => serde_json::to_vec(data)
-            .map(|payload| base64::engine::general_purpose::STANDARD.encode(payload))
-            .map_err(|error| SecureStorageError::Io(format!("serialize storage payload: {error}"))),
-    }
-}
-
-fn decode_storage_payload(
-    payload: &str,
-    payload_format: PayloadFormat,
-) -> Result<SecureStorageData, SecureStorageError> {
-    match payload_format {
-        PayloadFormat::Provider(kind) => Ok(SecureStorageData::new(
-            payload.as_bytes().to_vec(),
-            SecureStorageMetadata {
-                created_at: std::time::SystemTime::now(),
-                last_accessed: Some(std::time::SystemTime::now()),
-                kind: SecretKindDto(kind.to_string()),
-            },
-        )),
-        PayloadFormat::Json => {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(payload)
-                .map_err(|error| {
-                    SecureStorageError::Io(format!("decode credential broker payload: {error}"))
-                })?;
-            serde_json::from_slice(&bytes).map_err(|error| {
-                SecureStorageError::Io(format!("deserialize credential broker payload: {error}"))
-            })
-        }
-    }
+fn decode_storage_payload(payload: &str) -> Result<SecureStorageData, SecureStorageError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|error| {
+            SecureStorageError::Io(format!("decode credential broker payload: {error}"))
+        })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        SecureStorageError::Io(format!("deserialize credential broker payload: {error}"))
+    })
 }
 
 fn resolve_broker_client() -> Result<PathBuf, SecureStorageError> {
@@ -624,32 +568,48 @@ case "$payload" in
   *'"op":"retrieve"'*) printf '{{"ok":true,"protocol_version":1,"payload":"{payload}"}}' ;;
   *'"op":"contains"'*) printf '{{"ok":true,"protocol_version":1,"present":true}}' ;;
   *'"op":"delete"'*) printf '{{"ok":true,"protocol_version":1}}' ;;
-  *'"op":"list"'*) printf '{{"ok":true,"protocol_version":1,"accounts":["provider-key-openai"]}}' ;;
+  *'"op":"list"'*) printf '{{"ok":true,"protocol_version":1,"accounts":["acct.11111111-1111-4111-8111-111111111111"]}}' ;;
   *) printf '{{"ok":false,"protocol_version":1,"error_kind":"invalid_request","error":"bad request"}}' ;;
 esac
 "#,
             )),
         );
         storage
-            .store("", "provider-key-openai", sample_data(b"secret"))
+            .store(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111",
+                sample_data(b"secret"),
+            )
             .await
             .expect("store");
         let retrieved = storage
-            .retrieve("", "provider-key-openai")
+            .retrieve(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111",
+            )
             .await
             .expect("retrieve")
             .expect("present");
         assert_eq!(retrieved.expose_secret_bytes(), b"secret");
         assert!(storage
-            .contains("", "provider-key-openai")
+            .contains(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111"
+            )
             .await
             .expect("contains"));
         assert_eq!(
-            storage.list("").await.expect("list"),
-            vec!["provider-key-openai".to_string()]
+            storage
+                .list("provider-accounts.fixture")
+                .await
+                .expect("list"),
+            vec!["acct.11111111-1111-4111-8111-111111111111".to_string()]
         );
         storage
-            .delete("", "provider-key-openai")
+            .delete(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111",
+            )
             .await
             .expect("delete");
     }
@@ -683,8 +643,14 @@ printf '{{"ok":true,"protocol_version":1,"payload":"{payload}"}}'
             script,
         );
         let (first, second) = tokio::join!(
-            storage.retrieve("", "provider-key-openai"),
-            storage.retrieve("", "provider-key-openai"),
+            storage.retrieve(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111"
+            ),
+            storage.retrieve(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111"
+            ),
         );
         assert!(first.expect("first").is_some());
         assert!(second.expect("second").is_some());
@@ -705,10 +671,19 @@ printf '{"ok":false,"protocol_version":1,"error_kind":"unavailable","error":"loc
             ),
         );
 
-        assert!(storage.retrieve("", "provider-key-openai").await.is_err());
+        assert!(storage
+            .retrieve(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111"
+            )
+            .await
+            .is_err());
         let retry = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            storage.retrieve("", "provider-key-openai"),
+            storage.retrieve(
+                "provider-accounts.fixture",
+                "acct.11111111-1111-4111-8111-111111111111",
+            ),
         )
         .await
         .expect("a failed lookup must not leave later reads waiting forever");
@@ -757,7 +732,12 @@ printf '{"ok":false,"protocol_version":1,"error_kind":"unavailable","error":"loc
             PathBuf::from("/definitely-missing/lingxi-credential-client"),
         );
         assert!(matches!(
-            storage.retrieve("lingxi", "provider-key-openai").await,
+            storage
+                .retrieve(
+                    "provider-accounts.fixture",
+                    "acct.11111111-1111-4111-8111-111111111111"
+                )
+                .await,
             Err(SecureStorageError::BackendUnavailable(_)) | Err(SecureStorageError::Io(_))
         ));
     }
@@ -777,37 +757,6 @@ printf '{"ok":false,"protocol_version":1,"error_kind":"unavailable","error":"loc
             storage.keychain_service_name(""),
             "com.lingxi.secure-storage.v1.development.default"
         );
-    }
-
-    #[test]
-    fn provider_accounts_share_the_channel_scoped_provider_service() {
-        let storage = MacOsKeychainStorage::with_broker_for_test(
-            PathBuf::from("/Users/x/.lingxi"),
-            PathBuf::from("/Users/x/.lingxi"),
-            PathBuf::from("/tmp/lingxi-credential-client"),
-        );
-        let anthropic = storage.broker_address("lingxi", "anthropic-api-key");
-        assert_eq!(
-            anthropic.service,
-            "com.lingxi.provider-credentials.v1.development"
-        );
-        assert_eq!(anthropic.account, "anthropic");
-        let openai = storage.broker_address("lingxi", "provider-key-openai");
-        assert_eq!(openai.service, anthropic.service);
-        assert_eq!(openai.account, "openai");
-    }
-
-    #[test]
-    fn provider_payload_is_sent_as_the_raw_secret() {
-        let encoded = encode_storage_payload(
-            &sample_data(b"sk-test-secret"),
-            PayloadFormat::Provider("generic_api_key"),
-        )
-        .expect("encode provider secret");
-        assert_eq!(encoded, "sk-test-secret");
-        let decoded = decode_storage_payload(&encoded, PayloadFormat::Provider("generic_api_key"))
-            .expect("decode provider secret");
-        assert_eq!(decoded.expose_secret_bytes(), b"sk-test-secret");
     }
 
     #[test]

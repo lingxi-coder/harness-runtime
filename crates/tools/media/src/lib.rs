@@ -119,7 +119,7 @@ impl MediaTool {
             model,
             account_scope: profile_name
                 .as_ref()
-                .map(|profile| format!("profile:{profile}")),
+                .map(|_| lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned()),
             profile_name,
             attachment_id: self.service().and_then(|service| service.attachment_id()),
         })

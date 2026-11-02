@@ -186,8 +186,6 @@ pub(crate) fn native_builtin_catalog_order(name: &str) -> Option<usize> {
         "goal",
         "hooks",
         "export",
-        "login",
-        "logout",
         "passes",
         "list-agents",
         "tasks",
@@ -230,8 +228,8 @@ fn native_builtin_metadata(name: &str) -> (Option<crate::model::NativeCommandTyp
         // other UI-only flags.
         "autofix-pr" | "background" | "branch" | "brief" | "btw" | "bug" | "cd" | "chrome"
         | "copy" | "desktop" | "diff" | "export" | "feedback" | "fork" | "help" | "hooks"
-        | "ide" | "install" | "install-github-app" | "login" | "logout" | "memory" | "mobile"
-        | "passes" | "permissions" | "plan" | "plugin" | "powerup" | "privacy-settings"
+        | "ide" | "install" | "install-github-app" | "memory" | "mobile" | "passes"
+        | "permissions" | "plan" | "plugin" | "powerup" | "privacy-settings"
         | "rate-limit-options" | "release-notes" | "remote-env" | "resume" | "session"
         | "skills" | "status" | "subtask" | "tasks" | "teleport" | "terminal-setup" | "theme"
         | "tui" | "ultraplan" | "upgrade" | "workflows" => (Some(LocalJsx), false, false),
@@ -285,29 +283,26 @@ pub fn register_core_batch_1(
 }
 
 /// Overwrite the 11 batch-2 entries (`agents`, `config`, `hooks`,
-/// `ide`, `login`, `logout`, `mcp`, `model`, `permissions`, `status`, `version`) with
-/// their handle/auth-bound real handlers from M5-11.
+/// `ide`, `mcp`, `model`, `permissions`, `status`, `version`) with
+/// their orchestrator-bound handlers.
 ///
 /// Call **after** [`register_all_builtin_commands`] and (optionally) after
 /// [`register_core_batch_1`]. The function is idempotent — calling it twice
-/// with the same `handle`/`auth` produces the same final state.
+/// with the same handle produces the same final state.
 ///
 /// [`crate::builtins::VersionHandler`] starts with unknown host metadata; composition
-/// roots replace it using `VersionHandler::with_build_info`. All other batch-2 handlers consume the
-/// orchestrator handle; `/login` and `/logout` consume the auth handle.
+/// roots replace it using `VersionHandler::with_build_info`. Other batch-2 handlers consume the
+/// orchestrator handle.
 ///
 /// M5-12 (the CLI binary) calls this immediately after `register_core_batch_1`
-/// during boot, threading the live `Arc<dyn OrchestratorHandle>` and
-/// `Arc<dyn AuthHandle>` instances.
+/// during boot with the live orchestrator handle.
 pub fn register_core_batch_2(
     reg: &mut CommandRegistry,
     handle: Arc<dyn lingxi_core::host::OrchestratorHandle>,
-    auth: Arc<dyn lingxi_core::host::AuthHandle>,
 ) {
     use crate::builtins::{
-        AgentsHandler, ConfigHandler, HooksHandler, IdeHandler, LoginHandler, LogoutHandler,
-        McpHandler, ModelHandler, OutputStyleHandler, PermissionsHandler, StatusHandler,
-        VersionHandler,
+        AgentsHandler, ConfigHandler, HooksHandler, IdeHandler, McpHandler, ModelHandler,
+        OutputStyleHandler, PermissionsHandler, StatusHandler, VersionHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AgentsHandler::new(handle.clone())));
@@ -317,8 +312,6 @@ pub fn register_core_batch_2(
     reg.register_builtin_handler(Arc::new(ConfigHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(HooksHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(IdeHandler::new(handle.clone())));
-    reg.register_builtin_handler(Arc::new(LoginHandler::new(auth.clone())));
-    reg.register_builtin_handler(Arc::new(LogoutHandler::new(auth)));
     reg.register_builtin_handler(Arc::new(McpHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ModelHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(
@@ -473,19 +466,6 @@ pub fn register_core_batch_6(reg: &mut CommandRegistry, enabled: bool) {
     use crate::builtins::KeybindingsHandler;
 
     reg.register_builtin_handler(Arc::new(KeybindingsHandler::with_enabled(enabled)));
-}
-
-/// Register the additive `/connect` command (Plan 3c). Not a locked builtin name,
-/// so this is a pure addition; idempotent. Composition roots call this after the
-/// core batch registrars, threading the engine-built seams.
-pub fn register_core_connect(
-    reg: &mut CommandRegistry,
-    writer: Arc<dyn crate::builtins::ConnectCredentialWriter>,
-    copilot: Arc<dyn crate::builtins::CopilotConnectDriver>,
-    chatgpt: Arc<dyn crate::builtins::ChatGptConnectDriver>,
-) {
-    use crate::builtins::ConnectHandler;
-    reg.register_builtin_handler(Arc::new(ConnectHandler::new(writer, copilot, chatgpt)));
 }
 
 /// Overwrite the handle-free `/skills` entry with its non-TUI real handler.
@@ -1574,61 +1554,6 @@ mod batch_8_tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
-    }
-}
-
-#[cfg(test)]
-mod connect_tests {
-    use super::*;
-    use crate::builtins::connect::{
-        ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
-        CopilotConnectStep,
-    };
-    use async_trait::async_trait;
-
-    struct NoopWriter;
-    #[async_trait]
-    impl ConnectCredentialWriter for NoopWriter {
-        async fn prompt_and_store_key(&self, _id: &str) -> Result<(), ConnectError> {
-            Ok(())
-        }
-    }
-    struct NoopCopilot;
-    #[async_trait]
-    impl CopilotConnectDriver for NoopCopilot {
-        async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
-            Ok(CopilotConnectStep {
-                user_code: "X".into(),
-                verification_uri: "https://github.com/login/device".into(),
-            })
-        }
-        async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {
-            Ok(())
-        }
-    }
-    struct NoopChatGpt;
-    #[async_trait]
-    impl ChatGptConnectDriver for NoopChatGpt {
-        async fn connect(&self) -> Result<String, ConnectError> {
-            Ok("Connected chatgpt.".into())
-        }
-    }
-
-    #[test]
-    fn connect_resolves_after_registration() {
-        let mut reg = CommandRegistry::new();
-        register_all_builtin_commands(&mut reg);
-        register_core_connect(
-            &mut reg,
-            Arc::new(NoopWriter),
-            Arc::new(NoopCopilot),
-            Arc::new(NoopChatGpt),
-        );
-        assert!(reg.resolve(&"connect".into()).is_some(), "/connect missing");
-        assert!(
-            reg.get_handler(&"connect".into()).is_some(),
-            "/connect handler missing"
-        );
     }
 }
 

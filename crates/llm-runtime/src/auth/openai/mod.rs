@@ -23,7 +23,7 @@ pub(crate) mod testsupport;
 pub use credential_provider::OpenAiOAuthCredentialProvider;
 pub use device_code::run_device_code_login;
 pub use external_tokens::ExternalTokensCredentialProvider;
-pub use handle::{BrowserOpener, OpenAiAuthError, OpenAiLoginInfo, OpenAiOAuthHandle};
+pub use handle::{AccountOAuthClient, OpenAiAuthError};
 pub use host_session::{HostRefreshRequester, HostSession, HostToken};
 pub use login::{init_refresh_driver, OAuthError};
 pub use pat::PatCredentialProvider;

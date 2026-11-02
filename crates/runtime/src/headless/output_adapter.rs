@@ -94,6 +94,12 @@ impl OutputStream for SinkAdapter {
             .tool_heartbeat(id.as_str(), tool, elapsed_ms)
             .await;
     }
+    async fn emit_provider_account_routing(
+        &self,
+        event: &lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent,
+    ) {
+        self.sink.provider_account_routing(event).await;
+    }
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
         self.sink
             .turn_end(
@@ -138,6 +144,41 @@ mod tests {
                 .await
                 .push((code.to_string(), message.to_string()));
         }
+    }
+
+    #[tokio::test]
+    async fn named_account_routing_is_structured_ndjson() {
+        use crate::headless::io::Output;
+        use crate::headless::output::JsonSink;
+        use tokio::io::AsyncReadExt;
+        let (writer, mut reader) = tokio::io::duplex(8192);
+        let sink = Arc::new(JsonSink::new(
+            lingxi_core::types::SessionId::new(),
+            Output::new(writer),
+        ));
+        let adapter = SinkAdapter::new(sink.clone());
+        let event = lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent {
+            logical_call_id: "call-fixture".into(),
+            model: "fixture-model".into(),
+            attempt: 1,
+            status: "selected".into(),
+            selected_account_id: Some("account-a".into()),
+            profile: Some("account.account-a".into()),
+            identity_generation: Some(1),
+            config_revision: Some(2),
+            failed_accounts: vec![],
+            earliest_recovery_ms: None,
+        };
+        adapter.emit_provider_account_routing(&event).await;
+        drop(adapter);
+        drop(sink);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        let frame: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(frame["event"], "provider_account_routing");
+        assert_eq!(frame["routing"]["selectedAccountId"], "account-a");
+        assert_eq!(frame["routing"]["configRevision"], 2);
+        assert!(frame["routing"].get("accessToken").is_none());
     }
 
     #[tokio::test]

@@ -14,6 +14,13 @@ use crate::prefix_lock_recovery::PrefixLockRecoveryState;
 
 #[derive(Debug, Default)]
 struct State {
+    account_call_id: Option<String>,
+    account_output_committed: bool,
+    account_replay_error: Option<crate::LlmError>,
+    account_failed: std::collections::HashSet<String>,
+    account_renewed: std::collections::HashSet<String>,
+    account_budget: Option<crate::ApiAttemptsLeft>,
+    account_deadline: Option<tokio::time::Instant>,
     display_probe: lingxi_llm_client::providers::anthropic::thinking_display::DisplayProbe,
     max_retries: Option<u32>,
     retries: u32,
@@ -70,6 +77,74 @@ pub(crate) fn http_retry_decline_is_terminal(
 }
 
 impl ModelCallRetryScope {
+    pub(crate) fn record_account_output(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account_output_committed = true;
+    }
+    pub(crate) fn record_account_stream_error(&self, error: &crate::LlmError) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.account_output_committed {
+            state.account_replay_error = Some(error.clone());
+        }
+    }
+    pub(crate) fn account_replay_error(&self) -> Option<crate::LlmError> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account_replay_error
+            .clone()
+    }
+
+    pub(crate) fn account_call_id(&self) -> String {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account_call_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone()
+    }
+    pub(crate) fn take_account_renewal(&self, key: String) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account_renewed
+            .insert(key)
+    }
+    pub(crate) fn account_failed(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account_failed
+            .contains(key)
+    }
+    pub(crate) fn mark_account_failed(&self, key: Option<String>) {
+        if let Some(key) = key {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .account_failed
+                .insert(key);
+        }
+    }
+    pub(crate) fn account_api_budget(&self) -> crate::ApiAttemptsLeft {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account_budget
+            .get_or_insert_with(|| crate::ApiAttemptsLeft::new(64))
+            .clone()
+    }
+    pub(crate) fn account_deadline(&self, duration: std::time::Duration) -> tokio::time::Instant {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account_deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + duration)
+    }
+
     /// Record one matching Native prefix-lock response on this logical call.
     pub(crate) fn record_prefix_lock_error(&self) -> u32 {
         self.0

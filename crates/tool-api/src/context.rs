@@ -191,7 +191,7 @@ pub struct MediaAgentCapabilityContext {
     pub model: String,
     /// Exact profile pinned to this session, if present.
     pub profile_name: Option<String>,
-    /// Account scope derived from the pinned profile.
+    /// Account scope is unbound until the host selects a concrete account.
     pub account_scope: Option<String>,
     /// Host-issued engine attachment from the trusted media service, if scoped.
     pub attachment_id: Option<MediaAttachmentId>,
@@ -264,7 +264,7 @@ impl ToolUseContext {
             model: session.model.clone(),
             account_scope: profile_name
                 .as_ref()
-                .map(|profile| format!("profile:{profile}")),
+                .map(|_| lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned()),
             profile_name,
             attachment_id,
         })

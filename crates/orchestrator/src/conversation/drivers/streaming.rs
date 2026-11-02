@@ -4585,6 +4585,9 @@ impl StreamingTurnDriver<'_> {
             prior_message_id.unwrap_or_else(|| user_msg.id()),
             user_cancel.clone(),
         );
+        if transient_rewake && !in_human_turn {
+            loop_state.notification_user_boundary = Some(orch.latest_response_request_user().await);
+        }
         let final_message_id;
         loop {
             // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE

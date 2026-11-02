@@ -34,3 +34,10 @@ examples; avoid inventing another HTTP/Python/npm SDK from a Rust type name.
 Source anchors: Harness `crates/runtime/src/api.rs`, `crates/client/src/protocol`,
 `crates/local-app/src/v2/agent/protocol.rs`; product `packages/bridge-client`,
 `packages/mobile-ffi` and its technical documentation.
+
+HarnessBuilder wraps supplied SessionService/LifecycleService implementations;
+it does not bootstrap a runtime. Desktop Rust hosts can use the runtime crate's
+re-exported desktop SDK build_harness(DesktopConfig, OutputStream,
+PermissionGate), which assembles the runtime before creating the facade. Check
+crates/runtime/src/desktop/sdk.rs and the current Cargo crate name/features for
+imports. Consume events, permissions and shutdown through the owning services.

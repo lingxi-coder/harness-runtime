@@ -32,7 +32,7 @@ use command_api::builtins::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
-use lingxi_core::host::{AuthHandle, OrchestratorHandle};
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_ui::ask_user_question::AskUserQuestionResolver;
@@ -98,9 +98,8 @@ pub use host::{
     spawn_mobile_lifecycle_task, wait_for_mobile_session_release, CronDueOccurrenceDto,
     CronFireStatusDto, CronTaskDto, FiredCronJobDto, MediaAgentHandoffRequest,
     MediaConversationAttachment, MediaSessionContext, MobileBuildError, MobileConfig,
-    MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto,
-    MobileOAuthStateDto, MobileRuntime, MobileSessionDiscoveryScope, ProviderCatalogEntryDto,
-    ProviderConnectionTestDto, RealtimeAgentSessionIo,
+    MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileRuntime,
+    MobileSessionDiscoveryScope, ProviderCatalogEntryDto, RealtimeAgentSessionIo,
 };
 #[cfg(feature = "mobile")]
 pub use session::jsonl::SessionMode as MobileSessionMode;
@@ -211,14 +210,18 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
 ) {
     // ----- cross-platform subset (also linked by harness-runtime::desktop) -----------
     tool_file::register_all(reg, ctx.clone());
-    if let Some(config_home) = config_home {
-        tool_task::register_mobile_with_config_home(reg, ctx.clone(), config_home);
+    if let Some(config_home) = config_home.as_ref() {
+        tool_task::register_mobile_with_config_home(reg, ctx.clone(), config_home.clone());
     } else {
         tool_task::register_mobile(reg, ctx.clone());
     }
     tool_web::register_all(reg, ctx.clone(), None);
     tool_plan::register_all(reg, ctx.clone());
-    tool_meta::register_all(reg, ctx.clone());
+    if let Some(home) = config_home {
+        tool_meta::register_all_with_settings_path(reg, ctx.clone(), home.join("settings.json"));
+    } else {
+        tool_meta::register_all(reg, ctx.clone());
+    }
     // Audit fix (#7): the cron tools (Create/List/Delete/RemoteTrigger) are
     // registered, but mobile starts NO `cron::CronScheduler` (the desktop root is
     // the only place one runs) and wires no `task_registry` for it to fire into —
@@ -422,10 +425,7 @@ mod android_ui_registration_tests {
 /// Assemble the mobile slash-command registry: the core handlers plus the
 /// mobile-only handlers (`/mobile` `/voice` `/share` `/camera`).
 #[must_use]
-pub fn mobile_command_registry(
-    handle: Arc<dyn OrchestratorHandle>,
-    auth: Arc<dyn AuthHandle>,
-) -> CommandRegistry {
+pub fn mobile_command_registry(handle: Arc<dyn OrchestratorHandle>) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     reg.register_builtin_handler(Arc::new(
@@ -435,7 +435,7 @@ pub fn mobile_command_registry(
         ),
     ));
     register_core_batch_1(&mut reg, handle.clone());
-    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_2(&mut reg, handle.clone());
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle);
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,

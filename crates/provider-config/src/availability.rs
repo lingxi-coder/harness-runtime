@@ -1,8 +1,5 @@
-//! Per-profile availability: drives the `/model` picker's Connect badge.
-//!
-//! `available = keychain_has(id) || env_set(var) || anthropic key/oauth present`.
-//! A sibling list keyed by `profile_name` (spec §8) so the frozen `ModelListing`
-//! DTO stays untouched; the tui joins it by provider/profile name.
+//! Account-scoped credential presence for the model catalog.
+//! Only enabled registered accounts contribute availability; secrets are not read.
 
 use std::sync::Arc;
 
@@ -23,84 +20,62 @@ pub struct ProviderAvailability {
     pub available: bool,
 }
 
-/// Compute availability for every `CredentialSource`.
-///
-/// `anthropic_has_api_key` / `anthropic_has_oauth` reflect the engine's resolved
-/// Anthropic auth state (the composite serves those without a keychain/env id).
-/// `openai_chatgpt_available` mirrors that pattern for the ChatGPT credential —
-/// the engine ORs PAT-env / external-tokens-env / OAuth-session and passes the
-/// combined result here (OpenAI OAuth tokens are stored under `openai-oauth-*`
-/// keychain accounts, not under a `get_provider_key("openai-chatgpt")` slot, so
-/// the generic arm cannot detect any of the three sources).
-/// `isolated` suppresses AMBIENT credential sources — the process environment
-/// — leaving only what this boot was explicitly given.
-///
-/// A preset counts as available when its env var merely EXISTS, so any
-/// `DEEPSEEK_API_KEY`/`OPENAI_API_KEY`/… in the developer's shell silently makes
-/// a provider "connected". That is correct for a real session and wrong for a
-/// sandboxed one: it makes credential-dependent behaviour answer differently on
-/// a machine that happens to export a key, which is a test-isolation hazard
-/// rather than a preference.
-pub async fn compute_availability_with_isolation(
+/// Account-aware presence for the model catalog. Managed bindings never regain
+/// invisible environment/provider-wide credentials after their last account is removed.
+pub async fn compute_availability_with_accounts(
     credentials: &Arc<secret::CredentialManager>,
     sources: &[CredentialSource],
-    anthropic_has_api_key: bool,
-    anthropic_has_oauth: bool,
-    openai_chatgpt_available: bool,
-    isolated: bool,
+    snapshot: &lingxi_core::host::provider_accounts::AccountSnapshot,
 ) -> Vec<ProviderAvailability> {
-    let mut out = Vec::with_capacity(sources.len());
-    for source in sources {
-        let available = match source.credential_id.as_str() {
-            // Host-managed API keys do not own either OAuth session. In
-            // particular, an empty API-key override map on a cold sidecar
-            // must not hide a host's live ChatGPT/Anthropic OAuth delegate.
-            "anthropic-oauth" => anthropic_has_oauth,
-            "openai-chatgpt" => openai_chatgpt_available,
-            id if credentials.provider_key_is_suppressed(id).await => false,
-            "anthropic-api-key" => anthropic_has_api_key,
-            id => {
-                // Availability needs presence, not secret bytes. On macOS the
-                // attribute-only query avoids decrypting every provider key
-                // (and therefore avoids one ACL prompt per saved item) while a
-                // session still loads its selected provider below during boot.
-                let keychain_has = credentials.has_provider_key(id).await.unwrap_or(false);
-                let env_set = !isolated
-                    && source
-                        .env_var
-                        .as_deref()
-                        .is_some_and(|var| std::env::var(var).is_ok());
-                keychain_has || env_set
-            }
-        };
-        out.push(ProviderAvailability {
-            provider_id: source.provider_id.clone(),
-            profile_name: source.profile_name.clone(),
-            credential_id: source.credential_id.clone(),
-            available,
+    let mut presence = std::collections::BTreeMap::new();
+    for account in &snapshot.accounts {
+        let pending = snapshot.health.iter().any(|h| {
+            h.account_id == account.account_id
+                && h.reason.as_deref() == Some("credential_commit_pending")
         });
+        let present = account.enabled
+            && !pending
+            && credentials
+                .has_account_credential(&account.credential_ref)
+                .await
+                .unwrap_or(false);
+        presence.insert(account.account_id.as_str(), present);
     }
-    out
-}
-
-/// [`compute_availability_with_isolation`] with ambient sources ENABLED — the
-/// production behaviour.
-pub async fn compute_availability(
-    credentials: &Arc<secret::CredentialManager>,
-    sources: &[CredentialSource],
-    anthropic_has_api_key: bool,
-    anthropic_has_oauth: bool,
-    openai_chatgpt_available: bool,
-) -> Vec<ProviderAvailability> {
-    compute_availability_with_isolation(
-        credentials,
-        sources,
-        anthropic_has_api_key,
-        anthropic_has_oauth,
-        openai_chatgpt_available,
-        false,
-    )
-    .await
+    sources
+        .iter()
+        .map(|source| {
+            let exact = snapshot
+                .accounts
+                .iter()
+                .find(|a| a.credential_ref.secret_ref == source.credential_id);
+            let available = if let Some(account) = exact {
+                presence
+                    .get(account.account_id.as_str())
+                    .copied()
+                    .unwrap_or(false)
+            } else {
+                snapshot
+                    .accounts
+                    .iter()
+                    .filter(|a| {
+                        a.execution_binding_id == source.profile_name
+                            || a.execution_binding_id == source.credential_id
+                    })
+                    .any(|a| {
+                        presence
+                            .get(a.account_id.as_str())
+                            .copied()
+                            .unwrap_or(false)
+                    })
+            };
+            ProviderAvailability {
+                provider_id: source.provider_id.clone(),
+                profile_name: source.profile_name.clone(),
+                credential_id: source.credential_id.clone(),
+                available,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -214,13 +189,6 @@ mod tests {
             panic!("availability tests must not perform HTTP");
         }
     }
-    fn manager() -> Arc<secret::CredentialManager> {
-        Arc::new(secret::CredentialManager::new(
-            Arc::new(MemStorage::default()),
-            Arc::new(FixedClock),
-            Arc::new(NoHttp),
-        ))
-    }
     fn src(name: &str, env: Option<&str>) -> crate::CredentialSource {
         crate::CredentialSource {
             provider_id: ProviderId::OpenAICompatible {
@@ -233,223 +201,92 @@ mod tests {
         }
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[tokio::test]
-    async fn host_managed_api_keys_do_not_suppress_oauth_availability() {
-        let credentials = manager();
-        credentials.use_host_managed_provider_keys();
-        let sources = [
-            src("anthropic-api-key", None),
-            src("deepseek", None),
-            src("anthropic-oauth", None),
-            src("openai-chatgpt", None),
-        ];
-        let rows = compute_availability(&credentials, &sources, true, true, true).await;
-        let actual: Vec<bool> = rows.iter().map(|row| row.available).collect();
-        assert_eq!(actual, [false, false, true, true]);
-
-        credentials
-            .set_provider_key_ephemeral("anthropic", "key")
-            .await;
-        let rows = compute_availability(&credentials, &sources, true, true, true).await;
-        assert!(rows[0].available);
-        credentials
-            .suppress_provider_key_ephemeral("anthropic")
-            .await;
-        let rows = compute_availability(&credentials, &sources, true, true, true).await;
-        assert!(!rows[0].available);
-        assert!(rows[2].available && rows[3].available);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn host_deletion_suppresses_stale_flags_and_environment_availability() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let variable = "HOST_DELETED_AVAILABILITY_REGRESSION_KEY";
-        let previous = std::env::var_os(variable);
-        std::env::set_var(variable, "environment-key");
-        let credentials = manager();
-        credentials
-            .suppress_provider_key_ephemeral("anthropic")
-            .await;
-        credentials
-            .suppress_provider_key_ephemeral("host-test")
-            .await;
-        let sources = [
-            src("anthropic-api-key", None),
-            src("host-test", Some(variable)),
-        ];
-        let unavailable = compute_availability(&credentials, &sources, true, false, false).await;
-        assert!(unavailable.iter().all(|entry| !entry.available));
-
-        credentials
-            .set_provider_key_ephemeral("anthropic", "replacement")
-            .await;
-        credentials
-            .set_provider_key_ephemeral("host-test", "replacement")
-            .await;
-        let available = compute_availability(&credentials, &sources, true, false, false).await;
-        assert!(available.iter().all(|entry| entry.available));
-        match previous {
-            Some(value) => std::env::set_var(variable, value),
-            None => std::env::remove_var(variable),
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn keychain_makes_available() {
-        let _g = ENV_LOCK.lock().unwrap();
+    async fn account_availability_contains_only_and_empty_or_disabled_never_uses_ambient() {
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountMetadata, CredentialRef,
+        };
         let storage = Arc::new(MemStorage::default());
-        let cm = Arc::new(secret::CredentialManager::new(
+        let credentials = Arc::new(secret::CredentialManager::new(
             storage.clone(),
             Arc::new(FixedClock),
             Arc::new(NoHttp),
         ));
-        cm.set_provider_key("openrouter", "k").await.expect("store");
-        let map = compute_availability(
-            &cm,
-            &[src("openrouter", Some("NOPE_VAR"))],
-            false,
-            false,
-            false,
-        )
-        .await;
-        let entry = map
-            .iter()
-            .find(|a| a.profile_name == "openrouter")
-            .expect("entry");
-        assert!(entry.available);
+        storage.map.lock().unwrap().insert(
+            ("lingxi".into(), "provider-key-openai".into()),
+            lingxi_core::types::SecureStorageData::new(
+                b"old-singleton".to_vec(),
+                lingxi_core::types::SecureStorageMetadata {
+                    created_at: std::time::SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: lingxi_core::types::SecretKindDto("generic_api_key".into()),
+                },
+            ),
+        );
+        let mut registry = crate::AccountRegistry::new("test_account_availability".into());
+        let account = AccountMetadata {
+            account_id: uuid::Uuid::new_v4().to_string(),
+            provider_id: "openai".into(),
+            display_name: "fixture".into(),
+            auth_kind: AccountAuthKind::ApiKey,
+            execution_binding_id: "openai".into(),
+            credential_ref: CredentialRef {
+                store_scope: "test_account_availability".into(),
+                secret_ref: String::new(),
+            },
+            enabled: true,
+            user_priority: 0,
+            config_revision: 0,
+            identity_generation: 1,
+        };
+        let mut account = account;
+        account.credential_ref.secret_ref = format!("acct.{}", account.account_id);
+        registry.add(account.clone(), 0).unwrap();
+        credentials
+            .store_account_credential(
+                &account.credential_ref,
+                &secret::AccountCredential {
+                    credential_revision: 1,
+                    identity_generation: 1,
+                    kind: secret::AccountCredentialKind::ApiKey {
+                        key: lingxi_core::types::Secret::new("fixture-account-key".into()),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let mut exact = src("account.fixture", None);
+        exact.credential_id = account.credential_ref.secret_ref.clone();
+        let sources = [src("openai", Some("PATH")), exact];
+        let rows =
+            compute_availability_with_accounts(&credentials, &sources, &registry.snapshot()).await;
+        assert!(rows.iter().all(|r| r.available));
         assert_eq!(
             storage.retrieves.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "availability must not decrypt provider credentials"
+            0
         );
         assert_eq!(
             storage.contains.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn env_makes_available() {
-        let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("DEEPSEEK_AVAIL_VAR", "k");
-        let map = compute_availability(
-            &manager(),
-            &[src("deepseek", Some("DEEPSEEK_AVAIL_VAR"))],
-            false,
-            false,
-            false,
-        )
-        .await;
-        std::env::remove_var("DEEPSEEK_AVAIL_VAR");
+        let mut disabled = registry.snapshot();
+        disabled.accounts[0].enabled = false;
         assert!(
-            map.iter()
-                .find(|a| a.profile_name == "deepseek")
-                .unwrap()
-                .available
+            compute_availability_with_accounts(&credentials, &sources, &disabled)
+                .await
+                .iter()
+                .all(|r| !r.available)
         );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn neither_is_unavailable() {
-        let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("GLM_AVAIL_VAR");
-        let map = compute_availability(
-            &manager(),
-            &[src("glm", Some("GLM_AVAIL_VAR"))],
-            false,
-            false,
-            false,
-        )
-        .await;
+        disabled.accounts.clear();
         assert!(
-            !map.iter()
-                .find(|a| a.profile_name == "glm")
-                .unwrap()
-                .available
+            compute_availability_with_accounts(&credentials, &sources, &disabled)
+                .await
+                .iter()
+                .all(|r| !r.available)
         );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn anthropic_api_key_marks_anthropic_available() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let anthropic = crate::CredentialSource {
-            provider_id: ProviderId::AnthropicFirstParty,
-            profile_name: "anthropic".to_string(),
-            credential_id: "anthropic-api-key".to_string(),
-            env_var: None,
-            kind: crate::CredentialKind::ApiKey,
-        };
-        let map = compute_availability(&manager(), &[anthropic], true, false, false).await;
-        assert!(
-            map.iter()
-                .find(|a| a.profile_name == "anthropic")
-                .unwrap()
-                .available
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn anthropic_oauth_marks_anthropic_available() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let anthropic = crate::CredentialSource {
-            provider_id: ProviderId::AnthropicFirstParty,
-            profile_name: "anthropic".to_string(),
-            credential_id: "anthropic-oauth".to_string(),
-            env_var: None,
-            kind: crate::CredentialKind::OAuth,
-        };
-        let map = compute_availability(&manager(), &[anthropic], false, true, false).await;
-        assert!(
-            map.iter()
-                .find(|a| a.profile_name == "anthropic")
-                .unwrap()
-                .available
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn openai_chatgpt_available_when_oauth_session_present() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let chatgpt = crate::CredentialSource {
-            provider_id: ProviderId::OpenAICompatible {
-                name: "openai-chatgpt".to_string(),
-            },
-            profile_name: "openai-chatgpt".to_string(),
-            credential_id: "openai-chatgpt".to_string(),
-            env_var: None,
-            kind: crate::CredentialKind::ApiKey,
-        };
-        // not available with the flag false …
-        let map = compute_availability(
-            &manager(),
-            std::slice::from_ref(&chatgpt),
-            false,
-            false,
-            false,
-        )
-        .await;
-        assert!(
-            !map.iter()
-                .find(|a| a.profile_name == "openai-chatgpt")
-                .unwrap()
-                .available
-        );
-        // … available with the flag true (OAuth session present)
-        let map = compute_availability(&manager(), &[chatgpt], false, false, true).await;
-        assert!(
-            map.iter()
-                .find(|a| a.profile_name == "openai-chatgpt")
-                .unwrap()
-                .available
+        assert_eq!(
+            storage.retrieves.load(std::sync::atomic::Ordering::Relaxed),
+            0
         );
     }
 }

@@ -688,3 +688,168 @@ async fn no_pending_task_notification_rewake_clears_old_query_count_and_emits_en
         .count();
     assert_eq!(end_turn_count_after, end_turn_count_before + 1);
 }
+
+struct DeliveredReportNotification(Mutex<bool>);
+
+#[async_trait]
+impl crate::prompt::task_notification::TaskNotificationProvider for DeliveredReportNotification {
+    async fn take_pending_task_notifications(
+        &self,
+    ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
+        if std::mem::replace(&mut *self.0.lock().unwrap(), false) {
+            vec![lingxi_core::host::task_registry::TaskNotification {
+                task_id: "reported-child".into(),
+                task_type: "local_agent".into(),
+                status: "completed".into(),
+                description: "configuration review".into(),
+                result: Some(
+                    lingxi_core::host::handback::handback_pointer(false, "lingxi-code-guide")
+                        .into(),
+                ),
+                ..Default::default()
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn response_stream(text: Option<&str>) -> Vec<llm_runtime::HistoryEvent> {
+    use crate::test_support::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta,
+    };
+    let mut events = vec![message_start("notification-response", "test-model")];
+    if let Some(text) = text {
+        events.extend([
+            content_block_start_text(0),
+            text_delta(0, text),
+            content_block_stop(0),
+        ]);
+    }
+    events.extend([message_delta_stop("end_turn"), message_stop()]);
+    events
+}
+
+#[tokio::test]
+async fn notification_rewake_may_end_silently_without_forcing_a_duplicate_answer() {
+    let root = tempfile::tempdir().unwrap();
+    let streaming = Arc::new(crate::test_support::MockStreamingApiClient::with_turns(
+        vec![response_stream(None)],
+    ));
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.path().to_path_buf(),
+        )
+        .with_task_notifications(Arc::new(DeliveredReportNotification(Mutex::new(true)))),
+    );
+    orch.session.lock().await.history.extend([
+        ConversationMessage::user(MessageId::new(), "Read the report and answer once".into()),
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "Report received; here is the answer".into(),
+                citations: None,
+            }],
+            per_turn_effort: None,
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+        },
+    ]);
+    orch.run_async_hook_rewake(None).await.unwrap();
+    assert_eq!(
+        streaming.captured_calls().await.len(),
+        1,
+        "a silent notification does not retry"
+    );
+    assert!(!orch
+        .session
+        .lock()
+        .await
+        .history
+        .iter()
+        .any(|message| message
+            .text_content()
+            .contains(crate::turn_loop::THINKING_ONLY_NUDGE)));
+}
+
+#[tokio::test]
+async fn human_question_with_empty_response_still_gets_one_visible_output_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let streaming = Arc::new(crate::test_support::MockStreamingApiClient::with_turns(
+        vec![
+            response_stream(None),
+            response_stream(Some("Recovered answer")),
+        ],
+    ));
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        streaming.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    ));
+    orch.run_turn_streaming("Answer the question")
+        .await
+        .unwrap();
+    assert_eq!(streaming.captured_calls().await.len(), 2);
+    assert!(orch
+        .session
+        .lock()
+        .await
+        .history
+        .iter()
+        .any(|message| message
+            .text_content()
+            .contains(crate::turn_loop::THINKING_ONLY_NUDGE)));
+}
+
+#[tokio::test]
+async fn human_input_during_notification_rewake_restores_visible_answer_requirement() {
+    let root = tempfile::tempdir().unwrap();
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    );
+    let old_user = ConversationMessage::user(MessageId::new(), "original request".into());
+    orch.session.lock().await.history.push(old_user.clone());
+    let mut state = super::TurnLoopState::new(&orch, old_user.id(), None);
+    state.notification_user_boundary = Some(orch.latest_response_request_user().await);
+    orch.session
+        .lock()
+        .await
+        .history
+        .push(ConversationMessage::user_meta(
+            MessageId::new(),
+            "report was already delivered".into(),
+        ));
+    assert!(!orch.requires_visible_response(&mut state).await);
+    orch.session
+        .lock()
+        .await
+        .history
+        .push(ConversationMessage::user(
+            MessageId::new(),
+            "I have another question".into(),
+        ));
+    assert!(orch.requires_visible_response(&mut state).await);
+    assert!(state.notification_user_boundary.is_none());
+}

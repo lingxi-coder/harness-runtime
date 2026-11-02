@@ -12,6 +12,10 @@ use tokio_util::sync::CancellationToken;
 use tool_api::ask_user_question::AskUserQuestionExchange;
 
 enum Pending {
+    Account {
+        id: String,
+        reply: oneshot::Sender<super::TeamAccountEnvelope>,
+    },
     Permission {
         id: String,
         reply: oneshot::Sender<bool>,
@@ -80,6 +84,17 @@ impl ChildInteraction {
                 .ok_or(TeamProcessError::Protocol)?;
             match (pending, response) {
                 (
+                    Pending::Account { id, reply },
+                    ParentFrame::ProviderAccountsUpdated {
+                        id: got,
+                        credentials,
+                    },
+                ) if id == got => {
+                    reply
+                        .send(credentials)
+                        .map_err(|_| TeamProcessError::Protocol)?;
+                }
+                (
                     Pending::Permission { id, reply },
                     ParentFrame::OwnerPermission {
                         id: got,
@@ -125,6 +140,30 @@ impl ChildInteraction {
         Ok(())
     }
 
+    pub async fn refresh_provider_account(
+        &self,
+        account: &lingxi_core::host::provider_accounts::AccountMetadata,
+        revision: u64,
+    ) -> Result<super::TeamAccountEnvelope, TeamProcessError> {
+        let _serial = self.serial.lock().await;
+        let id = self.id()?;
+        let (reply, response) = oneshot::channel();
+        self.emit(
+            Pending::Account {
+                id: id.clone(),
+                reply,
+            },
+            WorkerFrame::ProviderAccountRefresh {
+                request: super::TeamProviderAccountRefresh {
+                    id,
+                    account_id: account.account_id.clone(),
+                    identity_generation: account.identity_generation,
+                    credential_revision: revision,
+                },
+            },
+        )?;
+        tokio::select! {biased;_=self.cancel.cancelled()=>Err(TeamProcessError::Cancelled),response=response=>response.map_err(|_|TeamProcessError::Protocol)}
+    }
     pub async fn approve(
         &self,
         tool_name: String,

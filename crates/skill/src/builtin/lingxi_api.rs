@@ -23,6 +23,8 @@ macro_rules! topic {
 
 const TOPICS: &[Topic] = &[
     topic!("overview"),
+    topic!("accounts"),
+    topic!("teams"),
     topic!("configuration"),
     topic!("media"),
     topic!("webrtc"),
@@ -48,7 +50,8 @@ pub(super) fn guide_context(body: Utf16JsonProjection) -> Utf16JsonProjection {
         units.extend(
             format!(
                 "\n\n---\n\n## Bundled resource: `{}`\n\n{}",
-                topic.path, topic.content
+                topic.path,
+                branding::render_namespace_template(topic.content)
             )
             .encode_utf16(),
         );
@@ -79,7 +82,8 @@ pub(super) fn render(body: Utf16JsonProjection, args: &Utf16JsonProjection) -> U
         units.extend(
             format!(
                 "\n\n---\n\n## Bundled resource: `{}`\n\n{}",
-                topic.path, topic.content
+                topic.path,
+                branding::render_namespace_template(topic.content)
             )
             .encode_utf16(),
         );
@@ -123,11 +127,15 @@ mod tests {
             );
             let prompt = render(root.clone(), &topic.id.into());
             let text = prompt.string_at("").unwrap();
-            assert!(text.contains(topic.content), "{} loads offline", topic.id);
+            assert!(
+                text.contains(&branding::render_namespace_template(topic.content)),
+                "{} loads offline",
+                topic.id
+            );
             assert_eq!(text.matches("## Bundled resource:").count(), 1);
             for other in TOPICS.iter().filter(|other| other.id != topic.id) {
                 assert!(
-                    !text.contains(other.content),
+                    !text.contains(&branding::render_namespace_template(other.content)),
                     "{} did not preload {}",
                     topic.id,
                     other.id
@@ -147,9 +155,24 @@ mod tests {
         let text = context.string_at("").unwrap();
         assert_eq!(text.matches("## Bundled resource:").count(), TOPICS.len());
         for topic in TOPICS {
-            assert!(text.contains(topic.content));
+            assert!(text.contains(&branding::render_namespace_template(topic.content)));
         }
         assert!(text.chars().count() < 50_000);
+    }
+
+    #[test]
+    fn every_resource_uses_the_injected_brand_namespace() {
+        for topic in TOPICS {
+            let text = branding::render_namespace_template(topic.content);
+            assert!(!text.contains("{{"), "unresolved namespace in {}", topic.id);
+            assert!(
+                !topic.content.contains(".lingxi"),
+                "hardcoded brand path in {}",
+                topic.id
+            );
+        }
+        let context = guide_context(body());
+        assert!(!context.string_at("").unwrap().contains("{{"));
     }
 
     #[test]

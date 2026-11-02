@@ -442,6 +442,8 @@ pub(crate) fn decode(collected: &sdk::CollectedResponse) -> Result<wire::ChatRes
 pub(crate) struct RequestCredentialSnapshot {
     pub profile: String,
     pub credential: tokio::sync::OnceCell<Option<crate::Credential>>,
+    pub credential_revision: std::sync::OnceLock<Option<u64>>,
+    pub rejected_credential_revision: std::sync::Mutex<Option<u64>>,
 }
 
 pub(crate) struct HostAuthenticator {
@@ -474,6 +476,8 @@ impl HostAuthenticator {
             snapshot: Some(Arc::new(RequestCredentialSnapshot {
                 profile,
                 credential: tokio::sync::OnceCell::new(),
+                credential_revision: std::sync::OnceLock::new(),
+                rejected_credential_revision: std::sync::Mutex::new(None),
             })),
         }
     }

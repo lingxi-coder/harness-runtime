@@ -1,7 +1,0 @@
-{
-  "type": "test_provider_connection",
-  "operation_id": 20,
-  "provider_id": "deepseek",
-  "api_base": "https://api.deepseek.com",
-  "model": "deepseek-flash"
-}

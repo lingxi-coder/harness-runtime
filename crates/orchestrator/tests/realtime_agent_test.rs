@@ -225,6 +225,16 @@ impl PermissionGate for Gate {
         }
     }
 }
+async fn prepare_bound(orch: &ConversationOrchestrator) -> orchestrator::RealtimeAgentContext {
+    let mut prepared = orch.prepare_realtime_agent().await.unwrap();
+    assert_eq!(
+        prepared.account_scope.as_deref(),
+        Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
+    );
+    // Simulate the host binding the prepared resource to an explicit service.
+    prepared.account_scope = Some("explicit-service.realtime-test".into());
+    prepared
+}
 async fn fixture(gate: Arc<Gate>) -> (Arc<ConversationOrchestrator>, Arc<AtomicUsize>) {
     fixture_with_completion(gate, None).await
 }
@@ -650,7 +660,7 @@ async fn unsolicited_provider_activity_never_admits_a_turn_or_executes_a_tool() 
     for kind in ["start", "tool", "audio", "text-delta", "output"] {
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
         let (orch, calls) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, _) = connection().await;
         let (_input_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(16);
@@ -672,7 +682,7 @@ async fn queued_provider_tool_cannot_borrow_simultaneously_ready_local_input() {
     for input in [RealtimeInput::CommitAudio, RealtimeInput::Text("hello".into())] {
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
         let (orch, calls) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, _sent, received) = observed_openai_connection().await;
         for frame in [json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call","name":"fixture","arguments":"{}"}}), json!({"type":"session.updated"})] {
             provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
@@ -698,7 +708,7 @@ async fn queued_provider_tool_cannot_borrow_simultaneously_ready_local_input() {
 async fn queued_openai_commit_ack_cannot_claim_a_new_audio_input() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _, received) = observed_openai_connection().await;
     for frame in [json!({"type":"input_audio_buffer.committed","item_id":"ghost"}), json!({"type":"session.updated","session":{"id":"before"}})] {
         provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
@@ -735,7 +745,7 @@ async fn queued_openai_commit_ack_cannot_claim_a_new_audio_input() {
 async fn input_transcript_before_commit_is_forwarded_without_admitting_or_persisting() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(4);
     let (output, mut output_rx) = mpsc::channel(16);
@@ -764,7 +774,7 @@ async fn realtime_output_burst_waits_for_the_consumer_and_remains_cancellable() 
     for consume in [true, false] {
         let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
         let (orch, _) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = connection().await;
         let (input_tx, inputs) = mpsc::channel(8);
         let (output, mut output_rx) = mpsc::channel(1);
@@ -798,7 +808,7 @@ async fn rejected_local_input_never_emits_start_or_runs_provider_tool() {
     for input in [RealtimeInput::CommitAudio, RealtimeInput::Text("hello".into())] {
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
         let (orch, calls) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, _provider, _) = connection_with_codec(Arc::new(RejectInputCodec)).await;
         let (input_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(16);
@@ -821,7 +831,7 @@ async fn admitted_audio_and_text_precede_queued_provider_work_and_keep_one_id() 
     for input in [RealtimeInput::CommitAudio, RealtimeInput::Text("hello".into())] {
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
         let (orch, calls) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = connection().await;
         let (input_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(32);
@@ -851,7 +861,7 @@ async fn admitted_audio_and_text_precede_queued_provider_work_and_keep_one_id() 
 async fn late_and_fragmented_audio_transcripts_survive_terminal_without_a_new_turn() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (_input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
@@ -893,7 +903,7 @@ async fn openai_transcripts_require_a_locally_committed_audio_item() {
     use lingxi_llm_client::providers::openai::realtime::{OpenAiRealtimeCodec, OpenAiRealtimeConfig};
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig { manual_turns: true, ..Default::default() });
     let (control, events, driver, provider, _) = connection_with_codec(Arc::new(codec)).await;
     let (input_tx, inputs) = mpsc::channel(8);
@@ -975,7 +985,7 @@ async fn openai_unowned_fragment_cannot_borrow_a_later_audio_commit() {
     use lingxi_llm_client::providers::openai::realtime::{OpenAiRealtimeCodec, OpenAiRealtimeConfig};
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig { manual_turns: true, ..Default::default() });
     let (control, events, driver, provider, _) = connection_with_codec(Arc::new(codec)).await;
     let (input_tx, inputs) = mpsc::channel(8);
@@ -1015,7 +1025,7 @@ async fn openai_unowned_fragment_cannot_borrow_a_later_audio_commit() {
 async fn gemini_transcripts_require_the_admitted_audio_turn() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = gemini_connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
     let (output, mut output_rx) = mpsc::channel(64);
@@ -1050,7 +1060,7 @@ async fn gemini_precommit_fragments_need_locally_streamed_audio() {
     for poisoned in [false, true] {
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
         let (orch, _) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = gemini_connection().await;
         let (input_tx, inputs) = mpsc::channel(8);
         let (output, mut output_rx) = mpsc::channel(64);
@@ -1107,7 +1117,7 @@ async fn queued_gemini_fragment_cannot_borrow_simultaneously_ready_audio() {
     use lingxi_llm_client::providers::google::live::{GeminiLiveConfig, GeminiLiveSession};
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (provider, rx) = futures::channel::mpsc::unbounded();
     provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#))).unwrap();
     let received = Arc::new(AtomicUsize::new(0));
@@ -1163,7 +1173,7 @@ async fn undriven_gemini_frame_precedes_local_audio_admission() {
     use lingxi_llm_client::providers::google::live::{GeminiLiveConfig, GeminiLiveSession};
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (provider, rx) = futures::channel::mpsc::unbounded();
     provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#))).unwrap();
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"forged "}}}).to_string()))).unwrap();
@@ -1216,7 +1226,7 @@ async fn undriven_gemini_frame_precedes_local_audio_admission() {
 async fn interrupted_gemini_audio_waits_for_the_previous_turn_to_finish() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = gemini_connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
     let (output, mut output_rx) = mpsc::channel(64);
@@ -1264,7 +1274,7 @@ async fn openai_cancelled_frame_drains_before_deferred_next_input() {
     for with_usage in [false, true] {
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
         let (orch, _) = fixture(gate).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig { manual_turns: true, ..Default::default() });
         let (control, events, driver, provider, sent) = connection_with_codec(Arc::new(codec)).await;
         let (input_tx, inputs) = admitted_inputs();
@@ -1324,7 +1334,7 @@ async fn provider_done_before_interrupt_waits_for_tool_drain_without_extra_cance
         let completion = Arc::new(tokio::sync::Notify::new());
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
         let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = if gemini { gemini_connection().await } else { connection().await };
         let (input_tx, inputs) = admitted_inputs();
         let (output, mut output_rx) = mpsc::channel(32);
@@ -1386,7 +1396,7 @@ async fn interrupt_after_continuation_request_waits_for_new_provider_completion(
     let completion = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
@@ -1421,7 +1431,7 @@ async fn interrupt_after_continuation_request_waits_for_new_provider_completion(
 async fn interrupt_after_local_terminal_does_not_cancel_a_new_response() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(16);
@@ -1450,7 +1460,7 @@ async fn interrupted_tool_drains_before_deferred_commit_and_continue_are_replaye
     let completion = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
@@ -1493,7 +1503,7 @@ async fn interrupted_tool_drains_before_deferred_commit_and_continue_are_replaye
 async fn audio_chunk_arriving_after_commit_does_not_end_the_active_turn() {
     let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
@@ -1523,7 +1533,7 @@ async fn interrupted_audio_applies_backpressure_until_the_old_tool_drains() {
     let completion = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
     input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
@@ -1575,7 +1585,7 @@ async fn deferred_images_share_the_payload_backpressure_limit() {
     let completion = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
     input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
@@ -1617,7 +1627,7 @@ async fn deferred_images_count_toward_the_session_limit_before_replay() {
     let completion = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
     input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
@@ -1645,6 +1655,96 @@ async fn deferred_images_count_toward_the_session_limit_before_replay() {
 }
 
 #[tokio::test]
+async fn realtime_rejects_unbound_and_foreign_account_contexts() {
+    for scenario in ["unbound", "foreign-account", "session-changed"] {
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
+        let (orch, calls) = fixture(gate).await;
+        let mut prepared = orch.prepare_realtime_agent().await.unwrap();
+        assert_eq!(
+            prepared.account_scope.as_deref(),
+            Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
+        );
+        if scenario != "unbound" {
+            prepared.account_scope = Some("explicit-service.realtime-test".into());
+        }
+        if scenario == "foreign-account" {
+            prepared.profile_name = Some("foreign-profile".into());
+        }
+        if scenario == "session-changed" {
+            orch.session().lock().await.model_profile = Some("new-session-profile".into());
+        }
+        let (control, events, driver, _provider, _) = connection().await;
+        let (_inputs_tx, inputs) = admitted_inputs();
+        let (output, _output_rx) = mpsc::channel(4);
+        let error = orch
+            .run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits::default(),
+                false,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("provider profile changed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
+    }
+}
+
+#[tokio::test]
+async fn explicit_audio_profile_can_differ_from_the_unchanged_session_profile() {
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
+    let (orch, _) = fixture(gate).await;
+    let mut prepared = prepare_bound(&orch).await;
+    assert_eq!(prepared.session_profile_name, "exact-profile");
+    prepared.audio_profile_name = "audio-provider".into();
+    prepared.profile_name = Some("audio-provider".into());
+    let (control, events, driver, _provider, _) = connection().await;
+    let (_input, inputs) = admitted_inputs();
+    let (output, mut output_rx) = mpsc::channel(8);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    next_agent_started(&mut output_rx).await;
+    cancel.cancel();
+    assert!(tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_ok());
+    let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
+}
+
+#[tokio::test]
 async fn realtime_rejects_context_for_another_fixed_mode() {
     let gate = Arc::new(Gate {
         calls: AtomicUsize::new(0),
@@ -1653,7 +1753,7 @@ async fn realtime_rejects_context_for_another_fixed_mode() {
         approved: AtomicBool::new(false),
     });
     let (orch, calls) = fixture(gate).await;
-    let mut prepared = orch.prepare_realtime_agent().await.unwrap();
+    let mut prepared = prepare_bound(&orch).await;
     assert_eq!(prepared.conversation_mode.mode, ConversationMode::Code);
     assert!(orch
         .ensure_conversation_mode(ConversationMode::Chat)
@@ -1693,7 +1793,7 @@ async fn realtime_running_turn_rejects_mode_change_without_interrupting_owner() 
         approved: AtomicBool::new(false),
     });
     let (orch, _) = fixture(gate.clone()).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (_inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(16);
@@ -1756,7 +1856,7 @@ async fn realtime_tool_loop_keeps_idle_paused_during_permission_and_uses_common_
         approved: AtomicBool::new(false),
     });
     let (orch, calls) = fixture(gate.clone()).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, events_tx, sent) = connection().await;
     let (_inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(16);
@@ -1823,7 +1923,7 @@ async fn agent_terminal_waits_for_permission_tools_and_the_continuation() {
             approved: AtomicBool::new(false),
         });
         let (orch, _) = fixture(gate.clone()).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = connection().await;
         let (_inputs_tx, inputs) = admitted_inputs();
         let (output, mut output_rx) = mpsc::channel(32);
@@ -1874,7 +1974,7 @@ async fn agent_terminal_supports_automatic_continuation_without_provider_start()
     let release = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate.clone()).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = gemini_connection().await;
     let (inputs_tx, inputs) = mpsc::channel(4);
     let (output, mut output_rx) = mpsc::channel(32);
@@ -1918,7 +2018,7 @@ async fn cancelled_provider_waits_for_cancelled_tool_cleanup_before_local_termin
     let release = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate.clone()).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (_inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
@@ -1955,7 +2055,7 @@ async fn gemini_interruption_in_a_separate_frame_waits_for_tool_drain() {
         let release = Arc::new(tokio::sync::Notify::new());
         let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
         let (orch, _) = fixture(gate.clone()).await;
-        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, _) = gemini_connection().await;
         let (inputs_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(32);
@@ -1992,7 +2092,7 @@ async fn gemini_interruption_in_a_separate_frame_waits_for_tool_drain() {
 async fn stale_provider_completion_cannot_finish_new_local_input() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
@@ -2035,7 +2135,7 @@ async fn stale_provider_completion_cannot_finish_new_local_input() {
 async fn gemini_missing_idle_status_fails_closed_without_a_terminal() {
     let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (inputs_tx, inputs) = mpsc::channel(4);
     let (output, mut output_rx) = mpsc::channel(32);
@@ -2062,7 +2162,7 @@ async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permis
         approved: AtomicBool::new(false),
     });
     let (orch, calls) = fixture(gate.clone()).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, events_tx, _) = connection().await;
     let (_inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(16);
@@ -2125,7 +2225,7 @@ async fn current_catalog_filters_media_resources_and_permission_denial_never_exe
         approved: AtomicBool::new(false),
     });
     let (orch, calls) = fixture(gate.clone()).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     assert_eq!(prepared.profile_name.as_deref(), Some("exact-profile"));
     let names = prepared
         .tools
@@ -2195,7 +2295,7 @@ async fn visual_tool_result_sends_real_image_bytes_after_tool_result() {
         approved: AtomicBool::new(false),
     });
     let (orch, calls) = visual_fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let captured = Arc::new(CapturedMediaInputs::default());
     let (control, events, driver, events_tx, _) =
         connection_with_codec(Arc::new(ImageRecordingCodec(captured.clone()))).await;
@@ -2277,7 +2377,7 @@ async fn visual_tool_result_fails_when_realtime_provider_has_no_image_input() {
         approved: AtomicBool::new(false),
     });
     let (orch, _) = visual_fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let captured = Arc::new(CapturedMediaInputs::default());
     let (control, events, driver, events_tx, _) =
         connection_with_codec(Arc::new(ImageRecordingCodec(captured.clone()))).await;
@@ -2320,7 +2420,7 @@ async fn realtime_transcripts_commit_after_playback_ack_and_skip_interrupted_aud
         approved: AtomicBool::new(false),
     });
     let (orch, _) = fixture(gate).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, events_tx, _) = connection().await;
     let (inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(16);
@@ -2410,7 +2510,7 @@ async fn absolute_deadline_closes_audio_but_waits_for_block_tool_and_persists_re
         approved: AtomicBool::new(false),
     });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (_inputs, input_rx) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(8);
@@ -2514,7 +2614,7 @@ async fn default_session_audio_uses_authoritative_registry_profile_and_unresolve
     }
     assert_eq!(orch.current_audio_profile().await.unwrap(), expected);
     assert_eq!(
-        orch.prepare_realtime_agent().await.unwrap().profile_name,
+        prepare_bound(&orch).await.profile_name,
         Some(expected)
     );
     let (unresolved, _) = fixture(Arc::new(Gate {
@@ -2538,7 +2638,7 @@ async fn separate_realtime_tool_calls_do_not_overlap_mutation_batches() {
         approved: AtomicBool::new(false),
     });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
-    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (_inputs, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(8);

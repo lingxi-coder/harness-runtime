@@ -280,6 +280,16 @@ impl MockApiClient {
 
 #[async_trait]
 impl OrchestratorApiClient for MockApiClient {
+    async fn audio_account_binding_is_current(
+        &self,
+        original_profile: &str,
+        actual_profile: &str,
+        scope: &str,
+    ) -> bool {
+        // Match the explicit-service branch of ApiService's account check.
+        original_profile == actual_profile && scope.starts_with("explicit-service.")
+    }
+
     fn is_first_party_route(&self, _model: &str, _profile: Option<&str>) -> bool {
         *self.native_request_first_party.lock().unwrap()
     }

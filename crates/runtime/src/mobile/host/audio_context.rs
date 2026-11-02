@@ -8,7 +8,8 @@ pub struct MediaSessionContext {
     pub session_id: String,
     /// Exact selected provider profile.
     pub profile_id: String,
-    /// Stable account namespace selected by the host.
+    /// Concrete account identity retained by the media owner, or the explicit
+    /// unbound marker before a new operation selects its first account.
     pub account_scope: String,
     /// Host-selected product region.
     pub region: String,
@@ -31,7 +32,7 @@ impl MobileEngineHandle {
         };
         Ok(MediaSessionContext {
             session_id,
-            account_scope: format!("profile:{profile_id}"),
+            account_scope: lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned(),
             profile_id,
             region: region.to_owned(),
         })
@@ -69,7 +70,7 @@ impl MobileEngineHandle {
             Ok((session_id, profile)) => serde_json::json!({
                 "sessionId":session_id,
                 "profileId":profile,
-                "accountScope":format!("profile:{profile}"),
+                "accountScope":lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 "region":self.inner.provider_region,
             }).to_string(),
             Err(_) => serde_json::json!({"error":{

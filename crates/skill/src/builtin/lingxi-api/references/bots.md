@@ -48,3 +48,8 @@ Source anchors (Bot-capable product): `apps/electron/src/main/bots/{service,
 store,routerTools,botSettings}.ts`, `apps/electron/src/shared/bots.ts`,
 `apps/electron/src/main/remoteControl/remoteBots.ts`,
 `packages/remote-control-client/src/session/bots.rs`.
+
+The current Bot execution service is macOS Desktop-hosted. Remote Bot chats
+attach to that host. Teams Bot identity/membership and same-account Remote
+Control grants are separate. Scoped router follow-ups are accepted only for
+completed/failed tasks; preserve task IDs rather than submitting duplicates.

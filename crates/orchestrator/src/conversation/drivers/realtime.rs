@@ -18,9 +18,14 @@ pub use tool_api::{MediaAgentCapabilityContext, MediaAgentHandoffRequest};
 pub struct RealtimeAgentContext {
     /// Owning current Agent session.
     pub session_id: String,
-    /// Exact current session provider profile.
+    /// Session's logical provider profile when this snapshot was captured.
+    pub session_profile_name: String,
+    /// Logical audio profile selected by the host before account resolution.
+    pub audio_profile_name: String,
+    /// Logical audio profile at preparation; the host replaces it with the
+    /// selected account's exact execution profile before admission.
     pub profile_name: Option<String>,
-    /// Trusted profile/account namespace pinned for this realtime session.
+    /// Unbound at preparation; the host supplies the selected account scope.
     pub account_scope: Option<String>,
     /// Conversation behavior admitted when the instructions were assembled.
     pub conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot,
@@ -360,6 +365,12 @@ impl RealtimeTurnTracker {
 /// This contract lives with the Agent orchestration layer so app hosts can
 /// implement it without depending on the full Harness runtime.
 pub struct RealtimeAgentSessionIo {
+    /// Logical audio profile selected by the trusted host.
+    pub audio_profile_name: String,
+    /// Exact provider profile selected by the trusted host for this session.
+    pub provider_profile: String,
+    /// Exact account scope selected by the trusted host for this session.
+    pub provider_account_scope: String,
     /// Provider-neutral control with bounded input queues.
     pub control: RealtimeControl,
     /// Bounded normalized provider event stream.
@@ -1091,7 +1102,7 @@ impl ConversationOrchestrator {
             )
         };
         let profile_name = self.current_audio_profile().await?;
-        let account_scope = format!("profile:{profile_name}");
+        let account_scope = lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned();
         let mut wire_tools = self
             .build_wire_tools()
             .await?
@@ -1134,6 +1145,8 @@ impl ConversationOrchestrator {
             .await;
         Ok(RealtimeAgentContext {
             session_id,
+            session_profile_name: profile_name.clone(),
+            audio_profile_name: profile_name.clone(),
             profile_name: Some(profile_name),
             account_scope: Some(account_scope),
             conversation_mode,
@@ -1353,8 +1366,19 @@ impl ConversationOrchestrator {
             }
         }
         let current_profile = self.current_audio_profile().await?;
-        if Some(current_profile.clone()) != prepared.profile_name
-            || Some(format!("profile:{current_profile}")) != prepared.account_scope
+        if current_profile != prepared.session_profile_name {
+            return Err(failure(
+                "Agent provider profile changed before realtime admission",
+            ));
+        }
+        if !self
+            .api
+            .audio_account_binding_is_current(
+                &prepared.audio_profile_name,
+                prepared.profile_name.as_deref().unwrap_or_default(),
+                prepared.account_scope.as_deref().unwrap_or_default(),
+            )
+            .await
         {
             return Err(failure(
                 "Agent provider profile changed before realtime admission",

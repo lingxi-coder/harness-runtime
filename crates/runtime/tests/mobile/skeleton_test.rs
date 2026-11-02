@@ -201,7 +201,6 @@ fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_pro
         inline_visualization: true,
         ..MobileConfig::default()
     };
-    cfg.api_key = "test-key".into();
 
     let response = vec![
         message_start("mobile-slash-source", "claude-sonnet-4-20250514"),
