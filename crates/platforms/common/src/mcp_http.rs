@@ -22,11 +22,142 @@ use lingxi_core::host::mcp_result::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use lingxi_llm_client::transport::http_backend as reqwest;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::sync::mpsc;
+
+struct HttpCleanupCompletion(CancellationToken);
+impl Drop for HttpCleanupCompletion {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn receive_notifications<H>(
+    client: reqwest::Client,
+    url: String,
+    auth: Option<String>,
+    extra: H,
+    session_id: Arc<Mutex<Option<String>>>,
+    protocol_version: Arc<Mutex<Option<String>>>,
+    inbound: mpsc::UnboundedSender<JsonRpcMessage>,
+    fatal: mpsc::UnboundedSender<()>,
+    cancel: CancellationToken,
+    fetch_timeout: Option<std::time::Duration>,
+) where
+    H: Send + 'static,
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
+    let mut last_event_id: Option<String> = None;
+    let mut retry_ms = 250u64;
+    loop {
+        let mut headers = {
+            let sid = session_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match build_headers(auth.as_deref(), &extra, sid.as_deref()) {
+                Ok(headers) => headers,
+                Err(_) => {
+                    let _ = fatal.send(());
+                    return;
+                }
+            }
+        };
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        headers.remove(CONTENT_TYPE);
+        if let Some(version) = protocol_version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            if let Ok(value) = HeaderValue::from_str(version) {
+                headers.insert(HeaderName::from_static("mcp-protocol-version"), value);
+            }
+        }
+        if let Some(id) = &last_event_id {
+            if let Ok(value) = HeaderValue::from_str(id) {
+                headers.insert(HeaderName::from_static("last-event-id"), value);
+            }
+        }
+        let receive = async {
+            let response = match tokio::time::timeout(
+                fetch_timeout.unwrap_or(std::time::Duration::from_secs(60)),
+                client.get(&url).headers(headers).send(),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response,
+                _ => return true,
+            };
+            // GET is optional in Streamable HTTP. A 405 does not replace the transport.
+            if response.status().as_u16() == 405 {
+                return false;
+            }
+            if matches!(response.status().as_u16(), 400 | 401 | 403 | 404) {
+                let _ = fatal.send(());
+                return false;
+            }
+            if !response.status().is_success() {
+                return true;
+            }
+            if !response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/event-stream"))
+            {
+                let _ = fatal.send(());
+                return false;
+            }
+            // Servers may not retain notifications while GET is disconnected.
+            // Reconcile after every attachment, including the initial list/GET race.
+            // This only invalidates catalogs; it never replays tool calls.
+            for method in [
+                "notifications/tools/list_changed",
+                "notifications/prompts/list_changed",
+                "notifications/resources/list_changed",
+            ] {
+                let frame = serde_json::json!({"jsonrpc":"2.0", "method":method, "params":{}});
+                if let Ok(message) = mcp::decode_native_mcp_frame(frame.to_string().as_bytes()) {
+                    if inbound.send(message).is_err() {
+                        return false;
+                    }
+                }
+            }
+            let mut events = response.bytes_stream().eventsource();
+            while let Some(event) = events.next().await {
+                let Ok(event) = event else {
+                    break;
+                };
+                if event.id.len() <= 4096 {
+                    last_event_id = (!event.id.is_empty()).then_some(event.id);
+                }
+                if event.data.is_empty() {
+                    continue;
+                }
+                if event.data.len() > 8 * 1024 * 1024 {
+                    let _ = fatal.send(());
+                    return false;
+                }
+                if let Ok(message) = mcp::decode_native_mcp_frame(event.data.as_bytes()) {
+                    if inbound.send(message).is_err() {
+                        return false;
+                    }
+                    retry_ms = 250;
+                }
+            }
+            true
+        };
+        let retry = tokio::select! { biased; _=cancel.cancelled()=>return, _=inbound.closed()=>return, retry=receive=>retry };
+        if !retry {
+            return;
+        }
+        tokio::select! { biased; _=cancel.cancelled()=>return, _=inbound.closed()=>return, _=tokio::time::sleep(std::time::Duration::from_millis(retry_ms))=>{} }
+        retry_ms = (retry_ms * 2).min(30_000);
+    }
+}
 
 /// Only router-assigned ids can register a POST token. The writer takes each
 /// token exactly once; cancelled queued tokens prevent delayed network writes.
@@ -197,7 +328,9 @@ where
     H: Clone + Send + 'static,
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
 {
-    connect_http_with_proxy_auth_helper(url, auth_token, extra_headers, fetch_timeout, None).await
+    connect_http_with_proxy_auth_helper(url, auth_token, extra_headers, fetch_timeout, None)
+        .await
+        .map(|(connection, _)| connection)
 }
 
 pub(crate) async fn connect_http_with_proxy_auth_helper<H>(
@@ -206,7 +339,7 @@ pub(crate) async fn connect_http_with_proxy_auth_helper<H>(
     extra_headers: &H,
     fetch_timeout: Option<std::time::Duration>,
     proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
-) -> Result<Connection, HttpConnectError>
+) -> Result<(Connection, CancellationToken), HttpConnectError>
 where
     H: Clone + Send + 'static,
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
@@ -237,16 +370,27 @@ where
 
     let request_cancellation = Arc::new(HttpRequestCancellation::default());
     let writer_request_cancellation = request_cancellation.clone();
+    let cleanup_done = CancellationToken::new();
+    let writer_cleanup_done = cleanup_done.clone();
     tokio::spawn(async move {
+        let _completion = HttpCleanupCompletion(writer_cleanup_done);
         // A POST owns its response body independently: input-required retries
         // and ordinary calls can proceed while an earlier SSE stream stays open.
         // The connection owns and drains every reader on close.
         let protocol_version = Arc::new(Mutex::new(None::<String>));
         let mut posts = tokio::task::JoinSet::new();
+        let (initialized_tx, mut initialized_rx) = mpsc::unbounded_channel::<()>();
+        let (stream_fault_tx, mut stream_fault_rx) = mpsc::unbounded_channel::<()>();
+        let notification_cancel = CancellationToken::new();
+        let mut notification_reader = None;
         loop {
             tokio::select! {
                 biased;
                 _=inbound_tx.closed()=>break,
+                _=stream_fault_rx.recv()=>break,
+                _=initialized_rx.recv(), if notification_reader.is_none()=>{
+                    notification_reader = Some(tokio::spawn(receive_notifications(client.clone(), post_url.clone(), post_auth.clone(), post_extra.clone(), writer_sid.clone(), protocol_version.clone(), inbound_tx.clone(), stream_fault_tx.clone(), notification_cancel.clone(), post_fetch_timeout)));
+                }
                 settled=posts.join_next(), if !posts.is_empty()=>{
                     if let Some(Err(error))=settled {tracing::warn!(%error,"mcp http: POST task failed");}
                 }
@@ -254,7 +398,7 @@ where
                     let Some(frame)=frame else {break;};
                     let request_abort=writer_request_cancellation.take(&frame);
                     if request_abort.is_cancelled() {continue;}
-                    let client=client.clone();let post_url=post_url.clone();let post_auth=post_auth.clone();let post_extra=post_extra.clone();let writer_sid=writer_sid.clone();let writer_protocol_version=protocol_version.clone();let inbound_tx=inbound_tx.clone();
+                    let client=client.clone();let post_url=post_url.clone();let post_auth=post_auth.clone();let post_extra=post_extra.clone();let writer_sid=writer_sid.clone();let writer_protocol_version=protocol_version.clone();let inbound_tx=inbound_tx.clone();let initialized_tx=initialized_tx.clone();
                     posts.spawn(async move {
                         let process_frame=async move {
                     let frame_value = serde_json::to_value(&frame).unwrap_or_default();
@@ -352,6 +496,12 @@ where
                                 return;
                             }
                         }
+                        return;
+                    }
+                    if frame_value["method"] == "notifications/initialized" {
+                        let _ = initialized_tx.send(());
+                    }
+                    if response.status().as_u16() == 202 || response.status().as_u16() == 204 {
                         return;
                     }
 
@@ -469,7 +619,34 @@ where
         }
         jsonrpc::router::PerRequestCancellation::close(writer_request_cancellation.as_ref());
         posts.abort_all();
+        notification_cancel.cancel();
+        if let Some(reader) = notification_reader {
+            let _ = reader.await;
+        }
         while posts.join_next().await.is_some() {}
+        let sid = writer_sid
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(sid) = sid {
+            if let Ok(mut headers) = build_headers(post_auth.as_deref(), &post_extra, Some(&sid)) {
+                if let Some(version) = protocol_version
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    if let Ok(value) = HeaderValue::from_str(version) {
+                        headers.insert(HeaderName::from_static("mcp-protocol-version"), value);
+                    }
+                }
+                // Explicit async disconnect waits for this bounded cleanup before a catalog process exits.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    client.delete(&post_url).headers(headers).send(),
+                )
+                .await;
+            }
+        }
     });
 
     // Adapt mpsc channels to the Stream/Sink shape `from_message_streams` wants.
@@ -489,7 +666,7 @@ where
         Some("Method not found".into()),
     );
     connection.set_per_request_cancellation(request_cancellation);
-    Ok(connection)
+    Ok((connection, cleanup_done))
 }
 
 fn apply_body_derived_headers(headers: &mut HeaderMap, request: &serde_json::Value) {

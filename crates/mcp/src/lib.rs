@@ -84,6 +84,7 @@ pub mod identity;
 pub mod inbound;
 pub mod initialize_params;
 pub mod json_config;
+pub mod local_apps;
 pub mod mcp_output_storage;
 mod native_message_schema;
 pub mod negotiation;

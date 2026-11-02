@@ -220,7 +220,8 @@ impl TeamModelRoute {
     pub fn validate(&self) -> Result<(), TeamProcessError> {
         self.validate_inner(false)
     }
-    pub(crate) fn validate_accounts(&self) -> Result<(), TeamProcessError> {
+    /// Validate a host account-backed route, including its supported OAuth protocols.
+    pub fn validate_accounts(&self) -> Result<(), TeamProcessError> {
         self.validate_inner(true)
     }
     fn validate_inner(&self, accounts: bool) -> Result<(), TeamProcessError> {

@@ -1,12 +1,22 @@
 ---
 name: local-app
-description: Build and maintain device-local schema-2 apps with interactive WebMCP tools or independent host Agent tasks when useful.
+description: Build, publish and maintain LingXi Local Apps for the selected Desktop or Mobile host, including app services and Agent integration when needed.
 session-modes: chat, code
 ---
 
 # Local apps
 
 Create an application project, publish it into this device's Apps library, and verify the published application. A project holds source code; an ordinary conversation is development history; an app owns its released code and data independently of either. Local publication never uploads to the public market. The `LocalApp` tool schema and current host capabilities are authoritative.
+
+## Choose the execution host and interfaces
+
+Separate where the app runs, how the user opens it, and how an Agent calls it. A phone accessing a Desktop-hosted app does not move its backend to Mobile or require a second data copy.
+
+- **Desktop:** choose the language and runtime that fit the task and are available on that OS/architecture. Local scripts, compiled programs and services are valid implementation choices; do not restrict business logic to browser JavaScript or apply Mobile Linux and background limits to Desktop. The current schema-2 publication entry is still `static` or `server`; a `native` execution target does not add a native GUI entry. If the user needs a standalone native window, tray app or headless-only package, identify the missing publication/lifecycle support instead of inventing manifest fields or silently substituting a website.
+- **Mobile:** browser UI is the usual presentation; backend execution uses the host's supported Mobile Linux runtime. Check its actual toolchains and lifecycle. Keep Mobile hosting available for long tasks; recommend Desktop when sustained execution matters without forcing migration. Default to the OS-resolved browser while preserving supported user-selected opening methods.
+- **Agent integration:** Desktop exposes app tools through standard MCP. Mobile page actions can use WebMCP; app-owned MCP process management is currently Desktop-only. An app requesting the host Agent uses AG-UI. These interfaces serve different directions and share the app's business logic; a simple app need not add any of them.
+
+This skill owns authoring, publication and app lifecycle. For LingXi product capabilities, MCP configuration, model accounts or remote access, consult the relevant `lingxi-api` topic only when that skill is available and the task needs it. Reuse already-loaded guidance and return to the app task; do not create a cycle of skill invocations. Carry forward the chosen host, source Project, app ID/revision and known grants. Neither skill makes an unavailable API callable or grants permission.
 
 ## Workflow
 
@@ -44,9 +54,30 @@ minimal project looks like:
 }
 ```
 
-Static apps do not require Linux processes. A Node/Python app needs a compatible execution target and the user's exact-release consent in the native Apps page. On mobile, require an available Mobile Linux runtime rather than assuming Desktop commands or arbitrary native executables will run. Check architecture, runtime/channel and capability support. Do not modify the shared Linux toolchain. Package only declared source/build outputs and lockfiles; exclude credentials, local grants, user data, browser stores and dependency caches.
+The static example lists possible web targets; retain only the platforms the app actually supports. Static apps do not require Linux processes. An app with install/build steps or processes needs a compatible execution target and the user's exact-release consent in the native Apps page. Desktop process targets use `native`; Mobile process targets use `mobile-linux`. This selects the execution environment, not the UI technology. On Mobile, require an available Mobile Linux runtime rather than assuming Desktop commands or arbitrary native executables will run. Check architecture, runtime/channel and capability support. Do not modify the shared Linux toolchain. Package only declared source/build outputs and lockfiles; exclude credentials, local grants, user data, browser stores and dependency caches.
 
 For services, `venv` and step `cwd` are app-relative. Install/build commands terminate; named processes can run until stopped, fail, or their host ends, subject to the platform's lifecycle. `dependsOn` sets startup order and readiness uses an HTTP `path` or exact `output`. Obtain URLs with `await window.localApp.serviceUrl(serviceName)` and `await window.localApp.serviceSocketUrl(serviceName)` rather than hardcoded ports or saved run URLs; use the manifest's service name, and restart revokes the old run's service access. Declare only needed native capabilities and handle denial visibly. An `agent.tools` declaration is a capability requirement, not a grant. App pages never receive general host tools or provider credentials. App processes run with this device user's access; they are not isolated by a per-app Linux security sandbox.
+
+## Backend and native tools with standard MCP
+
+For Desktop tools, implement standard MCP using an official SDK. Reuse the app's validated business functions and durable data. Add `mcpServers` to the schema-2 manifest, declare `mcp` and `process` capabilities, and select Desktop `native` targets. For example, these fields declare a host-owned stdio server:
+
+```json
+{
+  "capabilities": ["process", "mcp"],
+  "mcpServers": {"tools": {"type": "stdio", "command": "node mcp.mjs"}}
+}
+```
+
+This is a manifest fragment; retain the app's entry, targets and package files. A stdio declaration accepts the same app-relative `cwd`, `env`, `venv` and `python` fields as a process step. The host starts it once per app run and owns its stdin/stdout; stdout must contain MCP messages only. Do not also declare that server in `processes` or launch a second copy through MCP settings.
+
+For **Streamable HTTP**, declare an ordinary backend process with readiness, then use `"mcpServers":{"tools":{"type":"http","process":"api","path":"/mcp"}}`. `process` must name that declared process; `path` is a plain absolute endpoint path, not a URL. Bind to `127.0.0.1` and its allocated `PORT`. Authenticate MCP requests against the host-injected `LOCAL_APP_MCP_TOKEN` and validate Origin. Never put tokens in the manifest, frontend, logs or durable app data.
+
+After the user grants the exact release's execution and MCP capabilities, the host initializes these servers and exposes their tools through its `lingxi-local-apps` MCP connection. No user/project MCP settings edit is needed. The gateway supports ordinary tool discovery/calls and list-change notifications; it does not expose MCP resources, prompts, task execution, sampling or elicitation. Use `agent_catalog` for actual tool IDs. `agent.tools` still requests tools for App-to-Agent runs and requires separate native grants; exporting an app tool does not grant an App Agent permission to use it.
+
+The host reconnects broken channels while the authorized app run remains active. Reconnection never replays a tool call; a lost response may have committed side effects. Stop, revoke, version replacement and uninstall retire the old run's connections and child processes. Tool names stay stable for the same app/server/operation; release or definition changes invalidate old permission fingerprints and require fresh discovery/review. App restart does not duplicate its backend or data. Normal MCP policy and user-disabled server settings still apply.
+
+Verify `status`/`logs`, discovery from an already-open host session, a read-only call, reconnect, revocation and uninstall. Desktop uses this current contract directly: do not generate WebMCP bridges, old aliases, old-data decoders or migration/fallback adapters. For an independent MCP service outside the App lifecycle, consult `lingxi-api configuration` when available.
 
 ## Mobile service lifecycle and recovery
 
@@ -58,9 +89,9 @@ For an existing Agent task, keep its `threadId` and `runId` and inspect that sam
 
 ## Page tools with WebMCP
 
-For an interactive app with useful actions, expose its user-facing operations through the standard `document.modelContext` API. Register tools that call the same validated app functions used by the UI, validate domain rules again in each callback, and update/render the page from the result. Use `inputSchema` for argument shape; do not treat schema validation as authorization or business validation.
+Use this section for Mobile-hosted page actions when needed. Desktop Local Apps use standard MCP and do not inject or serve a WebMCP polyfill. On Mobile use the host-supported `document.modelContext` API. Register tools that call the same validated app functions used by the UI, validate domain rules again in each callback, and update/render the page from the result. Use `inputSchema` for argument shape; do not treat schema validation as authorization or business validation.
 
-The host provides the standard API: Desktop and static Mobile pages receive the polyfill automatically, which leaves a native implementation intact. A Mobile server-backed page must include `<script src="/__host/webmcp.js"></script>` before app code that uses the API. A `file://` preview does not have the installed app's host API or prove that it works. Do not overwrite `document.modelContext` or add a manifest capability for it. Reuse an already-installed browser integration for verification; do not silently install/configure one, grant access or open global CDP. If the installed app browser is unreachable, report that it was not verified. The user may choose an integration from Public settings.
+Static Mobile pages receive the host polyfill automatically, leaving a native implementation intact. A Mobile server-backed page using WebMCP must include `<script src="/__host/webmcp.js"></script>` before app code that uses the API. A `file://` preview does not have the installed app's host API or prove that it works. Do not overwrite `document.modelContext` or add a manifest capability for it. Reuse an already-installed browser integration for verification; do not silently install/configure one, grant access or open global CDP. If the installed app browser is unreachable, report that it was not verified. The user may choose an integration from Public settings.
 
 Register page tools once for the page lifetime with an `AbortController` signal; abort it during teardown/navigation. Keep the callback small and route it through the same validated function as the UI:
 
@@ -104,7 +135,7 @@ window.addEventListener("pageshow", event => { if (event.persisted) void registe
 
 In the installed app browser, check `document.modelContext.getTools()`, execute `reading.get_summary` with `{}` using `executeTool()`, and verify its result against the page. Check that a non-empty input is rejected, teardown/navigation removes the registration, and a BFCache `pageshow` restores it. If `document.modelContext` or `registerTool` is unavailable, keep the ordinary UI usable and do not claim Agent access.
 
-WebMCP exposes page actions to an Agent; `window.localApp.agent` is a separate app-to-host AG-UI interface. Use each only for its direction and purpose.
+Standard MCP exposes Desktop app operations to an Agent, while WebMCP exposes Mobile page actions. `window.localApp.agent` is the separate app-to-host AG-UI interface. Use each only for its direction and purpose.
 
 ## Calling the host Agent with AG-UI 1.0
 
@@ -243,8 +274,10 @@ sources, provider file handles and arbitrary binary input are unsupported. Do
 not supply native paths or manually encode the File. Preserve the draft on photo
 return and release camera tracks when done.
 
-Mobile pages open in the operating system's resolved external browser, including
-OEM/third-party browsers. Do not choose a browser package or embed WebView.
+Mobile pages default to the operating system's resolved external browser,
+including OEM/third-party browsers. Preserve the user's supported alternative
+opening method; do not hard-code a browser package or substitute an embedded
+WebView for the chosen flow.
 Android uses its user-visible foreground runtime. iOS26 uses an explicit native
 foreground handoff and a finite continued-processing lease; iOS27 user-invoked
 Intents require complete standard input. The SDK handles supported handoff and
@@ -260,8 +293,9 @@ browser context that shares its storage. Never resend or replace the `runId`
 automatically, label it a model failure, or infer a browser brand or private mode.
 A new request requires the user's explicit choice after reviewing the input.
 
-Use the current Local App Builder examples for one-shot file understanding and
-persistent attachment Chat. Keep business validation and explicit user save
+When the Local App Builder plugin is available, its current examples can help
+with one-shot file understanding and persistent attachment Chat; it is optional.
+Keep business validation and explicit user save
 confirmation in the App. Verify actual configured model, errors, File contents,
 refresh, cancellation, Chat cold resume and saved data. Builds, mock outputs and
 standalone browser rendering are not real-provider or physical-device evidence.
@@ -276,4 +310,4 @@ standalone browser rendering are not real-provider or physical-device evidence.
 
 ## Interface and verification
 
-Use local assets by default; AI/network features must honestly report their connectivity requirements. Support 320 px screens, safe areas, 44 px touch targets, light/dark preference and keyboard accessibility. Label controls and use adequate contrast. Use the Local App Builder plugin for frameworks or larger projects, retaining this schema-2 and host authorization contract. Test reload/storage, denial, cancellation and error recovery as well as the main flow.
+Use local assets by default; AI/network features must honestly report their connectivity requirements. Match the UI to the selected clients: Desktop needs resizable layouts and keyboard access; Mobile-accessible pages need 320 px layouts, safe areas and 44 px touch targets. Respect light/dark preference, label controls and use adequate contrast. An available Local App Builder plugin can assist with frameworks or larger projects while retaining this schema-2 and host authorization contract; it is not a prerequisite. Verify the chosen runtime and interfaces, plus reload/storage, denial, cancellation and error recovery. Do not require browser/WebMCP checks for a service-only integration or infer native-app acceptance from a web preview.

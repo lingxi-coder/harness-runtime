@@ -1,6 +1,6 @@
 ---
 name: lingxi-api
-description: Explain, configure, troubleshoot or integrate LingXi (灵犀), including Bots, media and Local Apps. Use for product questions; ordinary coding uses its own tools.
+description: Explain, configure, troubleshoot or integrate LingXi (灵犀) product capabilities and host APIs. App authoring uses local-app; ordinary coding uses its own tools.
 ---
 
 # LingXi API guide
@@ -25,7 +25,7 @@ domains; do not load every reference for a general question.
 | [configuration](references/configuration.md) | Settings, MCP, permissions, hooks, plugins, skill customization |
 | [media](references/media.md) | Camera, microphone, audio, transcription, speech, live assistance |
 | [webrtc](references/webrtc.md) | Remote Control, device connections, media transport |
-| [local-app](references/local-app.md) | Local Apps, publication, retained data, AG-UI, WebMCP, visualization |
+| [local-app](references/local-app.md) | Desktop/Mobile Local Apps, publication, retained data, MCP, WebMCP and AG-UI |
 | [bots](references/bots.md) | Persistent Bots, Bot memory, routines, delegation, remote Bot chats |
 | [devices](references/devices.md) | Computer Use, Browser, Android automation, native device tools |
 | [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs, runtime availability |
@@ -48,6 +48,14 @@ then the live tool schema. `media`, `local-app`, `visualize`, `workflow-authorin
 `update-config`, and mobile device skills are useful only where registered.
 External builder plugins are optional; do not assume one is installed. This
 guide does not extend the caller's tools, permissions, workspace, or Bot grants.
+
+For Local Apps, explain platform support here; route build, modify or publish
+requests to the registered `local-app` skill. Product discussion does not start
+publication. Reuse loaded guidance without recursive skill calls, retaining
+the execution host, source Project, app ID/revision and known permissions.
+Do not require both skills for a self-contained task or repeat resolved questions.
+App-owned Desktop MCP servers use the App lifecycle; separate MCP services use
+the configuration topic. Do not route an App declaration into global settings.
 
 Read-only product questions require no device activation, connection changes,
 configuration writes, or model requests. When the user requests an action,
