@@ -940,14 +940,15 @@ mod tests {
             let path = session::jsonl::session_path(&handle.lingxi_home, &b, &id.to_string());
             let writer = session::jsonl::JsonlWriter::new(path.clone(), handle.host_fs.clone());
             writer
-                .append_mobile_empty_session(&id.to_string(), "Empty in B", &b)
+                .initialize_fixed_session_mode(
+                    &id.to_string(),
+                    session::jsonl::SessionMode::Code,
+                    0,
+                )
                 .await
                 .unwrap();
             writer
-                .initialize_fixed_session_mode(
-                    &id.to_string(),
-                    &lingxi_core::host::session_context::SessionModeTransition::default(),
-                )
+                .append_mobile_empty_session(&id.to_string(), "Empty in B", &b)
                 .await
                 .unwrap();
             let rows = handle

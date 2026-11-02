@@ -286,7 +286,10 @@ fn current_contract_index() -> ContractIndex {
         "cancel_session_handoff",
     );
     put("ClientCommand::CancelSessionHandoff.request_id", "String");
-    put("ClientCommand::RetrySessionHandoff", "retry_session_handoff");
+    put(
+        "ClientCommand::RetrySessionHandoff",
+        "retry_session_handoff",
+    );
     put("ClientCommand::RetrySessionHandoff.request_id", "String");
     put(
         "ClientEvent::SessionHandoffPrepared",
@@ -316,14 +319,6 @@ fn current_contract_index() -> ContractIndex {
     );
     put("ClientEvent::SessionHandoffFailed.request_id", "String");
     put("ClientEvent::SessionHandoffFailed.message", "String");
-    put("ClientEvent::SessionModeChanged", "session_mode_changed");
-    put("ClientEvent::SessionModeChanged.session_id", "String");
-    put("ClientEvent::SessionModeChanged.mode", "SessionModeDto");
-    put(
-        "ClientEvent::SessionModeChanged.pending_mode",
-        "Option<SessionModeDto>",
-    );
-    put("ClientEvent::SessionModeChanged.revision", "u64");
     put("ClientEvent::ContextManifest", "context_manifest");
     put("ClientEvent::ContextManifest.manifest_json", "String");
     put("SessionModeDto::Chat", "chat");
@@ -3265,12 +3260,6 @@ fn contract_index_covers_every_dto() {
         connection_id: None,
     };
     let _ev: Vec<ClientEvent> = vec![
-        ClientEvent::SessionModeChanged {
-            session_id: String::new(),
-            mode: SessionModeDto::Chat,
-            pending_mode: None,
-            revision: 0,
-        },
         ClientEvent::SessionHandoffPrepared {
             request_id: "1".into(),
             source_session_id: "s".into(),

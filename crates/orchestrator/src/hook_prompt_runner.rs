@@ -1017,19 +1017,9 @@ mod tests {
                 .insert(assistant_id, (true, false));
         }
         assert_eq!(orch.prompt_hook_transcript().await.messages, audit_history);
-        orch.restore_captured_conversation_profile(
-            ConversationMode::Chat,
-            Some(lingxi_core::host::session_context::SessionModeTransition {
-                active: ConversationMode::Chat,
-                selected: ConversationMode::Chat,
-                revision: 1,
-                active_epoch: 1,
-                selected_epoch: 1,
-                pending: false,
-            }),
-        )
-        .await
-        .unwrap();
+        orch.restore_captured_conversation_profile(ConversationMode::Chat, 1)
+            .await
+            .unwrap();
         let snapshot = orch.prompt_hook_transcript().await;
         assert_eq!(snapshot.messages, vec![user.clone(), assistant.clone()]);
         assert_eq!(

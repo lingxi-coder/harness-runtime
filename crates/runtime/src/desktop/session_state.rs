@@ -36,6 +36,9 @@ pub fn is_mode_only_draft(source: &str, session_id: &str) -> bool {
     if source.is_empty() || !source.ends_with('\n') {
         return false;
     }
+    if session::JsonlWriter::fixed_session_mode_from_source(source, session_id).is_err() {
+        return false;
+    }
     let Ok(target_id) = uuid::Uuid::parse_str(session_id) else {
         return false;
     };
@@ -97,54 +100,12 @@ pub fn is_mode_only_draft(source: &str, session_id: &str) -> bool {
             if row.contains_property("attachment") {
                 return false;
             }
-            if row.string_at("/type") == Some("session-mode") {
-                // A valid later (or earlier) record cannot hide a damaged
-                // transition. Validate each complete source row separately.
-                return is_complete_draft_mode_row(&row, line, session_id);
+            if row.string_at("/type") == Some("fixed-session-mode") {
+                return true;
             }
             is_draft_metadata_row(&row)
         });
-    // Code at revision zero does not write a mode transition. Metadata or
-    // lifecycle hooks may nevertheless create the transcript before a turn.
     valid_rows && saw_row
-}
-
-/// Require the complete, valid transition carried by this exact record.
-fn is_complete_draft_mode_row(
-    row: &lingxi_core::types::utf16_json::Utf16JsonProjection,
-    source: &str,
-    session_id: &str,
-) -> bool {
-    if session::JsonlWriter::session_mode_transition_from_source(source, session_id).is_none() {
-        return false;
-    }
-    let Some(value) = row
-        .to_json_string()
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-    else {
-        return false;
-    };
-    value
-        .get("contextRevision")
-        .and_then(serde_json::Value::as_u64)
-        .is_some()
-        && value
-            .get("profileEpoch")
-            .and_then(serde_json::Value::as_u64)
-            .is_some()
-        && value
-            .get("admittedMode")
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-        && value
-            .get("admittedEpoch")
-            .and_then(serde_json::Value::as_u64)
-            .is_some()
-        && value
-            .get("pending")
-            .and_then(serde_json::Value::as_bool)
-            .is_some()
 }
 
 /// Only recognize the known, typed metadata records emitted for a draft.

@@ -765,26 +765,6 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_conversation_mode(
-        &self,
-        state: &lingxi_core::host::session_context::SessionModeSnapshot,
-    ) {
-        use crate::protocol::listings::SessionModeDto;
-        use lingxi_core::host::session_context::ConversationMode;
-        let lower = |mode| match mode {
-            ConversationMode::Chat => SessionModeDto::Chat,
-            ConversationMode::Code => SessionModeDto::Code,
-        };
-        self.sink
-            .emit(ClientEvent::SessionModeChanged {
-                session_id: state.session_id.clone(),
-                mode: lower(state.active),
-                pending_mode: None,
-                revision: state.revision,
-            })
-            .await;
-    }
-
     async fn emit_system_notice(&self, message: &Utf16JsonProjection, is_error: bool) {
         self.sink
             .emit(ClientEvent::SystemNotice {

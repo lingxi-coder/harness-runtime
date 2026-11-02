@@ -243,11 +243,11 @@ impl ConversationOrchestrator {
         String,
         Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     ) {
-        // Keep the history, admitted profile and frozen prompt on the same
-        // side of a concurrent profile or session transition.
+        // Keep the history, fixed mode and frozen prompt on the same side of a
+        // concurrent session transition.
         let _transition = self.conversation_transition.lock().await;
         let profile = self.conversation_profile().await;
-        let active_epoch = self.profile_epoch().await;
+        let instruction_epoch = self.profile_epoch().await;
         let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         let session = self.session.lock().await;
         let attachments = self
@@ -269,16 +269,8 @@ impl ConversationOrchestrator {
             lingxi_core::host::bg_session_forker::BgSessionSnapshot {
                 history: session.history.clone(),
                 model_context_excluded_messages: session.model_context_excluded_messages.clone(),
-                // The copy is an independent task. A selection pending in
-                // the foreground belongs to the foreground's next query.
-                profile: lingxi_core::host::session_context::SessionModeTransition {
-                    selected: profile.active,
-                    active: profile.active,
-                    revision: profile.revision,
-                    selected_epoch: active_epoch,
-                    active_epoch,
-                    pending: false,
-                },
+                mode: profile.mode,
+                instruction_epoch,
                 model_reminder_attachments,
                 native_request_history: session.native_request_history.clone(),
             },
@@ -1272,10 +1264,8 @@ impl ConversationOrchestrator {
                         "cold resume target changed before deferred replay".into(),
                     ));
                 }
-                self.restore_conversation_profile_locked(
-                    lingxi_core::host::session_context::ConversationMode::Code,
-                )
-                .await?;
+                self.restore_conversation_profile_locked(self.conversation_profile().await.mode)
+                    .await?;
                 crate::turn_loop::boxed_turn_future(|| {
                     crate::resume::replay_deferred_tools_after_resume(self, deferred_tools)
                 })
@@ -1467,7 +1457,7 @@ impl ConversationOrchestrator {
             &session_id.as_uuid().to_string(),
         )
         .map_err(HandleError::ActionFailed)?;
-        self.ensure_conversation_mode(fixed.active).await?;
+        self.ensure_conversation_mode(fixed).await?;
         let (old_session_id, from_model, from_profile, from_binding) = {
             let session = self.session.lock().await;
             let binding = match session.user_model_setting_source {
@@ -1840,12 +1830,8 @@ impl ConversationOrchestrator {
             .replace_loaded(runtime.loaded_tool_names);
         self.restore_hot_resume_prompt_state().await;
         *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
-        // The selected profile/epoch must precede resumed hooks and deferred
-        // Skill dispatch, which stamp their new instruction rows with it.
-        self.restore_conversation_profile_locked(
-            lingxi_core::host::session_context::ConversationMode::Code,
-        )
-        .await?;
+        // The fixed mode precedes resumed hooks and deferred skill dispatch.
+        self.restore_conversation_profile_locked(fixed).await?;
         // The latch resets with the session, and so does the cascade's
         // tried-models list (see `clear_session`).
         self.model_runtime
@@ -4218,7 +4204,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                     .join("projects")
                     .join(session::project_dir_name(&cwd))
             });
-        let mode = self.conversation_profile().await.active;
+        let mode = self.conversation_profile().await.mode;
         let Ok(entries) = std::fs::read_dir(&project_dir) else {
             return Vec::new();
         };
@@ -4240,7 +4226,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 continue;
             };
             if !session::JsonlWriter::fixed_session_mode_from_source(&source, stem)
-                .is_ok_and(|profile| profile.active == mode)
+                .is_ok_and(|profile| profile == mode)
             {
                 continue;
             }
@@ -7920,7 +7906,7 @@ mod background_context_tests {
             .ensure_conversation_mode(ConversationMode::Chat)
             .await
             .unwrap();
-        assert_eq!((chat.active, chat.revision), (ConversationMode::Chat, 0));
+        assert_eq!(chat.mode, ConversationMode::Chat);
         orch.save_current_turn_system_prompt(Some(&SystemPromptInput::custom_prompt(
             "captured chat instructions".into(),
         )))
@@ -7935,26 +7921,20 @@ mod background_context_tests {
         assert_eq!(snapshot.history.len(), 2);
         assert!(!snapshot.model_context_excluded_messages.contains(&old_id));
         assert!(!snapshot.model_context_excluded_messages.contains(&user_id));
-        assert_eq!(snapshot.profile.active, ConversationMode::Chat);
-        assert_eq!(snapshot.profile.selected, ConversationMode::Chat);
-        assert_eq!(
-            (snapshot.profile.revision, snapshot.profile.active_epoch),
-            (0, 0)
-        );
-        assert_eq!(snapshot.profile.selected_epoch, 0);
-        assert!(!snapshot.profile.pending);
+        assert_eq!(snapshot.mode, ConversationMode::Chat);
+        assert_eq!(snapshot.instruction_epoch, 0);
         assert_eq!(
             prompt.as_ref().and_then(|source| source.string_at("")),
             Some("captured chat instructions")
         );
 
         assert_eq!(
-            orch.conversation_profile().await.active,
+            orch.conversation_profile().await.mode,
             ConversationMode::Chat
         );
         assert_eq!(orch.profile_epoch().await, 0);
-        assert_eq!(snapshot.profile.active, ConversationMode::Chat);
-        assert_eq!(snapshot.profile.active_epoch, 0);
+        assert_eq!(snapshot.mode, ConversationMode::Chat);
+        assert_eq!(snapshot.instruction_epoch, 0);
         drop(turn);
     }
 }

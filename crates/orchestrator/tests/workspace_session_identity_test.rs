@@ -52,7 +52,8 @@ async fn fixture(
 fn write_source(path: &Path, cwd: &Path, id: SessionId) -> String {
     let uuid = uuid::Uuid::new_v4();
     let content = format!(
-        "{}\n",
+        "{}\n{}\n",
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(), "sessionMode":"code", "instructionEpoch":0}),
         serde_json::json!({
             "type":"user", "uuid":uuid, "parentUuid":null, "cwd":cwd,
             "sessionId":id.as_uuid(), "timestamp":"2026-10-21T12:00:00.000Z",
@@ -404,15 +405,24 @@ async fn warm_resume_replaces_shared_worktree_state_and_preserves_explicit_dirs(
     );
     assert_eq!(cwd.cwd(), worktree);
     assert!(cwd.trusted_dirs().contains(&extra));
+    let plain_id = SessionId::new();
+    write_source(&transcript(&home, &boot, plain_id), &boot, plain_id);
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(boot.clone()));
+    let plain = orchestrator::resume::replay_session_state(
+        &home,
+        &boot.to_string_lossy(),
+        plain_id.as_uuid(),
+        fs,
+    )
+    .await
+    .unwrap();
+    let runtime = plain.handle_runtime_snapshot();
     orch.resume_session(
-        SessionId::new(),
-        Vec::new(),
+        plain_id,
+        plain.state.history,
+        plain.last_message_uuid.map(|id| id.to_string()),
         None,
-        None,
-        lingxi_core::host::ResumeRuntimeSnapshot {
-            working_directory: Some(boot.clone()),
-            ..Default::default()
-        },
+        runtime,
     )
     .await
     .unwrap();
@@ -445,7 +455,8 @@ async fn warm_resume_after_cd_cannot_reappend_the_previous_sessions_metadata() {
     writer
         .initialize_fixed_session_mode(
             &id_a.as_uuid().to_string(),
-            &lingxi_core::host::session_context::SessionModeTransition::default(),
+            lingxi_core::host::session_context::ConversationMode::Code,
+            0,
         )
         .await
         .unwrap();

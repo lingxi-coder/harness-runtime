@@ -178,6 +178,16 @@ pub(crate) async fn open(
             .await
             .map_err(|_| unavailable())?,
     );
+    if expected.is_none() {
+        writer
+            .initialize_fixed_session_mode(
+                &chat.session_id,
+                lingxi_core::host::session_context::ConversationMode::Chat,
+                0,
+            )
+            .await
+            .map_err(|_| unavailable())?;
+    }
     let source = if expected.is_some() {
         let captured = writer
             .capture_persistent_chat_snapshot(false)
@@ -211,10 +221,11 @@ pub(crate) async fn restore(
                 &session::jsonl::route_lines(source.source()).messages_in_order,
                 true,
                 permission::PermissionMode::Default,
-                Some(JsonlWriter::fixed_session_mode_from_source(
+                JsonlWriter::fixed_session_mode_from_source(
                     source.source(),
                     &source.session_id().to_string(),
-                ).map_err(|_| BuildError::Orchestrator("chat_transcript_unavailable".into()))?),
+                )
+                .map_err(|_| BuildError::Orchestrator("chat_transcript_unavailable".into()))?,
                 source.source(),
             )
             .await

@@ -1,4 +1,4 @@
-//! Positional variant locks for the current Client protocol 31.0.0 baseline.
+//! Positional variant locks for the current Client protocol 32.0.0 baseline.
 //!
 //! UniFFI encodes each enum variant by declaration index, so inserting, removing,
 //! or reordering a variant can change the mobile ABI even when JSON tags remain
@@ -8,7 +8,7 @@
 //! unchanged. A later append remains
 //! compatible with this frozen prefix; any ordinal change requires a deliberate
 //! major-version re-cut. The wire contract major is separately recorded in
-//! snapshots/blessed_major.txt (currently 31).
+//! snapshots/blessed_major.txt (currently 32).
 
 const COMMANDS_SRC: &str = include_str!("../src/protocol/commands.rs");
 const EVENTS_SRC: &str = include_str!("../src/protocol/events.rs");
@@ -372,7 +372,6 @@ fn side_chat_variants_are_appended_after_the_protocol_25_prefix() {
         "MediaDeviceRequest".into(),
         "MediaServiceResponse".into(),
         "MediaControlRequest".into(),
-        "SessionModeChanged".into(),
         "ContextManifest".into(),
         "SessionHandoffPrepared".into(),
         "SessionHandoffFailed".into(),

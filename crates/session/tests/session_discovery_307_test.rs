@@ -26,7 +26,8 @@ fn write_session(home: &Path, cwd: &Path, id: Uuid, seconds: u8) -> PathBuf {
         "timestamp":format!("2026-10-21T12:00:{seconds:02}.000Z"),
         "cwd":cwd.to_string_lossy(), "message":{"role":"user","content":format!("message-{id}")}
     });
-    std::fs::write(&path, format!("{row}\n")).unwrap();
+    let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0});
+    std::fs::write(&path, format!("{header}\n{row}\n")).unwrap();
     path
 }
 
@@ -218,7 +219,8 @@ async fn job_uuid_probe_uses_native_raw_type_markers() {
     let id = Uuid::new_v4();
     let path = bucket(&home, &a).join(format!("{id}.jsonl"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, "{\"type\": \"user\"}\n").unwrap();
+    let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0});
+    std::fs::write(&path, format!("{header}\n{{\"type\": \"user\"}}\n")).unwrap();
     let unresolved = resolve_job_transcript_raw(
         &home,
         &c.to_string_lossy(),
@@ -232,7 +234,7 @@ async fn job_uuid_probe_uses_native_raw_type_markers() {
         unresolved.path,
         bucket(&home, &c).join(format!("{id}.jsonl"))
     );
-    std::fs::write(&path, "not parsed JSON: \"type\":\"user\"\n").unwrap();
+    std::fs::write(&path, format!("{header}\nnot parsed JSON: \"type\":\"user\"\n")).unwrap();
     assert_eq!(
         resolve_job_transcript_raw(
             &home,

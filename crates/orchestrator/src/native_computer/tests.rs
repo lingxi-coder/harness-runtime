@@ -2262,11 +2262,7 @@ async fn fixed_mode_rejection_keeps_pending_receipt_recoverable() {
             .ensure_conversation_mode(ConversationMode::Code)
             .await
             .unwrap();
-        assert_eq!(
-            (profile.active, profile.selected, profile.pending),
-            (ConversationMode::Code, ConversationMode::Code, false)
-        );
-        assert_eq!(profile.revision, 0);
+        assert_eq!(profile.mode, ConversationMode::Code);
 
         // The old-profile receipt still has its original continuation and can be
         // submitted exactly once; no computer operation is re-executed.
@@ -3028,10 +3024,7 @@ async fn full_compaction_preserves_abandonment_authority_but_not_pending_receipt
                 .ensure_conversation_mode(ConversationMode::Code)
                 .await
                 .unwrap();
-            assert_eq!(
-                (state.active, state.selected, state.pending),
-                (ConversationMode::Code, ConversationMode::Code, false)
-            );
+            assert_eq!(state.mode, ConversationMode::Code);
             assert_eq!(
                 fixture.computer.calls.lock().unwrap().len(),
                 usize::from(unresolved)

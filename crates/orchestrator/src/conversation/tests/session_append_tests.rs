@@ -598,7 +598,8 @@ async fn skill_companion_registers_only_the_accepted_durable_body_and_cold_resto
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     compaction::invoked_skills::reset_for_test();
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("session.jsonl");
+    let id = lingxi_core::types::SessionId::new();
+    let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
     let rewrite = r#"export function register(on) {
       on('session.append', ($, e, next) => {
         const blocks = e.message.content;
@@ -626,6 +627,8 @@ async fn skill_companion_registers_only_the_accepted_durable_body_and_cold_resto
         }
     }
     let (orch, _) = build_orchestrator(root.path(), &path, rewrite).await;
+    let orch = orch.with_session_id(id);
+    orch.initialize_conversation_mode().await.unwrap();
     let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
     let runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
@@ -731,7 +734,7 @@ async fn skill_companion_registers_only_the_accepted_durable_body_and_cold_resto
         &loaded.messages_in_order,
         false,
         permission::PermissionMode::Default,
-        None,
+        lingxi_core::host::session_context::ConversationMode::Code,
         &source,
     )
     .await
@@ -844,7 +847,8 @@ async fn skill_tool_reinvocation_commits_only_accepted_body_under_publication_fe
     for streaming in [false, true] {
         compaction::invoked_skills::reset_for_test();
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("session.jsonl");
+        let id = lingxi_core::types::SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
         let rewrite = r#"export function register(on) {
           on('session.append', ($, e, next) => {
             const blocks = e.message.content;
@@ -857,6 +861,8 @@ async fn skill_tool_reinvocation_commits_only_accepted_body_under_publication_fe
           });
         }"#;
         let (orch, _) = build_orchestrator(root.path(), &path, rewrite).await;
+        let orch = orch.with_session_id(id);
+        orch.initialize_conversation_mode().await.unwrap();
         let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
         let runner = Arc::new(
             sidequery::ForkedAgentRunner::new()
@@ -1083,7 +1089,7 @@ async fn skill_tool_reinvocation_commits_only_accepted_body_under_publication_fe
             &loaded.messages_in_order,
             false,
             permission::PermissionMode::Default,
-            None,
+            lingxi_core::host::session_context::ConversationMode::Code,
             &source,
         )
         .await

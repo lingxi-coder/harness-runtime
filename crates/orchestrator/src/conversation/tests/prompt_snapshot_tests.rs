@@ -590,6 +590,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let path =
             session::jsonl::session_path(&home, &cwd_string, &session_id.as_uuid().to_string());
         let warm = warm.with_jsonl_writer(Arc::new(JsonlWriter::new(path.clone(), fs.clone())));
+        warm.initialize_conversation_mode().await.unwrap();
         warm.run_turn("warm prompt").await.unwrap();
         let warm_requests = warm_api.captured_requests().await;
         assert_eq!(warm_requests.len(), 1);

@@ -170,6 +170,10 @@ pub(super) fn try_mobile_automation_runtime() -> Result<&'static tokio::runtime:
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("mobile-cron")
+            // Scheduled runs assemble and drive complete mobile sessions on
+            // this worker, just like the main mobile engine runtime. Use the
+            // same supported budget instead of Tokio's smaller default stack.
+            .thread_stack_size(crate::RUNTIME_THREAD_STACK_SIZE)
             .enable_all()
             .build()
             .map_err(|error| format!("build mobile scheduled execution runtime: {error}"))
@@ -519,12 +523,12 @@ impl MobileTurnFirer {
         request: &cron::AutomationRunRequest,
         cancel: CancellationToken,
     ) -> Result<cron::AutomationRunResult, String> {
-        llm_runtime::catalog_task::scope(self.fire_session_scoped(
+        llm_runtime::catalog_task::scope(Box::pin(self.fire_session_scoped(
             request.task.prompt.clone(),
             request.task.automation.as_ref(),
             Some(request),
             cancel,
-        ))
+        )))
         .await
     }
 
@@ -613,12 +617,12 @@ impl MobileTurnFirer {
         let automation = automation.cloned();
         let request = request.cloned();
         run_owned_mobile_cron(move |cancel| async move {
-            llm_runtime::catalog_task::scope(owner.fire_session_scoped(
+            llm_runtime::catalog_task::scope(Box::pin(owner.fire_session_scoped(
                 prompt,
                 automation.as_ref(),
                 request.as_ref(),
                 cancel,
-            ))
+            )))
             .await
         })
         .await
@@ -781,13 +785,15 @@ impl MobileTurnFirer {
                 return Err("busy: Multiple conversation owners".into());
             }
         }
-        let mut rt = super::assembly::build_mobile_inner_for_scheduled(
+        // Keep the scheduled child assembly state off the enclosing session
+        // future while retaining this task's ownership of cleanup and gates.
+        let mut rt = Box::pin(super::assembly::build_mobile_inner_for_scheduled(
             config,
             self.platform.clone(),
             listener,
             sink,
             borrowed_sessions,
-        )
+        ))
         .await
         .map_err(|e| {
             if automation.is_some() {
@@ -1049,7 +1055,6 @@ pub(super) async fn cron_target_session_mode(
         &source.content,
         &session_id.to_string(),
     )
-    .map(|profile| profile.active)
     .map_err(|error| format!("paused: Scheduled conversation mode is invalid: {error}"))
 }
 

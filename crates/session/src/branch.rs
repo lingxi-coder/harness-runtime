@@ -41,9 +41,6 @@ pub struct BranchResult {
     pub title: String,
     /// Count of conversation messages copied into the branch.
     pub message_count: usize,
-    /// Greatest profile revision or copied skill-instruction epoch observed in
-    /// the same captured source transcript used to construct this branch.
-    pub source_context_revision_max: u64,
 }
 
 /// Why a branch could not be created.
@@ -57,6 +54,8 @@ pub enum BranchError {
     ModeMismatch,
     /// The captured source contains malformed mode metadata.
     InvalidModeMetadata(String),
+    /// A fresh instruction provenance epoch cannot be represented.
+    InstructionEpochExhausted,
     /// An independent branch must have a different identity from its source.
     TargetIsSource,
     /// A filesystem read/write failed.
@@ -70,6 +69,7 @@ impl std::fmt::Display for BranchError {
             Self::NoMessages => write!(f, "No messages to branch"),
             Self::ModeMismatch => write!(f, "cannot fork a session into another mode"),
             Self::InvalidModeMetadata(error) => write!(f, "invalid session mode: {error}"),
+            Self::InstructionEpochExhausted => write!(f, "instruction epoch exhausted"),
             Self::TargetIsSource => write!(f, "branch target must differ from the source session"),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -82,7 +82,7 @@ impl std::error::Error for BranchError {}
 /// `custom_title` is the trimmed `/branch [name]` argument (empty / `None` ⇒
 /// derive the base name from the first user message). Returns the new session
 /// id + saved title so the caller can switch into the branch. A branch is a
-/// new task: it retains the source's fixed mode and admitted skill epoch.
+/// new task: it retains the source's fixed mode and starts a fresh instruction epoch.
 ///
 /// # Errors
 /// [`BranchError::NoConversation`] when the source file is missing/empty,
@@ -398,13 +398,29 @@ pub async fn render_branch_from_captured(
     }
     let routed = route_lines(content);
     let src_sid = source_session_id.to_string();
-    let source_context_revision_max = source_context_revision_max(content, &src_sid, messages);
-    let profile = crate::jsonl::JsonlWriter::fixed_session_mode_from_source(content, &src_sid)
+    let profile = crate::jsonl::JsonlWriter::fixed_session_profile_from_source(content, &src_sid)
         .map_err(BranchError::InvalidModeMetadata)?;
-    if mode.is_some_and(|mode| mode != profile.active) {
+    if mode.is_some_and(|mode| mode != profile.mode) {
         return Err(BranchError::ModeMismatch);
     }
-    let mode = profile.active;
+    let mode = profile.mode;
+    // A new UUID is a new authorization scope. Copied skill activations must
+    // remain historical evidence, never become instructions in the fork.
+    let copied_epoch = messages
+        .iter()
+        .filter_map(|message| message.origin_projection.as_ref())
+        .filter(|origin| origin.string_at("/type") == Some("skill_activation"))
+        .filter_map(|origin| origin.number_at("/context_epoch"))
+        .filter(|epoch| epoch.is_finite() && *epoch >= 0.0 && epoch.fract() == 0.0)
+        .map(|epoch| epoch as u64)
+        .max()
+        .unwrap_or(0);
+    let instruction_epoch = profile
+        .instruction_epoch
+        .max(copied_epoch)
+        .checked_add(1)
+        .filter(|epoch| *epoch <= (1_u64 << 53) - 1)
+        .ok_or(BranchError::InstructionEpochExhausted)?;
 
     // 3. Base name = provided title, else the first-prompt derivation
     //    (`deriveFirstPrompt`). Then append the collision-numbered "(Branch)".
@@ -432,6 +448,17 @@ pub async fn render_branch_from_captured(
             + usize::from(carries_relocated)
             + usize::from(carries_atis)
             + 1,
+    );
+
+    // Publish the fixed owner in the same atomic file as the copied history.
+    lines.push(
+        serde_json::to_string(&json!({
+            "type": "fixed-session-mode",
+            "sessionId": new_sid,
+            "sessionMode": mode.as_str(),
+            "instructionEpoch": instruction_epoch,
+        }))
+        .expect("fork mode serializes"),
     );
 
     // `createFork` stamps inherited history suppression BEFORE transcript
@@ -527,73 +554,15 @@ pub async fn render_branch_from_captured(
         }))
         .expect("custom-title serializes"),
     );
-    let epoch = profile.active_epoch;
-    lines.push(
-        serde_json::to_string(&json!({
-            "type": "session-mode",
-            "sessionId": new_sid,
-            "sessionMode": mode.as_str(),
-            "contextRevision": profile.revision,
-            "profileEpoch": epoch,
-            "admittedMode": mode.as_str(),
-            "admittedEpoch": epoch,
-            "pending": false,
-        }))
-        .expect("fork profile serializes"),
-    );
     Ok(RenderedBranch {
         result: BranchResult {
             new_session_id,
             source_session_id,
             title,
             message_count,
-            source_context_revision_max,
         },
         content: format!("{}\n", lines.join("\n")),
     })
-}
-
-fn source_context_revision_max(
-    content: &str,
-    session_id: &str,
-    messages: &[crate::jsonl::JsonlMessage],
-) -> u64 {
-    let metadata_max = content
-        .lines()
-        .filter_map(|line| parse_exact_json(line).ok())
-        .filter_map(|entry| {
-            let value = entry.value;
-            if value.get("type").and_then(serde_json::Value::as_str) != Some("session-mode")
-                || value.get("sessionId").and_then(serde_json::Value::as_str) != Some(session_id)
-            {
-                return None;
-            }
-            ["contextRevision", "profileEpoch", "admittedEpoch"]
-                .into_iter()
-                .filter_map(|key| {
-                    let number = value.get(key)?;
-                    number.as_u64().or_else(|| {
-                        let number = number.as_f64()?;
-                        (number.is_finite() && number >= 0.0 && number.fract() == 0.0)
-                            .then_some(number as u64)
-                    })
-                })
-                .max()
-        })
-        .max()
-        .unwrap_or(0);
-    let skill_max = messages
-        .iter()
-        .filter_map(|message| message.origin_projection.as_ref())
-        .filter(|origin| origin.string_at("/type") == Some("skill_activation"))
-        .filter_map(|origin| origin.number_at("/context_epoch"))
-        .filter(|epoch| epoch.is_finite() && *epoch >= 0.0 && epoch.fract() == 0.0)
-        // Rust's float-to-integer cast saturates, so an out-of-range origin
-        // becomes an exhaustion error before a branch file is created.
-        .map(|epoch| epoch as u64)
-        .max()
-        .unwrap_or(0);
-    metadata_max.max(skill_max)
 }
 
 #[derive(Default)]
@@ -719,6 +688,10 @@ mod tests {
         .to_string()
     }
 
+    fn fixed_header(sid: &str, mode: &str, epoch: u64) -> String {
+        json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":mode, "instructionEpoch":epoch}).to_string()
+    }
+
     fn content_replacement_line(sid: &str, path: &str, agent_id: Option<&str>) -> String {
         let mut value = json!({
             "type": "content-replacement",
@@ -764,10 +737,8 @@ mod tests {
         .unwrap();
         excluded["origin"] = json!({"type":"skill_activation", "context_epoch":99});
         let captured = format!(
-            "{first}\n{second}\n{excluded}\n{}\n{}\n{}\n{}\n",
-            json!({"type":"session-mode", "sessionId":src.to_string(),
-                "sessionMode":"chat", "contextRevision":11, "profileEpoch":9,
-                "admittedMode":"code", "admittedEpoch":8, "pending":true}),
+            "{}\n{first}\n{second}\n{excluded}\n{}\n{}\n{}\n",
+            fixed_header(&src.to_string(), "code", 8),
             format!(
                 r#"{{"type":"content-replacement","sessionId":"{src}","replacements":[{{"text":"\ude00"}}]}}"#
             ),
@@ -805,16 +776,9 @@ mod tests {
         assert_eq!(rendered.result.new_session_id, dst);
         let rendered_route = route_lines(&rendered.content);
         assert_eq!(rendered_route.messages_in_order.len(), 2);
-        assert_eq!(
-            rendered_route
-                .session_context_revisions
-                .get(&dst.to_string()),
-            Some(&11)
-        );
         let result = create_branch_from_captured(options, fs).await.unwrap();
         assert_eq!(result.new_session_id, dst);
         assert_eq!(result.message_count, 2);
-        assert_eq!(result.source_context_revision_max, 12);
         assert_eq!(
             tokio::fs::read_to_string(source).await.unwrap(),
             "later source contents\n"
@@ -875,15 +839,11 @@ mod tests {
             .lines()
             .find_map(|line| {
                 let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                (value["type"] == "session-mode").then_some(value)
+                (value["type"] == "fixed-session-mode").then_some(value)
             })
             .unwrap();
         assert_eq!(profile["sessionMode"], "code");
-        assert_eq!(profile["admittedMode"], "code");
-        assert_eq!(profile["contextRevision"], 11);
-        assert_eq!(profile["profileEpoch"], 8);
-        assert_eq!(profile["admittedEpoch"], 8);
-        assert_eq!(profile["pending"], false);
+        assert_eq!(profile["instructionEpoch"], 13);
     }
 
     #[tokio::test]
@@ -898,7 +858,7 @@ mod tests {
             None,
             "test",
         );
-        let captured = format!("{source}\n");
+        let captured = format!("{}\n{source}\n", fixed_header(&src.to_string(), "code", 0));
         let routed = route_lines(&captured);
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
         let target = session_path(home.path(), cwd, &dst.to_string());
@@ -969,31 +929,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profiled_branch_keeps_source_mode_and_admitted_epoch() {
+    async fn branch_keeps_fixed_mode_and_uses_fresh_instruction_epoch() {
         let home = tempfile::tempdir().unwrap();
         let cwd = "/profiled-branch";
         let src = Uuid::new_v4();
-        let src_sid = src.to_string();
-        let source = session_path(home.path(), cwd, &src_sid);
-        tokio::fs::create_dir_all(source.parent().unwrap())
+        let sid = src.to_string();
+        let path = session_path(home.path(), cwd, &sid);
+        tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
-        let mut message: serde_json::Value = serde_json::from_str(&user_line(
+        let message = user_line(
             "11111111-1111-1111-1111-111111111111",
-            &src_sid,
+            &sid,
             None,
             "copied instruction",
-        ))
+        );
+        tokio::fs::write(
+            &path,
+            format!("{}\n{message}\n", fixed_header(&sid, "code", 7)),
+        )
+        .await
         .unwrap();
-        message["origin"] = json!({"type":"skill_activation", "context_epoch":7});
-        let metadata = |revision| {
-            json!({"type":"session-mode", "sessionId":&src_sid,
-                "sessionMode":"code", "contextRevision":revision})
-        };
-        let write_source = |revision| format!("{message}\n{}\n", metadata(revision));
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
-
-        tokio::fs::write(&source, write_source(4)).await.unwrap();
         assert!(matches!(
             create_branch_with_mode(
                 home.path(),
@@ -1012,85 +969,25 @@ mod tests {
             src,
             None,
             crate::jsonl::SessionMode::Code,
-            fs.clone(),
+            fs,
         )
         .await
         .unwrap();
-        assert_eq!(branch.source_context_revision_max, 7);
-        let branch_raw = tokio::fs::read_to_string(session_path(
+        let raw = tokio::fs::read_to_string(session_path(
             home.path(),
             cwd,
             &branch.new_session_id.to_string(),
         ))
         .await
         .unwrap();
-        let mode = branch_raw
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .find(|row| row["type"] == "session-mode")
-            .unwrap();
-        assert_eq!(mode["sessionMode"], "code");
-        assert_eq!(mode["contextRevision"], 4);
-        assert_eq!(mode["profileEpoch"], 4);
-        assert_eq!(mode["admittedEpoch"], 4);
-        assert_eq!(mode["pending"], false);
-        assert!(branch_raw.contains("copied instruction"));
-
-        tokio::fs::write(&source, write_source(11)).await.unwrap();
-        let branch = create_branch_with_mode(
-            home.path(),
-            cwd,
-            src,
-            None,
-            crate::jsonl::SessionMode::Code,
-            fs.clone(),
+        let profile = crate::jsonl::JsonlWriter::fixed_session_profile_from_source(
+            &raw,
+            &branch.new_session_id.to_string(),
         )
-        .await
         .unwrap();
-        assert_eq!(branch.source_context_revision_max, 11);
-        let mut old_message = message.clone();
-        old_message["origin"]["context_epoch"] = json!(0);
-        tokio::fs::write(&source, format!("{old_message}\n{}\n", metadata(3)))
-            .await
-            .unwrap();
-        let generic = create_branch(home.path(), cwd, src, None, fs.clone())
-            .await
-            .unwrap();
-        assert_eq!(generic.source_context_revision_max, 3);
-        let generic_raw = tokio::fs::read_to_string(session_path(
-            home.path(),
-            cwd,
-            &generic.new_session_id.to_string(),
-        ))
-        .await
-        .unwrap();
-        let generic_mode = generic_raw
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .find(|row| row["type"] == "session-mode")
-            .unwrap();
-        assert_eq!(generic_mode["sessionMode"], "code");
-        assert_eq!(generic_mode["profileEpoch"], 3);
-        assert!(generic_raw.contains("copied instruction"));
-        tokio::fs::write(&source, write_source((1_u64 << 53) - 1))
-            .await
-            .unwrap();
-        let files_before = std::fs::read_dir(source.parent().unwrap()).unwrap().count();
-        let error = create_branch_with_mode(
-            home.path(),
-            cwd,
-            src,
-            None,
-            crate::jsonl::SessionMode::Chat,
-            fs,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(error, BranchError::ModeMismatch));
-        assert_eq!(
-            std::fs::read_dir(source.parent().unwrap()).unwrap().count(),
-            files_before
-        );
+        assert_eq!(profile.mode, crate::jsonl::SessionMode::Code);
+        assert_eq!(profile.instruction_epoch, 8);
+        assert!(raw.contains("copied instruction"));
     }
 
     #[tokio::test]
@@ -1109,9 +1006,12 @@ mod tests {
             None,
             "plot it",
         );
-        tokio::fs::write(&source, format!("{line}\n"))
-            .await
-            .unwrap();
+        tokio::fs::write(
+            &source,
+            format!("{}\n{line}\n", fixed_header(&src_sid, "code", 0)),
+        )
+        .await
+        .unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
         let store = visualization::VisualizationStore::new(fs.clone(), home.path().to_path_buf());
         let reference = store
@@ -1162,7 +1062,7 @@ mod tests {
         tokio::fs::create_dir_all(source.parent().unwrap())
             .await
             .unwrap();
-        let body = format!("{fixture}{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ud83d\"}}]}}\n{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ude00\"}}]}}\n");
+        let body = format!("{}\n{fixture}{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ud83d\"}}]}}\n{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ude00\"}}]}}\n", fixed_header(&src.to_string(), "code", 0));
         tokio::fs::write(&source, &body).await.unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
         let fork = create_branch(home.path(), cwd, src, Some("Exact peer history"), fs)
@@ -1181,6 +1081,7 @@ mod tests {
         assert_eq!(restored.messages_in_order.len(), 4);
         for ((native, original), message) in written
             .lines()
+            .skip(1)
             .take(4)
             .zip(fixture.lines())
             .zip(&restored.messages_in_order)
@@ -1239,6 +1140,7 @@ mod tests {
                 "second",
             ),
         );
+        let body = format!("{}\n{body}", fixed_header(&src_sid, "code", 0));
         tokio::fs::write(&path, body.clone()).await.unwrap();
 
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(std::path::PathBuf::from(cwd)));
@@ -1256,20 +1158,20 @@ mod tests {
         let lines: Vec<&str> = written.lines().collect();
         // 2 conversation lines + custom-title + fresh profile.
         assert_eq!(lines.len(), 4);
-        let first = read_row(lines[0]);
+        let first = read_row(lines[1]);
         assert_eq!(first.session_id, new_sid);
         assert_eq!(first.parent_uuid, None, "first entry re-roots the chain");
         assert_eq!(
             first.extra.string_at("/forkedFrom/sessionId").unwrap(),
             src_sid
         );
-        let second = read_row(lines[1]);
+        let second = read_row(lines[2]);
         assert_eq!(
             second.parent_uuid.as_deref(),
             Some("11111111-1111-1111-1111-111111111111"),
             "parentUuid rechained to the prior ORIGINAL uuid"
         );
-        let title_line: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        let title_line: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
         assert_eq!(title_line["type"], "custom-title");
         assert_eq!(title_line["sessionId"], new_sid);
         let _ = std::fs::remove_dir_all(&home);
@@ -1337,6 +1239,7 @@ mod tests {
                 "atis": "invalid token",
             }),
         );
+        let body = format!("{}\n{body}", fixed_header(&src_sid, "code", 0));
         tokio::fs::write(&path, body.clone()).await.unwrap();
 
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(std::path::PathBuf::from(cwd)));
@@ -1351,7 +1254,7 @@ mod tests {
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(lines.len(), 8);
 
-        let suppression: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let suppression: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(suppression["type"], "history-suppression");
         assert_eq!(suppression["sessionId"], json!(new_sid));
         assert_eq!(suppression["cause"], "fork_inherit");
@@ -1359,12 +1262,12 @@ mod tests {
             .as_str()
             .is_some_and(|ts| ts.ends_with('Z') && ts.contains('T')));
 
-        let first = read_row(lines[1]);
-        let second = read_row(lines[2]);
+        let first = read_row(lines[2]);
+        let second = read_row(lines[3]);
         assert_eq!(first.uuid, "11111111-1111-1111-1111-111111111111");
         assert_eq!(second.uuid, "22222222-2222-2222-2222-222222222222");
 
-        let sidecar: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+        let sidecar: serde_json::Value = serde_json::from_str(lines[4]).unwrap();
         assert_eq!(sidecar["type"], "content-replacement");
         assert_eq!(sidecar["sessionId"], json!(new_sid));
         assert_eq!(
@@ -1382,17 +1285,17 @@ mod tests {
             "agent-level replacements must not be carried onto the branch transcript",
         );
 
-        let relocated: serde_json::Value = serde_json::from_str(lines[4]).unwrap();
+        let relocated: serde_json::Value = serde_json::from_str(lines[5]).unwrap();
         assert_eq!(relocated["type"], "relocated");
         assert_eq!(relocated["sessionId"], json!(new_sid));
         assert_eq!(relocated["relocatedCwd"], "/tmp/new");
 
-        let atis: serde_json::Value = serde_json::from_str(lines[5]).unwrap();
+        let atis: serde_json::Value = serde_json::from_str(lines[6]).unwrap();
         assert_eq!(atis["type"], "atis-latch");
         assert_eq!(atis["sessionId"], json!(new_sid));
         assert_eq!(atis["atis"], "atis-token");
 
-        let title: serde_json::Value = serde_json::from_str(lines[6]).unwrap();
+        let title: serde_json::Value = serde_json::from_str(lines[7]).unwrap();
         assert_eq!(title["type"], "custom-title");
 
         let source_after = tokio::fs::read_to_string(&path).await.unwrap();
@@ -1441,6 +1344,7 @@ mod tests {
                 "it tracks habits",
             ),
         );
+        let body = format!("{}\n{body}", fixed_header(&src_sid, "code", 0));
         tokio::fs::write(&path, body.clone()).await.unwrap();
 
         let fs: Arc<dyn FileSystem> =
@@ -1456,7 +1360,7 @@ mod tests {
         let written = tokio::fs::read_to_string(&dst).await.expect("fork exists");
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(lines.len(), 4);
-        for line in &lines[..2] {
+        for line in &lines[1..3] {
             let entry = read_row(line);
             assert_eq!(entry.session_id, new_sid);
             assert_eq!(

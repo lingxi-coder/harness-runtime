@@ -886,14 +886,6 @@ define_client_event! {
     MediaControlRequest {
         request: MediaControlRequestDto,
     },
-    // Read-only notification of the session's fixed mode. pending_mode is None.
-    SessionModeChanged {
-        session_id: String,
-        mode: SessionModeDto,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pending_mode: Option<SessionModeDto>,
-        revision: u64,
-    },
     ContextManifest {
         manifest_json: String,
     },
@@ -938,17 +930,6 @@ impl From<ClientEventWire> for ClientEvent {
             } => Self::SessionHandoffFailed {
                 request_id,
                 message,
-            },
-            ClientEventWire::SessionModeChanged {
-                session_id,
-                mode,
-                pending_mode,
-                revision,
-            } => Self::SessionModeChanged {
-                session_id,
-                mode,
-                pending_mode,
-                revision,
             },
             ClientEventWire::ContextManifest { manifest_json } => {
                 Self::ContextManifest { manifest_json }

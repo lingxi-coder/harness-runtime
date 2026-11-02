@@ -19,7 +19,7 @@ use crate::jsonl::transcript_compact::{
     local_gc_enabled, next_backstop, perform_compact_transcript, CompactOutcome, CompactStats,
     COMPACT_BACKSTOP_BYTES,
 };
-use lingxi_core::host::session_context::{ConversationMode, SessionModeTransition};
+use lingxi_core::host::session_context::{ConversationMode, FixedSessionProfile};
 use lingxi_core::host::{FileSystem, FlockGuard, FsError};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::SessionId;
@@ -1143,7 +1143,7 @@ impl JsonlWriter {
             "agent-setting",
             "mode",
             "permission-mode",
-            "session-mode",
+            "fixed-session-mode",
             "isolation-latch",
             "atis-latch",
             "worktree-state",
@@ -1180,7 +1180,8 @@ impl JsonlWriter {
             }
             latest.insert(kind.to_owned(), row);
         }
-        latest.into_values().collect()
+        let fixed_mode = latest.remove("fixed-session-mode");
+        fixed_mode.into_iter().chain(latest.into_values()).collect()
     }
 
     fn metadata_from_source(rows: &[Utf16JsonProjection]) -> SessionMetadataState {
@@ -1211,28 +1212,6 @@ impl JsonlWriter {
                 Some("agent-setting") => state.agent_setting = string("agentSetting"),
                 Some("mode") => state.mode = string("mode"),
                 Some("permission-mode") => state.permission_mode = string("permissionMode"),
-                Some("session-mode") => {
-                    state.session_mode = string("sessionMode");
-                    state.session_admitted_mode = string("admittedMode");
-                    state.session_admitted_epoch = value().and_then(|value| {
-                        value
-                            .get("admittedEpoch")
-                            .and_then(serde_json::Value::as_u64)
-                    });
-                    state.session_mode_pending = value().and_then(|value| {
-                        value.get("pending").and_then(serde_json::Value::as_bool)
-                    });
-                    state.session_profile_epoch = value().and_then(|value| {
-                        value
-                            .get("profileEpoch")
-                            .and_then(serde_json::Value::as_u64)
-                    });
-                    state.session_context_revision = value().and_then(|value| {
-                        value
-                            .get("contextRevision")
-                            .and_then(serde_json::Value::as_u64)
-                    });
-                }
                 Some("isolation-latch") => state.isolation_latch = string("side"),
                 Some("atis-latch") => {
                     state.atis = string("atis")
@@ -2828,299 +2807,161 @@ impl JsonlWriter {
         Ok(())
     }
 
-    /// Initialize the fixed mode for one session, or normalize a historical
-    /// pending selection to its admitted mode without changing the epoch.
+    /// Initialize a new session's immutable mode before writing any other rows.
+    /// Reinitializing the same mode is harmless; an existing transcript without
+    /// the fixed header, or a different mode, is rejected without writing.
     pub async fn initialize_fixed_session_mode(
         &self,
         expected_session: &str,
-        profile: &SessionModeTransition,
+        mode: ConversationMode,
+        instruction_epoch: u64,
     ) -> Result<(), WriterError> {
-        if profile.pending
-            || profile.active != profile.selected
-            || profile.active_epoch != profile.selected_epoch
-            || profile.active_epoch > profile.revision
-            || profile.revision > (1_u64 << 53) - 1
-        {
+        if instruction_epoch > (1_u64 << 53) - 1 {
             return Err(WriterError::Fs(FsError::Io(
-                "invalid fixed session mode".into(),
+                "invalid instruction epoch".into(),
             )));
         }
-        self.append_fixed_session_mode_record(expected_session, profile)
-            .await
-    }
-
-    /// Read the durable profile transition; old records describe an applied profile.
-    pub async fn persisted_session_mode_transition(&self) -> Option<SessionModeTransition> {
-        let target = self.capture_active_target();
-        let session_id = Self::metadata_session_id_from_path(&target.0)?;
-        let slot = self.session_metadata_state(&session_id, &target.0).await;
-        let state = slot.lock().await;
-        Self::session_mode_transition_from_metadata(&state)
-    }
-
-    /// Decode the same profile state directly from a captured transcript,
-    /// without attaching a writer or reading the file again.
-    #[must_use]
-    pub fn session_mode_transition_from_source(
-        content: &str,
-        session_id: &str,
-    ) -> Option<SessionModeTransition> {
-        let rows = Self::capture_session_metadata_source(content, session_id);
-        Self::session_mode_transition_from_metadata(&Self::metadata_from_source(&rows))
-    }
-
-    /// Resolve the fixed session mode from the captured transcript before a
-    /// host opens a writer or runs hooks. A historical pending selection never
-    /// changes ownership: the admitted mode and its epoch remain authoritative.
-    /// A transcript without mode metadata belongs to Code.
-    pub fn fixed_session_mode_from_source(
-        content: &str,
-        session_id: &str,
-    ) -> Result<SessionModeTransition, String> {
-        let rows = Self::capture_session_metadata_source(content, session_id);
-        let Some(row) = rows
-            .iter()
-            .find(|row| row.string_at("/type") == Some("session-mode"))
-        else {
-            return Ok(SessionModeTransition::default());
-        };
-        let raw = row.to_json_string().map_err(|error| error.to_string())?;
-        let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        for field in ["contextRevision", "profileEpoch", "admittedEpoch"] {
-            if value
-                .get(field)
-                .is_some_and(|value| value.as_u64().is_none())
-            {
-                return Err(format!("invalid session mode metadata: {field}"));
-            }
-        }
-        if value
-            .get("pending")
-            .is_some_and(|value| value.as_bool().is_none())
-            || value
-                .get("admittedMode")
-                .is_some_and(|value| value.as_str().is_none())
-        {
-            return Err("invalid session mode admission metadata".into());
-        }
-        let transition =
-            Self::session_mode_transition_from_metadata(&Self::metadata_from_source(&rows))
-                .ok_or_else(|| "invalid session mode metadata".to_owned())?;
-        Ok(SessionModeTransition {
-            selected: transition.active,
-            selected_epoch: transition.active_epoch,
-            pending: false,
-            ..transition
-        })
-    }
-
-    /// Read the current writer target's fixed profile, distinguishing a new
-    /// transcript from malformed persisted mode metadata.
-    pub async fn persisted_fixed_session_mode(
-        &self,
-    ) -> Result<Option<SessionModeTransition>, String> {
-        let target = self.capture_active_target();
-        let session_id = Self::metadata_session_id_from_path(&target.0)
-            .ok_or_else(|| "invalid session transcript identity".to_owned())?;
-        let slot = self.session_metadata_state(&session_id, &target.0).await;
-        let state = slot.lock().await;
-        if state.session_mode.is_none()
-            && state.session_context_revision.is_none()
-            && state.session_profile_epoch.is_none()
-            && state.session_admitted_mode.is_none()
-            && state.session_admitted_epoch.is_none()
-            && state.session_mode_pending.is_none()
-        {
-            drop(state);
-            return match self
-                .fs
-                .read_file_rooted_no_follow(
-                    target
-                        .0
-                        .parent()
-                        .ok_or_else(|| "transcript has no parent".to_string())?,
-                    Path::new(
-                        target
-                            .0
-                            .file_name()
-                            .ok_or_else(|| "transcript has no filename".to_string())?,
-                    ),
-                )
-                .await
-            {
-                Ok(file) if file.content.is_empty() => Ok(None),
-                Ok(file) => {
-                    Self::fixed_session_mode_from_source(&file.content, &session_id).map(Some)
-                }
-                Err(FsError::NotFound(_)) => Ok(None),
-                Err(error) => Err(format!("read session mode: {error}")),
-            };
-        }
-        let profile = Self::session_mode_transition_from_metadata(&state)
-            .ok_or_else(|| "invalid session mode metadata".to_owned())?;
-        Ok(Some(SessionModeTransition {
-            selected: profile.active,
-            selected_epoch: profile.active_epoch,
-            pending: false,
-            ..profile
-        }))
-    }
-
-    fn session_mode_transition_from_metadata(
-        state: &SessionMetadataState,
-    ) -> Option<SessionModeTransition> {
-        let selected = ConversationMode::from_str(state.session_mode.as_deref()?)?;
-        let revision = state.session_context_revision.unwrap_or(0);
-        let selected_epoch = state.session_profile_epoch.unwrap_or(revision);
-        let (active, active_epoch, pending) = match (
-            &state.session_admitted_mode,
-            state.session_admitted_epoch,
-            state.session_mode_pending,
-        ) {
-            (Some(mode), Some(epoch), Some(pending)) => {
-                (ConversationMode::from_str(mode)?, epoch, pending)
-            }
-            (None, None, None) => (selected, selected_epoch, false),
-            _ => return None,
-        };
-        if pending != (active != selected)
-            || (!pending && active_epoch != selected_epoch)
-            || active_epoch > revision
-            || selected_epoch > revision
-            || revision > (1_u64 << 53) - 1
-        {
-            return None;
-        }
-        Some(SessionModeTransition {
-            selected,
-            active,
-            revision,
-            selected_epoch,
-            active_epoch,
-            pending,
-        })
-    }
-
-    /// Read a committed selection and its independently admitted instruction epoch.
-    pub async fn persisted_conversation_profile(&self) -> Option<(String, u64, u64)> {
-        let target = self.capture_active_target();
-        let session_id = Self::metadata_session_id_from_path(&target.0)?;
-        let slot = self.session_metadata_state(&session_id, &target.0).await;
-        let state = slot.lock().await;
-        let revision = state.session_context_revision.unwrap_or(0);
-        Some((
-            state.session_mode.clone()?,
-            revision,
-            state.session_profile_epoch.unwrap_or(revision),
-        ))
-    }
-
-    /// Read the latest selection imported from this writer's active transcript.
-    pub async fn persisted_session_mode(&self) -> Option<(String, u64)> {
-        let target = self.capture_active_target();
-        let session_id = Self::metadata_session_id_from_path(&target.0)?;
-        let slot = self.session_metadata_state(&session_id, &target.0).await;
-        let state = slot.lock().await;
-        Some((
-            state.session_mode.clone()?,
-            state.session_context_revision.unwrap_or(0),
-        ))
-    }
-
-    async fn append_fixed_session_mode_record(
-        &self,
-        expected_session: &str,
-        profile: &SessionModeTransition,
-    ) -> Result<(), WriterError> {
         let target = self.capture_active_target();
         let session_id = Self::metadata_session_id_from_path(&target.0).ok_or_else(|| {
             WriterError::Fs(FsError::Io("invalid session transcript identity".into()))
         })?;
-        if expected_session != session_id {
+        if uuid::Uuid::parse_str(expected_session).is_err() || expected_session != session_id {
             return Err(WriterError::Fs(FsError::Io(
                 "session changed before mode initialization".into(),
             )));
         }
+        // The existing metadata lock also serializes concurrent initialization
+        // for this session, including the file check and first append.
         let slot = self.session_metadata_state(&session_id, &target.0).await;
-        let mut state = slot.lock().await;
-        if state.session_mode.is_some() {
-            let previous =
-                Self::session_mode_transition_from_metadata(&state).ok_or_else(|| {
-                    WriterError::Fs(FsError::Io("invalid existing session mode".into()))
-                })?;
-            if previous.active != profile.active
-                || previous.active_epoch != profile.active_epoch
-                || previous.revision != profile.revision
-            {
-                return Err(WriterError::Fs(FsError::Io(
-                    "session mode and epoch are fixed".into(),
-                )));
-            }
-            if previous == *profile {
-                return Ok(());
-            }
-        } else if state.session_context_revision.is_some()
-            || state.session_profile_epoch.is_some()
-            || state.session_admitted_mode.is_some()
-            || state.session_admitted_epoch.is_some()
-            || state.session_mode_pending.is_some()
+        let _state = slot.lock().await;
+        let target = self.admitted_metadata_target(&session_id, target);
+        match self
+            .read_fixed_session_mode_at(&target.0, &session_id)
+            .await
         {
-            return Err(WriterError::Fs(FsError::Io(
-                "invalid existing session mode".into(),
-            )));
-        } else {
-            // A transcript with content but no mode is a legacy Code session,
-            // not a fresh Chat session waiting to acquire a new owner.
-            match self
-                .fs
-                .read_file_rooted_no_follow(
-                    target
-                        .0
-                        .parent()
-                        .ok_or_else(|| FsError::Io("transcript has no parent".into()))?,
-                    Path::new(
-                        target
-                            .0
-                            .file_name()
-                            .ok_or_else(|| FsError::Io("transcript has no filename".into()))?,
-                    ),
-                )
-                .await
+            Ok(Some(previous))
+                if previous
+                    == (FixedSessionProfile {
+                        mode,
+                        instruction_epoch,
+                    }) =>
             {
-                Ok(file) if !file.content.is_empty() => {
-                    let existing = Self::fixed_session_mode_from_source(&file.content, &session_id)
-                        .map_err(|error| WriterError::Fs(FsError::Io(error)))?;
-                    if existing.active != profile.active
-                        || existing.active_epoch != profile.active_epoch
-                        || existing.revision != profile.revision
-                    {
-                        return Err(WriterError::Fs(FsError::Io(
-                            "session mode and epoch are fixed".into(),
-                        )));
-                    }
-                }
-                Ok(_) | Err(FsError::NotFound(_)) => {}
-                Err(error) => return Err(WriterError::Fs(error)),
+                return Ok(())
             }
+            Ok(Some(_)) => {
+                return Err(WriterError::Fs(FsError::Io("session mode is fixed".into())));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(WriterError::Fs(FsError::Io(error))),
         }
         let value = serde_json::json!({
-            "type": "session-mode", "sessionMode": profile.active.as_str(), "sessionId": session_id,
-            "contextRevision": profile.revision, "profileEpoch": profile.active_epoch,
-            "admittedMode": profile.active.as_str(), "admittedEpoch": profile.active_epoch, "pending": false,
+            "type": "fixed-session-mode", "sessionId": session_id,
+            "sessionMode": mode.as_str(), "instructionEpoch": instruction_epoch,
         });
         let source = Utf16JsonProjection::from_serde_value(&value)
             .map_err(crate::jsonl::exact_json::projection_error)?;
         self.append_source_side_record_to_target(&source, target)
-            .await?;
-        state.session_mode = Some(profile.active.as_str().to_owned());
-        state.session_context_revision = Some(profile.revision);
-        state.session_profile_epoch = Some(profile.active_epoch);
-        state.session_admitted_mode = Some(profile.active.as_str().to_owned());
-        state.session_admitted_epoch = Some(profile.active_epoch);
-        state.session_mode_pending = Some(false);
-        drop(state);
-        self.maybe_re_append_metadata().await;
-        Ok(())
+            .await
+    }
+
+    /// Read the session mode from the captured transcript. The immutable mode
+    /// must be the first record and there must be no later mode records.
+    pub fn fixed_session_mode_from_source(
+        content: &str,
+        session_id: &str,
+    ) -> Result<ConversationMode, String> {
+        Self::fixed_session_profile_from_source(content, session_id).map(|profile| profile.mode)
+    }
+
+    /// Read the fixed mode together with the independently scoped instruction epoch.
+    pub fn fixed_session_profile_from_source(
+        content: &str,
+        session_id: &str,
+    ) -> Result<FixedSessionProfile, String> {
+        let mut lines = content.lines();
+        let header = lines
+            .next()
+            .ok_or_else(|| "missing fixed session mode".to_owned())?;
+        // This small ASCII ownership record has a closed schema. Deserialize it
+        // directly so duplicate keys cannot be silently collapsed. Other rows
+        // still use the exact UTF-16 codec for their user/provider content.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct FixedModeHeader {
+            #[serde(rename = "type")]
+            kind: String,
+            session_id: String,
+            session_mode: String,
+            instruction_epoch: u64,
+        }
+        let fields: FixedModeHeader = serde_json::from_str(header)
+            .map_err(|_| "invalid fixed session mode header".to_owned())?;
+        let expected_id = uuid::Uuid::parse_str(session_id)
+            .map_err(|_| "invalid fixed session mode identity".to_owned())?;
+        if fields.kind != "fixed-session-mode"
+            || uuid::Uuid::parse_str(&fields.session_id).ok() != Some(expected_id)
+        {
+            return Err("invalid fixed session mode identity".into());
+        }
+        let mode = ConversationMode::from_str(&fields.session_mode)
+            .ok_or_else(|| "invalid fixed session mode".to_owned())?;
+        let instruction_epoch = fields.instruction_epoch;
+        if instruction_epoch > (1_u64 << 53) - 1 {
+            return Err("invalid instruction epoch".into());
+        }
+        for line in lines {
+            if let Ok(row) = Utf16JsonProjection::parse(line) {
+                if matches!(
+                    row.string_at("/type"),
+                    Some("fixed-session-mode" | "session-mode")
+                ) {
+                    return Err("multiple or obsolete session mode records".into());
+                }
+            }
+        }
+        Ok(FixedSessionProfile {
+            mode,
+            instruction_epoch,
+        })
+    }
+
+    /// Distinguish an empty new target from a malformed existing transcript.
+    pub async fn persisted_fixed_session_profile(
+        &self,
+    ) -> Result<Option<FixedSessionProfile>, String> {
+        let target = self.capture_active_target();
+        let session_id = Self::metadata_session_id_from_path(&target.0)
+            .ok_or_else(|| "invalid session transcript identity".to_owned())?;
+        let slot = self.session_metadata_state(&session_id, &target.0).await;
+        let _state = slot.lock().await;
+        let target = self.admitted_metadata_target(&session_id, target);
+        self.read_fixed_session_mode_at(&target.0, &session_id)
+            .await
+    }
+
+    async fn read_fixed_session_mode_at(
+        &self,
+        path: &Path,
+        session_id: &str,
+    ) -> Result<Option<FixedSessionProfile>, String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "transcript has no parent".to_owned())?;
+        let filename = path
+            .file_name()
+            .ok_or_else(|| "transcript has no filename".to_owned())?;
+        match self
+            .fs
+            .read_file_rooted_no_follow(parent, Path::new(filename))
+            .await
+        {
+            Ok(file) if file.content.is_empty() => Ok(None),
+            Ok(file) => {
+                Self::fixed_session_profile_from_source(&file.content, session_id).map(Some)
+            }
+            Err(FsError::NotFound(_)) => Ok(None),
+            Err(error) => Err(format!("read session mode: {error}")),
+        }
     }
 
     /// Append an `agent-setting` metadata line for `session_id` — the persisted
@@ -3822,14 +3663,6 @@ mod tests {
 
     use super::*;
     use serde_json::json;
-
-    fn fixed_profile(mode: ConversationMode) -> SessionModeTransition {
-        SessionModeTransition {
-            active: mode,
-            selected: mode,
-            ..Default::default()
-        }
-    }
 
     fn temp_writer(tag: &str) -> (PathBuf, PathBuf, JsonlWriter) {
         let dir = std::env::temp_dir().join(format!(
@@ -5470,7 +5303,8 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join(format!("{upper}.jsonl"));
             let content = format!(
-                "{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n",
+                json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
                 json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":sid,"parentUuid":null,"message":{"role":"user","content":"selected source"}}),
                 json!({"type":"custom-title","sessionId":sid,"customTitle":"saved title"}),
                 json!({"type":"relocated","sessionId":sid,"relocatedCwd":"/selected-root"}),
@@ -5495,7 +5329,7 @@ mod tests {
                 .await
                 .unwrap();
             let captured = JsonlWriter::capture_session_metadata_source(&content, upper);
-            assert_eq!(captured.len(), 2);
+            assert_eq!(captured.len(), 3);
             writer.install_session_metadata_source(upper, &captured);
             writer
                 .append_custom_title(&sid, "renamed selected copy".into())
@@ -5503,7 +5337,7 @@ mod tests {
                 .unwrap();
             writer.append_permission_mode("acceptEdits").await.unwrap();
             writer
-                .initialize_fixed_session_mode(&sid, &fixed_profile(ConversationMode::Code))
+                .initialize_fixed_session_mode(&sid, ConversationMode::Code, 0)
                 .await
                 .unwrap();
             writer
@@ -5521,7 +5355,6 @@ mod tests {
             for value in [
                 "renamed selected copy",
                 "acceptEdits",
-                "\"sessionMode\":\"code\"",
                 "\"worktreeSession\":null",
                 "/selected-root",
             ] {
@@ -5575,6 +5408,10 @@ mod tests {
                         .unwrap();
                 }
                 writer
+                    .initialize_fixed_session_mode(&sid, ConversationMode::Code, 0)
+                    .await
+                    .unwrap();
+                writer
                     .append_custom_title(&sid, "before-move".into())
                     .await
                     .unwrap();
@@ -5600,10 +5437,7 @@ mod tests {
                         "permission" => writer.append_permission_mode("acceptEdits").await,
                         "mode" => {
                             writer
-                                .initialize_fixed_session_mode(
-                                    &sid,
-                                    &fixed_profile(ConversationMode::Code),
-                                )
+                                .initialize_fixed_session_mode(&sid, ConversationMode::Code, 0)
                                 .await
                         }
                         "worktree" => writer.append_worktree_state(&sid, None).await,
@@ -6496,105 +6330,87 @@ mod tests {
     }
 
     #[test]
-    fn fixed_mode_uses_last_admitted_profile_and_rejects_invalid_metadata() {
+    fn fixed_mode_requires_one_valid_creation_header_and_rejects_old_data() {
         let id = "11111111-2222-3333-4444-555555555555";
+        let fixed = format!(
+            r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"chat","instructionEpoch":7}}"#
+        );
         assert_eq!(
-            JsonlWriter::fixed_session_mode_from_source("", id)
-                .unwrap()
-                .active,
-            ConversationMode::Code
+            JsonlWriter::fixed_session_mode_from_source(&fixed, id).unwrap(),
+            ConversationMode::Chat
         );
-        let pending = format!(
-            r#"{{"type":"session-mode","sessionId":"{id}","sessionMode":"chat","contextRevision":7,"profileEpoch":7,"admittedMode":"code","admittedEpoch":3,"pending":true}}"#
+        let other = format!(
+            r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"code","instructionEpoch":7}}"#
         );
-        let fixed = JsonlWriter::fixed_session_mode_from_source(&pending, id).unwrap();
-        assert_eq!(fixed.active, ConversationMode::Code);
-        assert_eq!(fixed.selected, ConversationMode::Code);
-        assert_eq!(fixed.active_epoch, 3);
-        assert_eq!(fixed.selected_epoch, 3);
-        assert_eq!(fixed.revision, 7);
-        assert!(!fixed.pending);
-        for malformed in [
-            format!(r#"{{"type":"session-mode","sessionId":"{id}","sessionMode":"other"}}"#),
-            format!(
-                r#"{{"type":"session-mode","sessionId":"{id}","sessionMode":"chat","contextRevision":"7"}}"#
-            ),
-            format!(
-                r#"{{"type":"session-mode","sessionId":"{id}","sessionMode":"chat","pending":true}}"#
-            ),
+        for invalid in [
+            String::new(),
+            format!(r#"{{"type":"user","sessionId":"{id}"}}"#),
+            format!(r#"{{"type":"session-mode","sessionId":"{id}","sessionMode":"chat","contextRevision":1,"profileEpoch":1,"admittedMode":"code","admittedEpoch":0,"pending":true}}"#),
+            format!(r#"{{"type":"fixed-session-mode","sessionId":"{id}"}}"#),
+            format!(r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"other"}}"#),
+            format!(r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"chat","pending":false}}"#),
+            format!("{fixed}\n{fixed}\n"),
+            format!("{fixed}\n{other}\n"),
+            format!("{fixed}\n{{\"type\":\"session-mode\",\"sessionId\":\"{id}\",\"sessionMode\":\"code\"}}\n"),
         ] {
-            assert!(JsonlWriter::fixed_session_mode_from_source(&malformed, id).is_err());
+            assert!(JsonlWriter::fixed_session_mode_from_source(&invalid, id).is_err(), "accepted {invalid}");
         }
+        let non_uuid = r#"{"type":"fixed-session-mode","sessionId":"not-a-uuid","sessionMode":"code","instructionEpoch":0}"#;
+        assert!(JsonlWriter::fixed_session_mode_from_source(non_uuid, "not-a-uuid").is_err());
     }
 
     #[tokio::test]
-    async fn append_session_mode_round_trips_through_transcript_metadata() {
-        let tmp =
-            std::env::temp_dir().join(format!("lingxi-writer-session-mode-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        let session_id = "11111111-2222-3333-4444-555555555555";
-        let session_path = tmp.join(format!("{session_id}.jsonl"));
-        let fs: Arc<dyn FileSystem> =
-            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
-        let writer = JsonlWriter::new(session_path.clone(), fs);
-
-        writer
-            .initialize_fixed_session_mode(session_id, &fixed_profile(ConversationMode::Chat))
-            .await
-            .expect("append session mode");
-
-        let raw = std::fs::read_to_string(&session_path).expect("read back");
-        let routed = crate::jsonl::route_lines(&raw);
-        assert_eq!(
-            routed.session_modes.get(session_id).map(String::as_str),
-            Some("chat")
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[tokio::test]
-    async fn historical_pending_mode_normalizes_once_and_cannot_change() {
+    async fn fixed_mode_is_durable_idempotent_and_rejects_changes_without_writes() {
         let root = tempfile::tempdir().unwrap();
         let id = SessionId::new().as_uuid().to_string();
         let path = root.path().join(format!("{id}.jsonl"));
         let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
             root.path().to_path_buf(),
         ));
-        std::fs::write(&path, format!("{}\n", json!({
-            "type":"session-mode", "sessionId":id, "sessionMode":"chat", "contextRevision":5,
-            "profileEpoch":5, "admittedMode":"code", "admittedEpoch":3, "pending":true
-        }))).unwrap();
-        let fixed = JsonlWriter::fixed_session_mode_from_source(
-            &std::fs::read_to_string(&path).unwrap(),
-            &id,
-        )
-        .unwrap();
         let writer = JsonlWriter::new(path.clone(), fs.clone());
+        assert_eq!(
+            writer.persisted_fixed_session_profile().await.unwrap(),
+            None
+        );
         writer
-            .initialize_fixed_session_mode(&id, &fixed)
+            .initialize_fixed_session_mode(&id, ConversationMode::Chat, 7)
             .await
             .unwrap();
-        let after_first = std::fs::read_to_string(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            JsonlWriter::fixed_session_mode_from_source(&first, &id).unwrap(),
+            ConversationMode::Chat
+        );
         writer
-            .initialize_fixed_session_mode(&id, &fixed)
+            .initialize_fixed_session_mode(&id, ConversationMode::Chat, 7)
             .await
             .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), after_first);
-        let different = SessionModeTransition {
-            active: ConversationMode::Chat,
-            selected: ConversationMode::Chat,
-            ..fixed.clone()
-        };
         assert!(writer
-            .initialize_fixed_session_mode(&id, &different)
+            .initialize_fixed_session_mode(&id, ConversationMode::Code, 7)
             .await
             .is_err());
-        let reopened = JsonlWriter::new(path, fs);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        let reopened = JsonlWriter::new(path.clone(), fs.clone());
         assert_eq!(
-            reopened.persisted_session_mode_transition().await,
-            Some(fixed)
+            reopened.persisted_fixed_session_profile().await.unwrap(),
+            Some(FixedSessionProfile {
+                mode: ConversationMode::Chat,
+                instruction_epoch: 7
+            })
         );
+
+        let old = format!(
+            "{}\n",
+            json!({"type":"session-mode", "sessionId":id, "sessionMode":"code"})
+        );
+        std::fs::write(&path, &old).unwrap();
+        let reopened = JsonlWriter::new(path.clone(), fs);
+        assert!(reopened.persisted_fixed_session_profile().await.is_err());
+        assert!(reopened
+            .initialize_fixed_session_mode(&id, ConversationMode::Code, 7)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), old);
     }
 
     /// (P2-02 cc2.1.207) The `--agent` persist path emits an `agent-setting` line
@@ -6694,15 +6510,16 @@ mod tests {
         ));
         let writer = JsonlWriter::new(path_a.clone(), fs);
         writer
+            .initialize_fixed_session_mode(&id_a.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
+        writer
             .append_custom_title(&id_a.as_uuid().to_string(), "title-A".into())
             .await
             .unwrap();
         writer.append_permission_mode("plan").await.unwrap();
         writer
-            .initialize_fixed_session_mode(
-                &id_a.as_uuid().to_string(),
-                &fixed_profile(ConversationMode::Code),
-            )
+            .initialize_fixed_session_mode(&id_a.as_uuid().to_string(), ConversationMode::Code, 0)
             .await
             .unwrap();
         writer

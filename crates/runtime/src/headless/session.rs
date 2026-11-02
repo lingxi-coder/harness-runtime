@@ -144,7 +144,7 @@ pub async fn prepare(
         session::JsonlWriter::fixed_session_mode_from_source(&content, &source_id.to_string())?;
     if config
         .initial_conversation_mode
-        .is_some_and(|expected| expected != source_profile.active)
+        .is_some_and(|expected| expected != source_profile)
     {
         return Err(format!(
             "session mode mismatch: expected {}, found {}",
@@ -152,10 +152,10 @@ pub async fn prepare(
                 .initial_conversation_mode
                 .expect("checked mode")
                 .as_str(),
-            source_profile.active.as_str()
+            source_profile.as_str()
         ));
     }
-    config.initial_conversation_mode = Some(source_profile.active);
+    config.initial_conversation_mode = Some(source_profile);
     // Keep the selected file authoritative. Workspace restoration changes
     // runtime composition only; a missing workspace does not rehome JSONL.
     let resumed_cwd = if !fork {
@@ -380,10 +380,10 @@ async fn mount_prepared(
         } else {
             config.permission_mode
         };
-        let profile = Some(session::JsonlWriter::fixed_session_mode_from_source(
+        let profile = session::JsonlWriter::fixed_session_mode_from_source(
             &prepared.mounted_content,
             &prepared.session_id.to_string(),
-        )?);
+        )?;
         // Preserve the headless resume's established model selection rule even
         // when the transcript has no human-turn model setting. Install it
         // before restoration so dependent reasoning state uses the same model.
@@ -472,12 +472,11 @@ pub async fn rewind_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_core::host::session_context::{ConversationMode, SessionModeSnapshot};
+    use lingxi_core::host::session_context::ConversationMode;
     use lingxi_core::types::{utf16_json::Utf16JsonProjection, ToolUseId};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum StartupEvent {
-        Mode(ConversationMode),
         Tool(String),
         Hook(String),
     }
@@ -487,13 +486,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OutputStream for StartupTrace {
-        async fn emit_conversation_mode(&self, state: &SessionModeSnapshot) {
-            self.0
-                .lock()
-                .unwrap()
-                .push(StartupEvent::Mode(state.active));
-        }
-
         async fn emit_hook_started(&self, _: &str, _: &str, event: &str) {
             self.0
                 .lock()
@@ -562,27 +554,17 @@ mod tests {
                     .unwrap()
             };
             let events = trace.0.lock().unwrap().clone();
-            let mode = events
-                .iter()
-                .position(|event| *event == StartupEvent::Mode(ConversationMode::Chat))
-                .unwrap();
-            let hook = events
-                .iter()
-                .position(|event| *event == StartupEvent::Hook("SessionStart".into()))
-                .unwrap();
-            assert!(mode < hook, "{events:?}");
+            assert!(events.contains(&StartupEvent::Hook("SessionStart".into())));
             let path = session::jsonl::session_path(
                 &config.lingxi_home,
                 &config.cwd.to_string_lossy(),
                 &id.to_string(),
             );
             let source = std::fs::read_to_string(path).unwrap();
-            let persisted =
-                session::JsonlWriter::session_mode_transition_from_source(&source, &id.to_string())
-                    .unwrap();
             assert_eq!(
-                (persisted.active, persisted.selected, persisted.pending),
-                (ConversationMode::Chat, ConversationMode::Chat, false)
+                session::JsonlWriter::fixed_session_mode_from_source(&source, &id.to_string())
+                    .unwrap(),
+                ConversationMode::Chat
             );
             assert!(
                 runtime
@@ -595,23 +577,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_default_code_restarts_without_a_mode_record() {
+    async fn explicit_code_draft_has_fixed_header_and_rejects_chat_resume() {
         let root = tempfile::tempdir().unwrap();
         let id = Uuid::new_v4();
         let mut config = startup_config(root.path(), id);
         config.initial_conversation_mode = Some(ConversationMode::Code);
-        let hook = serde_json::json!({"hookSpecificOutput":{
-            "hookEventName":"SessionStart", "additionalContext":"startup context"
-        }});
-        let command = format!("printf '%s\\n' '{hook}'");
-        std::fs::write(
-            config.cwd.join(".lingxi/settings.json"),
-            serde_json::json!({
-                "hooks":{"SessionStart":[{"hooks":[{"type":"command","command":command}]}]}
-            })
-            .to_string(),
-        )
-        .unwrap();
         let runtime = crate::desktop::build(
             config.clone(),
             Arc::new(StartupTrace::default()),
@@ -637,11 +607,10 @@ mod tests {
             &source,
             &id.to_string()
         ));
-        assert!(session::JsonlWriter::session_mode_transition_from_source(
-            &source,
-            &id.to_string()
-        )
-        .is_none());
+        assert_eq!(
+            session::JsonlWriter::fixed_session_mode_from_source(&source, &id.to_string()).unwrap(),
+            ConversationMode::Code
+        );
         config.initial_conversation_mode = Some(ConversationMode::Chat);
         config.restore_draft = true;
         config.session_transcript_path = Some(path);
@@ -649,30 +618,10 @@ mod tests {
             source_session_id: id.to_string(),
             content: source.into(),
         });
-        let trace = Arc::new(StartupTrace::default());
-        let resumed = crate::desktop::build(config, trace.clone(), startup_sink())
-            .await
-            .unwrap();
-        assert_eq!(
-            resumed.orchestrator.conversation_mode().await.active,
-            ConversationMode::Code
-        );
-        let events = trace.0.lock().unwrap().clone();
-        let code = events
-            .iter()
-            .position(|event| *event == StartupEvent::Mode(ConversationMode::Code))
-            .unwrap();
-        let hook = events
-            .iter()
-            .position(|event| *event == StartupEvent::Hook("SessionStart".into()))
-            .unwrap();
-        assert!(code < hook, "{events:?}");
         assert!(
-            resumed
-                .session_lifecycle
-                .shutdown_and_drain()
+            crate::desktop::build(config, Arc::new(StartupTrace::default()), startup_sink())
                 .await
-                .complete
+                .is_err()
         );
     }
 
@@ -686,10 +635,10 @@ mod tests {
             let user = Uuid::new_v4();
             let assistant = Uuid::new_v4();
             let rows = [
+                serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"chat", "instructionEpoch":3}),
                 serde_json::json!({"type":"user", "uuid":user, "sessionId":id, "parentUuid":null, "cwd":config.cwd, "message":{"role":"user","content":"continue"}}),
                 serde_json::json!({"type":"assistant", "uuid":assistant, "sessionId":id, "parentUuid":user, "cwd":config.cwd, "message":{"role":"assistant","content":[{"type":"tool_use","id":"deferred", "name":"Bash", "input":{"command":"true"}}]}}),
                 serde_json::json!({"type":"attachment", "uuid":Uuid::new_v4(), "sessionId":id, "parentUuid":assistant, "cwd":config.cwd, "attachment":{"type":"hook_deferred_tool","toolUseID":"deferred","toolName":"Bash","toolInput":{"command":"true"}}}),
-                serde_json::json!({"type":"session-mode", "sessionId":id, "sessionMode":"chat", "contextRevision":3, "profileEpoch":3, "admittedMode":"chat", "admittedEpoch":3, "pending":false}),
             ];
             let path = session::jsonl::session_path(
                 &config.lingxi_home,
@@ -704,16 +653,17 @@ mod tests {
                     .collect::<String>(),
             )
             .unwrap();
-            let prepared = prepare(&mut config, &resume(id, false)).await.unwrap();
+            let prepared = prepare(&mut config, &resume(id, false)).await;
+            if explicit.is_some() {
+                assert!(prepared.is_err());
+                continue;
+            }
+            let prepared = prepared.unwrap();
             let trace = Arc::new(StartupTrace::default());
             let runtime = build_prepared(config, prepared, trace.clone(), startup_sink())
                 .await
                 .unwrap();
             let events = trace.0.lock().unwrap().clone();
-            let chat = events
-                .iter()
-                .position(|event| *event == StartupEvent::Mode(ConversationMode::Chat))
-                .unwrap();
             let replay = events
                 .iter()
                 .position(|event| *event == StartupEvent::Tool("Bash".into()))
@@ -722,30 +672,14 @@ mod tests {
                 .iter()
                 .position(|event| *event == StartupEvent::Hook("SessionStart".into()))
                 .unwrap();
-            assert!(chat < replay && replay < hook, "{events:?}");
-            if explicit.is_some() {
-                let code = events
-                    .iter()
-                    .position(|event| *event == StartupEvent::Mode(ConversationMode::Code))
-                    .unwrap();
-                assert!(hook < code, "{events:?}");
-            } else {
-                assert!(
-                    !events.contains(&StartupEvent::Mode(ConversationMode::Code)),
-                    "{events:?}"
-                );
-            }
+            assert!(replay < hook, "{events:?}");
             let source = std::fs::read_to_string(path).unwrap();
             let persisted =
-                session::JsonlWriter::session_mode_transition_from_source(&source, &id.to_string())
+                session::JsonlWriter::fixed_session_profile_from_source(&source, &id.to_string())
                     .unwrap();
             assert_eq!(
-                (persisted.active, persisted.revision, persisted.active_epoch),
-                if explicit.is_some() {
-                    (ConversationMode::Code, 4, 4)
-                } else {
-                    (ConversationMode::Chat, 3, 3)
-                }
+                (persisted.mode, persisted.instruction_epoch),
+                (ConversationMode::Chat, 3)
             );
             assert!(
                 runtime
@@ -769,7 +703,8 @@ mod tests {
         first["uuid"] = serde_json::json!("second");
         first["message"]["content"] = serde_json::json!("tail");
         format!(
-            "{first_line}\n{}\n{}\n",
+            "{}\n{first_line}\n{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":source_id, "sessionMode":"code", "instructionEpoch":0}),
             serde_json::to_string(&first).unwrap(),
             serde_json::json!({"type": "agent-setting", "sessionId": source_id.to_string(), "agentSetting": "reviewer"})
         )
@@ -926,13 +861,13 @@ mod tests {
             .messages
             .iter()
             .all(|message| message.session_id == prepared.session_id.to_string()));
-        let profile = session::JsonlWriter::session_mode_transition_from_source(
+        let profile = session::JsonlWriter::fixed_session_profile_from_source(
             &prepared.mounted_content,
             &prepared.session_id.to_string(),
         )
         .unwrap();
         assert_eq!(
-            (profile.active, profile.active_epoch),
+            (profile.mode, profile.instruction_epoch),
             (ConversationMode::Code, 1)
         );
         assert_eq!(
@@ -1015,10 +950,10 @@ mod tests {
             let skill = Uuid::new_v4();
             let tail = Uuid::new_v4();
             let rows = [
+                serde_json::json!({"type":"fixed-session-mode", "sessionId":source_id, "sessionMode":"code", "instructionEpoch":3}),
                 serde_json::json!({"type":"user", "uuid":first, "sessionId":source_id, "parentUuid":null, "cwd":config.cwd, "message":{"role":"user","content":"question"}}),
                 serde_json::json!({"type":"user", "uuid":skill, "sessionId":source_id, "parentUuid":first, "cwd":config.cwd, "isMeta":true, "origin":{"type":"skill_activation","context_epoch":7,"skill_name":"old","skill_path":"/skills/old"}, "message":{"role":"user","content":"old skill"}}),
                 serde_json::json!({"type":"user", "uuid":tail, "sessionId":source_id, "parentUuid":skill, "cwd":config.cwd, "message":{"role":"user","content":"continue"}}),
-                serde_json::json!({"type":"session-mode", "sessionId":source_id, "sessionMode":"chat", "contextRevision":3, "profileEpoch":3, "admittedMode":"chat", "admittedEpoch":3, "pending":false}),
             ];
             let source = rows
                 .iter()
@@ -1030,14 +965,14 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let target_id = prepared.session_id;
-            let profile = session::JsonlWriter::session_mode_transition_from_source(
+            let profile = session::JsonlWriter::fixed_session_profile_from_source(
                 &prepared.mounted_content,
                 &target_id.to_string(),
             )
             .unwrap();
             assert_eq!(
-                (profile.active, profile.selected, profile.active_epoch),
-                (ConversationMode::Code, ConversationMode::Code, 8)
+                (profile.mode, profile.instruction_epoch),
+                (ConversationMode::Code, 8)
             );
             let target_path = config.session_transcript_path.clone().unwrap();
             assert_eq!(target_path.exists(), persistence);
@@ -1063,10 +998,7 @@ mod tests {
                 .iter()
                 .any(|message| message.text_content() == "old skill"));
             let current = runtime.orchestrator.conversation_mode().await;
-            assert_eq!(
-                (current.active, current.selected, current.revision),
-                (ConversationMode::Code, ConversationMode::Code, 8)
-            );
+            assert_eq!(current.mode, ConversationMode::Code);
             assert!(
                 runtime
                     .session_lifecycle

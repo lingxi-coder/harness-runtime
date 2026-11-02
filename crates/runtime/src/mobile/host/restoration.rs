@@ -8,7 +8,7 @@ pub(super) struct InitialMobileSession {
     pub source: String,
     pub raw_source: Vec<u8>,
     pub transcript_identity: lingxi_core::host::rooted_fs::RootIdentity,
-    pub profile: lingxi_core::host::session_context::SessionModeTransition,
+    pub mode: lingxi_core::host::session_context::ConversationMode,
     pub messages: Vec<session::jsonl::JsonlMessage>,
     pub replayed: orchestrator::ReplayedSession,
     pub permission_mode: Option<String>,
@@ -125,13 +125,14 @@ pub(super) async fn capture_initial_mobile_session(
     if loaded.malformed_line_count != 0 {
         return Err(fail("transcript contains malformed records".into()));
     }
-    let profile = session::jsonl::JsonlWriter::fixed_session_mode_from_source(&source, &id_text)
+    let profile = session::jsonl::JsonlWriter::fixed_session_profile_from_source(&source, &id_text)
         .map_err(|error| fail(format!("invalid conversation mode: {error}")))?;
-    if profile.active != cfg.session_mode {
+    let mode = profile.mode;
+    if mode != cfg.session_mode {
         return Err(fail(format!(
             "session mode mismatch: expected {}, found {}",
             cfg.session_mode.as_str(),
-            profile.active.as_str()
+            mode.as_str()
         )));
     }
     let recorded = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
@@ -177,7 +178,13 @@ pub(super) async fn capture_initial_mobile_session(
         && loaded.mobile_empty_sessions.contains(&id_text)
         || super::mobile_anchored_startup_only(&loaded, id)
     {
-        super::replay_mobile_anchored_startup(path, source.clone(), loaded, id)
+        super::replay_mobile_anchored_startup(
+            path,
+            source.clone(),
+            loaded,
+            id,
+            profile.instruction_epoch,
+        )
     } else {
         orchestrator::resume::replay_captured_session(path, source.clone(), loaded, id)
             .map_err(|error| fail(format!("cannot replay transcript: {error}")))?
@@ -187,7 +194,7 @@ pub(super) async fn capture_initial_mobile_session(
         source,
         raw_source,
         transcript_identity,
-        profile,
+        mode,
         messages,
         replayed,
         permission_mode,

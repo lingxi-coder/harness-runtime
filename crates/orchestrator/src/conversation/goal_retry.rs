@@ -684,10 +684,7 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, crate::conversation::TurnOutcome::EndTurn));
         let state = orch.conversation_mode().await;
-        assert_eq!(
-            (state.active, state.selected, state.pending),
-            (ConversationMode::Code, ConversationMode::Code, false)
-        );
+        assert_eq!(state.mode, ConversationMode::Code);
         assert_eq!(orch.profile_epoch().await, 0);
         assert_eq!(compaction::invoked_skills::context_epoch(scope), 0);
         assert_eq!(compaction::invoked_skills::filter_for_scope(scope).len(), 1);
@@ -719,7 +716,7 @@ mod tests {
         assert!(token.is_cancelled());
         assert_eq!(
             (
-                orch.conversation_mode().await.active,
+                orch.conversation_mode().await.mode,
                 orch.profile_epoch().await
             ),
             (ConversationMode::Code, 0)
@@ -762,10 +759,7 @@ mod tests {
             crate::conversation::TurnOutcome::EndTurn
         ));
         let state = orch.conversation_mode().await;
-        assert_eq!(
-            (state.active, state.selected, state.pending),
-            (ConversationMode::Code, ConversationMode::Code, false)
-        );
+        assert_eq!(state.mode, ConversationMode::Code);
         assert_eq!(orch.profile_epoch().await, 0);
         assert!(api.captured_calls().await.is_empty());
     }
@@ -806,7 +800,6 @@ mod tests {
         assert!(orch.initialize_conversation_mode().await.is_err());
         assert!(!token.is_cancelled());
         assert!(orch.goal_retry_is_valid(&retry_id).await);
-        assert!(!orch.conversation_mode().await.pending);
         assert!(api.captured_calls().await.is_empty());
 
         std::fs::remove_dir(&path).unwrap();
@@ -819,7 +812,7 @@ mod tests {
         assert_eq!(api.captured_calls().await.len(), 1);
         assert_eq!(
             (
-                orch.conversation_mode().await.active,
+                orch.conversation_mode().await.mode,
                 orch.profile_epoch().await
             ),
             (ConversationMode::Code, 0)

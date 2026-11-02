@@ -32,7 +32,7 @@ use crate::jsonl::path::{project_dir_name, sanitized_cwd, MAX_SANITIZED_LENGTH};
 use crate::jsonl::re_append::find_last_typed_field;
 use crate::jsonl::reader::{
     extract_json_string_field, lines_naming_types, route_line_seq, route_lines,
-    strip_transcript_bom, JsonlReader, LoadedTranscript,
+    strip_transcript_bom, LoadedTranscript,
 };
 use crate::jsonl::recovery::{
     append_metadata_descendants, follows_checkpoint, ordered_messages, recover_parallel_results,
@@ -1504,7 +1504,7 @@ async fn enrich_candidate_uncached(
     };
     *scoped_cwd = scoped_cwd_from_source(&content);
     let mode = match crate::jsonl::JsonlWriter::fixed_session_mode_from_source(&content, &stem) {
-        Ok(profile) => profile.active,
+        Ok(mode) => mode,
         Err(_) => {
             *skipped_files += 1;
             return Ok(None);
@@ -2416,7 +2416,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
 /// file-order parent links; all `session_id` equal) rejected all of these. We
 /// now mirror `claude-code`'s `loadMessagesFromJsonlPath`
 /// (`conversationRecovery.ts:416`): route the file
-/// ([`JsonlReader::read_routed`]), pick the newest non-sidechain
+/// ([`crate::jsonl::reader::JsonlReader::read_routed`]), pick the newest non-sidechain
 /// user/assistant leaf as the tip, and walk `tip → root` via `parentUuid`
 /// ([`build_conversation_chain`]). The leaf supplies the session id, so forked
 /// sessions (whose root row keeps the SOURCE session's id) load cleanly.
@@ -2500,11 +2500,16 @@ async fn read_routed_session(
             });
         }
     }
-    let reader = JsonlReader::new(path, fs);
-    let loaded = reader.read_routed().await.map_err(|e| LoaderError::Io {
-        arg: arg.clone(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-    })?;
+    let content = fs
+        .read_file(path.to_str().expect("UTF-8 transcript path"), None, None)
+        .await
+        .map_err(|error| LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::other(error.to_string()),
+        })?
+        .content;
+    validate_fixed_session_mode(&content, &arg, &path)?;
+    let loaded = route_lines(&content);
     if !native_exact_preserved_valid_for(&loaded, &arg) {
         return Err(LoaderError::Io {
             arg,
@@ -2648,6 +2653,7 @@ pub fn route_captured_session_source(
             arg: expected_id.to_string(),
         });
     }
+    validate_fixed_session_mode(content, &expected_id.to_string(), path)?;
     let loaded = route_lines(content);
     if !native_exact_preserved_valid_for(&loaded, &expected_id.to_string()) {
         return Err(LoaderError::Io {
@@ -2666,6 +2672,19 @@ pub fn route_captured_session_source(
         return Err(LoaderError::EmptyDirectory);
     }
     Ok(loaded)
+}
+
+fn validate_fixed_session_mode(
+    content: &str,
+    session_id: &str,
+    path: &Path,
+) -> Result<(), LoaderError> {
+    crate::jsonl::JsonlWriter::fixed_session_mode_from_source(content, session_id)
+        .map(|_| ())
+        .map_err(|error| LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        })
 }
 
 /// Resolve CLI `--resume UUID` through native FIe: current full transcript,
@@ -2800,6 +2819,7 @@ async fn read_cli_transcript_source(
             }
         }
     };
+    validate_fixed_session_mode(&content, session_id, &path)?;
     let loaded = route_lines(&content);
     if !native_exact_preserved_valid_for(&loaded, session_id) {
         return Err(LoaderError::Io {
@@ -3286,7 +3306,7 @@ pub fn route_rows_of_types(content: &str, types: &[&str]) -> LoadedTranscript {
     route_line_seq(lines_naming_types(strip_transcript_bom(content), types))
 }
 
-/// The whole transcript text, as [`JsonlReader::read_routed`] reads it.
+/// The whole transcript text, as [`crate::jsonl::reader::JsonlReader::read_routed`] reads it.
 async fn read_transcript_content(
     transcript_path: &Path,
     fs: Arc<dyn FileSystem>,
@@ -4824,10 +4844,12 @@ mod tests {
         rows.remove(0);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(format!("{session_id}.jsonl"));
-        let content = rows
-            .iter()
-            .map(|row| serde_json::to_string(row).unwrap() + "\n")
-            .collect::<String>();
+        let header = json!({"type":"fixed-session-mode", "sessionId":session_id, "sessionMode":"code", "instructionEpoch":0});
+        let content = format!("{header}\n")
+            + &rows
+                .iter()
+                .map(|row| serde_json::to_string(row).unwrap() + "\n")
+                .collect::<String>();
         std::fs::write(&path, content).unwrap();
         let fs = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
         let error = read_routed_session(path, session_id, fs).await.unwrap_err();
@@ -4859,10 +4881,12 @@ mod tests {
             rows.push(unrelated);
             let dir = TempDir::new().unwrap();
             let path = dir.path().join(format!("{owner}.jsonl"));
-            let content = rows
-                .iter()
-                .map(|row| serde_json::to_string(row).unwrap() + "\n")
-                .collect::<String>();
+            let header = json!({"type":"fixed-session-mode", "sessionId":owner, "sessionMode":"code", "instructionEpoch":0});
+            let content = format!("{header}\n")
+                + &rows
+                    .iter()
+                    .map(|row| serde_json::to_string(row).unwrap() + "\n")
+                    .collect::<String>();
             std::fs::write(&path, content).unwrap();
             let fs = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
             let loaded = read_routed_session(path, owner.clone(), fs).await.unwrap();
@@ -4881,6 +4905,82 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn duplicate_fixed_header_fields_are_rejected_by_loader_and_reopened_writer() {
+        use lingxi_core::host::session_context::ConversationMode;
+
+        let (temp, _home, cwd, dir) = setup();
+        let id = write_session(
+            &dir,
+            &cwd,
+            "retained conversation",
+            SystemTime::now(),
+            false,
+            None,
+        );
+        let path = dir.join(format!("{id}.jsonl"));
+        let original = std::fs::read_to_string(&path).unwrap();
+        let (_, messages) = original.split_once('\n').unwrap();
+        let fs = make_fs(temp.path());
+        assert!(
+            load_routed_session_from_path_with_source(&path, id, fs.clone())
+                .await
+                .is_ok()
+        );
+
+        for header in [
+            format!(
+                r#"{{"type":"fixed-session-mode","type":"fixed-session-mode","sessionId":"{id}","sessionMode":"code","instructionEpoch":0}}"#
+            ),
+            format!(
+                r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionId":"{id}","sessionMode":"code","instructionEpoch":0}}"#
+            ),
+            format!(
+                r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"chat","sessionMode":"code","instructionEpoch":0}}"#
+            ),
+            format!(
+                r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"code","instructionEpoch":9,"instructionEpoch":0}}"#
+            ),
+            format!(
+                r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"chat","session\u004dode":"code","instructionEpoch":0}}"#
+            ),
+            format!(
+                r#"{{"type":"fixed-session-mode","sessionId":"{id}","sessionMode":"code","instructionEpoch":0,"extra":true}}"#
+            ),
+        ] {
+            let source = format!("{header}\n{messages}");
+            std::fs::write(&path, &source).unwrap();
+            let loaded = load_routed_session_from_path_with_source(&path, id, fs.clone()).await;
+            assert!(
+                matches!(loaded, Err(LoaderError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData)
+            );
+            let reopened = crate::jsonl::JsonlWriter::new(path.clone(), fs.clone());
+            assert!(reopened.persisted_fixed_session_profile().await.is_err());
+            assert!(reopened
+                .initialize_fixed_session_mode(&id.to_string(), ConversationMode::Code, 0)
+                .await
+                .is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        }
+
+        // Only the fixed header uses serde's strict schema. User content keeps
+        // the exact UTF-16 codec, including lone surrogate code units.
+        let header = format!(
+            r#"{{"type":"fixed-session-mode","sessionId":"{id}","session\u004dode":"code","instructionEpoch":0}}"#
+        );
+        let user = format!(
+            r#"{{"type":"user","uuid":"{id}","parentUuid":null,"sessionId":"{id}","cwd":"{cwd}","message":{{"role":"user","content":"\ud800"}}}}"#
+        );
+        std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
+        let (_, _, loaded) = load_routed_session_from_path_with_source(&path, id, fs)
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.messages_in_order[0].message.string_units("/content"),
+            Some(vec![0xd800])
+        );
     }
 
     fn user_with_content(uuid: &str, content: Value) -> JsonlMessage {
@@ -5033,7 +5133,10 @@ mod tests {
             .expect("import the existing Native rows before Host tombstone mutation");
         assert!(writer.remove_message_by_uuid(&discarded_id).await.unwrap());
 
-        let loaded = JsonlReader::new(path, fs).read_routed().await.unwrap();
+        let loaded = crate::jsonl::reader::JsonlReader::new(path, fs)
+            .read_routed()
+            .await
+            .unwrap();
         assert!(!loaded.by_uuid.contains_key(&discarded_id));
         assert_eq!(
             loaded.by_uuid[&survivor_id].parent_uuid.as_deref(),
@@ -5294,7 +5397,8 @@ mod tests {
         if let Some(team) = team_name {
             line["teamName"] = serde_json::Value::String(team.to_string());
         }
-        let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+        let header = json!({"type":"fixed-session-mode", "sessionId":uuid.to_string(), "sessionMode":"code", "instructionEpoch":0});
+        let bytes = format!("{header}\n{}\n", serde_json::to_string(&line).unwrap());
         let path = dir.join(format!("{uuid}.jsonl"));
         std::fs::write(&path, bytes).unwrap();
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
@@ -5387,7 +5491,8 @@ mod tests {
             "userType": "external",
             "message": {"role": "user", "content": prompt},
         });
-        let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+        let header = json!({"type":"fixed-session-mode", "sessionId":uuid.to_string(), "sessionMode":"code", "instructionEpoch":0});
+        let bytes = format!("{header}\n{}\n", serde_json::to_string(&line).unwrap());
         let path = dir.join(format!("{uuid}.jsonl"));
         std::fs::write(&path, bytes).unwrap();
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
@@ -5746,13 +5851,14 @@ mod tests {
             let physical = SystemTime::UNIX_EPOCH + Duration::from_secs(physical);
             write_session_id(bucket, id, cwd, "copy", physical);
             let path = bucket.join(format!("{id}.jsonl"));
-            let mut row: Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let (header, row) = contents.split_once('\n').unwrap();
+            let mut row: Value = serde_json::from_str(row).unwrap();
             row["timestamp"] = json!(chrono::DateTime::<chrono::Utc>::from(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(logical),
             )
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-            std::fs::write(&path, format!("{row}\n")).unwrap();
+            std::fs::write(&path, format!("{header}\n{row}\n")).unwrap();
             filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(physical))
                 .unwrap();
         }
@@ -6270,21 +6376,15 @@ mod tests {
 
     #[tokio::test]
     async fn mode_filter_precedes_catalog_limit_even_after_two_hundred_other_sessions() {
-        use std::io::Write;
-
         let (temp, home, cwd, dir) = setup();
         let base = SystemTime::now() - Duration::from_secs(3_600);
         let chat = write_session(&dir, &cwd, "older chat", base, false, None);
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(dir.join(format!("{chat}.jsonl")))
-            .unwrap();
-        writeln!(
-            file,
-            "{}",
-            json!({"type":"session-mode", "sessionId":chat.to_string(), "sessionMode":"chat"})
-        )
-        .unwrap();
+        let path = dir.join(format!("{chat}.jsonl"));
+        let source = std::fs::read_to_string(&path).unwrap();
+        let (_, rows) = source.split_once('\n').unwrap();
+        let header = json!({"type":"fixed-session-mode", "sessionId":chat.to_string(), "sessionMode":"chat", "instructionEpoch":0});
+        std::fs::write(&path, format!("{header}\n{rows}")).unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(base)).unwrap();
         for index in 0..205 {
             write_session(
                 &dir,
@@ -6429,9 +6529,10 @@ mod tests {
             "sessionId": id.to_string(),
             "relocatedCwd": cwd
         });
+        let header = json!({"type":"fixed-session-mode", "sessionId":id.to_string(), "sessionMode":"code", "instructionEpoch":0});
         std::fs::write(
             dir.join(format!("{id}.jsonl")),
-            format!("{}\n{}\n", user, relocated),
+            format!("{header}\n{user}\n{relocated}\n"),
         )
         .unwrap();
 

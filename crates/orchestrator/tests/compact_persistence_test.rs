@@ -204,7 +204,8 @@ fn assert_cold_resume_reconstructs_post_compact_state(manual: bool) {
 
 async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     let dir = tempdir().expect("tempdir");
-    let session_path = dir.path().join("session.jsonl");
+    let session_id = lingxi_core::types::SessionId::new();
+    let session_path = dir.path().join(format!("{}.jsonl", session_id.as_uuid()));
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
 
@@ -250,9 +251,13 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         Arc::new(StaticMemoryProvider::empty()),
         dir.path().to_path_buf(),
     )
+    .with_session_id(session_id)
     .with_jsonl_writer(writer)
     .with_cache_safe_slot(slot)
     .with_compaction(Arc::new(compactor));
+    orch.initialize_conversation_mode()
+        .await
+        .expect("initialize fixed session mode");
 
     // Three small persisted turns...
     orch.run_turn("small one").await.expect("turn 1");
@@ -538,10 +543,15 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     );
 
     // ---- Cold reload == hot state ---------------------------------------- //
-    let loaded = reader.read_routed().await.expect("read_routed");
-    let (chain, _tip_sid) = build_conversation_chain(&loaded, "cold-load");
-    let session_uuid = uuid::Uuid::new_v4();
-    let cold_state = state_from_messages(session_uuid, &chain);
+    let (_, _, loaded) = session::jsonl::loader::load_routed_session_from_path_with_source(
+        &session_path,
+        session_id.as_uuid(),
+        fs.clone(),
+    )
+    .await
+    .expect("strict cold session load");
+    let (chain, _tip_sid) = build_conversation_chain(&loaded, &session_id.as_uuid().to_string());
+    let cold_state = state_from_messages(session_id.as_uuid(), &chain);
 
     let post_attachment_range = if manual {
         boundary_idx + 3..boundary_idx + 8
@@ -631,7 +641,8 @@ fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized() {
 
 async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized_inner() {
     let dir = tempdir().expect("tempdir");
-    let session_path = dir.path().join("session.jsonl");
+    let session_id = lingxi_core::types::SessionId::new();
+    let session_path = dir.path().join(format!("{}.jsonl", session_id.as_uuid()));
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
 
@@ -671,8 +682,12 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
         Arc::new(StaticMemoryProvider::empty()),
         dir.path().to_path_buf(),
     )
+    .with_session_id(session_id)
     .with_jsonl_writer(writer)
     .with_compaction(Arc::new(CompactionOrchestrator::new(200)));
+    orch.initialize_conversation_mode()
+        .await
+        .expect("initialize fixed session mode");
 
     orch.run_turn("small one").await.expect("turn 1");
     orch.run_turn("small two").await.expect("turn 2");

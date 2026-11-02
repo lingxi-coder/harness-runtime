@@ -109,21 +109,11 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
         )),
     );
     target_writer
-        .append_mobile_empty_session(&target_uuid, "Scheduled", &cwd)
+        .initialize_fixed_session_mode(&target_uuid, session::jsonl::SessionMode::Chat, 3)
         .await
         .unwrap();
     target_writer
-        .initialize_fixed_session_mode(
-            &target_uuid,
-            &lingxi_core::host::session_context::SessionModeTransition {
-                selected: session::jsonl::SessionMode::Chat,
-                active: session::jsonl::SessionMode::Chat,
-                revision: 4,
-                selected_epoch: 3,
-                active_epoch: 3,
-                pending: false,
-            },
-        )
+        .append_mobile_empty_session(&target_uuid, "Scheduled", &cwd)
         .await
         .unwrap();
     for (task_id, session_uuid, run_id) in [
@@ -166,8 +156,7 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
         .unwrap();
     runtime.retarget_session_context(&home, target, &cwd).await;
     let restored = runtime.orchestrator.conversation_mode().await;
-    assert_eq!(restored.selected, session::jsonl::SessionMode::Chat);
-    assert_eq!(restored.revision, 4);
+    assert_eq!(restored.mode, session::jsonl::SessionMode::Chat);
     assert_eq!(*runtime.active_session_uuid.lock().unwrap(), target_uuid);
     assert_eq!(
         runtime.session_writer.active_path(),
@@ -250,14 +239,11 @@ async fn mounted_workspace_scheduled_run_reuses_the_selected_host_transcript() {
     let path = session::jsonl::session_path(&cfg.lingxi_home, &guest, &session.to_string());
     let writer = session::jsonl::JsonlWriter::new(path.clone(), host_fs.clone());
     writer
-        .append_mobile_empty_session(&session.to_string(), "Scheduled source", &guest)
+        .initialize_fixed_session_mode(&session.to_string(), session::jsonl::SessionMode::Code, 0)
         .await
         .unwrap();
     writer
-        .initialize_fixed_session_mode(
-            &session.to_string(),
-            &lingxi_core::host::session_context::SessionModeTransition::default(),
-        )
+        .append_mobile_empty_session(&session.to_string(), "Scheduled source", &guest)
         .await
         .unwrap();
     let original_source = std::fs::read(&path).unwrap();
@@ -782,14 +768,11 @@ async fn scheduled_empty_anchor_is_replayable_before_first_prompt() {
     );
     let writer = session::jsonl::writer::JsonlWriter::new(path, fs.clone());
     writer
-        .append_mobile_empty_session(&id.to_string(), "Scheduled task", &cwd.to_string_lossy())
+        .initialize_fixed_session_mode(&id.to_string(), session::jsonl::SessionMode::Code, 0)
         .await
         .unwrap();
     writer
-        .initialize_fixed_session_mode(
-            &id.to_string(),
-            &lingxi_core::host::session_context::SessionModeTransition::default(),
-        )
+        .append_mobile_empty_session(&id.to_string(), "Scheduled task", &cwd.to_string_lossy())
         .await
         .unwrap();
     assert!(
@@ -827,21 +810,14 @@ async fn scheduled_existing_session_uses_its_persisted_mode() {
         let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
         let writer = session::jsonl::JsonlWriter::new(path, fs.clone());
         writer
+            .initialize_fixed_session_mode(&id.to_string(), mode, 0)
+            .await
+            .unwrap();
+        writer
             .append_mobile_empty_session(
                 &id.to_string(),
                 "Existing session",
                 &cwd.to_string_lossy(),
-            )
-            .await
-            .unwrap();
-        writer
-            .initialize_fixed_session_mode(
-                &id.to_string(),
-                &lingxi_core::host::session_context::SessionModeTransition {
-                    active: mode,
-                    selected: mode,
-                    ..Default::default()
-                },
             )
             .await
             .unwrap();

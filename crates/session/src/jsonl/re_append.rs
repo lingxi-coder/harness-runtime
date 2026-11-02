@@ -121,18 +121,6 @@ pub struct SessionMetadataState {
     pub mode: Option<String>,
     /// `currentSessionPermissionMode` → `{type:"permission-mode",permissionMode,sessionId}`.
     pub permission_mode: Option<String>,
-    /// LingXi mobile capability profile → `{type:"session-mode",sessionMode,sessionId}`.
-    pub session_mode: Option<String>,
-    /// Revision committed with the profile; retained across metadata re-append.
-    pub session_context_revision: Option<u64>,
-    /// Selected profile epoch used by trusted skill-activation provenance.
-    pub session_profile_epoch: Option<u64>,
-    /// Profile retained by the interrupted query until the next admission.
-    pub session_admitted_mode: Option<String>,
-    /// Epoch retained by the interrupted query.
-    pub session_admitted_epoch: Option<u64>,
-    /// Whether the selection is awaiting a query boundary.
-    pub session_mode_pending: Option<bool>,
     /// `currentSessionIsolationLatch` → `{type:"isolation-latch",side,sessionId}`.
     /// Note the wire key is `side`, NOT `isolationLatch`.
     pub isolation_latch: Option<String>,
@@ -611,29 +599,6 @@ pub fn plan_re_append(
             ("sessionId", sid()),
         ]));
     }
-    if let Some(session_mode) = truthy(&state.session_mode) {
-        let mut fields = vec![
-            ("type", Value::String("session-mode".into())),
-            ("sessionMode", Value::String(session_mode.to_string())),
-            ("sessionId", sid()),
-        ];
-        if let Some(revision) = state.session_context_revision {
-            fields.push(("contextRevision", Value::from(revision)));
-        }
-        if let Some(epoch) = state.session_profile_epoch {
-            fields.push(("profileEpoch", Value::from(epoch)));
-        }
-        if let Some(mode) = &state.session_admitted_mode {
-            fields.push(("admittedMode", Value::String(mode.clone())));
-        }
-        if let Some(epoch) = state.session_admitted_epoch {
-            fields.push(("admittedEpoch", Value::from(epoch)));
-        }
-        if let Some(pending) = state.session_mode_pending {
-            fields.push(("pending", Value::Bool(pending)));
-        }
-        entries.push(obj(fields));
-    }
     if let Some(latch) = truthy(&state.isolation_latch) {
         entries.push(obj(vec![
             ("type", Value::String("isolation-latch".into())),
@@ -912,12 +877,6 @@ mod tests {
             agent_setting: Some("reviewer".into()),
             mode: Some("default".into()),
             permission_mode: Some("acceptEdits".into()),
-            session_mode: Some("code".into()),
-            session_context_revision: None,
-            session_profile_epoch: None,
-            session_admitted_mode: None,
-            session_admitted_epoch: None,
-            session_mode_pending: None,
             isolation_latch: Some("left".into()),
             atis: Some("atis-token".into()),
             worktree: Some(serde_json::json!({"worktreePath": "/wt"})),
@@ -951,7 +910,6 @@ mod tests {
                 "agent-setting",
                 "mode",
                 "permission-mode",
-                "session-mode",
                 "isolation-latch",
                 "atis-latch",
                 "worktree-state",
@@ -1002,29 +960,25 @@ mod tests {
             lines[9],
             r#"{"type":"permission-mode","permissionMode":"acceptEdits","sessionId":"S1"}"#
         );
-        assert_eq!(
-            lines[10],
-            r#"{"type":"session-mode","sessionMode":"code","sessionId":"S1"}"#
-        );
         // Wire key is `side`, NOT `isolationLatch`.
         assert_eq!(
-            lines[11],
+            lines[10],
             r#"{"type":"isolation-latch","side":"left","sessionId":"S1"}"#
         );
         assert_eq!(
-            lines[12],
+            lines[11],
             r#"{"type":"atis-latch","atis":"atis-token","sessionId":"S1"}"#
         );
         assert_eq!(
-            lines[13],
+            lines[12],
             r#"{"type":"worktree-state","worktreeSession":{"worktreePath":"/wt"},"sessionId":"S1"}"#
         );
         // pr-link and bridge-session put `sessionId` SECOND, unlike every other record.
-        assert!(lines[14].starts_with(
+        assert!(lines[13].starts_with(
             r#"{"type":"pr-link","sessionId":"S1","prNumber":42,"prUrl":"https://example.test/pull/42","prRepository":"acme/widgets","timestamp":""#
         ));
         assert_eq!(
-            lines[15],
+            lines[14],
             r#"{"type":"bridge-session","sessionId":"S1","bridgeSessionId":"bridge-9","lastSequenceNum":7,"declaredDialogKinds":["ask"],"sessionGroupingId":"grp-1"}"#
         );
     }

@@ -7,7 +7,6 @@ use super::ConversationOrchestrator;
 use lingxi_core::host::orchestrator::{HandleError, OrchestratorHandle};
 use lingxi_core::host::session_context::{
     ContextBlockKind, ContextBlockManifest, ContextManifest, ConversationMode, SessionModeSnapshot,
-    SessionModeTransition,
 };
 use lingxi_core::types::ConversationMessage;
 use sha2::{Digest, Sha256};
@@ -21,7 +20,6 @@ pub(crate) type ProfileTurnGuard = std::sync::Arc<tokio::sync::OwnedMutexGuard<(
 pub(crate) struct ConversationContextRuntime {
     state: SessionModeSnapshot,
     active_epoch: u64,
-    selected_epoch: u64,
     restored: bool,
     manifest: ContextManifest,
 }
@@ -105,7 +103,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn captured_profile_keeps_admitted_mode_and_epoch_without_a_writer() {
+    async fn captured_profile_keeps_mode_and_instruction_epoch_without_a_writer() {
         let _registry_guard = compaction::invoked_skills::TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -116,11 +114,11 @@ mod tests {
         let excluded_id = MessageId::new();
         let sid = session_id.as_uuid();
         let rows = [
+            serde_json::json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"chat","instructionEpoch":2}),
             serde_json::json!({"type":"user","uuid":old_id.as_uuid(),"sessionId":sid,"parentUuid":null,"isMeta":true,"origin":{"type":"skill_activation","context_epoch":1,"skill_name":"old"},"message":{"role":"user","content":"same text"}}),
             serde_json::json!({"type":"user","uuid":current_id.as_uuid(),"sessionId":sid,"parentUuid":old_id.as_uuid(),"isMeta":true,"origin":{"type":"skill_activation","context_epoch":2,"skill_name":"current"},"message":{"role":"user","content":"current instruction"}}),
             serde_json::json!({"type":"user","uuid":user_id.as_uuid(),"sessionId":sid,"parentUuid":current_id.as_uuid(),"message":{"role":"user","content":"same text"}}),
             serde_json::json!({"type":"user","uuid":excluded_id.as_uuid(),"sessionId":sid,"parentUuid":user_id.as_uuid(),"isModelContextExcluded":true,"message":{"role":"user","content":"excluded evidence"}}),
-            serde_json::json!({"type":"session-mode","sessionId":sid,"sessionMode":"code","contextRevision":3,"profileEpoch":3,"admittedMode":"chat","admittedEpoch":2,"pending":true}),
         ];
         let source = rows
             .iter()
@@ -128,8 +126,6 @@ mod tests {
             .collect::<String>();
         let loaded = session::jsonl::route_lines(&source);
         let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid.to_string());
-        let profile =
-            session::JsonlWriter::session_mode_transition_from_source(&source, &sid.to_string());
         let orch = orchestrator()
             .with_conversation_mode(ConversationMode::Chat)
             .with_session_id(session_id);
@@ -139,17 +135,14 @@ mod tests {
             &loaded.messages_in_order,
             false,
             permission::PermissionMode::Default,
-            profile,
+            ConversationMode::Chat,
             &source,
         )
         .await
         .unwrap();
 
         let mode = orch.conversation_profile().await;
-        assert_eq!(
-            (mode.active, mode.selected, mode.revision, mode.pending),
-            (ConversationMode::Chat, ConversationMode::Chat, 3, false)
-        );
+        assert_eq!(mode.mode, ConversationMode::Chat);
         assert_eq!(orch.profile_epoch().await, 2);
         let history = orch.session.lock().await;
         assert_eq!(history.history.len(), 4);
@@ -225,12 +218,9 @@ impl ConversationContextRuntime {
         if self.state.session_id != session_id {
             self.state = SessionModeSnapshot {
                 session_id,
-                active: self.state.selected,
-                selected: self.state.selected,
-                ..Default::default()
+                mode: self.state.mode,
             };
             self.active_epoch = 0;
-            self.selected_epoch = 0;
             self.restored = false;
             self.manifest = ContextManifest::default();
         }
@@ -265,8 +255,7 @@ impl ConversationOrchestrator {
             .conversation_context
             .try_lock()
             .expect("unshared profile builder");
-        context.state.active = mode;
-        context.state.selected = mode;
+        context.state.mode = mode;
         drop(context);
         self
     }
@@ -288,7 +277,7 @@ impl ConversationOrchestrator {
         mode: ConversationMode,
     ) -> Result<SessionModeSnapshot, HandleError> {
         let snapshot = self.conversation_profile().await;
-        if snapshot.active != mode {
+        if snapshot.mode != mode {
             return Err(HandleError::ActionFailed(
                 "session mode is fixed at creation".into(),
             ));
@@ -309,41 +298,12 @@ impl ConversationOrchestrator {
         &self,
     ) -> Result<SessionModeSnapshot, HandleError> {
         let session_id = self.current_session_id().await.as_uuid().to_string();
-        let (expected, restored, active_epoch, revision) = {
+        let (expected, instruction_epoch) = {
             let mut context = self.conversation_context.lock().await;
             context.bind(session_id.clone());
-            (
-                context.state.active,
-                context.restored,
-                context.active_epoch,
-                context.state.revision,
-            )
+            (context.state.mode, context.active_epoch)
         };
-        let writer = self.transcript.jsonl_writer.as_ref();
-        let persisted = if let Some(writer) = writer {
-            writer
-                .persisted_fixed_session_mode()
-                .await
-                .map_err(HandleError::ActionFailed)?
-        } else {
-            None
-        };
-        if let Some(profile) = &persisted {
-            if profile.active != expected || (restored && profile.active_epoch != active_epoch) {
-                return Err(HandleError::ActionFailed(
-                    "persisted session mode or instruction epoch does not match the initialized session".into(),
-                ));
-            }
-        }
-        let profile = persisted.unwrap_or(SessionModeTransition {
-            selected: expected,
-            active: expected,
-            revision,
-            selected_epoch: active_epoch,
-            active_epoch,
-            pending: false,
-        });
-        if let Some(writer) = writer {
+        if let Some(writer) = &self.transcript.jsonl_writer {
             if writer
                 .active_path()
                 .file_stem()
@@ -355,122 +315,93 @@ impl ConversationOrchestrator {
                     "session changed before mode initialization".into(),
                 ));
             }
-            if writer.persisted_session_mode_transition().await.as_ref() != Some(&profile) {
-                writer
-                    .initialize_fixed_session_mode(&session_id, &profile)
-                    .await
-                    .map_err(|error| {
-                        HandleError::ActionFailed(format!("persist fixed session mode: {error}"))
-                    })?;
-            }
+            writer
+                .initialize_fixed_session_mode(&session_id, expected, instruction_epoch)
+                .await
+                .map_err(|error| {
+                    HandleError::ActionFailed(format!("persist fixed session mode: {error}"))
+                })?;
         }
-        self.restore_conversation_profile_state_locked(expected, Some(profile))
+        self.restore_conversation_profile_state_locked(expected, instruction_epoch)
             .await
     }
 
     pub(crate) async fn restore_conversation_profile(
         &self,
-        fallback: ConversationMode,
+        mode: ConversationMode,
     ) -> Result<SessionModeSnapshot, HandleError> {
-        let turn = self.turn_gate.lock().await;
-        let transition = self.conversation_transition.lock().await;
-        let snapshot = self.restore_conversation_profile_locked(fallback).await?;
-        drop(transition);
-        drop(turn);
-        self.output.emit_conversation_mode(&snapshot).await;
-        Ok(snapshot)
+        let _turn = self.turn_gate.lock().await;
+        let _transition = self.conversation_transition.lock().await;
+        self.restore_conversation_profile_locked(mode).await
     }
 
-    /// Restore a profile from the already captured transcript, including when
-    /// this runtime deliberately has no transcript writer.
+    /// Restore the already validated fixed mode from a captured transcript.
     pub(crate) async fn restore_captured_conversation_profile(
         &self,
-        fallback: ConversationMode,
-        persisted: Option<SessionModeTransition>,
+        mode: ConversationMode,
+        instruction_epoch: u64,
     ) -> Result<SessionModeSnapshot, HandleError> {
-        let turn = self.turn_gate.lock().await;
-        let transition = self.conversation_transition.lock().await;
-        let snapshot = self
-            .restore_conversation_profile_state_locked(fallback, persisted)
-            .await?;
-        drop(transition);
-        drop(turn);
-        self.output.emit_conversation_mode(&snapshot).await;
-        Ok(snapshot)
+        let _turn = self.turn_gate.lock().await;
+        let _transition = self.conversation_transition.lock().await;
+        self.restore_conversation_profile_state_locked(mode, instruction_epoch)
+            .await
     }
 
-    /// Restore inside the same transaction that publishes the mounted session.
-    /// The caller owns turn_gate and conversation_transition; no callback runs
-    /// until the owning host publishes its SessionResumed event.
+    /// Restore inside the transaction that publishes the mounted session.
     pub(crate) async fn restore_conversation_profile_locked(
         &self,
-        fallback: ConversationMode,
+        mode: ConversationMode,
     ) -> Result<SessionModeSnapshot, HandleError> {
-        let persisted = if let Some(writer) = &self.transcript.jsonl_writer {
-            writer.persisted_session_mode_transition().await
+        let instruction_epoch = if let Some(writer) = &self.transcript.jsonl_writer {
+            let persisted = writer
+                .persisted_fixed_session_profile()
+                .await
+                .map_err(HandleError::ActionFailed)?
+                .ok_or_else(|| HandleError::ActionFailed("missing fixed session mode".into()))?;
+            if persisted.mode != mode {
+                return Err(HandleError::ActionFailed(
+                    "persisted session mode does not match the initialized session".into(),
+                ));
+            }
+            persisted.instruction_epoch
         } else {
-            None
+            self.profile_epoch().await
         };
-        self.restore_conversation_profile_state_locked(fallback, persisted)
+        self.restore_conversation_profile_state_locked(mode, instruction_epoch)
             .await
     }
 
     async fn restore_conversation_profile_state_locked(
         &self,
-        fallback: ConversationMode,
-        persisted: Option<SessionModeTransition>,
+        mode: ConversationMode,
+        instruction_epoch: u64,
     ) -> Result<SessionModeSnapshot, HandleError> {
         let session_id = self.current_session_id().await.as_uuid().to_string();
-        let mut profile = persisted.unwrap_or(SessionModeTransition {
-            selected: fallback,
-            active: fallback,
-            revision: 0,
-            selected_epoch: 0,
-            active_epoch: 0,
-            pending: false,
-        });
-        profile.selected = profile.active;
-        profile.selected_epoch = profile.active_epoch;
-        profile.pending = false;
         let mut context = self.conversation_context.lock().await;
+        let same_session = context.state.session_id == session_id;
         if context.restored
-            && context.state.session_id == session_id
-            && context.state.selected == profile.selected
-            && context.state.active == profile.active
-            && context.state.revision == profile.revision
-            && context.state.pending == profile.pending
-            && context.active_epoch == profile.active_epoch
-            && context.selected_epoch == profile.selected_epoch
+            && same_session
+            && context.state.mode == mode
+            && context.active_epoch == instruction_epoch
         {
             return Ok(context.state.clone());
         }
+        let epoch = instruction_epoch;
         let registry_session_id = self.current_session_id().await.to_string();
         let registry_scope =
             compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&registry_session_id), None);
-        let retire = (context.state.session_id == session_id
-            && (context.state.active != profile.active
-                || context.active_epoch != profile.active_epoch))
+        let retire = (same_session
+            && (context.state.mode != mode || context.active_epoch != epoch))
             || (!compaction::invoked_skills::filter_for_scope(registry_scope).is_empty()
-                && compaction::invoked_skills::context_epoch(registry_scope)
-                    != profile.active_epoch);
-        self.reset_profile_projection(&session_id, profile.active_epoch, retire, true)
+                && compaction::invoked_skills::context_epoch(registry_scope) != epoch);
+        self.reset_profile_projection(&session_id, epoch, retire, true)
             .await;
-        self.restore_effective_skill_activations(profile.active_epoch)
-            .await;
-        context.active_epoch = profile.active_epoch;
-        context.selected_epoch = profile.selected_epoch;
+        self.restore_effective_skill_activations(epoch).await;
+        context.active_epoch = epoch;
         context.restored = true;
-        context.state = SessionModeSnapshot {
-            session_id,
-            active: profile.active,
-            selected: profile.selected,
-            revision: profile.revision,
-            pending: profile.pending,
-        };
+        context.state = SessionModeSnapshot { session_id, mode };
         context.manifest = ContextManifest::default();
-        let snapshot = context.state.clone();
-        drop(context);
-        Ok(snapshot)
+        Ok(context.state.clone())
     }
 
     /// Called once per admitted outer query, before any prompt is assembled.
@@ -600,9 +531,7 @@ impl ConversationOrchestrator {
         let state = self.conversation_profile().await;
         let context = self.conversation_context.lock().await;
         let mut manifest = context.manifest.clone();
-        manifest.projected &= !state.pending
-            && manifest.session.session_id == state.session_id
-            && manifest.session.revision == state.revision;
+        manifest.projected &= manifest.session == state;
         manifest.session = state;
         manifest
     }
@@ -827,7 +756,7 @@ impl ConversationOrchestrator {
             blocks.push(aggregate);
         }
         self.conversation_context.lock().await.manifest = ContextManifest {
-            projected: !session.pending,
+            projected: true,
             session,
             blocks,
         };

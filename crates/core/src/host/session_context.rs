@@ -37,37 +37,20 @@ impl ConversationMode {
     }
 }
 
+/// The fixed behavior mode and independently scoped instruction provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedSessionProfile {
+    pub mode: ConversationMode,
+    pub instruction_epoch: u64,
+}
+
 /// Read-only snapshot of the mode fixed for one session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionModeSnapshot {
     /// Owning conversation.
     pub session_id: String,
-    /// Profile fixed when this session was created or migrated.
-    pub active: ConversationMode,
-    /// Equal to `active` in current sessions.
-    pub selected: ConversationMode,
-    /// Revision retained from the session's persisted profile.
-    pub revision: u64,
-    /// Always false in current sessions.
-    pub pending: bool,
-}
-
-/// Durable profile and epoch. Historical records can carry a pending choice;
-/// restore resolves those records to their admitted mode and epoch.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionModeTransition {
-    /// Most recently selected profile.
-    pub selected: ConversationMode,
-    /// Profile admitted for the interrupted query.
-    pub active: ConversationMode,
-    /// Monotonic selection revision.
-    pub revision: u64,
-    /// Instruction epoch of the selected profile.
-    pub selected_epoch: u64,
-    /// Instruction epoch of the admitted profile.
-    pub active_epoch: u64,
-    /// Whether admission of the selection is still pending.
-    pub pending: bool,
+    /// Profile fixed when this session was created.
+    pub mode: ConversationMode,
 }
 
 /// Why a context block is present; documents and tool output are evidence.

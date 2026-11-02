@@ -2084,7 +2084,7 @@ impl ConversationOrchestrator {
             &session_id.as_uuid().to_string(),
         )
         .map_err(HandleError::ActionFailed)?;
-        if profile.active == target_mode {
+        if profile == target_mode {
             return Err(HandleError::ActionFailed(
                 "handoff target must use the other mode".into(),
             ));
@@ -2154,7 +2154,7 @@ impl ConversationOrchestrator {
         }
         Ok(crate::session_handoff::SessionHandoffCapture {
             source_session_id: session_id.as_uuid().to_string(),
-            source_mode: profile.active,
+            source_mode: profile,
             target_mode,
             cutoff,
             params,

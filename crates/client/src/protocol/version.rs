@@ -180,6 +180,7 @@
 /// Version 30 adds attachment-scoped media/audio owners and requires an opaque
 /// operation incarnation in media references, responses, and cancellation.
 /// Native bindings and bridge peers must be regenerated together.
-/// Session-mode selection and context-manifest commands/events append after
-/// the current command/event variants without changing their ordinals.
-pub const CLIENT_PROTOCOL_VERSION: &str = "31.0.0";
+/// Version 31 introduces fixed session modes, context manifests, and handoffs.
+/// Version 32 removes the obsolete mutable-mode notification; session lifecycle
+/// events carry the fixed mode. Native bindings must be regenerated.
+pub const CLIENT_PROTOCOL_VERSION: &str = "32.0.0";

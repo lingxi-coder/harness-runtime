@@ -833,7 +833,7 @@ impl ConversationOrchestrator {
             system_prompt.clone(),
             dynamic_context,
             Some(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
-                crate::prompt::profile_header(self.conversation_profile().await.active),
+                crate::prompt::profile_header(self.conversation_profile().await.mode),
             )),
         );
         let pending = self
@@ -1928,7 +1928,7 @@ impl ConversationOrchestrator {
                 cache.answers.clear();
             }
         }
-        let mode = self.conversation_profile().await.active;
+        let mode = self.conversation_profile().await.mode;
         let mut sections = named_prompt_sections_for_mode(&ctx, style, mode);
         let epoch = self.profile_epoch().await;
         if epoch > 0 {

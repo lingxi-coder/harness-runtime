@@ -441,7 +441,8 @@ mod tests {
         let id = SessionId::new();
         let first = uuid::Uuid::new_v4();
         let source = format!(
-            "{}\n",
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id.as_uuid(),"sessionMode":"code","instructionEpoch":0}),
             serde_json::json!({"type":"user","uuid":first,"sessionId":id.as_uuid(),"parentUuid":null,"message":{"role":"user","content":"before cutoff"}})
         );
         let path = root.path().join(format!("{}.jsonl", id.as_uuid()));

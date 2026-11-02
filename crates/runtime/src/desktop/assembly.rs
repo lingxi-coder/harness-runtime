@@ -834,6 +834,89 @@ async fn bootstrap_main_transcript_identity_if_nonempty(
     Ok(true)
 }
 
+/// Publish a scheduled draft only after its fixed header and writer lease exist.
+pub(super) async fn ensure_scheduled_durable_anchor(
+    writer: &session::jsonl::JsonlWriter,
+    transcript_path: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    mode: lingxi_core::host::session_context::ConversationMode,
+) -> Result<bool, String> {
+    use lingxi_core::host::rooted_fs::{open_append_file_pinned, open_read_file_pinned, opened_file_identity, root_identity, sync_parent_pinned};
+    use std::io::Read;
+
+    let expected_id = uuid::Uuid::parse_str(session_id).map_err(|_| "invalid scheduled session UUID")?;
+    let expected_cwd = cwd.to_str().filter(|_| cwd.is_absolute()).ok_or("invalid scheduled session cwd")?;
+    if writer.active_path().as_path() != transcript_path
+        || transcript_path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        || transcript_path.file_stem().and_then(|value| value.to_str()).and_then(|value| uuid::Uuid::parse_str(value).ok()) != Some(expected_id) {
+        return Err("scheduled session writer changed target".into());
+    }
+    let parent = transcript_path.parent().ok_or("scheduled transcript has no parent")?;
+    let name = transcript_path.file_name().ok_or("scheduled transcript has no filename")?;
+    let relative = std::path::Path::new(name);
+    let root = root_identity(parent).map_err(|error| error.to_string())?;
+    let mut file = open_read_file_pinned(parent, relative, Some(&root)).map_err(|error| error.to_string())?;
+    let file_identity = opened_file_identity(&file).map_err(|error| error.to_string())?;
+    let mut source = String::new();
+    file.read_to_string(&mut source).map_err(|error| error.to_string())?;
+    let sync = || -> Result<(), String> {
+        let file = open_append_file_pinned(parent, relative, Some(&root)).map_err(|error| error.to_string())?;
+        if opened_file_identity(&file).map_err(|error| error.to_string())? != file_identity
+            || file.metadata().map_err(|error| error.to_string())?.len() < source.len() as u64 {
+            return Err("scheduled transcript changed during synchronization".into());
+        }
+        file.sync_all().map_err(|error| error.to_string())?;
+        sync_parent_pinned(parent, relative, Some(&root)).map_err(|error| error.to_string())
+    };
+    if !source.ends_with('\n') || session::JsonlWriter::fixed_session_mode_from_source(&source, session_id)? != mode {
+        return Err("scheduled session mode does not match its transcript".into());
+    }
+    for line in source.lines().filter(|line| !line.trim().is_empty()) {
+        let row = Utf16JsonProjection::parse(line).map_err(|_| "invalid scheduled transcript row")?;
+        if row.contains_property("sessionId") && row.string_at("/sessionId").and_then(|value| uuid::Uuid::parse_str(value).ok()) != Some(expected_id) {
+            return Err("scheduled transcript has a different session UUID".into());
+        }
+        if row.contains_property("cwd") && row.string_at("/cwd") != Some(expected_cwd) {
+            return Err("scheduled transcript has a different cwd".into());
+        }
+        if row.string_at("/type") == Some("relocated") && row.string_at("/relocatedCwd") != Some(expected_cwd) {
+            return Err("scheduled transcript has a different relocated cwd".into());
+        }
+        if row.contains_property("mobileEmptySession")
+            && (row.number_at("/mobileEmptySession") != Some(1.0)
+                || row.string_at("/sessionId").and_then(|value| uuid::Uuid::parse_str(value).ok()) != Some(expected_id)
+                || row.string_at("/cwd") != Some(expected_cwd)) {
+            return Err("invalid scheduled empty-session anchor".into());
+        }
+    }
+    let loaded = session::jsonl::route_lines(&source);
+    if loaded.malformed_line_count != 0 { return Err("scheduled transcript is malformed".into()); }
+    let is_draft = super::session_state::is_mode_only_draft(&source, session_id);
+    let has_conversation = loaded.messages_in_order.iter().any(|message| matches!(message.message_type.as_str(), "user" | "assistant"));
+    if !is_draft && !has_conversation { return Err("scheduled transcript is not an empty draft".into()); }
+    if loaded.mobile_empty_sessions.contains(session_id) { sync()?; return Ok(false); }
+    if has_conversation { sync()?; return Ok(false); }
+    let title = loaded.custom_titles.get(session_id).filter(|title| !title.is_empty()).map(String::as_str).unwrap_or("Scheduled");
+    writer.append_mobile_empty_session(session_id, title, expected_cwd).await.map_err(|error| error.to_string())?;
+    sync()?;
+    let mut confirmed = String::new();
+    let mut confirmed_file = open_read_file_pinned(parent, relative, Some(&root)).map_err(|error| error.to_string())?;
+    if opened_file_identity(&confirmed_file).map_err(|error| error.to_string())? != file_identity {
+        return Err("scheduled transcript changed during anchor confirmation".into());
+    }
+    confirmed_file.read_to_string(&mut confirmed).map_err(|error| error.to_string())?;
+    if !confirmed.ends_with('\n') || session::JsonlWriter::fixed_session_mode_from_source(&confirmed, session_id)? != mode {
+        return Err("scheduled session identity changed during anchor creation".into());
+    }
+    let confirmed = session::jsonl::route_lines(&confirmed);
+    if confirmed.malformed_line_count != 0 || !confirmed.mobile_empty_sessions.contains(session_id)
+        || confirmed.mobile_empty_session_cwds.get(session_id).map(String::as_str) != Some(expected_cwd) {
+        return Err("scheduled empty-session anchor was not retained".into());
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod main_transcript_identity_bootstrap_tests {
     use super::*;
@@ -898,6 +981,29 @@ pub async fn build_with_credential_stack(
     // Resolve and validate fixed ownership before opening a writer or running
     // any startup effects. A restored session never adopts a UI selection.
     let initial_conversation_mode = cfg.initial_conversation_mode.take();
+    // This admission option belongs only to this construction, not to the
+    // cloned scheduler/settings configurations derived below.
+    let scheduled_durable_anchor = std::mem::take(&mut cfg.scheduled_durable_anchor);
+    if scheduled_durable_anchor {
+        let id = cfg.session_id_override.as_deref().and_then(|value| uuid::Uuid::parse_str(value).ok());
+        if !cfg.restore_draft || !cfg.session_persistence || cfg.defer_session_start
+            || initial_conversation_mode.is_none() || id.is_none()
+            || !cfg.cwd.is_absolute() || cfg.cwd.to_str().is_none() || !cfg.lingxi_home.is_absolute()
+            || cfg.session_resume_target_snapshot.is_some()
+            || cfg.app_invocation.is_some() || cfg.team_invocation.is_some() {
+            return Err(BuildError::Orchestrator("scheduled anchor requires an explicit persistent draft owner".into()));
+        }
+        if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
+            if uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != id {
+                return Err(BuildError::Orchestrator("scheduled resume has a different session UUID".into()));
+            }
+        }
+        if let Some(lease) = cfg.session_writer_lease.as_ref() {
+            if lease.canonical_session_id().map(|value| value.as_uuid()) != id {
+                return Err(BuildError::Orchestrator("scheduled writer lease has a different session UUID".into()));
+            }
+        }
+    }
     let captured_mode = cfg
         .session_resume_snapshot
         .as_ref()
@@ -906,7 +1012,6 @@ pub async fn build_with_credential_stack(
                 &snapshot.content,
                 &snapshot.source_session_id,
             )
-            .map(|profile| profile.active)
             .map_err(|error| {
                 BuildError::Orchestrator(format!("invalid resumed session mode: {error}"))
             })
@@ -930,12 +1035,16 @@ pub async fn build_with_credential_stack(
     )
     .await?;
     let is_app_chat = app_chat_mount.is_some();
+    if scheduled_durable_anchor && is_app_chat {
+        return Err(BuildError::Orchestrator("scheduled anchor requires an ordinary session".into()));
+    }
     // App-owned Chat has a separate transcript and lifecycle. Its captured
     // profile, not the ordinary conversation's selected space, is authoritative.
     let construction_mode = if let Some(source) = app_chat_mount.as_ref().and_then(|chat| chat.source.as_ref()) {
         session::JsonlWriter::fixed_session_mode_from_source(source.source(), &source.session_id().to_string())
             .map_err(BuildError::Orchestrator)?
-            .active
+    } else if is_app_chat {
+        lingxi_core::host::session_context::ConversationMode::Chat
     } else {
         construction_mode
     };
@@ -1211,6 +1320,11 @@ pub async fn build_with_credential_stack(
             &main_session_uuid,
         )
     });
+    if scheduled_durable_anchor && main_transcript_path != session::jsonl::session_path(
+        &cfg.lingxi_home, cfg.cwd.to_str().expect("validated scheduled cwd"), &main_session_uuid,
+    ) {
+        return Err(BuildError::Orchestrator("scheduled transcript does not match its workspace owner".into()));
+    }
     // Create the one ordinary transcript writer before durable session setup.
     // Production later decorates this same writer with the coordinator's
     // durable transaction; legacy/no-persistence hosts keep compatibility.
@@ -5934,6 +6048,7 @@ pub async fn build_with_credential_stack(
     // restoration. Same shared-`Arc` file target, so the record lands in the SAME
     // `<uuid>.jsonl` the orchestrator appends messages to.
     let main_agent_setting_writer = main_jsonl_writer.clone();
+    let scheduled_anchor_writer = scheduled_durable_anchor.then(|| main_jsonl_writer.clone());
     let goal_hooks_restricted = if cfg.restricted {
         effective_settings
             .settings
@@ -6433,6 +6548,16 @@ pub async fn build_with_credential_stack(
         orch.initialize_conversation_mode()
             .await
             .map_err(|error| BuildError::Orchestrator(error.to_string()))?;
+    }
+    if let Some(writer) = scheduled_anchor_writer {
+        if session_cwd.cwd() != cwd {
+            return Err(BuildError::Orchestrator("scheduled session cwd changed before anchor creation".into()));
+        }
+        ensure_scheduled_durable_anchor(
+            writer.as_ref(), &main_transcript_path, &cwd, &main_session_uuid, construction_mode,
+        )
+        .await
+        .map_err(|error| BuildError::Orchestrator(format!("scheduled session anchor: {error}")))?;
     }
     orch.enable_goal_retries();
     orch.attach_owned_session_switches();

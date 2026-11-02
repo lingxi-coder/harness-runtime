@@ -243,24 +243,12 @@ async fn realtime_preparation_uses_restored_fixed_behavior() {
             .push(ConversationMessage::user(empty_id, "".into()));
     }
     orchestrator
-        .restore_captured_conversation_profile(
-            ConversationMode::Chat,
-            Some(lingxi_core::host::session_context::SessionModeTransition {
-                active: ConversationMode::Chat,
-                selected: ConversationMode::Chat,
-                revision: 1,
-                active_epoch: 1,
-                selected_epoch: 1,
-                pending: false,
-            }),
-        )
+        .restore_captured_conversation_profile(ConversationMode::Chat, 1)
         .await
         .unwrap();
 
     let prepared = orchestrator.prepare_realtime_agent().await.unwrap();
-    assert_eq!(prepared.conversation_mode.active, ConversationMode::Chat);
-    assert_eq!(prepared.conversation_mode.selected, ConversationMode::Chat);
-    assert!(!prepared.conversation_mode.pending);
+    assert_eq!(prepared.conversation_mode.mode, ConversationMode::Chat);
     assert_eq!(prepared.conversation_profile_epoch, 1);
     assert!(prepared
         .instructions
@@ -276,7 +264,7 @@ async fn realtime_preparation_uses_restored_fixed_behavior() {
     );
     let manifest = orchestrator.current_context_manifest().await;
     assert!(manifest.projected);
-    assert_eq!(manifest.session.active, ConversationMode::Chat);
+    assert_eq!(manifest.session.mode, ConversationMode::Chat);
     assert!(manifest.blocks.iter().any(|block| block.id == "system"));
     assert!(manifest
         .blocks

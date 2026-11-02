@@ -35,7 +35,8 @@ async fn setup_project(file_count: usize) -> (TempDir, std::path::PathBuf, Strin
             "userType": "external",
             "message": {"role": "user", "content": format!("prompt {i}")}
         });
-        let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+        let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":uuid, "sessionMode":"code", "instructionEpoch":0});
+        let bytes = format!("{header}\n{}\n", serde_json::to_string(&line).unwrap());
         tokio::fs::write(&path, bytes).await.unwrap();
         // Stagger mtimes by 1 second so the desc sort has a deterministic order.
         let mtime = base + Duration::from_secs(i as u64);
@@ -128,7 +129,10 @@ async fn setup_one(lines: &[String], sid: Uuid) -> (TempDir, std::path::PathBuf,
     let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
 
-    let mut body = String::new();
+    let mut body = format!(
+        "{}\n",
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"code", "instructionEpoch":0})
+    );
     for l in lines {
         body.push_str(l);
         body.push('\n');
@@ -391,7 +395,7 @@ async fn branched_fixture_surfaces_ai_title() {
     let lingxi_home = temp.path().join("home");
     let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixture)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), format!("{}\n{fixture}", serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"code", "instructionEpoch":0})))
         .await
         .unwrap();
 
@@ -434,7 +438,8 @@ async fn sanitized_dir_collision_filters_rows_by_transcript_cwd() {
     tokio::fs::write(
         subdir.join(format!("{sid_a}.jsonl")),
         format!(
-            "{}\n",
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":sid_a, "sessionMode":"code", "instructionEpoch":0}),
             serde_json::to_string(&serde_json::json!({
                 "type": "user",
                 "uuid": sid_a.to_string(),
@@ -457,7 +462,8 @@ async fn sanitized_dir_collision_filters_rows_by_transcript_cwd() {
     tokio::fs::write(
         subdir.join(format!("{sid_b}.jsonl")),
         format!(
-            "{}\n",
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":sid_b, "sessionMode":"code", "instructionEpoch":0}),
             serde_json::to_string(&serde_json::json!({
                 "type": "user",
                 "uuid": sid_b.to_string(),
@@ -509,7 +515,8 @@ async fn sorts_by_transcript_activity_not_file_mtime() {
     tokio::fs::write(
         subdir.join(format!("{old_sid}.jsonl")),
         format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":old_sid, "sessionMode":"code", "instructionEpoch":0}),
             serde_json::to_string(&serde_json::json!({
                 "type": "user",
                 "uuid": old_user.to_string(),
@@ -547,7 +554,8 @@ async fn sorts_by_transcript_activity_not_file_mtime() {
     tokio::fs::write(
         subdir.join(format!("{new_sid}.jsonl")),
         format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":new_sid, "sessionMode":"code", "instructionEpoch":0}),
             serde_json::to_string(&serde_json::json!({
                 "type": "user",
                 "uuid": new_user.to_string(),

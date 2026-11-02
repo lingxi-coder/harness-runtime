@@ -29,36 +29,54 @@ fn mode_source(id: uuid::Uuid, case: &str) -> String {
                 "systemPrompt":[text], "tools":[], "contextRendering":"inline"}
         })
     };
-    let mut rows = vec![serde_json::json!({
-        "type":"user", "uuid":user, "sessionId":id, "parentUuid":null,
-        "message":{"role":"user", "content":"hello"}
-    })];
-    if case != "missing" {
-        rows.push(snapshot("old prefix"));
-    }
-    if case != "legacy" {
-        rows.push(serde_json::json!({"type":"session-mode", "sessionId":id,
-            "sessionMode":"chat", "contextRevision":1, "profileEpoch":1,
-            "admittedMode":"chat", "admittedEpoch":1, "pending":false}));
-        if case == "current" {
-            rows.push(snapshot("current prefix"));
-        }
-        // A queued change must retain the snapshot of the admitted epoch.
-        rows.push(serde_json::json!({"type":"session-mode", "sessionId":id,
-            "sessionMode":"code", "contextRevision":2, "profileEpoch":2,
-            "admittedMode":"chat", "admittedEpoch":1, "pending":true}));
+    let mut rows = vec![
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"chat", "instructionEpoch":1}),
+        serde_json::json!({"type":"user", "uuid":user, "sessionId":id, "parentUuid":null,
+            "message":{"role":"user", "content":"hello"}}),
+    ];
+    if case == "current" {
+        rows.push(snapshot("current prefix"));
     }
     rows.iter().map(|row| format!("{row}\n")).collect()
 }
 
 #[test]
-fn legacy_snapshot_uuid_case_is_normalized() {
+fn snapshot_must_match_the_fixed_instruction_epoch() {
     let id = uuid::Uuid::new_v4();
-    let source = mode_source(id, "legacy").replace(&id.to_string(), &id.to_string().to_uppercase());
-    let (snapshot, rendering) =
-        crate::resume::prompt_state_for_epoch_from_source(&source, &id.to_string(), 0);
-    assert_eq!(snapshot.unwrap().system_prompt, vec!["old prefix"]);
-    assert_eq!(rendering, Some(InstructionRendering::Inline));
+    let source = mode_source(id, "current");
+    assert!(
+        crate::resume::prompt_state_for_epoch_from_source(&source, &id.to_string(), 0)
+            .0
+            .is_none()
+    );
+    assert_eq!(
+        crate::resume::prompt_state_for_epoch_from_source(&source, &id.to_string(), 1)
+            .0
+            .unwrap()
+            .system_prompt,
+        vec!["current prefix"]
+    );
+}
+
+#[test]
+fn forked_prompt_snapshot_is_history_not_current_instruction_state() {
+    let id = uuid::Uuid::new_v4();
+    let source = mode_source(id, "current");
+    let source = source
+        .lines()
+        .map(|line| {
+            let mut row: serde_json::Value = serde_json::from_str(line).unwrap();
+            if row["type"] == "attachment" {
+                row["forkedFrom"] = serde_json::json!({"sessionId":uuid::Uuid::new_v4()});
+            }
+            format!("{row}\n")
+        })
+        .collect::<String>();
+    assert!(
+        crate::resume::prompt_state_for_epoch_from_source(&source, &id.to_string(), 1)
+            .0
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -70,10 +88,7 @@ async fn fixed_session_rejects_a_different_mode_before_mutating_state() {
         .await
         .is_err());
     let state = orch.conversation_mode().await;
-    assert_eq!(
-        (state.active, state.selected, state.revision, state.pending),
-        (ConversationMode::Code, ConversationMode::Code, 0, false)
-    );
+    assert_eq!(state.mode, ConversationMode::Code);
 }
 
 #[tokio::test]
@@ -84,9 +99,9 @@ async fn cold_restore_rejects_another_space_before_replacing_session_state() {
     let target = uuid::Uuid::new_v4();
     let source = format!(
         "{}\n{}\n",
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":target, "sessionMode":"chat", "instructionEpoch":1}),
         serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "sessionId":target, "parentUuid":null,
             "message":{"role":"user", "content":"foreign"}}),
-        serde_json::json!({"type":"session-mode", "sessionId":target, "sessionMode":"chat"}),
     );
     let loaded = session::jsonl::route_lines(&source);
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &target.to_string());
@@ -97,20 +112,14 @@ async fn cold_restore_rejects_another_space_before_replacing_session_state() {
             &loaded.messages_in_order,
             false,
             permission::PermissionMode::Default,
-            Some(
-                session::JsonlWriter::fixed_session_mode_from_source(&source, &target.to_string())
-                    .unwrap(),
-            ),
+            ConversationMode::Chat,
             &source,
         )
         .await;
     assert!(result.is_err());
     assert_eq!(orch.current_session_id().await, original_id);
     assert!(orch.snapshot_history().await.is_empty());
-    assert_eq!(
-        orch.conversation_mode().await.active,
-        ConversationMode::Code
-    );
+    assert_eq!(orch.conversation_mode().await.mode, ConversationMode::Code);
 }
 
 #[tokio::test]
@@ -132,8 +141,7 @@ async fn initialization_persists_chat_once_before_any_turn() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
     assert_eq!(
         session::JsonlWriter::fixed_session_mode_from_source(&first, &id.as_uuid().to_string())
-            .unwrap()
-            .active,
+            .unwrap(),
         ConversationMode::Chat
     );
     assert!(orch.snapshot_history().await.is_empty());
@@ -141,7 +149,6 @@ async fn initialization_persists_chat_once_before_any_turn() {
 
 async fn assert_prompt_state(orch: &ConversationOrchestrator, case: &str) {
     let expected = match case {
-        "legacy" => Some("old prefix"),
         "current" => Some("current prefix"),
         _ => None,
     };
@@ -171,21 +178,13 @@ async fn assert_prompt_state(orch: &ConversationOrchestrator, case: &str) {
 #[tokio::test]
 async fn captured_cold_profile_preserves_only_its_epoch_prompt_state() {
     let root = tempfile::tempdir().unwrap();
-    for case in ["legacy", "current", "wrong_epoch", "missing"] {
+    for case in ["current", "missing"] {
         let id = lingxi_core::types::SessionId::new();
         let source = mode_source(id.as_uuid(), case);
         let loaded = session::jsonl::route_lines(&source);
         let (messages, _) =
             session::jsonl::build_conversation_chain(&loaded, &id.as_uuid().to_string());
-        let profile = session::JsonlWriter::session_mode_transition_from_source(
-            &source,
-            &id.as_uuid().to_string(),
-        );
-        let mode = if case == "legacy" {
-            ConversationMode::Code
-        } else {
-            ConversationMode::Chat
-        };
+        let mode = ConversationMode::Chat;
         let orch = orchestrator(root.path())
             .with_conversation_mode(mode)
             .with_session_id(id);
@@ -195,7 +194,7 @@ async fn captured_cold_profile_preserves_only_its_epoch_prompt_state() {
             &loaded.messages_in_order,
             false,
             permission::PermissionMode::Default,
-            profile,
+            mode,
             &source,
         )
         .await
@@ -210,7 +209,7 @@ async fn hot_resume_profile_preserves_only_its_epoch_prompt_state() {
     let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
         platform_posix::fs::PosixFileSystem::new(root.path().to_path_buf()),
     );
-    for case in ["legacy", "current", "wrong_epoch", "missing"] {
+    for case in ["current", "missing"] {
         let id = lingxi_core::types::SessionId::new();
         let source = mode_source(id.as_uuid(), case);
         let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
@@ -226,11 +225,7 @@ async fn hot_resume_profile_preserves_only_its_epoch_prompt_state() {
         let writer = Arc::new(session::JsonlWriter::new(initial, fs.clone()));
         let orch = ConversationOrchestrator::into_shared(
             orchestrator(root.path())
-                .with_conversation_mode(if case == "legacy" {
-                    ConversationMode::Code
-                } else {
-                    ConversationMode::Chat
-                })
+                .with_conversation_mode(ConversationMode::Chat)
                 .with_jsonl_writer(writer),
         );
         orch.attach_owned_session_switches();
@@ -259,13 +254,12 @@ async fn public_with_resume_restores_chat_epoch_and_current_skill_from_captured_
     let current = uuid::Uuid::new_v4();
     let tail = uuid::Uuid::new_v4();
     let rows = [
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"chat", "instructionEpoch":1}),
         serde_json::json!({"type":"user", "uuid":first, "sessionId":sid, "parentUuid":null,
             "message":{"role":"user", "content":"question"}}),
         serde_json::json!({"type":"user", "uuid":old, "sessionId":sid, "parentUuid":first, "isMeta":true,
             "origin":{"type":"skill_activation", "context_epoch":0, "skill_name":"old", "skill_path":"/skills/old"},
             "message":{"role":"user", "content":"old skill"}}),
-        serde_json::json!({"type":"session-mode", "sessionId":sid, "sessionMode":"chat", "contextRevision":1,
-            "profileEpoch":1, "admittedMode":"chat", "admittedEpoch":1, "pending":false}),
         serde_json::json!({"type":"user", "uuid":current, "sessionId":sid, "parentUuid":old, "isMeta":true,
             "origin":{"type":"skill_activation", "context_epoch":1, "skill_name":"current", "skill_path":"/skills/current"},
             "message":{"role":"user", "content":"current skill"}}),
@@ -304,15 +298,7 @@ async fn public_with_resume_restores_chat_epoch_and_current_skill_from_captured_
     .await
     .unwrap();
     let profile = orch.conversation_mode().await;
-    assert_eq!(
-        (
-            profile.active,
-            profile.selected,
-            profile.revision,
-            profile.pending
-        ),
-        (ConversationMode::Chat, ConversationMode::Chat, 1, false)
-    );
+    assert_eq!(profile.mode, ConversationMode::Chat);
     assert_eq!(orch.profile_epoch().await, 1);
     let session = orch.session.lock().await;
     let history = session.model_context_history();
@@ -384,11 +370,7 @@ async fn cancelled_storage_waiter_keeps_input_and_fixed_mode() {
     drop(storage);
     assert!(matches!(turn.await.unwrap(), TurnOutcome::Cancelled));
     assert!(!admitted.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(
-        orch.conversation_mode().await.active,
-        ConversationMode::Code
-    );
-    assert!(!orch.conversation_mode().await.pending);
+    assert_eq!(orch.conversation_mode().await.mode, ConversationMode::Code);
     assert!(orch.snapshot_history().await.is_empty());
 }
 

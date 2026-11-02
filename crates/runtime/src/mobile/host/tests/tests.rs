@@ -11618,6 +11618,12 @@ fn seed_session_file(root: &std::path::Path) -> String {
     // we use a literal instead of minting one). Deterministic by design.
     let uuid = "11111111-2222-3333-4444-555555555555".to_string();
     let path = project_dir.join(format!("{uuid}.jsonl"));
+    let header = serde_json::json!({
+        "type": "fixed-session-mode",
+        "sessionId": uuid,
+        "sessionMode": "code",
+        "instructionEpoch": 0
+    });
     let line = serde_json::json!({
         "type": "user",
         "uuid": uuid,
@@ -11630,11 +11636,7 @@ fn seed_session_file(root: &std::path::Path) -> String {
         "userType": "external",
         "message": {"role": "user", "content": "hello from a prior session"}
     });
-    std::fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&line).unwrap()),
-    )
-    .expect("write session file");
+    std::fs::write(&path, format!("{header}\n{line}\n")).expect("write session file");
     uuid
 }
 
@@ -11764,7 +11766,7 @@ fn submit_new_session_emits_session_started() {
                 && record["permissionMode"] == expected_permission_mode
         }));
         assert!(records.iter().any(|record| {
-            record["type"] == "session-mode"
+            record["type"] == "fixed-session-mode"
                 && record["sessionId"] == after_uuid
                 && record["sessionMode"] == "code"
         }));
@@ -11929,7 +11931,7 @@ fn mobile_initialized_long_session_does_not_reread_identity_on_commands() {
 }
 
 #[test]
-fn mobile_initial_and_new_session_modes_use_versioned_records() {
+fn mobile_initial_and_new_sessions_keep_fixed_mode_headers() {
     let tmp = tempfile::tempdir().unwrap();
     let mut config = test_config(tmp.path());
     config.session_mode = session::jsonl::SessionMode::Chat;
@@ -11941,7 +11943,7 @@ fn mobile_initial_and_new_session_modes_use_versioned_records() {
                     .submit(ClientCommand::NewSession {
                         cwd: None,
                         model: None,
-                        mode: client::protocol::listings::SessionModeDto::Code,
+                        mode: client::protocol::listings::SessionModeDto::Chat,
                     })
                     .await
                     .unwrap();
@@ -11950,12 +11952,10 @@ fn mobile_initial_and_new_session_modes_use_versioned_records() {
             let mode = raw
                 .lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .find(|row| row["type"] == "session-mode")
+                .find(|row| row["type"] == "fixed-session-mode")
                 .unwrap();
             assert_eq!(mode["sessionMode"], "chat");
-            let expected_epoch = 0;
-            assert_eq!(mode["contextRevision"], expected_epoch);
-            assert_eq!(mode["profileEpoch"], expected_epoch);
+            assert_eq!(mode["instructionEpoch"], 0);
         }
     });
 }
@@ -12006,40 +12006,6 @@ fn anchored_session_with_deferred_tool_is_not_restored_as_empty() {
         );
         assert_eq!(std::fs::read(path).unwrap(), source);
     });
-}
-
-struct ReentrantModeListener {
-    handle: StdMutex<Option<std::sync::Weak<MobileEngineHandle>>>,
-    completed: Notify,
-}
-
-#[async_trait]
-impl ClientEventListener for ReentrantModeListener {
-    async fn on_event(&self, event: ClientEvent) {
-        if matches!(event, ClientEvent::SessionModeChanged { .. }) {
-            let handle = self
-                .handle
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(std::sync::Weak::upgrade);
-            if let Some(handle) = handle {
-                handle
-                    .submit(ClientCommand::GetContextManifest)
-                    .await
-                    .unwrap();
-                self.completed.notify_one();
-            }
-        }
-    }
-    async fn on_workflow_progress(
-        &self,
-        _: String,
-        _: String,
-        _: String,
-        _: client::protocol::listings::WorkflowProgressDto,
-    ) {
-    }
 }
 
 #[cfg(unix)]
@@ -12261,6 +12227,12 @@ fn seed_replay_valid_session(root: &std::path::Path) -> (String, usize) {
     let asst_uuid = "cccccccc-3333-4333-8333-cccccccccccc".to_string();
     let path = project_dir.join(format!("{file_uuid}.jsonl"));
 
+    let header = serde_json::json!({
+        "type": "fixed-session-mode",
+        "sessionId": file_uuid,
+        "sessionMode": "code",
+        "instructionEpoch": 0
+    });
     let user_line = serde_json::json!({
         "type": "user",
         "uuid": user_uuid,
@@ -12285,7 +12257,7 @@ fn seed_replay_valid_session(root: &std::path::Path) -> (String, usize) {
         "message": {"role": "assistant", "content": [{"type": "text", "text": "resumed!"}]}
     });
     let body = format!(
-        "{}\n{}\n",
+        "{header}\n{}\n{}\n",
         serde_json::to_string(&user_line).unwrap(),
         serde_json::to_string(&asst_line).unwrap()
     );

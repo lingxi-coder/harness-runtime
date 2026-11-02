@@ -36,9 +36,10 @@ pub struct BgSessionSnapshot {
     pub history: Vec<crate::types::ConversationMessage>,
     /// Transcript rows retained for audit but excluded from model context.
     pub model_context_excluded_messages: std::collections::HashSet<crate::types::MessageId>,
-    /// The admitted profile and epoch captured for this independent task.
-    /// A pending foreground selection must not retarget the copied task.
-    pub profile: crate::host::session_context::SessionModeTransition,
+    /// The fixed profile captured for this independent task.
+    pub mode: crate::host::session_context::ConversationMode,
+    /// Instruction provenance to preserve when copying the conversation.
+    pub instruction_epoch: u64,
     /// Original payloads for retained durable model reminders.
     pub model_reminder_attachments: Vec<(
         crate::types::MessageId,

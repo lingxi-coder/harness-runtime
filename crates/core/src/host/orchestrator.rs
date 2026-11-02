@@ -4218,9 +4218,6 @@ pub enum ResponseTimingEvent {
 
 #[async_trait]
 pub trait OutputStream: Send + Sync {
-    /// Publish a committed profile selection or its admission at a query boundary.
-    async fn emit_conversation_mode(&self, _state: &super::session_context::SessionModeSnapshot) {}
-
     /// Whether this sink observes raw model-output progress for trusted host UI.
     /// This observation is separate from published messages and token accounting.
     fn wants_model_output_progress(&self) -> bool {

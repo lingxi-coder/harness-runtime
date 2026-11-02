@@ -1039,12 +1039,9 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             Some(transcript_identity),
         )?;
-        // A versioned session-mode record acknowledges a committed behavior
-        // selection. Ordinary metadata remains ordered but intentionally does
-        // not pay an fsync; this record must survive before it is published.
-        let mode_selection = payload.string_at("/type") == Some("session-mode")
-            && payload.number_at("/contextRevision").is_some();
-        let previous_len = if mode_selection {
+        // The fixed session mode must survive before its creation is published.
+        let fixed_mode = payload.string_at("/type") == Some("fixed-session-mode");
+        let previous_len = if fixed_mode {
             Some(
                 file.metadata()
                     .map_err(|error| FsError::Io(error.to_string()))?
@@ -1060,7 +1057,7 @@ impl DurableTranscriptTransaction<'_> {
                 .writer
                 .fail_next_append_sync
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
-                .then(|| std::io::Error::other("synthetic mode selection sync failure"));
+                .then(|| std::io::Error::other("synthetic session mode sync failure"));
             #[cfg(not(test))]
             let injected_error: Option<std::io::Error> = None;
             let sync = if let Some(error) = injected_error {
@@ -1073,9 +1070,8 @@ impl DurableTranscriptTransaction<'_> {
                 file.sync_all()
             };
             if let Err(error) = sync {
-                // The selection was not acknowledged. While still holding the
-                // transcript transaction, remove its complete line so a failed
-                // selection does not become visible on the next resume.
+                // The mode was not acknowledged. While still holding the
+                // transaction, remove its complete line before returning.
                 return Err(self.writer.rollback_undurable_append(
                     &mut file,
                     previous_len,
@@ -1645,7 +1641,7 @@ mod tests {
     }
 
     #[test]
-    fn versioned_mode_selection_is_synced_and_sync_failure_is_not_committed() {
+    fn fixed_mode_header_is_synced_and_sync_failure_is_not_committed() {
         let dir = tempfile::tempdir().unwrap();
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("mode.jsonl");
@@ -1656,32 +1652,36 @@ mod tests {
             })
         };
 
-        append(json!({"type":"session-mode", "sessionMode":"code"})).unwrap();
+        append(json!({"type":"tag", "tag":"ordinary"})).unwrap();
         assert_eq!(
             writer.sync_count_for_test(),
             1,
-            "unversioned metadata only syncs the new directory entry"
+            "ordinary metadata only syncs the new directory entry"
         );
-        append(json!({"type":"session-mode", "sessionMode":"chat", "contextRevision":1})).unwrap();
+        append(json!({"type":"fixed-session-mode", "sessionMode":"chat", "instructionEpoch":1}))
+            .unwrap();
         assert_eq!(
             writer.sync_count_for_test(),
             2,
-            "a versioned selection fsyncs its file"
+            "a fixed mode header fsyncs its file"
         );
         let before = std::fs::read(dir.path().join(path)).unwrap();
         writer
             .fail_next_append_sync
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
-            append(json!({"type":"session-mode", "sessionMode":"code", "contextRevision":2})),
+            append(
+                json!({"type":"fixed-session-mode", "sessionMode":"code", "instructionEpoch":2})
+            ),
             Err(TranscriptWriterError::WrittenButNotDurable(_))
         ));
         assert_eq!(
             std::fs::read(dir.path().join(path)).unwrap(),
             before,
-            "a rejected selection cannot be replayed on resume"
+            "an unacknowledged header cannot be replayed on resume"
         );
-        append(json!({"type":"session-mode", "sessionMode":"code", "contextRevision":2})).unwrap();
+        append(json!({"type":"fixed-session-mode", "sessionMode":"code", "instructionEpoch":2}))
+            .unwrap();
         assert_eq!(writer.sync_count_for_test(), 4);
 
         let fresh = Path::new("fresh-mode.jsonl");
@@ -1692,7 +1692,7 @@ mod tests {
                     &identity,
                     fresh,
                     source_payload(
-                        json!({"type":"session-mode", "sessionMode":"chat", "contextRevision":1}),
+                        json!({"type":"fixed-session-mode", "sessionMode":"chat", "instructionEpoch":1}),
                     ),
                 )
             })
@@ -1700,7 +1700,7 @@ mod tests {
         assert_eq!(
             writer.sync_count_for_test(),
             6,
-            "a fresh selection syncs both file and directory"
+            "a fresh mode header syncs both file and directory"
         );
     }
 

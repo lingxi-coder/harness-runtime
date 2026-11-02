@@ -49,7 +49,7 @@ use super::{
     resolve_default_model_ref, settings_commands, settle_mobile_loop_turn, ActiveTurn,
     MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob,
     MobileMediaAgentHandoffQueue, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
-    MobileSessionAgentObserver, MobileWakeupDelivery, ModeEventListener, TurnLifecycleListener,
+    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener,
     MOBILE_CRON_HANDLES,
 };
 
@@ -657,17 +657,9 @@ pub(super) async fn build_mobile_inner_with_ask(
                 &initial.replayed.transcript_metadata,
             );
         } else {
-            // Publish immutable ownership before even the empty-session anchor:
-            // a nonempty transcript without mode is an existing Code session.
+            // Publish immutable ownership before the empty-session anchor.
             session_writer
-                .initialize_fixed_session_mode(
-                    &main_session_uuid,
-                    &lingxi_core::host::session_context::SessionModeTransition {
-                        active: cfg.session_mode,
-                        selected: cfg.session_mode,
-                        ..Default::default()
-                    },
-                )
+                .initialize_fixed_session_mode(&main_session_uuid, cfg.session_mode, 0)
                 .await
                 .map_err(|error| {
                     MobileBuildError::Orchestrator(format!("session mode: {error}"))
@@ -3052,7 +3044,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             &initial.replayed.messages,
             false,
             permission,
-            Some(initial.profile.clone()),
+            initial.mode,
             &initial.source,
         )
         .await
@@ -3518,7 +3510,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         })
         .await;
     if !cfg.app_agent_host {
-        let mode = super::lower_session_mode(orch.conversation_mode().await.active);
+        let mode = super::lower_session_mode(orch.conversation_mode().await.mode);
         let event = if let Some(initial) = &initial_session {
             ClientEvent::SessionResumed {
                 session_id: main_session_uuid.clone(),
@@ -3791,9 +3783,6 @@ fn build_mobile_engine_on_worker(
     let active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>> = Arc::new(Mutex::new(None));
     let durable_turns = Arc::new(DurableTurnStore::new(lingxi_home.join("mobile-turns")));
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
-    // Taken before the wrap: the gate below is what a connection-scoped notice
-    // has to get past, so it cannot be reached through the wrapped listener.
-    let listener = ModeEventListener::new(listener, &runtime);
     let connection_sink = ListenerSink::arc(listener.clone());
     let media_agent_handoffs = Arc::new(MobileMediaAgentHandoffQueue::default());
     let lifecycle_listener: Arc<dyn ClientEventListener> =

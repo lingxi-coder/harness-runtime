@@ -1350,7 +1350,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
-        ("event/session_mode_changed.json", ClientEvent::SessionModeChanged { session_id: "session-1".into(), mode: SessionModeDto::Code, pending_mode: None, revision: 2 }),
         ("event/context_manifest.json", ClientEvent::ContextManifest { manifest_json: "{\"projected\":false}".into() }),
         ("event/session_handoff_prepared.json", ClientEvent::SessionHandoffPrepared { request_id: "handoff-1".into(), source_session_id: "session-1".into(), source_mode: SessionModeDto::Code, target_mode: SessionModeDto::Chat, cutoff: "sha256:example:42".into(), summary: ClientTextDto::from_utf8("Summary") }),
         ("event/session_handoff_failed.json", ClientEvent::SessionHandoffFailed { request_id: "handoff-1".into(), message: "unavailable".into() }),

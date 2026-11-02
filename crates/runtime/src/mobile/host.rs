@@ -1396,13 +1396,12 @@ fn replay_mobile_anchored_startup(
     source: String,
     loaded: session::jsonl::LoadedTranscript,
     id: uuid::Uuid,
+    instruction_epoch: u64,
 ) -> orchestrator::ReplayedSession {
     let sid = id.to_string();
     let transcript_metadata =
         session::jsonl::JsonlWriter::capture_session_metadata_source(&source, &sid);
-    let profile_epoch =
-        session::jsonl::JsonlWriter::session_mode_transition_from_source(&source, &sid)
-            .map_or(0, |profile| profile.active_epoch);
+    let profile_epoch = instruction_epoch;
     let (snapshot, rendering) =
         orchestrator::resume::prompt_state_for_epoch_from_source(&source, &sid, profile_epoch);
     let mut runtime_metadata =
@@ -2158,8 +2157,8 @@ mod session_identity_import_tests {
         );
         let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
         let anchor = concat!(
-            "{\"type\":\"custom-title\",\"customTitle\":\"New\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"mobileEmptySession\":1}\n",
-            "{\"type\":\"session-mode\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"sessionMode\":\"code\"}\n"
+            "{\"type\":\"fixed-session-mode\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"sessionMode\":\"code\",\"instructionEpoch\":0}\n",
+            "{\"type\":\"custom-title\",\"customTitle\":\"New\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"mobileEmptySession\":1}\n"
         );
         std::fs::write(&transcript_path, anchor).unwrap();
 
@@ -2187,12 +2186,15 @@ mod session_identity_import_tests {
     #[tokio::test]
     async fn resumed_native_transcript_keeps_bytes_and_exposes_original_indices() {
         let directory = tempfile::tempdir().unwrap();
-        let transcript_path = directory.path().join("session.jsonl");
+        let transcript_path = directory
+            .path()
+            .join("11111111-2222-3333-4444-555555555555.jsonl");
         let filesystem: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
         let native = concat!(
+            "{\"type\":\"fixed-session-mode\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"sessionMode\":\"code\",\"instructionEpoch\":0}\n",
             "{\"type\":\"user\",\"uuid\":\"resume-user\",\"parentUuid\":null,\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:00.000Z\",\"cwd\":\"/home/lingxi/lingxi\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
             "{\"type\":\"assistant\",\"uuid\":\"resume-assistant\",\"parentUuid\":\"resume-user\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:01.000Z\",\"cwd\":\"/home/lingxi/lingxi\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
         );
@@ -4138,57 +4140,8 @@ async fn continue_media_agent_handoff(
     .await
 }
 
-/// Mobile-only lifecycle guard around the foreign listener. The core protocol
-/// intentionally keeps its frozen event shapes, so the host enforces the
-/// single-owner invariant at the delivery boundary: one terminal event closes
-/// the turn, cancellation rewrites that terminal outcome, and live-turn events
-/// emitted after terminal/slot release are discarded.
-/// Deliver mode snapshots on one ordered queue so a foreign listener may
-/// submit another command without waiting on the command's transition lock.
-struct ModeEventListener {
-    inner: Arc<dyn ClientEventListener>,
-    mode_events: tokio::sync::mpsc::UnboundedSender<ClientEvent>,
-}
-
-impl ModeEventListener {
-    fn new(
-        inner: Arc<dyn ClientEventListener>,
-        runtime: &tokio::runtime::Runtime,
-    ) -> Arc<dyn ClientEventListener> {
-        let (mode_events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let consumer = inner.clone();
-        runtime.spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                consumer.on_event(event).await;
-            }
-        });
-        Arc::new(Self { inner, mode_events })
-    }
-}
-
-#[async_trait]
-impl ClientEventListener for ModeEventListener {
-    async fn on_event(&self, event: ClientEvent) {
-        if matches!(event, ClientEvent::SessionModeChanged { .. }) {
-            let _ = self.mode_events.send(event);
-        } else {
-            self.inner.on_event(event).await;
-        }
-    }
-
-    async fn on_workflow_progress(
-        &self,
-        origin_session_id: String,
-        task_id: String,
-        run_id: String,
-        progress: client::protocol::listings::WorkflowProgressDto,
-    ) {
-        self.inner
-            .on_workflow_progress(origin_session_id, task_id, run_id, progress)
-            .await;
-    }
-}
-
+/// Mobile lifecycle guard around the foreign listener. It ensures that one
+/// terminal event closes a turn and ignores later live-turn events.
 struct TurnLifecycleListener {
     inner: Arc<dyn ClientEventListener>,
     active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
@@ -4528,22 +4481,6 @@ impl MobileEngineHandle {
     /// The same live logical cwd used by file tools, Bash and the orchestrator.
     fn session_cwd(&self) -> String {
         self.inner.session_cwd.cwd().to_string_lossy().into_owned()
-    }
-
-    async fn emit_conversation_mode_snapshot(
-        &self,
-        snapshot: &lingxi_core::host::session_context::SessionModeSnapshot,
-    ) {
-        self.connection_sink
-            .emit(ClientEvent::SessionModeChanged {
-                session_id: snapshot.session_id.clone(),
-                mode: lower_session_mode(snapshot.active),
-                pending_mode: snapshot
-                    .pending
-                    .then(|| lower_session_mode(snapshot.selected)),
-                revision: snapshot.revision,
-            })
-            .await;
     }
 
     async fn emit_controls_snapshot(&self) {
@@ -5031,16 +4968,16 @@ impl MobileEngineHandle {
                         .iter()
                         .all(|field| !row.contains_property(field));
                     let startup_row = match row.string_at("/type") {
-                        Some("session-mode") => {
+                        Some("fixed-session-mode") if !saw_mode => {
                             saw_mode = true;
                             !row.contains_property("attachment")
-                                && session::JsonlWriter::session_mode_transition_from_source(
+                                && session::JsonlWriter::fixed_session_mode_from_source(
                                     &line,
                                     &session_uuid,
                                 )
-                                .is_some()
+                                .is_ok()
                         }
-                        Some("attachment") => {
+                        Some("attachment") if saw_mode => {
                             row.subprojection("/attachment")
                                 .ok()
                                 .as_ref()
@@ -5198,7 +5135,7 @@ impl MobileEngineHandle {
         // A hot mount cannot change this runtime's immutable profile. Reject
         // both caller/source and current/source mismatches before any restore,
         // writer retarget, hook, or permission mutation.
-        let current_mode = self.inner.orchestrator.conversation_mode().await.active;
+        let current_mode = self.inner.orchestrator.conversation_mode().await.mode;
         if let Some((_, source, _)) = captured.as_ref().ok() {
             let actual = session::jsonl::JsonlWriter::fixed_session_mode_from_source(
                 source,
@@ -5206,8 +5143,7 @@ impl MobileEngineHandle {
             )
             .map_err(|error| ClientError::Rejected {
                 message: format!("resume: invalid conversation mode: {error}"),
-            })?
-            .active;
+            })?;
             if actual != current_mode || expected_mode.is_some_and(|expected| expected != actual) {
                 return Err(ClientError::Rejected {
                     message: format!("resume: session mode mismatch (source {})", actual.as_str()),
@@ -5276,7 +5212,12 @@ impl MobileEngineHandle {
                     })
                     .or_else(|| restored_directory.clone());
                 let mut replayed = if mobile_anchored_startup_only(&loaded, uuid) {
-                    replay_mobile_anchored_startup(path, source, loaded, uuid)
+                    let profile = session::jsonl::JsonlWriter::fixed_session_profile_from_source(
+                        &source,
+                        &uuid.to_string(),
+                    )
+                    .map_err(orchestrator::resume::ResumeError::Profile)?;
+                    replay_mobile_anchored_startup(path, source, loaded, uuid, profile.instruction_epoch)
                 } else {
                     orchestrator::resume::replay_captured_session(path, source, loaded, uuid)?
                 };
@@ -5362,11 +5303,10 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
-                        mode: lower_session_mode(restored_mode.active),
+                        mode: lower_session_mode(restored_mode.mode),
                         messages,
                     })
                     .await;
-                self.emit_conversation_mode_snapshot(&restored_mode).await;
                 if let Some(usage) = replayed.runtime_metadata.current_usage {
                     self.event_sink
                         .emit(client::adapter::lowering::lower_current_usage(usage))
@@ -5460,11 +5400,10 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
-                        mode: lower_session_mode(restored_mode.active),
+                        mode: lower_session_mode(restored_mode.mode),
                         messages: Vec::new(),
                     })
                     .await;
-                self.emit_conversation_mode_snapshot(&restored_mode).await;
                 self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(uuid.to_string());
                 Ok(())
@@ -7509,7 +7448,7 @@ impl MobileEngineHandle {
         };
         if let Some(mode) = requested_mode {
             let current =
-                lower_session_mode(self.inner.orchestrator.conversation_mode().await.active);
+                lower_session_mode(self.inner.orchestrator.conversation_mode().await.mode);
             if mode != current {
                 return Err(ClientError::Rejected {
                     message: "session mode does not match this live runtime".into(),
@@ -8529,8 +8468,7 @@ impl MobileEngineHandle {
                 )
                 .map_err(|error| ClientError::Rejected {
                     message: format!("fork: invalid source mode: {error}"),
-                })?
-                .active;
+                })?;
                 if source_mode != target_mode {
                     return Err(ClientError::Rejected {
                         message: "fork: the target mode must match the source session".into(),
@@ -8702,10 +8640,9 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionStarted {
                         session_id: session_id.clone(),
-                        mode: lower_session_mode(started_mode.active),
+                        mode: lower_session_mode(started_mode.mode),
                     })
                     .await;
-                self.emit_conversation_mode_snapshot(&started_mode).await;
                 self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(session_id);
                 Ok(())

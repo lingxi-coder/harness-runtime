@@ -619,6 +619,9 @@ pub struct DesktopConfig {
     /// Bridge boot should restore an existing, metadata-only draft for this
     /// session ID after claiming its writer lease.
     pub restore_draft: bool,
+    /// Make an explicitly identified scheduled-task draft discoverable before
+    /// its first message, under the draft's existing writer authority.
+    pub scheduled_durable_anchor: bool,
     /// Session prompt roots retained through a host remount. Unlike `add_dir`,
     /// these load extensions without granting additional filesystem access.
     pub initial_prompt_directories: Vec<std::path::PathBuf>,
@@ -1168,6 +1171,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("session_id_override", &self.session_id_override)
             .field("session_transcript_path", &self.session_transcript_path)
             .field("restore_draft", &self.restore_draft)
+            .field("scheduled_durable_anchor", &self.scheduled_durable_anchor)
             .field(
                 "session_resume_snapshot",
                 &self.session_resume_snapshot.as_ref().map(|_| "<captured>"),
@@ -1342,6 +1346,7 @@ impl Default for DesktopConfig {
             session_writer_lease: None,
             session_transcript_path: None,
             restore_draft: false,
+            scheduled_durable_anchor: false,
             initial_prompt_directories: Vec::new(),
             session_resume_snapshot: None,
             session_resume_target_snapshot: None,

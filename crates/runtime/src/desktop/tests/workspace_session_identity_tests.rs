@@ -2,6 +2,102 @@ use super::restore_session_worktree_state;
 use lingxi_core::host::FileSystem;
 use std::sync::Arc;
 
+struct ScheduledAnchorPermissionSink;
+
+#[async_trait::async_trait]
+impl client::adapter::PermissionRequestSink for ScheduledAnchorPermissionSink {
+    async fn emit_request(&self, _: client::protocol::permission::PermissionRequest) {}
+}
+
+#[tokio::test]
+async fn scheduled_draft_is_discoverable_before_desktop_build_returns() {
+    use lingxi_core::host::session_context::ConversationMode;
+    let (_root, mut cfg) = super::tests::test_config(true);
+    let id = uuid::Uuid::new_v4();
+    cfg.session_id_override = Some(id.to_string());
+    cfg.initial_conversation_mode = Some(ConversationMode::Chat);
+    cfg.restore_draft = true;
+    cfg.scheduled_durable_anchor = true;
+    cfg.enable_automation_scheduler = false;
+    cfg.isolated_credential_storage = true;
+    let path = session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), &id.to_string());
+    let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cfg.cwd.clone()));
+    let runtime = Box::pin(super::build(
+        cfg.clone(),
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(ScheduledAnchorPermissionSink),
+    )).await.unwrap();
+    let source = std::fs::read_to_string(&path).unwrap();
+    let rows = source.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    assert_eq!(rows[0]["type"], "fixed-session-mode");
+    assert!(rows.iter().any(|row| row["type"] == "custom-title" && row["mobileEmptySession"] == 1 && row["sessionId"] == id.to_string() && row["cwd"].as_str() == cfg.cwd.to_str()));
+    let catalog = session::jsonl::loader::list_recent_sessions(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), 20, fs).await.unwrap();
+    assert!(catalog.iter().any(|row| row.uuid == id && row.mode == ConversationMode::Chat && row.message_count == 0));
+    assert!(runtime.session_lifecycle.shutdown_and_drain().await.complete);
+    drop(runtime);
+
+    let captured = std::fs::read_to_string(&path).unwrap();
+    let retry = super::DesktopConfig {
+        session_transcript_path: Some(path.clone()),
+        session_resume_snapshot: Some(super::DesktopSessionResumeSnapshot {
+            source_session_id: id.to_string(),
+            content: captured.into(),
+        }),
+        ..cfg
+    };
+    let resumed = Box::pin(super::build(
+        retry,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(ScheduledAnchorPermissionSink),
+    )).await.unwrap();
+    let resumed_source = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(resumed_source.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).is_ok_and(|row| row["mobileEmptySession"] == 1)).count(), 1);
+    assert!(resumed.session_lifecycle.shutdown_and_drain().await.complete);
+}
+
+#[tokio::test]
+async fn scheduled_anchor_is_idempotent_and_rejects_foreign_owner() {
+    use lingxi_core::host::session_context::ConversationMode;
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("home");
+    let id = uuid::Uuid::new_v4();
+    let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cwd.clone()));
+    let writer = session::JsonlWriter::new(path.clone(), fs);
+    let _lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+        .claim_session_id(&id.to_string(), std::process::id()).unwrap();
+    writer.initialize_fixed_session_mode(&id.to_string(), ConversationMode::Chat, 0).await.unwrap();
+    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Chat).await.unwrap());
+    let anchored = std::fs::read(&path).unwrap();
+    assert!(!super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Chat).await.unwrap());
+    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Code).await.is_err());
+    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd.join("other"), &id.to_string(), ConversationMode::Chat).await.is_err());
+    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &uuid::Uuid::new_v4().to_string(), ConversationMode::Chat).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), anchored);
+    let relocated = serde_json::json!({"type":"relocated", "sessionId":id, "relocatedCwd":cwd.join("other")});
+    writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{relocated}").unwrap();
+    let foreign_relocation = std::fs::read(&path).unwrap();
+    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Chat).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), foreign_relocation);
+    std::fs::write(&path, &anchored).unwrap();
+
+    let existing_id = uuid::Uuid::new_v4();
+    let existing_path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &existing_id.to_string());
+    let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cwd.clone()));
+    let existing = session::JsonlWriter::new(existing_path.clone(), fs);
+    let _existing_lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+        .claim_session_id(&existing_id.to_string(), std::process::id()).unwrap();
+    existing.initialize_fixed_session_mode(&existing_id.to_string(), ConversationMode::Chat, 0).await.unwrap();
+    let row = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":existing_id,"parentUuid":null,"cwd":cwd,"message":{"role":"user","content":"existing history"}});
+    writeln!(std::fs::OpenOptions::new().append(true).open(&existing_path).unwrap(), "{row}").unwrap();
+    let original = std::fs::read(&existing_path).unwrap();
+    assert!(!session::jsonl::route_lines(std::str::from_utf8(&original).unwrap()).messages_in_order.is_empty());
+    assert!(!super::assembly::ensure_scheduled_durable_anchor(&existing, &existing_path, &cwd, &existing_id.to_string(), ConversationMode::Chat).await.unwrap());
+    assert_eq!(std::fs::read(&existing_path).unwrap(), original);
+}
+
 struct ColdResumeTool(Arc<std::sync::atomic::AtomicUsize>);
 
 #[async_trait::async_trait]
@@ -78,86 +174,30 @@ impl tool_api::Tool for ColdResumeTool {
 
 struct ColdResumePermissionGate(Arc<std::sync::atomic::AtomicUsize>);
 
-#[tokio::test]
-async fn captured_mode_only_draft_restores_transition_and_rejects_damaged_rows() {
-    use super::{hydrate_captured_session_before_start, DesktopConfig, DesktopSessionResumeSnapshot};
-    use lingxi_core::host::OrchestratorHandle;
-    use orchestrator::test_support::{noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider};
-    let root = tempfile::tempdir().unwrap();
-    let id = lingxi_core::types::SessionId::new();
-    let sid = id.as_uuid().to_string();
-    let source = format!("{}\n", serde_json::json!({"type":"session-mode", "sessionId":sid,
-        "sessionMode":"code", "contextRevision":4, "profileEpoch":4,
-        "admittedMode":"chat", "admittedEpoch":3, "pending":true}));
-    assert!(super::session_state::is_mode_only_draft(&source, &sid));
-    assert!(!super::session_state::is_mode_only_draft(source.trim_end_matches('\n'), &sid));
-    assert!(super::session_state::is_mode_only_draft(&source.replace(&sid, &sid.to_uppercase()), &sid));
-    let incomplete = format!("{}\n", serde_json::json!({"type":"session-mode", "sessionId":sid,
-        "sessionMode":"chat", "contextRevision":3, "profileEpoch":3}));
-    assert!(!super::session_state::is_mode_only_draft(&incomplete, &sid));
-    for damaged in [format!("{source}{{bad json\n"), format!("{source}{}\n", serde_json::json!({
-        "type":"user", "sessionId":sid, "message": {"role":"user"}
-    }))] {
-        assert!(!super::session_state::is_mode_only_draft(&damaged, &sid));
-    }
-    let cfg = DesktopConfig {
-        cwd: root.path().into(),
-        session_id_override: Some(sid.clone()),
-        session_resume_snapshot: Some(DesktopSessionResumeSnapshot {
-            source_session_id: sid.clone(), content: source.into(),
-        }),
-        ..Default::default()
-    };
-    let orch = orchestrator::ConversationOrchestrator::new(
-        orchestrator::OrchestratorConfig::default(), Arc::new(MockApiClient::new(Vec::new())),
-        Arc::new(tool_api::ToolRegistry::new()), noop_hook_executor(), Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()), Arc::new(StaticMemoryProvider::empty()), root.path().into(),
-    ).with_session_id(id);
-    hydrate_captured_session_before_start(&orch, &cfg, lingxi_core::host::ModelProvenance::ProviderCatalogTier).await.unwrap();
-    let profile = orch.conversation_mode().await;
-    assert_eq!((profile.active, profile.selected, profile.revision, profile.pending),
-        (lingxi_core::host::session_context::ConversationMode::Chat,
-         lingxi_core::host::session_context::ConversationMode::Code, 4, true));
-}
-
 #[test]
-fn every_draft_mode_record_must_be_a_complete_valid_transition() {
+fn mode_only_draft_requires_exactly_one_valid_fixed_header() {
     let sid = uuid::Uuid::new_v4().to_string();
-    let valid = serde_json::json!({"type":"session-mode", "sessionId":sid,
-        "sessionMode":"chat", "contextRevision":4, "profileEpoch":4,
-        "admittedMode":"code", "admittedEpoch":3, "pending":true});
-    let next = serde_json::json!({"type":"session-mode", "sessionId":sid,
-        "sessionMode":"code", "contextRevision":5, "profileEpoch":5,
-        "admittedMode":"code", "admittedEpoch":5, "pending":false});
-    assert!(super::session_state::is_mode_only_draft(
-        &format!("{valid}\n{next}\n"),
+    let fixed = serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"chat", "instructionEpoch":3});
+    let source = format!("{fixed}\n");
+    assert!(super::session_state::is_mode_only_draft(&source, &sid));
+    assert!(!super::session_state::is_mode_only_draft(
+        source.trim_end(),
         &sid
     ));
-    let mut invalid_selected = valid.clone();
-    invalid_selected["sessionMode"] = serde_json::json!("bogus");
-    let mut invalid_admitted = valid.clone();
-    invalid_admitted["admittedMode"] = serde_json::json!("bogus");
-    let mut invalid_epoch = valid.clone();
-    invalid_epoch["profileEpoch"] = serde_json::json!(5);
-    let mut invalid_pending = valid.clone();
-    invalid_pending["pending"] = serde_json::json!(false);
-    let mut incomplete = valid.clone();
-    incomplete.as_object_mut().unwrap().remove("admittedEpoch");
-    for damaged in [
-        invalid_selected,
-        invalid_admitted,
-        invalid_epoch,
-        invalid_pending,
-        incomplete,
+    for bad in [
+        serde_json::json!({"type":"session-mode", "sessionId":sid, "sessionMode":"chat"}),
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"chat"}),
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"bogus", "instructionEpoch":0}),
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"chat", "instructionEpoch":0, "pending":false}),
     ] {
-        assert!(
-            !super::session_state::is_mode_only_draft(&format!("{valid}\n{damaged}\n"), &sid),
-            "accepted damaged final record {damaged}"
-        );
-        assert!(
-            !super::session_state::is_mode_only_draft(&format!("{damaged}\n{next}\n"), &sid),
-            "accepted damaged earlier record {damaged}"
-        );
+        assert!(!super::session_state::is_mode_only_draft(
+            &format!("{bad}\n"),
+            &sid
+        ));
+        assert!(!super::session_state::is_mode_only_draft(
+            &format!("{source}{bad}\n"),
+            &sid
+        ));
     }
 }
 
@@ -191,7 +231,8 @@ fn draft_lifecycle_attachments_require_the_host_shape_and_a_closed_chain() {
             "toolUseID":"SessionStart", "content":["hook context"]
         }),
     );
-    let source = format!("{startup}\n{context}\n");
+    let mode = serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"chat", "instructionEpoch":1});
+    let source = format!("{mode}\n{startup}\n{context}\n");
     assert!(super::session_state::is_mode_only_draft(
         &source,
         &sid.to_string()
@@ -200,14 +241,6 @@ fn draft_lifecycle_attachments_require_the_host_shape_and_a_closed_chain() {
         source.trim_end_matches('\n'),
         &sid.to_string()
     ));
-    let mode = serde_json::json!({"type":"session-mode", "sessionId":sid,
-        "sessionMode":"chat", "contextRevision":1, "profileEpoch":1,
-        "admittedMode":"chat", "admittedEpoch":1, "pending":false});
-    assert!(super::session_state::is_mode_only_draft(
-        &format!("{source}{mode}\n"),
-        &sid.to_string()
-    ));
-
     let mut wrong_parent = context.clone();
     wrong_parent["parentUuid"] = serde_json::json!(uuid::Uuid::new_v4());
     let mut foreign = context.clone();
@@ -248,7 +281,7 @@ fn draft_lifecycle_attachments_require_the_host_shape_and_a_closed_chain() {
     ] {
         assert!(
             !super::session_state::is_mode_only_draft(
-                &format!("{startup}\n{bad}\n"),
+                &format!("{mode}\n{startup}\n{bad}\n"),
                 &sid.to_string()
             ),
             "accepted {bad}"
@@ -285,7 +318,7 @@ fn draft_lifecycle_attachments_require_the_host_shape_and_a_closed_chain() {
             }),
         );
         assert!(super::session_state::is_mode_only_draft(
-            &format!("{lifecycle}\n"),
+            &format!("{mode}\n{lifecycle}\n"),
             &sid.to_string()
         ));
     }
@@ -299,23 +332,28 @@ fn draft_lifecycle_attachments_require_the_host_shape_and_a_closed_chain() {
     ] {
         let attachment = row(uuid::Uuid::new_v4(), serde_json::Value::Null, payload);
         assert!(super::session_state::is_mode_only_draft(
-            &format!("{attachment}\n"),
+            &format!("{mode}\n{attachment}\n"),
             &sid.to_string()
         ));
     }
 }
 
 #[test]
-fn unprompted_code_draft_accepts_typed_metadata_without_a_mode_record() {
+fn unprompted_code_draft_requires_fixed_header_before_typed_metadata() {
     let sid = uuid::Uuid::new_v4();
     let permission = serde_json::json!({"type":"permission-mode", "sessionId":sid,
         "permissionMode":"acceptEdits"});
     let title = serde_json::json!({"type":"custom-title", "sessionId":sid,
         "customTitle":"unsent draft"});
+    let mode = serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"code", "instructionEpoch":0});
+    assert!(!super::session_state::is_mode_only_draft(
+        &format!("{permission}\n"),
+        &sid.to_string()
+    ));
     for source in [
-        format!("{permission}\n"),
-        format!("{title}\n"),
-        format!("{permission}\n{title}\n"),
+        format!("{mode}\n{permission}\n"),
+        format!("{mode}\n{title}\n"),
+        format!("{mode}\n{permission}\n{title}\n"),
     ] {
         assert!(super::session_state::is_mode_only_draft(
             &source,
@@ -334,7 +372,7 @@ fn unprompted_code_draft_accepts_typed_metadata_without_a_mode_record() {
         serde_json::json!({"type":"custom-title", "sessionId":uuid::Uuid::new_v4(), "customTitle":"foreign"}),
     ] {
         assert!(!super::session_state::is_mode_only_draft(
-            &format!("{permission}\n{bad}\n"),
+            &format!("{mode}\n{permission}\n{bad}\n"),
             &sid.to_string()
         ));
     }
@@ -349,7 +387,7 @@ fn unprompted_code_draft_accepts_typed_metadata_without_a_mode_record() {
 }
 
 #[tokio::test]
-async fn captured_startup_hook_draft_without_mode_row_restores_code_before_hooks() {
+async fn captured_startup_hook_draft_restores_fixed_code_before_hooks() {
     use super::{
         hydrate_captured_session_before_start, DesktopConfig, DesktopSessionResumeSnapshot,
     };
@@ -362,7 +400,8 @@ async fn captured_startup_hook_draft_without_mode_row_restores_code_before_hooks
     let id = lingxi_core::types::SessionId::new();
     let sid = id.as_uuid().to_string();
     let source = format!(
-        "{}\n",
+        "{}\n{}\n",
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":"code", "instructionEpoch":0}),
         serde_json::json!({
             "type":"attachment", "sessionId":sid, "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
             "isSidechain":false, "cwd":root.path(), "version":"1", "timestamp":"2026-10-28T00:00:00Z",
@@ -402,18 +441,8 @@ async fn captured_startup_hook_draft_without_mode_row_restores_code_before_hooks
     );
     let profile = orch.conversation_mode().await;
     assert_eq!(
-        (
-            profile.active,
-            profile.selected,
-            profile.revision,
-            profile.pending
-        ),
-        (
-            lingxi_core::host::session_context::ConversationMode::Code,
-            lingxi_core::host::session_context::ConversationMode::Code,
-            0,
-            false
-        )
+        profile.mode,
+        lingxi_core::host::session_context::ConversationMode::Code
     );
     assert!(orch.session().lock().await.history.is_empty());
 }
@@ -472,6 +501,7 @@ async fn captured_cold_history_waits_for_transport_before_dispatching_deferred_t
     let assistant = uuid::Uuid::new_v4();
     let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
     let rows = [
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id.as_uuid(),"sessionMode":"code","instructionEpoch":0}),
         serde_json::json!({"type":"user","uuid":user,"sessionId":id.as_uuid(),"parentUuid":null,"message":{"role":"user","content":"pending tool"}}),
         serde_json::json!({"type":"assistant","uuid":assistant,"sessionId":id.as_uuid(),"parentUuid":user,"message":{"role":"assistant","content":[{"type":"tool_use","id":"deferred_cold","name":"NeedsApproval","input":{}}]}}),
         serde_json::json!({"type":"attachment","uuid":uuid::Uuid::new_v4(),"sessionId":id.as_uuid(),"parentUuid":assistant,"attachment":{"type":"hook_deferred_tool","toolUseID":"deferred_cold","toolName":"NeedsApproval","toolInput":{}}}),
@@ -582,15 +612,11 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
     std::fs::create_dir_all(unselected.parent().unwrap()).unwrap();
     let content = format!(
         "{}\n{}\n",
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":session_id.as_uuid(), "sessionMode":"chat", "instructionEpoch":1}),
         serde_json::json!({
             "type":"user", "uuid":uuid, "sessionId":session_id.as_uuid(),
             "parentUuid":null, "cwd":target,
             "message":{"role":"user","content":"selected-history"}
-        }),
-        serde_json::json!({
-            "type":"session-mode", "sessionId":session_id.as_uuid(),
-            "sessionMode":"chat", "contextRevision":1, "profileEpoch":1,
-            "admittedMode":"chat", "admittedEpoch":1, "pending":false
         }),
     );
     std::fs::write(&selected, &content).unwrap();
@@ -701,7 +727,7 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
     );
     let mode = lingxi_core::host::OrchestratorHandle::conversation_mode(&orchestrator).await;
     assert_eq!(
-        mode.active,
+        mode.mode,
         lingxi_core::host::session_context::ConversationMode::Chat,
         "the captured profile is active before SessionStart hooks"
     );

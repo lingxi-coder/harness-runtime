@@ -80,9 +80,7 @@ fn configured_chat_creates_and_cold_resumes_the_original_session_once() {
     .unwrap();
     let (id, path) = first.runtime().block_on(async {
         let state = first.inner().orchestrator.conversation_mode().await;
-        assert_eq!(state.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(state.selected, state.active);
-        assert_eq!(state.revision, 0);
+        assert_eq!(state.mode, session::jsonl::SessionMode::Chat);
         let events = drained(&first_listener).await;
         assert!(events.iter().any(|event| matches!(event,
             Ev::SessionStarted { session_id, mode: SessionModeDto::Chat } if session_id == &state.session_id
@@ -95,9 +93,7 @@ fn configured_chat_creates_and_cold_resumes_the_original_session_once() {
         assert_eq!(calls[0].0["source"], "startup");
         let source = calls[0].1.as_deref().expect("mode persisted before hook");
         assert_eq!(
-            session::JsonlWriter::fixed_session_mode_from_source(source, &id)
-                .unwrap()
-                .active,
+            session::JsonlWriter::fixed_session_mode_from_source(source, &id).unwrap(),
             session::jsonl::SessionMode::Chat
         );
     }
@@ -115,7 +111,7 @@ fn configured_chat_creates_and_cold_resumes_the_original_session_once() {
     resumed.runtime().block_on(async {
         let state = resumed.inner().orchestrator.conversation_mode().await;
         assert_eq!(state.session_id, id);
-        assert_eq!(state.active, session::jsonl::SessionMode::Chat);
+        assert_eq!(state.mode, session::jsonl::SessionMode::Chat);
         assert_eq!(resumed.inner().session_writer.active_path(), path);
         let events = drained(&listener).await;
         assert!(events.iter().any(|event| matches!(event,
@@ -148,7 +144,9 @@ fn cold_resume_restores_recorded_workspace_and_full_transcript() {
         .lines()
         .map(|line| {
             let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
-            value["cwd"] = serde_json::json!(workspace.to_string_lossy());
+            if value.get("cwd").is_some() {
+                value["cwd"] = serde_json::json!(workspace.to_string_lossy());
+            }
             format!("{value}\n")
         })
         .collect::<String>();
@@ -281,8 +279,7 @@ fn isolated_app_agent_keeps_initial_chat_without_a_transcript() {
     let (handle, _) = build_submit_handle_with_config(config, tmp.path());
     handle.runtime().block_on(async {
         let state = handle.inner().orchestrator.conversation_mode().await;
-        assert_eq!(state.active, session::jsonl::SessionMode::Chat);
-        assert_eq!(state.revision, 0);
+        assert_eq!(state.mode, session::jsonl::SessionMode::Chat);
         assert!(!handle.inner().session_writer.active_path().exists());
     });
 }

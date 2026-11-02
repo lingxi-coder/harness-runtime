@@ -1427,13 +1427,11 @@ async fn hydrate_captured_session_before_start(
             cfg.cli_agent.is_some()
                 || model_provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier,
             permission_mode,
-            Some(
-                session::JsonlWriter::fixed_session_mode_from_source(
-                    &snapshot.content,
-                    &session_id.to_string(),
-                )
-                .map_err(BuildError::Orchestrator)?,
-            ),
+            session::JsonlWriter::fixed_session_mode_from_source(
+                &snapshot.content,
+                &session_id.to_string(),
+            )
+            .map_err(BuildError::Orchestrator)?,
             &snapshot.content,
         )
         .await

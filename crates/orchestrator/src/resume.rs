@@ -775,8 +775,9 @@ fn replay_captured_session_with_text_projection(
     // `load_session` returns only the resumable chain; prompt snapshots are
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
-    let profile_epoch = JsonlWriter::session_mode_transition_from_source(&source, &sid_str)
-        .map_or(0, |profile| profile.active_epoch);
+    let profile_epoch = JsonlWriter::fixed_session_profile_from_source(&source, &sid_str)
+        .map_err(ResumeError::Profile)?
+        .instruction_epoch;
     let (snapshot, rendering) =
         prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
     runtime_metadata.prompt_snapshot = snapshot;
@@ -925,8 +926,7 @@ pub fn context_rendering_hint_from_messages(
 
 /// Recover prompt attachments only from the admitted epoch in the captured
 /// source. Session-mode metadata is absent from `messages_in_order`, so its
-/// original position must be considered before the message stream is routed.
-/// Transcripts predating profile revisions begin in epoch zero.
+/// Only the session's current instruction epoch may supply its prompt snapshot.
 #[must_use]
 pub fn prompt_state_for_epoch_from_source(
     source: &str,
@@ -939,7 +939,11 @@ pub fn prompt_state_for_epoch_from_source(
     let Ok(target_id) = Uuid::parse_str(session_id) else {
         return (None, None);
     };
-    let mut active_epoch = 0;
+    if !JsonlWriter::fixed_session_profile_from_source(source, session_id)
+        .is_ok_and(|profile| profile.instruction_epoch == expected_epoch)
+    {
+        return (None, None);
+    }
     let mut matching = String::new();
     for line in source.lines() {
         let Ok(row) = Utf16JsonProjection::parse(line) else {
@@ -953,15 +957,13 @@ pub fn prompt_state_for_epoch_from_source(
             continue;
         }
         match row.string_at("/type") {
-            Some("session-mode") => {
-                if let Some(profile) =
-                    JsonlWriter::session_mode_transition_from_source(line, session_id)
+            Some("attachment") => {
+                // A fork copies source attachments for audit, but its new
+                // instruction epoch must assemble a fresh prompt. Branch
+                // records carry their source in `forkedFrom`.
+                if row.string_at("/attachment/type") == Some("prompt_snapshot")
+                    && row.string_at("/forkedFrom/sessionId").is_none()
                 {
-                    active_epoch = profile.active_epoch;
-                }
-            }
-            Some("attachment") if active_epoch == expected_epoch => {
-                if row.string_at("/attachment/type") == Some("prompt_snapshot") {
                     matching.push_str(line);
                     matching.push('\n');
                 }
@@ -3402,20 +3404,17 @@ impl ConversationOrchestrator {
         entries: &[JsonlMessage],
         preserve_boot_model: bool,
         permission_mode: permission::PermissionMode,
-        profile: Option<lingxi_core::host::session_context::SessionModeTransition>,
+        expected_mode: lingxi_core::host::session_context::ConversationMode,
         source: &str,
     ) -> Result<(), String> {
         let persisted =
-            JsonlWriter::fixed_session_mode_from_source(source, &session_id.to_string())?;
-        if profile.as_ref().is_some_and(|supplied| {
-            supplied.active != persisted.active || supplied.active_epoch != persisted.active_epoch
-        }) {
+            JsonlWriter::fixed_session_profile_from_source(source, &session_id.to_string())?;
+        if expected_mode != persisted.mode {
             return Err("captured session mode does not match the supplied profile".into());
         }
-        self.ensure_conversation_mode(persisted.active)
+        self.ensure_conversation_mode(persisted.mode)
             .await
             .map_err(|error| error.to_string())?;
-        let profile = Some(persisted);
         let (replayed, last_uuid, metadata) = build_state_from_jsonl(session_id, messages);
         let model_recovered = messages.iter().any(|message| {
             carries_human_turn_settings(message)
@@ -3451,18 +3450,15 @@ impl ConversationOrchestrator {
         self.restore_resume_prompt_state_from_source(
             source,
             &session_id.to_string(),
-            profile.as_ref().map_or(0, |profile| profile.active_epoch),
+            persisted.instruction_epoch,
         )
         .await;
         // A captured resume is mounted before SessionStart and instruction
         // hooks run. Restore the admitted profile and epoch at that boundary,
         // including its model-only exclusions, before any hook observes it.
-        self.restore_captured_conversation_profile(
-            lingxi_core::host::session_context::ConversationMode::Code,
-            profile,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        self.restore_captured_conversation_profile(persisted.mode, persisted.instruction_epoch)
+            .await
+            .map_err(|error| error.to_string())?;
         let (model, profile) = {
             let state = self.session.lock().await;
             (state.model.clone(), state.model_profile.clone())
@@ -3678,9 +3674,11 @@ impl ConversationOrchestrator {
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("\n");
-        let fixed_profile =
-            JsonlWriter::fixed_session_mode_from_source(&metadata_source, &session_id.to_string())
-                .map_err(ResumeError::Profile)?;
+        let fixed_profile = JsonlWriter::fixed_session_profile_from_source(
+            &metadata_source,
+            &session_id.to_string(),
+        )
+        .map_err(ResumeError::Profile)?;
         let effort_was_explicit = config.effort.is_some();
         if config.effort.is_none() {
             config.effort.clone_from(&replayed.runtime_metadata.effort);
@@ -3702,7 +3700,7 @@ impl ConversationOrchestrator {
             memory,
             cwd,
         )
-        .with_conversation_mode(fixed_profile.active);
+        .with_conversation_mode(fixed_profile.mode);
         orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(
             &replayed.messages,
         ));
@@ -3797,8 +3795,8 @@ impl ConversationOrchestrator {
         // The metadata was captured with the same source that supplied the
         // history and prompt snapshot, even when no writer is attached.
         orch.restore_captured_conversation_profile(
-            lingxi_core::host::session_context::ConversationMode::Code,
-            Some(fixed_profile),
+            fixed_profile.mode,
+            fixed_profile.instruction_epoch,
         )
         .await
         .map_err(|error| ResumeError::Profile(error.to_string()))?;

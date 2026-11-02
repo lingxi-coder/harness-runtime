@@ -271,6 +271,31 @@ fn idle_scheduled_run_borrows_the_live_owner_and_marks_it_for_reload() {
     });
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[test]
+fn idle_scheduled_run_survives_default_thread_stack_in_isolated_process() {
+    // A real stack overflow aborts the whole process. Run the existing
+    // selected-session regression in a child with Tokio's default thread
+    // budget so a missing product-side worker configuration fails this test
+    // without terminating the rest of the suite.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env("RUST_MIN_STACK", "2097152")
+        .args([
+            "--exact",
+            "mobile::host::tests::session_owner_tests::idle_scheduled_run_borrows_the_live_owner_and_marks_it_for_reload",
+            "--test-threads=1",
+        ])
+        .output()
+        .expect("run the scheduled session regression in an isolated process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "scheduled session failed on the production worker: status={}, stdout={stdout}, stderr={stderr}",
+        output.status
+    );
+}
+
 #[test]
 fn run_now_can_target_its_own_idle_session() {
     let tmp = tempfile::tempdir().unwrap();
