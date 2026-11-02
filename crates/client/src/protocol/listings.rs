@@ -472,6 +472,10 @@ pub struct AgentDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SessionAgentSummaryDto {
+    /// Report delivery, independent of lifecycle: delivered, flagged, withheld,
+    /// or pending. None means this run did not enable the handback protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_delivery: Option<String>,
     /// Stable agent id (`agent:<uuid>`); the main conversation uses `main`.
     pub agent_id: String,
     /// Display name (the spawn name, or a short id fallback).

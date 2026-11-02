@@ -1909,6 +1909,7 @@ fn current_contract_index() -> ContractIndex {
     put("AgentDto.description", "String");
     put("AgentDto.tools_allowed", "Vec<String>");
 
+    put("SessionAgentSummaryDto.report_delivery", "Option<String>");
     put("SessionAgentSummaryDto.agent_id", "String");
     put("SessionAgentSummaryDto.name", "ClientTextDto");
     put("SessionAgentSummaryDto.agent_type", "String");
@@ -4568,6 +4569,7 @@ fn contract_index_covers_every_dto() {
             tools_allowed: vec![],
         },
         SessionAgentSummaryDto {
+            report_delivery: None,
             agent_id: String::new(),
             name: String::new().into(),
             agent_type: String::new(),

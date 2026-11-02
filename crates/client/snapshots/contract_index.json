@@ -1322,6 +1322,7 @@
   "SessionAgentSummaryDto.agent_type": "String",
   "SessionAgentSummaryDto.latest_activity": "Option<ClientTextDto>",
   "SessionAgentSummaryDto.name": "ClientTextDto",
+  "SessionAgentSummaryDto.report_delivery": "Option<String>",
   "SessionAgentSummaryDto.status": "String",
   "SessionAgentSummaryDto.updated_at_ms": "Option<u64>",
   "SessionRowDto.message_count": "u32",

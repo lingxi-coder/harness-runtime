@@ -464,6 +464,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
             self.remember(
                 &self.allocated_session_id(*origin_session_id),
                 &SessionAgentSummaryDto {
+                    report_delivery: None,
                     agent_id: agent_id.to_string(),
                     name: ClientTextDto::from(name.clone().unwrap_or_else(|| agent_type.clone())),
                     agent_type: agent_type.clone(),
@@ -529,6 +530,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     ClientEvent::SessionAgentUpdated {
                         session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_id.to_string(),
                             name,
                             agent_type,
@@ -614,6 +616,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: key,
                             name: bound.name,
                             agent_type: bound.agent_type,
@@ -801,6 +804,7 @@ impl DesktopSessionAgentObserver {
             ClientEvent::SessionAgentUpdated {
                 session_id: bound.session_id,
                 agent: SessionAgentSummaryDto {
+                    report_delivery: None,
                     agent_id: key.clone(),
                     name: bound.name,
                     agent_type: bound.agent_type,

@@ -561,6 +561,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SessionAgentList {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
                 agents: vec![SessionAgentSummaryDto {
+                    report_delivery: None,
                     agent_id: "main".to_string(),
                     name: "Main agent".into(),
                     agent_type: "main".to_string(),
@@ -592,6 +593,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SessionAgentUpdated {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
                 agent: SessionAgentSummaryDto {
+                    report_delivery: None,
                     agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
                     name: "Researcher".into(),
                     agent_type: "general-purpose".to_string(),

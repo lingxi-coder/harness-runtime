@@ -2117,6 +2117,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_id.to_string(),
                             name: name.into(),
                             agent_type,
@@ -2172,6 +2173,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                         .emit(ClientEvent::SessionAgentUpdated {
                             session_id: bound.session_id,
                             agent: SessionAgentSummaryDto {
+                                report_delivery: None,
                                 agent_id: agent_key,
                                 name: bound.name.into(),
                                 agent_type: bound.agent_type,
@@ -2230,6 +2232,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -2325,6 +2328,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -2355,6 +2359,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -2380,6 +2385,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
+                            report_delivery: None,
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -8659,6 +8665,7 @@ impl MobileEngineHandle {
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
         Some(SessionAgentSummaryDto {
+            report_delivery: None,
             agent_id,
             name: client::protocol::text::ClientTextDto::from_projection(&name)
                 .expect("agent label is text"),
@@ -8680,6 +8687,7 @@ impl MobileEngineHandle {
             "idle"
         };
         let mut agents = vec![SessionAgentSummaryDto {
+            report_delivery: None,
             agent_id: "main".to_string(),
             name: "Main agent".into(),
             agent_type: "main".to_string(),
