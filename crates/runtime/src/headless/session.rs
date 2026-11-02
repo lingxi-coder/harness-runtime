@@ -41,6 +41,8 @@ pub enum SessionStart {
 pub struct PreparedSession {
     source_id: Uuid,
     source_content: Arc<str>,
+    source_authority: session::jsonl::writer::TranscriptFileAuthority,
+    source_lease: Option<SharedSessionWriterLease>,
     mounted_content: Arc<str>,
     session_id: Uuid,
     fork: bool,
@@ -61,6 +63,7 @@ pub struct PreparedSession {
 pub async fn prepare(
     config: &mut DesktopConfig,
     start: &SessionStart,
+    retain_source_for_rewind: bool,
 ) -> Result<Option<PreparedSession>, String> {
     config.defer_session_start = true;
     let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(config.cwd.clone()));
@@ -338,7 +341,7 @@ pub async fn prepare(
         }
         Some(authority)
     } else if config.session_persistence {
-        Some(source_identity)
+        Some(source_identity.clone())
     } else {
         None
     };
@@ -361,6 +364,8 @@ pub async fn prepare(
     Ok(Some(PreparedSession {
         source_id,
         source_content: content,
+        source_authority: source_identity,
+        source_lease: retain_source_for_rewind.then_some(source_lease),
         mounted_content,
         session_id,
         fork,
@@ -723,15 +728,30 @@ pub async fn rewind_files(
         return Err(invalid());
     }
     let message_id = Uuid::parse_str(message_id).map_err(|_| invalid())?;
-    let history = session::FileHistory::new(
-        config.lingxi_home.clone(),
-        config.cwd.clone(),
-        prepared.source_id.to_string(),
-    );
-    history.restore_from_records(session::file_history::parse_snapshot_records(
+    let loaded = session::jsonl::route_lines(&prepared.source_content);
+    let workspace = session::jsonl::loader::transcript_workspace_path(
+        &prepared.source_authority.path(),
+        &loaded,
+    )
+    .ok_or("rewind source has no valid workspace")?;
+    let mode = session::JsonlWriter::fixed_session_mode_from_source(
         &prepared.source_content,
-    ));
-    history.rewind_files(message_id).await
+        &prepared.source_id.to_string(),
+    )?;
+    session::file_history::rewind_from_captured(
+        &config.lingxi_home,
+        &workspace,
+        prepared.source_id,
+        mode,
+        &prepared.source_authority,
+        &prepared.source_content,
+        message_id,
+        prepared
+            .source_lease
+            .clone()
+            .ok_or("session was not prepared for file rewind")?,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -809,7 +829,9 @@ mod tests {
             config.restore_draft = restore_draft;
             let trace = Arc::new(StartupTrace::default());
             let runtime = if headless {
-                let prepared = prepare(&mut config, &SessionStart::New).await.unwrap();
+                let prepared = prepare(&mut config, &SessionStart::New, false)
+                    .await
+                    .unwrap();
                 build_prepared(config.clone(), prepared, trace.clone(), startup_sink())
                     .await
                     .unwrap()
@@ -918,7 +940,7 @@ mod tests {
                     .collect::<String>(),
             )
             .unwrap();
-            let prepared = prepare(&mut config, &resume(id, false)).await;
+            let prepared = prepare(&mut config, &resume(id, false), false).await;
             if explicit.is_some() {
                 assert!(prepared.is_err());
                 continue;
@@ -1012,6 +1034,171 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_rewind_keeps_captured_source_and_original_file_workspace() {
+        for replace_source in [false, true] {
+            let (root, mut config, id, path, content) = fixture().await;
+            let first = Uuid::new_v4();
+            let second = Uuid::new_v4();
+            let content = content
+                .replace("\"first\"", &format!("\"{first}\""))
+                .replace("\"second\"", &format!("\"{second}\""));
+            let a_file = config.cwd.join("foo");
+            let b = root.path().canonicalize().unwrap().join("other");
+            std::fs::create_dir(&b).unwrap();
+            let b_file = b.join("foo");
+            std::fs::write(&a_file, b"A before").unwrap();
+            std::fs::write(&b_file, b"B business data").unwrap();
+            let history = session::FileHistory::new(config.lingxi_home.clone(), id.to_string());
+            history.make_snapshot(first).await;
+            history.track_edit(a_file.to_str().unwrap()).await;
+            std::fs::write(&a_file, b"A edited").unwrap();
+            let snapshot = history.snapshot_record(first).unwrap();
+            let content = format!(
+                "{content}{}\n{}\n",
+                session::file_history::snapshot_line_json(&id.to_string(), &snapshot),
+                serde_json::json!({"type":"relocated", "sessionId":id, "relocatedCwd":b})
+            );
+            std::fs::write(&path, &content).unwrap();
+            config.session_transcript_path = Some(path.clone());
+            let prepared = prepare(&mut config, &resume(id, false), true)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(config.cwd, b);
+            if replace_source {
+                std::fs::rename(&path, path.with_extension("retired")).unwrap();
+                std::fs::write(&path, &content).unwrap();
+            }
+            let result = rewind_files(&config, Some(&prepared), &first.to_string()).await;
+            if replace_source {
+                assert!(result.is_err());
+                assert_eq!(std::fs::read(&a_file).unwrap(), b"A edited");
+            } else {
+                assert!(result.is_ok(), "{result:?}");
+                assert_eq!(std::fs::read(&a_file).unwrap(), b"A before");
+            }
+            assert_eq!(std::fs::read(&b_file).unwrap(), b"B business data");
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_write_tool_binds_new_parent_for_safe_file_rewind() {
+        use tool_api::tool_trait::Tool;
+        for replace_parent in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let root_path = root.path().canonicalize().unwrap();
+            let a = root_path.join("a");
+            let b = root_path.join("b");
+            let home = root_path.join("home");
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            let path = a.join("new/deep/foo");
+            std::fs::create_dir_all(b.join("new/deep")).unwrap();
+            let other = b.join("new/deep/foo");
+            std::fs::write(&other, b"B business data").unwrap();
+            let history = Arc::new(session::FileHistory::new(
+                home.clone(),
+                "actual-write".into(),
+            ));
+            let first = Uuid::new_v4();
+            history.make_snapshot(first).await;
+            let builtin = tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                Arc::new(telemetry::AnalyticsBus::new()),
+                vec![a],
+            );
+            let mut invocation = tool_api::test_support::fresh_ctx();
+            invocation.file_history = Some(history.clone());
+            tool_file::FileWriteTool::new(builtin)
+                .call(
+                    tool_api::tool_trait::generated_builtin_result(&serde_json::json!({
+                        "file_path":path, "content":"new A file"
+                    })),
+                    invocation,
+                    tool_api::test_support::fresh_tx(),
+                )
+                .await
+                .unwrap();
+            let record = history.snapshot_record(first).unwrap();
+            let json = format!(
+                "{}\n",
+                session::file_history::snapshot_line_json("actual-write", &record)
+            );
+            let resumed = session::FileHistory::new(home, "actual-write".into());
+            resumed
+                .restore_from_records(session::file_history::parse_snapshot_records(&json).unwrap())
+                .unwrap();
+            if replace_parent {
+                let parent = path.parent().unwrap();
+                std::fs::rename(parent, root_path.join("retired")).unwrap();
+                std::fs::create_dir(parent).unwrap();
+                std::fs::write(&path, b"replacement business data").unwrap();
+            }
+            let outcome = resumed.rewind_files(first).await.unwrap();
+            if replace_parent {
+                assert_eq!(outcome.skipped_links, 1);
+                assert_eq!(std::fs::read(&path).unwrap(), b"replacement business data");
+                assert_eq!(
+                    std::fs::read(root_path.join("retired/foo")).unwrap(),
+                    b"new A file"
+                );
+            } else {
+                assert_eq!(outcome.changed.len(), 1);
+                assert!(!path.exists());
+            }
+            assert_eq!(std::fs::read(other).unwrap(), b"B business data");
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_rewind_reports_partial_failure_instead_of_success() {
+        let (_root, mut config, id, path, content) = fixture().await;
+        let first = Uuid::new_v4();
+        let content = content.replace("\"first\"", &format!("\"{first}\""));
+        let good = config.cwd.join("good");
+        let bad = config.cwd.join("bad");
+        std::fs::write(&good, b"good before").unwrap();
+        std::fs::write(&bad, b"bad before").unwrap();
+        let history = session::FileHistory::new(config.lingxi_home.clone(), id.to_string());
+        history.make_snapshot(first).await;
+        history.track_edit(good.to_str().unwrap()).await;
+        history.track_edit(bad.to_str().unwrap()).await;
+        let record = history.snapshot_record(first).unwrap();
+        let missing = record.tracked_file_backups[bad.to_str().unwrap()]
+            .backup_file_name
+            .as_ref()
+            .unwrap();
+        std::fs::remove_file(
+            config
+                .lingxi_home
+                .join("file-history")
+                .join(id.to_string())
+                .join(missing),
+        )
+        .unwrap();
+        std::fs::write(&good, b"good edited").unwrap();
+        std::fs::write(&bad, b"bad edited").unwrap();
+        let content = format!(
+            "{content}{}\n",
+            session::file_history::snapshot_line_json(&id.to_string(), &record)
+        );
+        std::fs::write(&path, &content).unwrap();
+        config.session_transcript_path = Some(path.clone());
+        let prepared = prepare(&mut config, &resume(id, false), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = rewind_files(&config, Some(&prepared), &first.to_string())
+            .await
+            .unwrap_err();
+        assert!(error.contains("partially restored"), "{error}");
+        assert_eq!(std::fs::read(good).unwrap(), b"good before");
+        assert_eq!(std::fs::read(bad).unwrap(), b"bad edited");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+    }
+
+    #[tokio::test]
     async fn selected_source_path_wins_and_bare_duplicate_uuid_is_rejected() {
         let (_root, config, source_id, path, source) = fixture().await;
         let duplicate_dir = config.lingxi_home.join("projects").join("duplicate");
@@ -1020,7 +1207,7 @@ mod tests {
         std::fs::write(&duplicate, source.replace("inherited", "other source")).unwrap();
 
         let mut ambiguous = config.clone();
-        let error = prepare(&mut ambiguous, &resume(source_id, false))
+        let error = prepare(&mut ambiguous, &resume(source_id, false), false)
             .await
             .err()
             .unwrap();
@@ -1029,7 +1216,7 @@ mod tests {
 
         let mut exact = config;
         exact.session_transcript_path = Some(path.clone());
-        let prepared = prepare(&mut exact, &resume(source_id, false))
+        let prepared = prepare(&mut exact, &resume(source_id, false), false)
             .await
             .unwrap()
             .unwrap();
@@ -1116,7 +1303,7 @@ mod tests {
         let source = format!("{}{relocation}\n", source_transcript(id, &config.cwd));
         std::fs::write(&upper, source).unwrap();
         let mut run = config.clone();
-        prepare(&mut run, &resume(id, false)).await.unwrap();
+        prepare(&mut run, &resume(id, false), false).await.unwrap();
         assert_eq!(run.cwd, relocated);
         assert_eq!(
             run.session_transcript_path.as_deref(),
@@ -1145,7 +1332,7 @@ mod tests {
             Some("Scheduled")
         );
         let mut run = config.clone();
-        let prepared = prepare(&mut run, &SessionStart::Continue { fork: false })
+        let prepared = prepare(&mut run, &SessionStart::Continue { fork: false }, false)
             .await
             .unwrap()
             .unwrap();
@@ -1164,7 +1351,7 @@ mod tests {
         let linked = root.path().join("other-transcript.jsonl");
         std::fs::hard_link(&path, &linked).unwrap();
         config.session_transcript_path = Some(path.clone());
-        assert!(prepare(&mut config, &resume(source_id, false))
+        assert!(prepare(&mut config, &resume(source_id, false), false)
             .await
             .is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
@@ -1181,7 +1368,7 @@ mod tests {
         std::os::unix::fs::symlink(&path, &link).unwrap();
         let mut linked = config.clone();
         linked.session_transcript_path = Some(link);
-        assert!(prepare(&mut linked, &resume(source_id, false))
+        assert!(prepare(&mut linked, &resume(source_id, false), false)
             .await
             .is_err());
 
@@ -1192,7 +1379,7 @@ mod tests {
             content: source.clone().into(),
         });
         std::fs::write(&path, source.replace("inherited", "changed")).unwrap();
-        assert!(prepare(&mut captured, &resume(source_id, false))
+        assert!(prepare(&mut captured, &resume(source_id, false), false)
             .await
             .is_err());
     }
@@ -1207,7 +1394,7 @@ mod tests {
             .replace("2026-10-07", "2026-10-09");
         std::fs::write(chat_path, chat).unwrap();
         config.initial_conversation_mode = Some(ConversationMode::Code);
-        let prepared = prepare(&mut config, &SessionStart::Continue { fork: false })
+        let prepared = prepare(&mut config, &SessionStart::Continue { fork: false }, false)
             .await
             .unwrap()
             .unwrap();
@@ -1231,7 +1418,7 @@ mod tests {
             .replace("\"sessionMode\":\"code\"", "\"sessionMode\":\"chat\"")
             .replace("2026-10-07", "2026-10-09");
         std::fs::write(&chat_path, chat).unwrap();
-        let prepared = prepare(&mut config, &SessionStart::Continue { fork: false })
+        let prepared = prepare(&mut config, &SessionStart::Continue { fork: false }, false)
             .await
             .unwrap()
             .unwrap();
@@ -1260,7 +1447,7 @@ mod tests {
             SessionStart::Continue { fork: false },
         ] {
             let mut run = config.clone();
-            let prepared = prepare(&mut run, &start).await.unwrap().unwrap();
+            let prepared = prepare(&mut run, &start, false).await.unwrap().unwrap();
             assert!(prepared.messages.is_empty());
             assert_eq!(run.session_transcript_path.as_deref(), Some(path.as_path()));
         }
@@ -1273,6 +1460,7 @@ mod tests {
                 resume_drops_turn: None,
                 fork: false,
             },
+            false,
         )
         .await
         .err()
@@ -1294,7 +1482,9 @@ mod tests {
             std::fs::write(&path, &source).unwrap();
             let mut run = config.clone();
             run.session_transcript_path = Some(path.clone());
-            assert!(prepare(&mut run, &resume(source_id, false)).await.is_err());
+            assert!(prepare(&mut run, &resume(source_id, false), false)
+                .await
+                .is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
         }
 
@@ -1306,7 +1496,9 @@ mod tests {
         std::fs::write(&path, &wrong_bucket).unwrap();
         let mut run = config.clone();
         run.session_transcript_path = Some(path.clone());
-        assert!(prepare(&mut run, &resume(source_id, false)).await.is_err());
+        assert!(prepare(&mut run, &resume(source_id, false), false)
+            .await
+            .is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), wrong_bucket);
 
         let relocated =
@@ -1315,7 +1507,7 @@ mod tests {
         std::fs::write(&path, &source).unwrap();
         let mut run = config.clone();
         run.session_transcript_path = Some(path.clone());
-        let prepared = prepare(&mut run, &resume(source_id, false))
+        let prepared = prepare(&mut run, &resume(source_id, false), false)
             .await
             .unwrap()
             .unwrap();
@@ -1327,7 +1519,7 @@ mod tests {
     #[tokio::test]
     async fn resume_keeps_one_claim_and_one_snapshot_for_history_and_metadata() {
         let (_root, mut config, source_id, path, content) = fixture().await;
-        let prepared = prepare(&mut config, &resume(source_id, false))
+        let prepared = prepare(&mut config, &resume(source_id, false), false)
             .await
             .unwrap()
             .unwrap();
@@ -1362,7 +1554,7 @@ mod tests {
         std::fs::create_dir(&other).unwrap();
         config.cwd = other.clone();
         config.add_dir = vec![std::path::PathBuf::from("relative-explicit")];
-        prepare(&mut config, &resume(source_id, false))
+        prepare(&mut config, &resume(source_id, false), false)
             .await
             .unwrap();
         assert_eq!(config.cwd, source_cwd);
@@ -1384,7 +1576,7 @@ mod tests {
         let other = _root.path().join("other-workspace");
         std::fs::create_dir(&other).unwrap();
         config.cwd = other.clone();
-        prepare(&mut config, &resume(source_id, false))
+        prepare(&mut config, &resume(source_id, false), false)
             .await
             .unwrap();
         assert_eq!(config.cwd, other);
@@ -1404,7 +1596,7 @@ mod tests {
             })
         ));
         std::fs::write(&path, &content).unwrap();
-        prepare(&mut config, &resume(source_id, false))
+        prepare(&mut config, &resume(source_id, false), false)
             .await
             .unwrap();
         assert_eq!(config.cwd, target);
@@ -1423,7 +1615,7 @@ mod tests {
     #[tokio::test]
     async fn fork_atomically_publishes_history_with_a_fresh_profile() {
         let (_root, mut config, source_id, source_path, source_content) = fixture().await;
-        let prepared = prepare(&mut config, &resume(source_id, true))
+        let prepared = prepare(&mut config, &resume(source_id, true), false)
             .await
             .unwrap()
             .unwrap();
@@ -1461,6 +1653,8 @@ mod tests {
             tokio::fs::read_to_string(source_path).await.unwrap(),
             source_content
         );
+        drop(prepared);
+        assert!(claim_session(&config.lingxi_home, source_id).is_ok());
     }
 
     #[tokio::test]
@@ -1471,7 +1665,7 @@ mod tests {
             let target_id = Uuid::new_v4();
             let target_id_text = target_id.to_string();
             config.session_id_override = Some(target_id_text.clone());
-            let prepared = prepare(&mut config, &resume(source_id, true))
+            let prepared = prepare(&mut config, &resume(source_id, true), false)
                 .await
                 .unwrap()
                 .unwrap();
@@ -1496,7 +1690,7 @@ mod tests {
                 &target_id.to_string(),
             );
             std::fs::write(&target, "existing target\n").unwrap();
-            let error = prepare(&mut collision, &resume(source_id, true))
+            let error = prepare(&mut collision, &resume(source_id, true), false)
                 .await
                 .err()
                 .unwrap();
@@ -1508,7 +1702,7 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&source_path).unwrap(), source);
 
             collision.session_id_override = Some(source_id.to_string());
-            let error = prepare(&mut collision, &resume(source_id, true))
+            let error = prepare(&mut collision, &resume(source_id, true), false)
                 .await
                 .err()
                 .unwrap();
@@ -1539,7 +1733,7 @@ mod tests {
                 .map(|row| format!("{row}\n"))
                 .collect::<String>();
             std::fs::write(&source_path, &source).unwrap();
-            let prepared = prepare(&mut config, &resume(source_id, true))
+            let prepared = prepare(&mut config, &resume(source_id, true), false)
                 .await
                 .unwrap()
                 .unwrap();
@@ -1602,7 +1796,7 @@ mod tests {
         let files_before = std::fs::read_dir(source_path.parent().unwrap())
             .unwrap()
             .count();
-        let error = prepare(&mut config, &resume(source_id, true))
+        let error = prepare(&mut config, &resume(source_id, true), false)
             .await
             .err()
             .unwrap();
@@ -1636,6 +1830,7 @@ mod tests {
                 resume_drops_turn: None,
                 fork: false,
             },
+            false,
         )
         .await
         .err()

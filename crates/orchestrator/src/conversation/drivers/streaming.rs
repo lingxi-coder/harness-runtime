@@ -1213,6 +1213,7 @@ impl StreamingTurnDriver<'_> {
                 &mut native_anthropic_request_context,
             );
         }
+        orch.ensure_transcript_rewrite_resolved()?;
         let mut mod_model_state = None;
         let stream_result = if let Some(host) = mod_host {
             let mut input = serde_json::json!({
@@ -2564,6 +2565,11 @@ impl StreamingTurnDriver<'_> {
                     }
                 };
                 match pump_outcome {
+                    Err(failure)
+                        if matches!(&failure.error, OrchestratorError::TranscriptRewriteUncertain(_)) =>
+                    {
+                        return Err(failure.error);
+                    }
                     // Nothing completed before the interrupt, so there is no
                     // assistant message to keep (Claude Code drops a
                     // thinking-only partial the same way).
@@ -2662,7 +2668,7 @@ impl StreamingTurnDriver<'_> {
                                 .emit_server_fallback_tombstone(tombstone, true)
                                 .await;
                         }
-                        exec.remove_assistant_stream_rows(&persisted_links).await;
+                        exec.remove_assistant_stream_rows(&persisted_links).await?;
                         let result_tombstones = settlement.discard_attempt_rows();
                         crate::streaming_loop::clear_tombstoned_tool_result_metadata(
                             orch,
@@ -4702,6 +4708,7 @@ impl StreamingTurnDriver<'_> {
                         &error,
                     )
                     .await;
+                    orch.ensure_transcript_rewrite_resolved()?;
                 }
             }
         }

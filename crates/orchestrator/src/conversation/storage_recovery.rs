@@ -211,6 +211,62 @@ mod tests {
         }).to_string()).unwrap()).unwrap()
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uncertain_retry_and_fallback_rewrites_fence_the_next_turn() {
+        use lingxi_core::host::session_context::ConversationMode;
+        use std::os::unix::fs::PermissionsExt;
+        for tombstone in [false, true] {
+            let (_dir, orch, writer, path) = fixture();
+            let sid = orch.session.lock().await.session_id.as_uuid().to_string();
+            writer
+                .initialize_fixed_session_mode(&sid, ConversationMode::Code, 0)
+                .await
+                .unwrap();
+            let saved = row(&orch, "question").await;
+            writer.append(&saved).await.unwrap();
+            let assistant_id = MessageId::new();
+            let assistant = JsonlMessage::from_projection(&Utf16JsonProjection::parse(&serde_json::json!({
+            "type":"assistant", "uuid":assistant_id.as_uuid().to_string(),
+            "parentUuid":saved.uuid.clone(), "sessionId":sid, "isSidechain":false,
+            "timestamp":"2026-10-23T04:11:27.000Z", "cwd":"/workspace", "version":"test",
+            "message":{"id":"retry-attempt", "role":"assistant", "content":"rejected"}
+        }).to_string()).unwrap()).unwrap();
+            writer.append(&assistant).await.unwrap();
+            *orch.transcript.last_jsonl_uuid.lock().await = Some(assistant.uuid.clone());
+            let mut name = path.file_name().unwrap().to_os_string();
+            name.push(branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX);
+            let sidecar = path.parent().unwrap().join(name);
+            std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o400)).unwrap();
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .open(&sidecar)
+                .is_ok()
+            {
+                // Privileged test runners can bypass file-mode failure injection.
+                return;
+            }
+            let result = if tombstone {
+                orch.remove_assistant_stream_rows(&[
+                    crate::streaming_loop::PersistedAssistantRowLink {
+                        uuid: assistant.uuid.clone(),
+                        parent_uuid: Some(saved.uuid.clone()),
+                    },
+                ])
+                .await
+            } else {
+                orch.discard_retry_attempt(assistant_id, &[]).await
+            };
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("rewrite is uncertain"));
+            let rewritten = std::fs::read(&path).unwrap();
+            assert!(!String::from_utf8_lossy(&rewritten).contains("rejected"));
+            let error = orch.run_turn("must not dispatch").await.unwrap_err();
+            assert!(error.to_string().contains("rewrite is uncertain"));
+            assert_eq!(std::fs::read(&path).unwrap(), rewritten);
+        }
+    }
+
     #[tokio::test]
     async fn disk_full_recovery_preserves_history_and_appends_buffered_rows_once() {
         let (_dir, orch, writer, path) = fixture();

@@ -70,7 +70,6 @@ fn fixture() -> Fixture {
     let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs));
     let file_history = Arc::new(session::FileHistory::new(
         dir.path().to_path_buf(),
-        dir.path().to_path_buf(),
         "epilogue-test".to_string(),
     ));
     Fixture {

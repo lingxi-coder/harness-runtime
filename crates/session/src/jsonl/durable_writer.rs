@@ -131,6 +131,9 @@ pub struct DurableTranscriptWriter {
     root: PathBuf,
     identity: RootIdentity,
     transcript_authority: Arc<RwLock<Option<TranscriptFileAuthority>>>,
+    /// A published rewrite whose final state could not be confirmed must not
+    /// be followed by another write using the old in-memory transcript tip.
+    rewrite_uncertain: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     authority_after_scan: Arc<std::sync::Mutex<Option<AuthorityTestGate>>>,
     #[cfg(test)]
@@ -569,6 +572,7 @@ impl DurableTranscriptWriter {
             root,
             identity,
             transcript_authority: Arc::new(RwLock::new(None)),
+            rewrite_uncertain: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             authority_after_scan: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
@@ -712,10 +716,35 @@ impl DurableTranscriptWriter {
             SESSION_STATE_FILE_MODE,
             Some(&self.identity),
         )?;
+        // Check only after taking the shared lock: a previous rewrite can
+        // become uncertain while this transaction is waiting for that lock.
+        self.ensure_rewrite_is_resolved()?;
         Ok(DurableTranscriptTransaction {
             writer: self,
             _lock: lock,
         })
+    }
+
+    /// Fence this owner after an uncertain published rewrite. Call while the
+    /// rewrite's transaction is still held; a validated remount creates a new
+    /// owner after restoring the on-disk state.
+    pub(crate) fn mark_rewrite_uncertain(&self) {
+        self.rewrite_uncertain
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn rewrite_is_uncertain(&self) -> bool {
+        self.rewrite_uncertain
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn ensure_rewrite_is_resolved(&self) -> Result<(), TranscriptWriterError> {
+        if self.rewrite_is_uncertain() {
+            return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
+                "a published transcript rewrite is uncertain; reopen the session".into(),
+            )));
+        }
+        Ok(())
     }
 
     /// Hold the stable session-state transcript lock while a caller resolves
@@ -1353,6 +1382,7 @@ impl DurableTranscriptTransaction<'_> {
         expected_digest: Option<[u8; 32]>,
         expected_file_identity: Option<RootIdentity>,
     ) -> Result<(), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         #[cfg(test)]
         self.writer.wait_authority_rewrite_test_gate();
         let Some(expected_digest) = expected_digest else {
@@ -1453,6 +1483,7 @@ impl DurableTranscriptTransaction<'_> {
         admitted_file: Option<std::fs::File>,
         force_sync: bool,
     ) -> Result<(), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         let mut line = payload
             .to_json_string()
             .map_err(crate::jsonl::exact_json::projection_error)?
@@ -1627,6 +1658,28 @@ impl DurableTranscriptTransaction<'_> {
     /// leaves the original inode truncated. Surviving `parentUuid` fields are
     /// left byte-for-byte unchanged.
     pub fn remove_message_by_uuid_at(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        message_uuid: &str,
+    ) -> Result<bool, TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
+        let result = self.remove_message_by_uuid_at_inner(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            message_uuid,
+        );
+        if matches!(&result, Err(TranscriptWriterError::WrittenButNotDurable(_))) {
+            // Keep the fence inside the transaction even for callers using
+            // DurableTranscriptTransaction directly, before its lock drops.
+            self.writer.mark_rewrite_uncertain();
+        }
+        result
+    }
+
+    fn remove_message_by_uuid_at_inner(
         &self,
         transcript_root: &Path,
         transcript_identity: &RootIdentity,
@@ -1914,6 +1967,7 @@ impl DurableTranscriptTransaction<'_> {
         delivery_id: &str,
         payload: Utf16JsonProjection,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         self.writer.append_json_once_at_locked(
             transcript_root,
             transcript_identity,
@@ -1938,6 +1992,7 @@ impl DurableTranscriptTransaction<'_> {
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         self.writer.append_json_once_at_locked(
             transcript_root,
             transcript_identity,
@@ -1962,6 +2017,7 @@ impl DurableTranscriptTransaction<'_> {
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         self.writer.append_json_once_at_locked(
             transcript_root,
             transcript_identity,
@@ -1986,6 +2042,7 @@ impl DurableTranscriptTransaction<'_> {
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, Option<String>), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         if payload.string_at("/uuid") != Some(message_uuid) {
             return Err(TranscriptWriterError::DeliveryConflict {
                 delivery_id: message_uuid.to_string(),
@@ -2597,6 +2654,80 @@ mod tests {
             .unwrap());
         worker.join().unwrap();
         assert_eq!(std::fs::metadata(transcript_path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn uncertain_tombstone_fences_the_existing_transaction_and_future_writers() {
+        let state = tempfile::tempdir().unwrap();
+        let transcript = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(transcript.path()).unwrap();
+        let relative = PathBuf::from("transcript.jsonl");
+        let path = root.join(&relative);
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"uuid\":\"keep\"}\n{\"type\":\"assistant\",\"uuid\":\"remove\"}\n",
+        )
+        .unwrap();
+        let (authority, _) =
+            TranscriptFileAuthority::capture(root.clone(), relative.clone()).unwrap();
+        let identity = root_identity(&root).unwrap();
+        let writer = DurableTranscriptWriter::open(state.path()).unwrap();
+        writer
+            .bind_transcript_authority(&path, Some(authority))
+            .unwrap();
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        writer.install_authority_rewrite_test_gate((reached_tx, release_rx));
+        let worker = std::thread::spawn({
+            let writer = writer.clone();
+            let root = root.clone();
+            let relative = relative.clone();
+            move || {
+                let transaction = writer.begin_transaction().unwrap();
+                let rewrite =
+                    transaction.remove_message_by_uuid_at(&root, &identity, &relative, "remove");
+                let raw = transaction.append_raw_json_at(
+                    &root,
+                    &identity,
+                    &relative,
+                    source_payload(serde_json::json!({"type":"agent-name","agentName":"later"})),
+                );
+                let once = transaction.append_json_once_at(
+                    &root,
+                    &identity,
+                    &relative,
+                    "delivery",
+                    source_payload(serde_json::json!({"type":"user","uuid":"later"})),
+                );
+                (rewrite, raw, once)
+            }
+        });
+        reached_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let published = std::fs::read(&path).unwrap();
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &published).unwrap();
+        release_tx.send(()).unwrap();
+        let (rewrite, raw, once) = worker.join().unwrap();
+        assert!(matches!(
+            rewrite,
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert!(matches!(
+            raw,
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert!(matches!(
+            once,
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert!(matches!(
+            writer.begin_transaction(),
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), published);
     }
 
     #[test]

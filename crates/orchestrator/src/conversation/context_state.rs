@@ -454,6 +454,11 @@ impl ConversationOrchestrator {
         &self,
         _turn_guard: &ProfileTurnGuard,
     ) -> Result<(), HandleError> {
+        if let Some(writer) = self.transcript.jsonl_writer.as_ref() {
+            writer
+                .ensure_rewrite_is_resolved()
+                .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        }
         let session_id = self.current_session_id().await;
         let mut context = self.conversation_context.lock().await;
         context.bind(session_id.as_uuid().to_string());

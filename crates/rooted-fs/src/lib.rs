@@ -222,6 +222,29 @@ pub struct RootedFileSnapshot {
 pub struct RootedWriteResult {
     /// Modification time reported by the opened write handle, when available.
     pub modified: Option<SystemTime>,
+    /// Physical identity of the directory handle that performed the write.
+    /// Missing means no post-write parent receipt is available.
+    pub parent: Option<RootedWriteParent>,
+}
+
+/// Receipt holding the directory handle that performed a completed write.
+#[derive(Debug)]
+pub struct RootedWriteParent {
+    directory: std::fs::File,
+    identity: RootIdentity,
+}
+
+impl RootedWriteParent {
+    /// Identity obtained from the still-open directory handle.
+    pub fn identity(&self) -> Result<RootIdentity, FsError> {
+        let identity = opened_file_identity(&self.directory)?;
+        if identity != self.identity {
+            return Err(FsError::OutsideWorkspace(
+                "write parent identity changed".into(),
+            ));
+        }
+        Ok(identity)
+    }
 }
 
 /// Failures that need operation-specific model-facing messages in file tools.
@@ -1851,6 +1874,12 @@ mod imp {
                 .metadata()
                 .ok()
                 .and_then(|metadata| metadata.modified().ok()),
+            parent: root_identity_from_file(&parent, relative)
+                .ok()
+                .map(|identity| RootedWriteParent {
+                    directory: parent,
+                    identity,
+                }),
         })
     }
 
@@ -1911,6 +1940,25 @@ mod imp {
             FILE_OPEN,
             FILE_ATTRIBUTE_NORMAL,
         )?;
+        mark_delete(&file, relative)
+    }
+
+    pub(super) fn remove_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
+        let file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        super::validate_open_file_single_link(&file)?;
         mark_delete(&file, relative)
     }
 
@@ -2635,6 +2683,15 @@ pub fn atomic_write(
 /// Remove a file without following any component below `root`.
 pub fn remove_file(root: &Path, relative: &Path) -> Result<(), FsError> {
     imp::remove_file(root, relative)
+}
+
+/// Remove a file through a no-follow parent chain anchored to an expected root.
+pub fn remove_file_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: &RootIdentity,
+) -> Result<(), FsError> {
+    imp::remove_file_pinned(root, relative, Some(expected))
 }
 
 #[cfg(test)]
@@ -4010,6 +4067,12 @@ mod imp {
                 .metadata()
                 .ok()
                 .and_then(|metadata| metadata.modified().ok()),
+            parent: identity_from_fd(&parent, relative)
+                .ok()
+                .map(|identity| RootedWriteParent {
+                    directory: std::fs::File::from(parent),
+                    identity,
+                }),
         })
     }
 
@@ -4047,6 +4110,22 @@ mod imp {
 
     pub(super) fn remove_file(root: &Path, relative: &Path) -> Result<(), FsError> {
         let (parent, file_name) = open_parent(root, relative, false, PRIVATE_DIR_MODE)?;
+        fs::unlinkat(&parent, &file_name, AtFlags::empty())
+            .map_err(|error| map_unix_io(relative, error))
+    }
+
+    pub(super) fn remove_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let stat = fs::statat(&parent, &file_name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| map_unix_io(relative, error))?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || stat.st_nlink != 1 {
+            return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+        }
         fs::unlinkat(&parent, &file_name, AtFlags::empty())
             .map_err(|error| map_unix_io(relative, error))
     }
@@ -4423,6 +4502,14 @@ mod imp {
     }
 
     pub(super) fn remove_file(_root: &Path, _relative: &Path) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn remove_file_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
         Err(unsupported())
     }
 
@@ -5578,6 +5665,23 @@ mod tests {
             Err(FsError::AlreadyExists(_))
         ));
         assert_eq!(std::fs::read(root.path().join(relative)).unwrap(), b"first");
+    }
+
+    #[test]
+    fn pinned_remove_refuses_replaced_root() {
+        let outer = tempfile::tempdir().unwrap();
+        let outer = outer.path().canonicalize().unwrap();
+        let root = outer.join("scope");
+        let retired = outer.join("retired");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("foo"), b"original").unwrap();
+        let identity = root_identity(&root).unwrap();
+        std::fs::rename(&root, &retired).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("foo"), b"replacement").unwrap();
+        assert!(remove_file_pinned(&root, Path::new("foo"), &identity).is_err());
+        assert_eq!(std::fs::read(root.join("foo")).unwrap(), b"replacement");
+        assert_eq!(std::fs::read(retired.join("foo")).unwrap(), b"original");
     }
 
     #[test]

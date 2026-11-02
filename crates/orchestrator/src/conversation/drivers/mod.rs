@@ -26,8 +26,8 @@ mod streaming;
 pub use realtime::{
     realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentOutput, RealtimeAgentSessionIo, RealtimeCompletionBoundary, ScheduledMediaChild, ScheduledMediaChildRoute,
-    ScheduledMediaParentCheck,
+    RealtimeAgentLimits, RealtimeAgentOutput, RealtimeAgentSessionIo, RealtimeCompletionBoundary,
+    ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 
 use super::context_state_impl::ProfileTurnGuard;
@@ -1060,6 +1060,8 @@ impl ConversationOrchestrator {
             .await;
             let cleanup = crate::native_computer::cleanup(self).await;
             let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
             self.fire_mod_turn_complete(false, result.is_err()).await;
             self.complete_turn_metrics(result.as_ref().ok());
             self.emit_terminal_rate_limit_if_changed(&result).await;
@@ -1305,6 +1307,8 @@ impl ConversationOrchestrator {
                     .await
                 })
                 .await;
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
             self.emit_terminal_rate_limit_if_changed(&result).await;
             let result = result.map_err(|e| self.enrich_api_error(e));
             match &result {
@@ -2912,7 +2916,7 @@ impl ConversationOrchestrator {
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                        .await;
+                        .await?;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue(
@@ -2972,7 +2976,7 @@ impl ConversationOrchestrator {
                     return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
                 }
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                    .await;
+                    .await?;
                 self.inject_meta_user_message(MALFORMED_TOOL_USE_RETRY_NUDGE)
                     .await;
                 // TS resets the recovery counters on the retry transition so
@@ -3092,7 +3096,7 @@ impl ConversationOrchestrator {
                                 .successful_assistant_messages
                                 .saturating_sub(u32::from(!has_api_error));
                             self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                                .await;
+                                .await?;
                             return Ok(StreamingIterationDisposition::Continue(
                                 crate::turn_loop::NativeQueryTransition::InPlaceRetry,
                             ));
@@ -3156,7 +3160,7 @@ impl ConversationOrchestrator {
                     && !prior_structured_output =>
             {
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                    .await;
+                    .await?;
                 self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                 loop_state.thinking_only_nudged = true;
                 Ok(StreamingIterationDisposition::Continue(
@@ -3221,7 +3225,7 @@ impl ConversationOrchestrator {
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                        .await;
+                        .await?;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue(
@@ -3371,6 +3375,8 @@ impl ConversationOrchestrator {
             .await;
             let cleanup = crate::native_computer::cleanup(self).await;
             let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
             self.fire_mod_turn_complete(
                 completion_cancel
                     .as_ref()
@@ -3532,6 +3538,9 @@ impl ConversationOrchestrator {
                 .await;
                 let cleanup = crate::native_computer::cleanup(self).await;
                 let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+                let result = result.and_then(|outcome| {
+                    self.ensure_transcript_rewrite_resolved().map(|()| outcome)
+                });
                 self.fire_mod_turn_complete(
                     cancel.is_cancelled()
                         || result
@@ -3604,6 +3613,8 @@ impl ConversationOrchestrator {
             .await;
             let cleanup = crate::native_computer::cleanup(self).await;
             let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
             self.fire_mod_turn_complete(
                 cancel.is_cancelled()
                     || result
@@ -4586,6 +4597,7 @@ impl ConversationOrchestrator {
             },
         )
         .await;
+        let r = r.and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
         if cancel.is_cancelled() {
             self.reset_goal_interruption();
         }

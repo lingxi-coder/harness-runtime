@@ -6,8 +6,8 @@
 
 pub use crate::jsonl::durable_writer::TranscriptFileAuthority;
 use crate::jsonl::durable_writer::{
-    require_complete_transcript_tail, DurableTranscriptWriter, TranscriptAppendOutcome,
-    TranscriptWriterError,
+    require_complete_transcript_tail, DurableTranscriptTransaction, DurableTranscriptWriter,
+    TranscriptAppendOutcome, TranscriptWriterError,
 };
 use crate::jsonl::exact_json::{
     native_message_bytes, native_message_projection, parse_exact_json, ExactJsonError,
@@ -152,6 +152,128 @@ fn durable_target_parts(
         .map(PathBuf::from)
         .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
     Ok((parent.to_path_buf(), identity, relative, None))
+}
+
+/// A title is also the durable catalog anchor for a valid zero-message draft.
+/// Derive that marker from the source protected by the current transaction,
+/// including its latest relocation, rather than from cached metadata.
+fn preserve_empty_draft_title(
+    mut payload: Utf16JsonProjection,
+    source: &str,
+    path: &Path,
+) -> Result<Utf16JsonProjection, FsError> {
+    if payload.string_at("/type") != Some("custom-title")
+        || payload.contains_property("mobileEmptySession")
+    {
+        return Ok(payload);
+    }
+    let id = payload
+        .string_at("/sessionId")
+        .ok_or_else(|| FsError::Io("custom title has no session identity".into()))?
+        .to_owned();
+    let loaded = crate::jsonl::route_lines(source);
+    let cwd = crate::jsonl::validated_empty_draft_cwd(source, &id);
+    if let Some(cwd) = cwd {
+        if !cwd.is_dir()
+            || crate::jsonl::loader::transcript_workspace_path(path, &loaded)
+                .map(PathBuf::from)
+                .as_deref()
+                != Some(cwd.as_path())
+        {
+            return Err(FsError::Io(
+                "empty session workspace does not match its transcript".into(),
+            ));
+        }
+        let cwd = cwd
+            .to_str()
+            .ok_or_else(|| FsError::Io("empty session workspace is not UTF-8".into()))?;
+        payload
+            .set_field(
+                "mobileEmptySession",
+                Utf16JsonProjection::parse("1").expect("valid number"),
+            )
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        payload
+            .set_field("cwd", Utf16JsonProjection::from(cwd))
+            .map_err(|error| FsError::Io(error.to_string()))?;
+    } else {
+        let (messages, _) = crate::jsonl::build_conversation_chain(&loaded, &id);
+        let has_anchor = source.lines().any(|line| {
+            Utf16JsonProjection::parse(line)
+                .is_ok_and(|row| row.contains_property("mobileEmptySession"))
+        });
+        if messages.is_empty() && has_anchor {
+            return Err(FsError::Io("empty session anchor is invalid".into()));
+        }
+    }
+    Ok(payload)
+}
+
+/// Avoid loading a long established conversation for every metadata
+/// backstop: a message-bearing row proves this is no longer an empty draft.
+fn preserve_title_from_admitted_file(
+    payload: Utf16JsonProjection,
+    file: &mut std::fs::File,
+    path: &Path,
+) -> Result<Utf16JsonProjection, FsError> {
+    if payload.string_at("/type") != Some("custom-title")
+        || payload.contains_property("mobileEmptySession")
+    {
+        return Ok(payload);
+    }
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| FsError::Io(error.to_string()))?;
+    let mut reader = BufReader::new(file);
+    let mut source = String::new();
+    loop {
+        let mut line = String::new();
+        if reader
+            .read_line(&mut line)
+            .map_err(|error| FsError::Io(error.to_string()))?
+            == 0
+        {
+            break;
+        }
+        if !line.trim().is_empty() {
+            let row = Utf16JsonProjection::parse(&line)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            if ["message", "rendered", "renderedRole", "toolUseResult"]
+                .iter()
+                .any(|field| row.contains_property(field))
+            {
+                return Ok(payload);
+            }
+        }
+        source.push_str(&line);
+    }
+    preserve_empty_draft_title(payload, &source, path)
+}
+
+fn append_durable_row_in_transaction(
+    transaction: &DurableTranscriptTransaction<'_>,
+    durable: &DurableTranscriptWriter,
+    path: &Path,
+    identity_store: &IdentityLogStore,
+    mut payload: Utf16JsonProjection,
+    identity_uuid: Option<&str>,
+) -> Result<(), TranscriptWriterError> {
+    let (root, identity, relative, mut admitted) = durable_target_parts(durable, path)?;
+    if let Some(file) = admitted.as_mut() {
+        require_complete_transcript_tail(file)?;
+        payload = preserve_title_from_admitted_file(payload, file, path)?;
+    }
+    if let Some(authority) = durable.transcript_authority() {
+        authority.verify_current()?;
+    }
+    if let Some(uuid) = identity_uuid {
+        message_identity::append_row_identity_at(identity_store, path, &root, &identity, uuid)?;
+    } else if payload.string_at("/type") == Some("queue-operation") {
+        message_identity::initialize_empty_host_log_at(identity_store, path, &root, &identity)?;
+    } else {
+        initialize_identity_for_fresh_metadata(identity_store, path, &root, &identity)?;
+    }
+    transaction.append_raw_json_at_with_file(&root, &identity, &relative, payload, admitted)
 }
 
 /// Rewrite an admitted target under its durable lock and explicitly transfer
@@ -495,8 +617,15 @@ fn canonical_metadata_session_id(session_id: &str) -> String {
 /// appended by another host (for example Electron's metadata-only rename)
 /// before a large transcript write crosses the backstop in one operation.
 fn latest_custom_title(path: &Path, session_id: &str) -> Option<Option<Utf16JsonProjection>> {
-    let session_id = canonical_metadata_session_id(session_id);
     let contents = std::fs::read_to_string(path).ok()?;
+    latest_custom_title_from_source(&contents, session_id)
+}
+
+fn latest_custom_title_from_source(
+    contents: &str,
+    session_id: &str,
+) -> Option<Option<Utf16JsonProjection>> {
+    let session_id = canonical_metadata_session_id(session_id);
     contents.lines().rev().find_map(|line| {
         let value = Utf16JsonProjection::parse(line).ok()?;
         if value.string_at("/type") != Some("custom-title")
@@ -881,6 +1010,12 @@ impl JsonlWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session)
             .cloned();
+        if !operations.records.is_empty()
+            && target.is_none()
+            && self.active_durable_target().is_some()
+        {
+            return Err(FsError::Io("queued transcript has no session authority".into()).into());
+        }
         while let Some(operation) = operations.records.pop_front() {
             operations.current = Some(operation.clone());
             let operation_bytes = if target.is_some() {
@@ -1115,6 +1250,20 @@ impl JsonlWriter {
         Ok(())
     }
 
+    /// Refuse another turn while a published rewrite has an uncertain result.
+    pub fn ensure_rewrite_is_resolved(&self) -> Result<(), WriterError> {
+        if self
+            .active_durable_target()
+            .is_some_and(|target| target.writer.rewrite_is_uncertain())
+        {
+            return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
+                "a published transcript rewrite is uncertain; reopen the session".into(),
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     /// Update metadata without changing the active owner or waiting for a turn.
     /// The caller's session, exact path and immutable mode are checked again
     /// under the writer mutex and the same durable transaction used by appends
@@ -1229,6 +1378,8 @@ impl JsonlWriter {
                                 ("sessionId".into(), Utf16JsonProjection::from(session_key)),
                             ])
                             .expect("metadata fields are unique");
+                            let payload =
+                                preserve_empty_draft_title(payload, content, &expected_path)?;
                             let file = authority.open_checked()?;
                             transaction.append_raw_json_at_with_file_and_sync(
                                 &authority.root,
@@ -1979,10 +2130,61 @@ impl JsonlWriter {
         {
             return state;
         }
-        // Direct library writers may not have a prepared replay snapshot.
-        // Hydrate their first mirror from the complete target so old titles
-        // outside the 64 KiB tail remain available to the backstop.
-        let content = if tokio::fs::symlink_metadata(path)
+        // A captured durable owner must never seed its mirror from a pathname
+        // which can now name a different session file. Keep failed hydration
+        // uncached so a later valid retry reads the real source again.
+        let durable_target = SessionId::parse_prefixed(&session_id).and_then(|id| {
+            self.session_targets
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&id)
+                .filter(|target| target.path == path)
+                .cloned()
+        });
+        let content = if let Some(target) = durable_target {
+            let expected = target.clone();
+            let content = if let Some(authority) = target.writer.transcript_authority() {
+                let target_path = path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    target.writer.with_transaction(|_| {
+                        if authority.path() != target_path {
+                            return Err(
+                                FsError::Io("metadata transcript source changed".into()).into()
+                            );
+                        }
+                        let bytes = authority.read_checked()?;
+                        authority.verify_current()?;
+                        String::from_utf8(bytes).map_err(|error| {
+                            TranscriptWriterError::Fs(FsError::Io(error.to_string()))
+                        })
+                    })
+                })
+                .await
+                .ok()
+                .and_then(Result::ok)
+            } else {
+                // A fresh owner has no source to hydrate until its fixed
+                // header is written and its authority is installed.
+                Some(String::new())
+            };
+            let still_current = SessionId::parse_prefixed(&session_id).is_some_and(|id| {
+                self.session_targets
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&id)
+                    .is_some_and(|target| {
+                        target.path == expected.path
+                            && target.incarnation == expected.incarnation
+                            && Arc::ptr_eq(&target.writer, &expected.writer)
+                    })
+            });
+            match (content, still_current) {
+                (Some(content), true) => content,
+                _ => return Arc::new(Mutex::new(SessionMetadataState::default())),
+            }
+        } else if self.active_durable_target().is_some() {
+            return Arc::new(Mutex::new(SessionMetadataState::default()));
+        } else if tokio::fs::symlink_metadata(path)
             .await
             .is_ok_and(|metadata| metadata.file_type().is_file())
         {
@@ -2669,6 +2871,14 @@ impl JsonlWriter {
     /// virtualize for tests (each `FileSystem` impl that hosts real files
     /// would do the same syscall internally). M5-08 may extend the trait.
     pub async fn append(&self, msg: &JsonlMessage) -> Result<(), WriterError> {
+        self.append_with_compaction(msg, local_gc_enabled()).await
+    }
+
+    async fn append_with_compaction(
+        &self,
+        msg: &JsonlMessage,
+        compact_enabled: bool,
+    ) -> Result<(), WriterError> {
         if self.active_durable_target().is_some() {
             let stamped = stamp_session_kind(msg);
             let msg = stamped.as_ref().unwrap_or(msg);
@@ -2707,8 +2917,8 @@ impl JsonlWriter {
         // the transcript rewrite runs FIRST, then the metadata re-append —
         // otherwise the re-append's freshly written records are the ones the
         // rewrite would immediately supersede.
-        self.maybe_compact_transcript(writes_compact_boundary(msg))
-            .await;
+        self.maybe_compact_transcript_with_policy(writes_compact_boundary(msg), compact_enabled)
+            .await?;
         self.maybe_re_append_metadata().await;
         Ok(())
     }
@@ -2964,39 +3174,14 @@ impl JsonlWriter {
         let identity_store = self.identity_store.clone();
         tokio::task::spawn_blocking(move || {
             durable_lock.with_transaction(|transaction| {
-                let (root, identity, relative, mut admitted) =
-                    durable_target_parts(&durable_lock, &active_path)?;
-                if let Some(file) = admitted.as_mut() {
-                    require_complete_transcript_tail(file)?;
-                }
-                if let Some(authority) = durable_lock.transcript_authority() {
-                    let _current = authority.open_checked()?;
-                }
-                if let Some(uuid) = identity_uuid.as_deref() {
-                    message_identity::append_row_identity_at(
-                        &identity_store,
-                        &active_path,
-                        &root,
-                        &identity,
-                        uuid,
-                    )?;
-                } else if payload.string_at("/type") == Some("queue-operation") {
-                    message_identity::initialize_empty_host_log_at(
-                        &identity_store,
-                        &active_path,
-                        &root,
-                        &identity,
-                    )?;
-                } else {
-                    initialize_identity_for_fresh_metadata(
-                        &identity_store,
-                        &active_path,
-                        &root,
-                        &identity,
-                    )?;
-                }
-                transaction
-                    .append_raw_json_at_with_file(&root, &identity, &relative, payload, admitted)
+                append_durable_row_in_transaction(
+                    transaction,
+                    &durable_lock,
+                    &active_path,
+                    &identity_store,
+                    payload,
+                    identity_uuid.as_deref(),
+                )
             })
         })
         .await
@@ -3088,6 +3273,54 @@ impl JsonlWriter {
     /// [`Self::re_append_session_metadata`] can read the tail and write the
     /// plan under one critical section.
     async fn append_payload(&self, payload: &str) -> Result<(), WriterError> {
+        if self.active_durable_target().is_some() {
+            if !payload.ends_with('\n') {
+                return Err(
+                    FsError::Io("transcript payload has an incomplete record".into()).into(),
+                );
+            }
+            let records = payload
+                .lines()
+                .map(|line| {
+                    Utf16JsonProjection::parse(line)
+                        .map_err(crate::jsonl::exact_json::projection_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for record in records {
+                let target = if let Some(id) = record.string_at("/sessionId") {
+                    let id = SessionId::parse_prefixed(id).ok_or_else(|| {
+                        FsError::Io("transcript record has invalid session identity".into())
+                    })?;
+                    self.session_targets
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            FsError::Io("transcript record has no session authority".into())
+                        })?
+                } else {
+                    self.active_durable_target().ok_or_else(|| {
+                        FsError::Io("active transcript authority is unavailable".into())
+                    })?
+                };
+                let active = target.path == self.active_path();
+                let bytes = record
+                    .to_json_string()
+                    .map_err(crate::jsonl::exact_json::projection_error)?
+                    .len()
+                    + 1;
+                self.append_json_durable_locked(target.path, target.writer, record, None)
+                    .await?;
+                if active {
+                    self.bytes_since_metadata_re_append
+                        .fetch_add(bytes, Ordering::Relaxed);
+                    self.bytes_since_compact
+                        .fetch_add(bytes as u64, Ordering::Relaxed);
+                }
+            }
+            return Ok(());
+        }
         let path = self.active_path();
         self.append_payload_to_path(&path, payload, true).await
     }
@@ -3262,14 +3495,27 @@ impl JsonlWriter {
     /// So this costs one env read per append today and nothing else; flipping
     /// the env matches upstream with the gate on.
     ///
-    /// Best-effort, like the metadata backstop: a rewrite failure must never
-    /// fail the append that triggered it.
-    pub async fn maybe_compact_transcript(&self, boundary_written: bool) -> Option<CompactStats> {
+    /// Failures before publication remain best-effort. If a replacement was
+    /// published but its final state is uncertain, fence the owner and report
+    /// that uncertainty to the append which triggered compaction.
+    pub async fn maybe_compact_transcript(
+        &self,
+        boundary_written: bool,
+    ) -> Result<Option<CompactStats>, WriterError> {
+        self.maybe_compact_transcript_with_policy(boundary_written, local_gc_enabled())
+            .await
+    }
+
+    async fn maybe_compact_transcript_with_policy(
+        &self,
+        boundary_written: bool,
+        enabled: bool,
+    ) -> Result<Option<CompactStats>, WriterError> {
         if self.persistent_chat.is_some() {
-            return None;
+            return Ok(None);
         }
-        if !local_gc_enabled() {
-            return None;
+        if !enabled {
+            return Ok(None);
         }
         if boundary_written {
             self.compact_backstop_bytes
@@ -3277,7 +3523,7 @@ impl JsonlWriter {
         }
         let due = self.bytes_since_compact() >= self.compact_backstop_bytes();
         if !boundary_written && !due {
-            return None;
+            return Ok(None);
         }
         if due {
             // `this.bytesSinceCompact=0, await this.performCompactTranscript(...)`
@@ -3299,32 +3545,36 @@ impl JsonlWriter {
                 if let Some(target) =
                     target.filter(|target| target.writer.transcript_authority().is_some())
                 {
-                    target
-                        .writer
-                        .with_transaction(|_| compact_authoritative_target(&target.writer, &path))
-                        .unwrap_or_else(|error| {
-                            CompactOutcome::Failed(
-                                crate::jsonl::transcript_compact::CompactFailure::Io(
-                                    error.to_string(),
-                                ),
-                            )
-                        })
+                    target.writer.with_transaction(|_| {
+                        let result = compact_authoritative_target(&target.writer, &path);
+                        if matches!(&result, Err(TranscriptWriterError::WrittenButNotDurable(_))) {
+                            target.writer.mark_rewrite_uncertain();
+                        }
+                        result
+                    })
                 } else {
-                    perform_compact_transcript(&path)
+                    Ok(perform_compact_transcript(&path))
                 }
             })
             .await
             {
-                Ok(outcome) => outcome,
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(error @ TranscriptWriterError::WrittenButNotDurable(_))) => {
+                    return Err(error.into());
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Transcript compact failed before publication");
+                    return Ok(None);
+                }
                 Err(e) => {
                     tracing::warn!("Transcript compact failed (io): {e}");
-                    return None;
+                    return Ok(None);
                 }
             }
         };
 
         let CompactOutcome::Compacted(stats) = outcome else {
-            return None;
+            return Ok(None);
         };
         self.bytes_since_compact.store(0, Ordering::Relaxed);
         self.compact_backstop_bytes.store(
@@ -3350,7 +3600,7 @@ impl JsonlWriter {
                 tracing::error!("Metadata re-append after transcript compact failed: {e}");
             }
         }
-        Some(stats)
+        Ok(Some(stats))
     }
 
     /// Re-append the session's metadata sidecar records — 1:1 with
@@ -3412,6 +3662,81 @@ impl JsonlWriter {
             self.bytes_since_metadata_re_append
                 .store(0, Ordering::Relaxed);
         }
+        if let Some(durable) = durable {
+            let identity_store = self.identity_store.clone();
+            let mut next_state = state.clone();
+            let session_id = session_id.to_owned();
+            let current_path = path.clone();
+            let (next_state, count) = tokio::task::spawn_blocking(move || {
+                durable.with_transaction(|transaction| {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let authority = durable.transcript_authority().ok_or_else(|| {
+                        FsError::Io("metadata transcript authority is unavailable".into())
+                    })?;
+                    if authority.path() != path {
+                        return Err(FsError::Io("metadata transcript source changed".into()).into());
+                    }
+                    let mut file = authority.open_checked()?;
+                    require_complete_transcript_tail(&mut file)?;
+                    let length = file
+                        .metadata()
+                        .map_err(|error| FsError::Io(error.to_string()))?
+                        .len();
+                    file.seek(SeekFrom::Start(
+                        length.saturating_sub(crate::jsonl::LITE_READ_BUF_SIZE as u64),
+                    ))
+                    .map_err(|error| FsError::Io(error.to_string()))?;
+                    let mut bytes = Vec::new();
+                    file.read_to_end(&mut bytes)
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    let tail = String::from_utf8_lossy(&bytes).into_owned();
+                    if !skip_title_adopt && !tail.contains("\"type\":\"custom-title\"") {
+                        file.seek(SeekFrom::Start(0))
+                            .map_err(|error| FsError::Io(error.to_string()))?;
+                        let mut source = String::new();
+                        file.read_to_string(&mut source)
+                            .map_err(|error| FsError::Io(error.to_string()))?;
+                        if let Some(title) = latest_custom_title_from_source(&source, &session_id) {
+                            next_state.title = title;
+                        }
+                    }
+                    let plan = plan_re_append(
+                        &tail,
+                        &mut next_state,
+                        &session_id,
+                        skip_title_adopt,
+                        skip_dedup,
+                    );
+                    authority.verify_current()?;
+                    let mut count = 0;
+                    if let Some(plan) = plan {
+                        for line in plan.to_jsonl().lines() {
+                            let payload = Utf16JsonProjection::parse(line)
+                                .map_err(crate::jsonl::exact_json::projection_error)?;
+                            append_durable_row_in_transaction(
+                                transaction,
+                                &durable,
+                                &path,
+                                &identity_store,
+                                payload,
+                                None,
+                            )?;
+                            count += 1;
+                        }
+                    }
+                    authority.verify_current()?;
+                    Ok((next_state, count))
+                })
+            })
+            .await
+            .map_err(|error| WriterError::Fs(FsError::Io(error.to_string())))??;
+            *state = next_state;
+            if self.active_path() == current_path {
+                self.bytes_since_metadata_re_append
+                    .store(0, Ordering::Relaxed);
+            }
+            return Ok(count);
+        }
         let tail = read_tail(&path);
         // Electron can append a title through its host process while this
         // writer remains live. If a single large append pushed that record
@@ -3431,18 +3756,9 @@ impl JsonlWriter {
             return Ok(0);
         }
         let count = plan.entries.len();
-        if let Some(durable) = durable {
-            for line in plan.to_jsonl().lines() {
-                let payload = Utf16JsonProjection::parse(line)
-                    .map_err(crate::jsonl::exact_json::projection_error)?;
-                self.append_json_durable_locked(path.clone(), durable.clone(), payload, None)
-                    .await?;
-            }
-        } else {
-            let _identity_guard = self.prepare_metadata_identity_non_durable(&path).await?;
-            self.append_payload_to_path(&path, &plan.to_jsonl(), true)
-                .await?;
-        }
+        let _identity_guard = self.prepare_metadata_identity_non_durable(&path).await?;
+        self.append_payload_to_path(&path, &plan.to_jsonl(), true)
+            .await?;
         // The re-appended bytes are the metadata itself; they must not count
         // toward the next backstop.
         if self.active_path() == path {
@@ -3518,9 +3834,9 @@ impl JsonlWriter {
         let target = self.capture_metadata_target(session_id)?;
         let slot = self.session_metadata_state(session_id, &target.0).await;
         let mut state = slot.lock().await;
-        state.title = Some(custom_title);
         self.append_source_side_record_to_target(&value, target)
             .await?;
+        state.title = Some(custom_title);
         drop(state);
         self.maybe_re_append_metadata().await;
         Ok(())
@@ -3997,91 +4313,101 @@ impl JsonlWriter {
             let identity_store = self.identity_store.clone();
             return tokio::task::spawn_blocking(move || {
                 target.writer.with_transaction(|transaction| {
-                    use sha2::{Digest, Sha256};
-                    use std::io::Read;
-                    let (root, identity, relative, admitted) =
-                        durable_target_parts(&target.writer, &path)?;
-                    let mut file = match admitted {
-                        Some(file) => file,
-                        None => lingxi_core::host::rooted_fs::open_read_file_pinned(
-                            &root,
-                            &relative,
-                            Some(&identity),
-                        )?,
-                    };
-                    let mut source = String::new();
-                    file.read_to_string(&mut source)
-                        .map_err(|error| FsError::Io(error.to_string()))?;
-                    let (output, removed, tail) = prepare_retry_rewrite(&source, &message_ids)
-                        .map_err(queue_journal_error)?;
-                    if !removed.is_empty() {
-                        message_identity::require_initialized_at(&path, &root, &identity)?;
-                        let original_authority = target.writer.transcript_authority();
-                        let source_revision: [u8; 32] = Sha256::digest(source.as_bytes()).into();
-                        let expected_digest = match original_authority.as_ref() {
-                            Some(authority) => {
-                                if authority.read_checked()? != source.as_bytes() {
-                                    return Err(FsError::Io(
-                                        "transcript changed during retry rewrite".into(),
-                                    )
-                                    .into());
-                                }
-                                Some(<[u8; 32]>::from(Sha256::digest(output.as_bytes())))
-                            }
-                            None => None,
-                        };
-                        let mut published_identity = None;
-                        lingxi_core::host::rooted_fs::atomic_write_stream_pinned_checked(
-                            &root,
-                            &relative,
-                            lingxi_core::host::rooted_fs::AtomicWriteOptions {
-                                overwrite: true,
-                                create_parents: false,
-                                dir_mode: 0o700,
-                                file_mode: 0o600,
-                            },
-                            &identity,
-                            |temporary| {
-                                use std::io::Write;
-                                published_identity = Some(
-                                    lingxi_core::host::rooted_fs::opened_file_identity(temporary)?,
-                                );
-                                temporary
-                                    .write_all(output.as_bytes())
-                                    .map_err(|error| FsError::Io(error.to_string()))
-                            },
-                            || {
-                                #[cfg(test)]
-                                target.writer.wait_authority_publish_test_gate();
-                                if let Some(authority) = &original_authority {
-                                    authority.verify_revision(&source_revision)?;
-                                }
-                                Ok(())
-                            },
-                        )?;
-                        transaction
-                            .transfer_rewritten_target(
+                    let result: Result<Option<String>, TranscriptWriterError> = (|| {
+                        use sha2::{Digest, Sha256};
+                        use std::io::Read;
+                        let (root, identity, relative, admitted) =
+                            durable_target_parts(&target.writer, &path)?;
+                        let mut file = match admitted {
+                            Some(file) => file,
+                            None => lingxi_core::host::rooted_fs::open_read_file_pinned(
                                 &root,
                                 &relative,
-                                expected_digest,
-                                published_identity,
-                            )
-                            .map_err(|error| {
-                                TranscriptWriterError::WrittenButNotDurable(FsError::Io(
-                                    error.to_string(),
-                                ))
-                            })?;
-                        for uuid in removed.keys() {
-                            message_identity::remove_row_identity_at(
-                                &identity_store,
-                                &path,
+                                Some(&identity),
+                            )?,
+                        };
+                        let mut source = String::new();
+                        file.read_to_string(&mut source)
+                            .map_err(|error| FsError::Io(error.to_string()))?;
+                        let (output, removed, tail) = prepare_retry_rewrite(&source, &message_ids)
+                            .map_err(queue_journal_error)?;
+                        if !removed.is_empty() {
+                            message_identity::require_initialized_at(&path, &root, &identity)?;
+                            let original_authority = target.writer.transcript_authority();
+                            let source_revision: [u8; 32] =
+                                Sha256::digest(source.as_bytes()).into();
+                            let expected_digest = match original_authority.as_ref() {
+                                Some(authority) => {
+                                    if authority.read_checked()? != source.as_bytes() {
+                                        return Err(FsError::Io(
+                                            "transcript changed during retry rewrite".into(),
+                                        )
+                                        .into());
+                                    }
+                                    Some(<[u8; 32]>::from(Sha256::digest(output.as_bytes())))
+                                }
+                                None => None,
+                            };
+                            let mut published_identity = None;
+                            lingxi_core::host::rooted_fs::atomic_write_stream_pinned_checked(
                                 &root,
+                                &relative,
+                                lingxi_core::host::rooted_fs::AtomicWriteOptions {
+                                    overwrite: true,
+                                    create_parents: false,
+                                    dir_mode: 0o700,
+                                    file_mode: 0o600,
+                                },
                                 &identity,
-                                uuid,
+                                |temporary| {
+                                    use std::io::Write;
+                                    published_identity =
+                                        Some(lingxi_core::host::rooted_fs::opened_file_identity(
+                                            temporary,
+                                        )?);
+                                    temporary
+                                        .write_all(output.as_bytes())
+                                        .map_err(|error| FsError::Io(error.to_string()))
+                                },
+                                || {
+                                    #[cfg(test)]
+                                    target.writer.wait_authority_publish_test_gate();
+                                    if let Some(authority) = &original_authority {
+                                        authority.verify_revision(&source_revision)?;
+                                    }
+                                    Ok(())
+                                },
                             )?;
+                            transaction
+                                .transfer_rewritten_target(
+                                    &root,
+                                    &relative,
+                                    expected_digest,
+                                    published_identity,
+                                )
+                                .map_err(|error| {
+                                    TranscriptWriterError::WrittenButNotDurable(FsError::Io(
+                                        error.to_string(),
+                                    ))
+                                })?;
+                            for uuid in removed.keys() {
+                                message_identity::remove_row_identity_at(
+                                    &identity_store,
+                                    &path,
+                                    &root,
+                                    &identity,
+                                    uuid,
+                                )
+                                .map_err(TranscriptWriterError::WrittenButNotDurable)?;
+                            }
                         }
+                        Ok(tail)
+                    })(
+                    );
+                    if matches!(&result, Err(TranscriptWriterError::WrittenButNotDurable(_))) {
+                        target.writer.mark_rewrite_uncertain();
                     }
-                    Ok(tail)
+                    result
                 })
             })
             .await
@@ -4139,29 +4465,36 @@ impl JsonlWriter {
             let transcript_path = target.path.clone();
             return tokio::task::spawn_blocking(move || {
                 target.writer.with_transaction(|transaction| {
-                    let (transcript_root, transcript_identity, transcript_relative, _admitted) =
-                        durable_target_parts(&target.writer, &transcript_path)?;
-                    message_identity::require_initialized_at(
-                        &transcript_path,
-                        &transcript_root,
-                        &transcript_identity,
-                    )?;
-                    let removed = transaction.remove_message_by_uuid_at(
-                        &transcript_root,
-                        &transcript_identity,
-                        &transcript_relative,
-                        &message_uuid,
-                    )?;
-                    if removed {
-                        message_identity::remove_row_identity_at(
-                            &identity_store,
+                    let result: Result<bool, TranscriptWriterError> = (|| {
+                        let (transcript_root, transcript_identity, transcript_relative, _admitted) =
+                            durable_target_parts(&target.writer, &transcript_path)?;
+                        message_identity::require_initialized_at(
                             &transcript_path,
                             &transcript_root,
                             &transcript_identity,
+                        )?;
+                        let removed = transaction.remove_message_by_uuid_at(
+                            &transcript_root,
+                            &transcript_identity,
+                            &transcript_relative,
                             &message_uuid,
                         )?;
+                        if removed {
+                            message_identity::remove_row_identity_at(
+                                &identity_store,
+                                &transcript_path,
+                                &transcript_root,
+                                &transcript_identity,
+                                &message_uuid,
+                            )
+                            .map_err(TranscriptWriterError::WrittenButNotDurable)?;
+                        }
+                        Ok(removed)
+                    })();
+                    if matches!(&result, Err(TranscriptWriterError::WrittenButNotDurable(_))) {
+                        target.writer.mark_rewrite_uncertain();
                     }
-                    Ok(removed)
+                    result
                 })
             })
             .await
@@ -4933,6 +5266,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_draft_title_survives_active_ordinary_and_backstop_renames() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let id = SessionId::parse_prefixed(sid).unwrap();
+        let path = crate::jsonl::path::session_path(&root, &cwd.to_string_lossy(), sid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let source = format!(
+            "{}\n{}\n{}\n",
+            json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
+            json!({"type":"custom-title","sessionId":sid,"customTitle":"Old","mobileEmptySession":1,"cwd":cwd}),
+            json!({"type":"agent-name","sessionId":sid,"agentName":"x".repeat(40_000)})
+        );
+        std::fs::write(&path, source).unwrap();
+        let relative = path.strip_prefix(&root).unwrap().to_path_buf();
+        let (authority, bytes) = TranscriptFileAuthority::capture(root.clone(), relative).unwrap();
+        let state_dir = root.join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        let durable = Arc::new(DurableTranscriptWriter::open(state_dir).unwrap());
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(root.clone()));
+        let writer =
+            Arc::new(JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone()));
+        writer
+            .bootstrap_prepared_session_message_identity_snapshot_with_source_authority(
+                &path, durable, &authority, &bytes,
+            )
+            .await
+            .unwrap();
+        writer
+            .activate_session_target_with_authority(id, path.clone(), cwd.clone(), Some(authority))
+            .unwrap();
+        let receipt = writer
+            .update_active_session_metadata(
+                id,
+                &path,
+                ConversationMode::Code,
+                None,
+                SessionMetadataOperation::Capture,
+            )
+            .await
+            .unwrap();
+        writer
+            .update_active_session_metadata(
+                id,
+                &path,
+                ConversationMode::Code,
+                Some(receipt),
+                SessionMetadataOperation::Rename("Active".into()),
+            )
+            .await
+            .unwrap();
+        writer
+            .append_custom_title(sid, Utf16JsonProjection::from("Ordinary"))
+            .await
+            .unwrap();
+        let slot = writer.session_metadata_state(sid, &path).await;
+        let mut metadata = slot.lock().await;
+        writer
+            .re_append_session_metadata(&mut metadata, sid, false, true)
+            .await
+            .unwrap();
+        drop(metadata);
+        let retained = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            crate::jsonl::validated_empty_draft_cwd(&retained, sid),
+            Some(cwd.clone())
+        );
+        let latest = retained
+            .lines()
+            .rev()
+            .find(|line| line.contains("\"type\":\"custom-title\""))
+            .unwrap();
+        let title = Utf16JsonProjection::parse(latest).unwrap();
+        assert_eq!(title.string_at("/customTitle"), Some("Ordinary"));
+        assert_eq!(title.number_at("/mobileEmptySession"), Some(1.0));
+        assert_eq!(title.string_at("/cwd"), cwd.to_str());
+
+        writer
+            .append(&identity_row("started", "hello"))
+            .await
+            .unwrap();
+        writer
+            .append_custom_title(sid, Utf16JsonProjection::from("Started"))
+            .await
+            .unwrap();
+        let started = std::fs::read_to_string(&path).unwrap();
+        let latest = started
+            .lines()
+            .rev()
+            .find(|line| line.contains("\"type\":\"custom-title\""))
+            .unwrap();
+        assert!(!Utf16JsonProjection::parse(latest)
+            .unwrap()
+            .contains_property("mobileEmptySession"));
+
+        let invalid = format!(
+            "{}\n{}\n",
+            json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
+            json!({"type":"custom-title","sessionId":sid,"customTitle":"Bad","mobileEmptySession":1})
+        );
+        std::fs::write(&path, &invalid).unwrap();
+        assert!(writer
+            .append_custom_title(sid, Utf16JsonProjection::from("No"))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+    }
+
+    #[tokio::test]
     async fn active_metadata_rejects_wrong_owner_path_or_mode_without_writing() {
         let (_root, id, path, _durable, writer) = scheduled_anchor_fixture();
         writer
@@ -5263,6 +5708,338 @@ mod tests {
             }
             assert_eq!(std::fs::read_to_string(&path).unwrap(), replacement);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn published_compaction_uncertainty_reaches_append_and_fences_owner() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let relative = PathBuf::from(format!("projects/bucket/{sid}.jsonl"));
+        let path = root.join(&relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let source = format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
+            json!({"type":"user","uuid":"old","sessionId":sid,"message":{"role":"user","content":"x".repeat(MIN_COMPACT_FILE_BYTES as usize)}}),
+            json!({"type":"system","subtype":"compact_boundary","uuid":"boundary","sessionId":sid,"parentUuid":null}),
+            json!({"type":"user","uuid":"kept","sessionId":sid,"parentUuid":"boundary","message":{"role":"user","content":"kept"}})
+        );
+        std::fs::write(&path, source).unwrap();
+        let (authority, bytes) = TranscriptFileAuthority::capture(root.clone(), relative).unwrap();
+        let state = root.join("state");
+        std::fs::create_dir(&state).unwrap();
+        let durable = Arc::new(DurableTranscriptWriter::open(state).unwrap());
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(root.clone()));
+        let writer =
+            Arc::new(JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone()));
+        writer
+            .bootstrap_prepared_session_message_identity_snapshot_with_source_authority(
+                &path,
+                durable.clone(),
+                &authority,
+                &bytes,
+            )
+            .await
+            .unwrap();
+        writer
+            .activate_session_target_with_authority(
+                SessionId::parse_prefixed(sid).unwrap(),
+                path.clone(),
+                root,
+                Some(authority),
+            )
+            .unwrap();
+        writer
+            .bytes_since_compact
+            .store(COMPACT_BACKSTOP_BYTES, Ordering::Relaxed);
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        durable.install_authority_rewrite_test_gate((reached_tx, release_rx));
+        let task = tokio::spawn({
+            let writer = writer.clone();
+            async move {
+                writer
+                    .append_with_compaction(&identity_row("next", "next"), true)
+                    .await
+            }
+        });
+        tokio::task::spawn_blocking(move || {
+            reached_rx.recv_timeout(std::time::Duration::from_secs(10))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let published = std::fs::read(&path).unwrap();
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &published).unwrap();
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(WriterError::Durable(
+                TranscriptWriterError::WrittenButNotDurable(_)
+            ))
+        ));
+        assert!(writer.ensure_rewrite_is_resolved().is_err());
+        assert!(writer
+            .append(&identity_row("later", "must not append"))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), published);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn published_retry_and_tombstone_sidecar_failure_fences_future_writes() {
+        for kind in ["retry", "tombstone"] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(fixture.path()).unwrap();
+            let sid = "11111111-2222-3333-4444-555555555555";
+            let relative = PathBuf::from(format!("projects/bucket/{sid}.jsonl"));
+            let path = root.join(&relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let source = format!(
+                "{}\n{}\n{}\n",
+                json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
+                json!({"type":"user","uuid":"old","sessionId":sid,"message":{"role":"user","content":"question"}}),
+                json!({"type":"assistant","uuid":"remove","sessionId":sid,"parentUuid":"old","message":{"id":"attempt","role":"assistant","content":"answer"}})
+            );
+            std::fs::write(&path, source).unwrap();
+            let (authority, bytes) =
+                TranscriptFileAuthority::capture(root.clone(), relative).unwrap();
+            let state = root.join("state");
+            std::fs::create_dir(&state).unwrap();
+            let durable = Arc::new(DurableTranscriptWriter::open(state).unwrap());
+            let fs: Arc<dyn FileSystem> =
+                Arc::new(platform_posix::fs::PosixFileSystem::new(root.clone()));
+            let writer =
+                Arc::new(JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone()));
+            writer
+                .bootstrap_prepared_session_message_identity_snapshot_with_source_authority(
+                    &path,
+                    durable.clone(),
+                    &authority,
+                    &bytes,
+                )
+                .await
+                .unwrap();
+            writer
+                .activate_session_target_with_authority(
+                    SessionId::parse_prefixed(sid).unwrap(),
+                    path.clone(),
+                    root,
+                    Some(authority),
+                )
+                .unwrap();
+            let sidecar = path
+                .parent()
+                .unwrap()
+                .join(message_identity::log_path(&path).unwrap());
+            let saved = sidecar.with_extension("saved");
+            let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            durable.install_authority_rewrite_test_gate((reached_tx, release_rx));
+            let task = tokio::spawn({
+                let writer = writer.clone();
+                async move {
+                    if kind == "retry" {
+                        writer.remove_retry_attempt("attempt").await.map(|_| ())
+                    } else {
+                        writer.remove_message_by_uuid("remove").await.map(|_| ())
+                    }
+                }
+            });
+            tokio::task::spawn_blocking(move || {
+                reached_rx.recv_timeout(std::time::Duration::from_secs(5))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+            let waiting = tokio::task::spawn_blocking({
+                let durable = durable.clone();
+                move || {
+                    waiting_tx.send(()).unwrap();
+                    durable.begin_transaction().map(|_| ())
+                }
+            });
+            tokio::task::spawn_blocking(move || {
+                waiting_rx.recv_timeout(std::time::Duration::from_secs(5))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            std::fs::rename(&sidecar, &saved).unwrap();
+            std::fs::create_dir(&sidecar).unwrap();
+            release_tx.send(()).unwrap();
+            assert!(
+                matches!(
+                    task.await.unwrap(),
+                    Err(WriterError::Durable(
+                        TranscriptWriterError::WrittenButNotDurable(_)
+                    ))
+                ),
+                "{kind}"
+            );
+            let published = std::fs::read(&path).unwrap();
+            assert!(!String::from_utf8_lossy(&published).contains("\"uuid\":\"remove\""));
+            assert!(writer.ensure_rewrite_is_resolved().is_err());
+            assert!(matches!(
+                waiting.await.unwrap(),
+                Err(TranscriptWriterError::WrittenButNotDurable(_))
+            ));
+            assert!(matches!(
+                durable.begin_transaction(),
+                Err(TranscriptWriterError::WrittenButNotDurable(_))
+            ));
+            assert!(writer
+                .append(&identity_row("later", "must not append"))
+                .await
+                .is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), published);
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_side_records_reject_replaced_or_uncertain_owner() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let relative = PathBuf::from(format!("projects/bucket/{sid}.jsonl"));
+        let path = root.join(&relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let source = format!(
+            "{}\n{}\n",
+            json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
+            json!({"type":"user","uuid":"old","sessionId":sid,"message":{"role":"user","content":"a"}})
+        );
+        std::fs::write(&path, &source).unwrap();
+        let (authority, bytes) = TranscriptFileAuthority::capture(root.clone(), relative).unwrap();
+        let state = root.join("state");
+        std::fs::create_dir(&state).unwrap();
+        let durable = Arc::new(DurableTranscriptWriter::open(state).unwrap());
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(root.clone()));
+        let writer =
+            Arc::new(JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone()));
+        writer
+            .bootstrap_prepared_session_message_identity_snapshot_with_source_authority(
+                &path,
+                durable.clone(),
+                &authority,
+                &bytes,
+            )
+            .await
+            .unwrap();
+        writer
+            .activate_session_target_with_authority(
+                SessionId::parse_prefixed(sid).unwrap(),
+                path.clone(),
+                root,
+                Some(authority),
+            )
+            .unwrap();
+        let sidecar = path
+            .parent()
+            .unwrap()
+            .join(message_identity::log_path(&path).unwrap());
+        let sidecar_before = std::fs::read(&sidecar).unwrap();
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &source).unwrap();
+        let snapshot = json!({"type":"file-history-snapshot","sessionId":sid});
+        let operation = Utf16JsonProjection::from_serde_value(
+            &json!({"type":"queue-operation","sessionId":sid}),
+        )
+        .unwrap();
+        let side = json!({"type":"agent-setting","sessionId":sid,"agentSetting":"x"});
+        assert!(writer
+            .append_file_history_snapshot(&snapshot)
+            .await
+            .is_err());
+        assert!(writer.append_queue_operation(&operation).await.is_err());
+        assert!(writer.append_side_record(&side).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), source);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), sidecar_before);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&saved, &path).unwrap();
+        durable.mark_rewrite_uncertain();
+        assert!(writer
+            .append_file_history_snapshot(&snapshot)
+            .await
+            .is_err());
+        assert!(writer.append_queue_operation(&operation).await.is_err());
+        assert!(writer.append_side_record(&side).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), sidecar_before);
+    }
+
+    #[tokio::test]
+    async fn metadata_backstop_never_adopts_a_replaced_sources_state() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let relative = PathBuf::from(format!("projects/bucket/{sid}.jsonl"));
+        let path = root.join(&relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let source = format!(
+            "{}\n{}\n",
+            json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"code","instructionEpoch":0}),
+            json!({"type":"user","uuid":"old","sessionId":sid,"message":{"role":"user","content":"a"}})
+        );
+        std::fs::write(&path, &source).unwrap();
+        let (authority, bytes) = TranscriptFileAuthority::capture(root.clone(), relative).unwrap();
+        let state_dir = root.join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        let durable = Arc::new(DurableTranscriptWriter::open(state_dir).unwrap());
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(root.clone()));
+        let writer = JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone());
+        writer
+            .bootstrap_prepared_session_message_identity_snapshot_with_source_authority(
+                &path, durable, &authority, &bytes,
+            )
+            .await
+            .unwrap();
+        writer
+            .activate_session_target_with_authority(
+                SessionId::parse_prefixed(sid).unwrap(),
+                path.clone(),
+                root,
+                Some(authority),
+            )
+            .unwrap();
+        let replacement = format!(
+            "{source}{}\n{}\n",
+            json!({"type":"custom-title","sessionId":sid,"customTitle":"foreign"}),
+            json!({"type":"relocated","sessionId":sid,"relocatedCwd":"/foreign"})
+        );
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &replacement).unwrap();
+        assert!(writer
+            .append_custom_title(sid, Utf16JsonProjection::from("request"))
+            .await
+            .is_err());
+        assert!(!writer.metadata_states.read().unwrap().contains_key(sid));
+        let mut metadata = SessionMetadataState::default();
+        let original_metadata = metadata.clone();
+        assert!(writer
+            .re_append_session_metadata(&mut metadata, sid, false, true)
+            .await
+            .is_err());
+        assert_eq!(metadata, original_metadata);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&saved, &path).unwrap();
+        writer
+            .re_append_session_metadata(&mut metadata, sid, false, true)
+            .await
+            .unwrap();
+        let retained = std::fs::read_to_string(&path).unwrap();
+        assert!(!retained.contains("foreign"));
+        assert_eq!(metadata, original_metadata);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5778,6 +6555,38 @@ mod tests {
         writer.flush_queue_operations().await.unwrap();
         assert_eq!(std::fs::read_to_string(writer.path()).unwrap(), raw);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn empty_queue_does_not_require_an_old_session_target() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("active.jsonl");
+        let state = fixture.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let writer = JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                fixture.path().to_path_buf(),
+            )),
+        );
+        writer.activate_session_target_with_durable_lock(
+            SessionId::new(),
+            path,
+            fixture.path().to_path_buf(),
+            Arc::new(DurableTranscriptWriter::open(&state).unwrap()),
+        );
+        let previous_session = SessionId::new();
+        let pending: QueueOperationBuffer = Default::default();
+        writer.bind_queue_operations(previous_session, pending.clone());
+        writer.flush_queue_operations().await.unwrap();
+        let row = source_value(&json!({
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "sessionId": previous_session.as_uuid().to_string(),
+        }));
+        pending.lock().unwrap().push_back(row);
+        assert!(writer.flush_queue_operations().await.is_err());
+        assert_eq!(pending.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -8606,6 +9415,12 @@ mod tests {
             root.path().to_path_buf(),
             lock_a,
         );
+        // A real durable session installs its fixed header and file authority
+        // before the first metadata operation.
+        writer
+            .initialize_fixed_session_mode(&id_a.as_uuid().to_string(), ConversationMode::Code, 0)
+            .await
+            .unwrap();
         writer
             .append_custom_title(&id_a.as_uuid().to_string(), "captured-A".into())
             .await

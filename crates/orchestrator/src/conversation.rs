@@ -996,6 +996,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         // upstream and never reach `surface_model_error` — dead arms kept for
         // totality.
         OrchestratorError::Internal(_)
+        | OrchestratorError::TranscriptRewriteUncertain(_)
         | OrchestratorError::Settings(_)
         | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::StreamingProtocol(_)

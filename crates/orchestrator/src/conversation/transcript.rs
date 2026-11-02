@@ -1147,6 +1147,14 @@ fn refused_message_id_is_persisted_after_timestamp_with_exact_utf16_units() {
 }
 
 impl ConversationOrchestrator {
+    pub(crate) fn ensure_transcript_rewrite_resolved(&self) -> Result<(), OrchestratorError> {
+        if let Some(writer) = self.transcript.jsonl_writer.as_ref() {
+            writer.ensure_rewrite_is_resolved().map_err(|error| {
+                OrchestratorError::TranscriptRewriteUncertain(error.to_string())
+            })?;
+        }
+        Ok(())
+    }
     async fn mod_append_tool_name(&self, id: &lingxi_core::types::ToolUseId) -> String {
         self.session
             .lock()
@@ -4276,7 +4284,7 @@ impl ConversationOrchestrator {
         &self,
         assistant_id: MessageId,
         persisted_row_ids: &[MessageId],
-    ) {
+    ) -> Result<(), OrchestratorError> {
         self.session
             .lock()
             .await
@@ -4289,9 +4297,19 @@ impl ConversationOrchestrator {
             message_ids.extend(persisted_row_ids.iter().map(|id| id.as_uuid().to_string()));
             match writer.remove_retry_attempt_rows(&message_ids).await {
                 Ok(tail) => *self.transcript.last_jsonl_uuid.lock().await = tail,
+                Err(
+                    error @ session::jsonl::writer::WriterError::Durable(
+                        session::jsonl::TranscriptWriterError::WrittenButNotDurable(_),
+                    ),
+                ) => {
+                    return Err(OrchestratorError::TranscriptRewriteUncertain(
+                        error.to_string(),
+                    ));
+                }
                 Err(error) => tracing::warn!(%error, "failed to remove rejected retry attempt"),
             }
         }
+        Ok(())
     }
 
     /// Persist the latest active-goal snapshot as a transcript metadata line.
@@ -4831,6 +4849,7 @@ impl ConversationOrchestrator {
                 }
             }
             Err(error) => {
+                self.ensure_transcript_rewrite_resolved()?;
                 if pending_prompt_id.is_some() {
                     return Err(OrchestratorError::Internal(format!(
                         "pending prompt transcript append failed: {error}"
@@ -5532,9 +5551,9 @@ impl ConversationOrchestrator {
     pub(crate) async fn remove_assistant_stream_rows(
         &self,
         rows: &[crate::streaming_loop::PersistedAssistantRowLink],
-    ) {
+    ) -> Result<(), OrchestratorError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
-            return;
+            return Ok(());
         };
         let mut removed = std::collections::HashMap::new();
         for row in rows {
@@ -5543,6 +5562,15 @@ impl ConversationOrchestrator {
                     removed.insert(row.uuid.clone(), row.parent_uuid.clone());
                 }
                 Ok(false) => {}
+                Err(
+                    error @ session::jsonl::writer::WriterError::Durable(
+                        session::jsonl::TranscriptWriterError::WrittenButNotDurable(_),
+                    ),
+                ) => {
+                    return Err(OrchestratorError::TranscriptRewriteUncertain(
+                        error.to_string(),
+                    ));
+                }
                 Err(error) => tracing::warn!(
                     uuid = %row.uuid,
                     %error,
@@ -5551,7 +5579,7 @@ impl ConversationOrchestrator {
             }
         }
         if removed.is_empty() {
-            return;
+            return Ok(());
         }
 
         // The live append cursor follows the surviving transcript tail, but
@@ -5569,6 +5597,7 @@ impl ConversationOrchestrator {
             tail.clone_from(parent);
         }
         *cursor = tail;
+        Ok(())
     }
 
     /// Persist a NON-streaming (batched) assistant turn as ONE merged JSONL line

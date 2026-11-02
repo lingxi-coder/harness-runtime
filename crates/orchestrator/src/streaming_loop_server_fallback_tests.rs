@@ -21,6 +21,163 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tool_api::registry::ToolRegistry;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn fallback_stitch_stops_when_published_tombstone_sidecar_fails() {
+    use lingxi_core::host::session_context::ConversationMode;
+    use lingxi_core::types::SessionId;
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let probe = directory.path().join("permission-probe");
+    std::fs::write(&probe, "probe").unwrap();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o400)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&probe).is_ok() {
+        // A privileged runner cannot inject this filesystem failure.
+        return;
+    }
+    std::fs::remove_file(probe).unwrap();
+
+    let session_id = SessionId::new();
+    let path = directory
+        .path()
+        .join(format!("{}.jsonl", session_id.as_uuid()));
+    let state = directory.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+        path.clone(),
+        Arc::new(platform_posix::fs::PosixFileSystem::new(
+            directory.path().to_path_buf(),
+        )),
+    ));
+    writer.activate_session_target_with_durable_lock(
+        session_id,
+        path.clone(),
+        directory.path().to_path_buf(),
+        Arc::new(session::jsonl::DurableTranscriptWriter::open(&state).unwrap()),
+    );
+    writer
+        .initialize_fixed_session_mode(&session_id.as_uuid().to_string(), ConversationMode::Code, 0)
+        .await
+        .unwrap();
+    let retained_id = MessageId::new();
+    let saved = session::JsonlMessage::from_projection(
+        &Utf16JsonProjection::parse(&serde_json::json!({
+            "type":"assistant", "uuid":retained_id.as_uuid().to_string(),
+            "parentUuid":null, "sessionId":session_id.as_uuid().to_string(), "isSidechain":false,
+            "timestamp":"2026-10-23T04:11:27.000Z", "cwd":directory.path(), "version":"test",
+            "message":{"id":"old-attempt", "role":"assistant", "content":"retained answer"}
+        }).to_string()).unwrap(),
+    )
+    .unwrap();
+    writer.append(&saved).await.unwrap();
+    let mut sidecar_name = path.file_name().unwrap().to_os_string();
+    sidecar_name.push(branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX);
+    let sidecar = path.parent().unwrap().join(sidecar_name);
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    let api = Arc::new(MockApiClient::new(vec![]));
+    let output: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            directory.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer.clone())
+        .with_session_id(session_id),
+    );
+    let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+        .await
+        .unwrap();
+    let candidate_id = MessageId::new();
+    let row = |id, order, text: &str, persisted_link| CompletedAssistantRow {
+        per_turn_effort: None,
+        stream_order: order,
+        row_id: id,
+        logical_message_id: Some(id),
+        provider_message_id: "old-attempt".into(),
+        model: "requested-model".into(),
+        model_profile: None,
+        is_api_error: false,
+        stop_reason: Some("end_turn".into()),
+        stop_details: None,
+        resumable: None,
+        usage: None,
+        request_id: None,
+        timestamp: "2026-10-23T04:11:27.000Z".into(),
+        persisted_link,
+        content: vec![ContentBlock::Text {
+            text: text.into(),
+            citations: None,
+        }],
+        session_append_dispatched: true,
+        supersedes_row_ids: Vec::new(),
+    };
+    let retained = row(
+        retained_id,
+        0,
+        "retained answer",
+        Some(PersistedAssistantRowLink {
+            uuid: saved.uuid,
+            parent_uuid: None,
+        }),
+    );
+    let candidate = row(candidate_id, 1, "new answer", None);
+    let mut turn = PumpedTurn {
+        assistant_rows: vec![retained.clone(), candidate],
+        ..PumpedTurn::default()
+    };
+    let mut pending = Some(PendingServerStitch {
+        retained_text: "retained answer".into(),
+        retained_row_ids: vec![retained_id],
+        retained_rows: vec![retained],
+        after_row_order: 1,
+    });
+    let mut indices = Vec::new();
+    let mut row_ids = Vec::new();
+    let mut by_index = HashMap::new();
+    let mut pump = Some(ExecutorPump {
+        executor: &mut executor,
+        assistant_id: candidate_id,
+        query_history: Vec::new(),
+        model_profile: None,
+        record_supersedes: false,
+        user_cancel: None,
+        suppress_live_text: false,
+        suppress_live_thinking: false,
+        settlement: None,
+    });
+    let error = finish_pending_server_stitch(
+        &mut turn,
+        &output,
+        &mut indices,
+        &mut row_ids,
+        &mut by_index,
+        &mut pending,
+        &mut pump,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::OrchestratorError::TranscriptRewriteUncertain(_)
+    ));
+    assert!(!std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("retained answer"));
+    assert!(writer.ensure_rewrite_is_resolved().is_err());
+    drop(pump);
+    drop(executor);
+    assert!(orch.run_turn("must not dispatch").await.is_err());
+    assert!(api.captured_requests().await.is_empty());
+}
+
 fn boxed(
     events: Vec<Result<HistoryEvent, LlmError>>,
 ) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {

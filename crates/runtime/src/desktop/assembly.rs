@@ -1311,7 +1311,6 @@ pub async fn build_with_credential_stack(
     // live under `<lingxi_home>/file-history/<session>/`.
     let file_history = std::sync::Arc::new(session::FileHistory::new(
         cfg.lingxi_home.clone(),
-        cwd.clone(),
         main_session_uuid.clone(),
     ));
     let main_transcript_path = cfg.session_transcript_path.clone().unwrap_or_else(|| {
@@ -1369,12 +1368,18 @@ pub async fn build_with_credential_stack(
         // A fork has a different backup-directory owner. Do not attach source
         // checkpoint names to that empty directory without a backup transfer.
         if snapshot.source_session_id == main_session_uuid {
-            file_history.restore_from_records(session::file_history::parse_snapshot_records(
-                &snapshot.content,
-            ));
+            let records = session::file_history::parse_snapshot_records(&snapshot.content)
+                .map_err(BuildError::DurableSession)?;
+            file_history
+                .restore_from_records(records)
+                .map_err(BuildError::DurableSession)?;
         }
     } else if let Ok(content) = std::fs::read_to_string(&main_transcript_path) {
-        file_history.restore_from_records(session::file_history::parse_snapshot_records(&content));
+        let records = session::file_history::parse_snapshot_records(&content)
+            .map_err(BuildError::DurableSession)?;
+        file_history
+            .restore_from_records(records)
+            .map_err(BuildError::DurableSession)?;
     }
     let main_subagents_dir = main_transcript_path.with_extension("").join("subagents");
 

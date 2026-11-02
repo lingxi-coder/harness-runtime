@@ -215,6 +215,7 @@ pub(super) fn process_visible_response<'a>(
             })
             .await
         };
+        orch.ensure_transcript_rewrite_resolved()?;
         if !publication_fence.is_current() {
             return Ok(TurnStepOutcome::Ended {
                 final_message_id: assistant_id,
@@ -948,7 +949,7 @@ pub(super) fn process_visible_response<'a>(
                                 state.output_recovery_actions += 1;
                                 state.successful_assistant_messages =
                                     state.successful_assistant_messages.saturating_sub(1);
-                                orch.discard_retry_attempt(assistant_id, &[]).await;
+                                orch.discard_retry_attempt(assistant_id, &[]).await?;
                                 return Ok(TurnStepOutcome::Continue(
                                     NativeQueryTransition::InPlaceRetry,
                                 ));

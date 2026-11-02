@@ -312,6 +312,7 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         OrchestratorError::Settings(_)
         | OrchestratorError::StreamEndedWithoutStop
         | OrchestratorError::Internal(_)
+        | OrchestratorError::TranscriptRewriteUncertain(_)
         | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::Compaction(_)
         | OrchestratorError::CompactionCancelled
@@ -580,6 +581,10 @@ mod tests {
             ),
             (
                 OrchestratorError::Internal("boom".into()),
+                ErrorKindDto::Internal,
+            ),
+            (
+                OrchestratorError::TranscriptRewriteUncertain("reopen session".into()),
                 ErrorKindDto::Internal,
             ),
             (

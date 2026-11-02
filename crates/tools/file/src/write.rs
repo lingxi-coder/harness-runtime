@@ -476,6 +476,11 @@ impl Tool for FileWriteTool {
             }
         };
 
+        if let (Some(fh), Some(parent)) = (ctx.file_history.as_ref(), write_result.parent) {
+            fh.track_completed_write(&canon.to_string_lossy(), parent)
+                .await;
+        }
+
         let structured_patch = if is_create {
             Vec::new()
         } else {
