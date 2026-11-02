@@ -65,7 +65,7 @@ pub async fn prepare(
     config.defer_session_start = true;
     let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(config.cwd.clone()));
     let cwd = config.cwd.to_string_lossy().into_owned();
-    let (source_id, at, drops, fork) = match start {
+    let (source_id, at, drops, fork, selected_path) = match start {
         SessionStart::New => return Ok(None),
         SessionStart::Resume {
             session_id,
@@ -77,13 +77,16 @@ pub async fn prepare(
             resume_session_at.as_deref(),
             resume_drops_turn.as_deref(),
             *fork,
+            config.session_transcript_path.clone(),
         ),
         SessionStart::Continue { fork } => {
-            let rows = session::jsonl::loader::list_recent_sessions(
+            let catalog = session::jsonl::loader::list_recent_sessions_in_scope_with_mode(
                 &config.lingxi_home,
                 &cwd,
+                session::jsonl::loader::SessionDiscoveryScope::Current,
                 1,
                 fs.clone(),
+                config.initial_conversation_mode,
             )
             .await
             .map_err(|error| match error {
@@ -92,11 +95,17 @@ pub async fn prepare(
                 }
                 other => other.to_string(),
             })?;
-            let id = rows
+            let selected = catalog
+                .sessions
                 .first()
-                .ok_or("No conversation found to continue")?
-                .uuid;
-            (id, None, None, *fork)
+                .ok_or("No conversation found to continue")?;
+            (
+                selected.uuid,
+                None,
+                None,
+                *fork,
+                Some(selected.path.clone()),
+            )
         }
     };
     let session_id = if fork {
@@ -113,33 +122,41 @@ pub async fn prepare(
         return Err("A branch must use a different session ID from its source".into());
     }
     let missing = || format!("No conversation found with session ID: {source_id}");
-    let source_path = session::jsonl::resolve_session_path(&config.lingxi_home, &cwd, source_id)
-        .await
-        .map_err(|error| match error {
-            session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
-            other => other.to_string(),
-        })?;
-    // Do not create a live-session directory for a nonexistent resume target.
-    if !tokio::fs::try_exists(&source_path)
-        .await
-        .map_err(|error| error.to_string())?
-    {
-        return Err(missing());
-    }
+    let (source_path, discovered_identity) = match selected_path {
+        Some(path) => (path, None),
+        None => {
+            let (path, identity) =
+                unique_resume_source(&config.lingxi_home, source_id, !fork).await?;
+            (path, Some(identity))
+        }
+    };
+    let (_, _, source_identity) = capture_resume_source(
+        &source_path,
+        source_id,
+        discovered_identity,
+        config.initial_conversation_mode,
+        !fork,
+    )
+    .await?;
     let source_lease = claim_source(config, source_id)?;
-    // Path discovery can race the old writer's final relocation; repeat it
-    // under the claim, then retain this exact path throughout assembly.
-    let source_path = session::jsonl::resolve_session_path(&config.lingxi_home, &cwd, source_id)
-        .await
-        .map_err(|error| match error {
-            session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
-            other => other.to_string(),
-        })?;
-    let content: Arc<str> = tokio::fs::read_to_string(&source_path)
-        .await
-        .map_err(|error| error.to_string())?
-        .into();
-    let loaded = session::jsonl::route_lines(&content);
+    // The lease never authorizes substituting another path or inode. Reopen
+    // the exact source and compare both its directory and file identities.
+    let (captured, loaded, _) = capture_resume_source(
+        &source_path,
+        source_id,
+        Some(source_identity),
+        config.initial_conversation_mode,
+        !fork,
+    )
+    .await?;
+    if let Some(snapshot) = config.session_resume_snapshot.as_ref() {
+        if Uuid::parse_str(&snapshot.source_session_id).ok() != Some(source_id)
+            || snapshot.content.as_ref() != captured.as_str()
+        {
+            return Err("captured resume source changed before admission".into());
+        }
+    }
+    let content: Arc<str> = captured.into();
     let source_profile =
         session::JsonlWriter::fixed_session_mode_from_source(&content, &source_id.to_string())?;
     if config
@@ -156,19 +173,45 @@ pub async fn prepare(
         ));
     }
     config.initial_conversation_mode = Some(source_profile);
-    // Keep the selected file authoritative. Workspace restoration changes
-    // runtime composition only; a missing workspace does not rehome JSONL.
-    let resumed_cwd = if !fork {
-        session::jsonl::loader::transcript_workspace_path(&source_path, &loaded)
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &source_id.to_string());
+    let empty_cwd = if messages.is_empty() {
+        if !loaded
+            .mobile_empty_sessions
+            .contains(&source_id.to_string())
+        {
+            return Err(missing());
+        }
+        let workspace = validated_empty_draft_cwd(&content, source_id).ok_or_else(missing)?;
+        // A relocation explicitly changes the workspace; otherwise the
+        // recorded cwd must own this transcript's project bucket.
+        if session::jsonl::loader::transcript_workspace_path(&source_path, &loaded)
             .map(std::path::PathBuf::from)
-            .filter(|workspace| workspace.is_dir())
+            .as_deref()
+            != Some(workspace.as_path())
+        {
+            return Err("empty session workspace does not match its transcript".into());
+        }
+        if !workspace.is_dir() {
+            return Err("empty session workspace is not an existing directory".into());
+        }
+        if at.is_some() || drops.is_some() {
+            return Err("cannot truncate an empty conversation".into());
+        }
+        Some(workspace)
     } else {
         None
     };
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &source_id.to_string());
-    if messages.is_empty() {
-        return Err(missing());
-    }
+    // A draft anchor must identify its real workspace; never silently attach
+    // an empty session to the launch cwd. Nonempty sessions retain their
+    // existing missing-workspace behavior without rehoming the source file.
+    let source_cwd = empty_cwd.or_else(|| {
+        session::jsonl::loader::transcript_workspace_path(&source_path, &loaded)
+            .map(std::path::PathBuf::from)
+    });
+    let resumed_cwd = (!fork)
+        .then(|| source_cwd.clone())
+        .flatten()
+        .filter(|workspace| workspace.is_dir());
     let messages = super::resume_truncation::apply_truncating_resume(messages, at, drops)?;
     let resume_cost = crate::desktop::session_state::capture_resume_cost(
         &config.lingxi_home,
@@ -212,7 +255,8 @@ pub async fn prepare(
         )
     };
     let (mounted_content, messages, entries) = if fork {
-        let source_cwd = session::jsonl::loader::transcript_workspace_path(&source_path, &loaded)
+        let source_cwd = source_cwd
+            .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| config.cwd.to_string_lossy().into_owned());
         let options = session::branch::CapturedBranch {
             lingxi_home: &config.lingxi_home,
@@ -292,6 +336,200 @@ pub async fn prepare(
         explicit_permission_mode: config.permission_mode_cli_explicit
             || config.permission_mode_preference.is_some(),
     }))
+}
+
+/// Validate the complete empty-draft timeline, including the latest anchor and
+/// any later relocations, before using its final cwd as workspace authority.
+fn validated_empty_draft_cwd(source: &str, session_id: Uuid) -> Option<std::path::PathBuf> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    if !session::jsonl::is_mode_only_draft(source, &session_id.to_string()) {
+        return None;
+    }
+    let mut cwd: Option<String> = None;
+    let mut anchored = false;
+    for line in source.lines().filter(|line| !line.trim().is_empty()) {
+        let row = Utf16JsonProjection::parse(line).ok()?;
+        if row.contains_property("cwd") {
+            let value = row
+                .string_at("/cwd")
+                .filter(|value| Path::new(value).is_absolute())?;
+            if cwd.as_deref().is_some_and(|previous| previous != value) {
+                return None;
+            }
+            cwd = Some(value.to_owned());
+        }
+        if row.contains_property("mobileEmptySession") {
+            if row.string_at("/type") != Some("custom-title")
+                || row.string_at("/customTitle").is_none()
+                || row.number_at("/mobileEmptySession") != Some(1.0)
+                || !row
+                    .string_at("/cwd")
+                    .is_some_and(|value| Path::new(value).is_absolute())
+            {
+                return None;
+            }
+            anchored = true;
+        } else if row.string_at("/type") == Some("custom-title") {
+            anchored = false;
+        }
+        if row.string_at("/type") == Some("relocated") {
+            let value = row
+                .string_at("/relocatedCwd")
+                .filter(|value| Path::new(value).is_absolute())?;
+            cwd = Some(value.to_owned());
+        }
+    }
+    anchored.then_some(cwd?).map(std::path::PathBuf::from)
+}
+
+#[derive(Clone, Copy)]
+struct ResumeSourceIdentity {
+    directory: lingxi_core::host::rooted_fs::RootIdentity,
+    file: lingxi_core::host::rooted_fs::RootIdentity,
+}
+
+async fn capture_resume_source(
+    path: &Path,
+    session_id: Uuid,
+    expected: Option<ResumeSourceIdentity>,
+    mode: Option<lingxi_core::host::session_context::ConversationMode>,
+    require_single_link: bool,
+) -> Result<
+    (
+        String,
+        session::jsonl::LoadedTranscript,
+        ResumeSourceIdentity,
+    ),
+    String,
+> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use lingxi_core::host::rooted_fs::{
+            open_read_file_pinned, opened_file_identity, root_identity,
+            validate_open_file_single_link,
+        };
+        use std::io::Read;
+
+        let parent = path.parent().ok_or("resume source has no parent")?;
+        let name = path.file_name().ok_or("resume source has no filename")?;
+        let name = Path::new(name);
+        let directory = match expected {
+            Some(identity) => identity.directory,
+            None => root_identity(parent).map_err(|error| error.to_string())?,
+        };
+        let mut file = open_read_file_pinned(parent, name, Some(&directory))
+            .map_err(|error| error.to_string())?;
+        if require_single_link {
+            validate_open_file_single_link(&file).map_err(|error| error.to_string())?;
+        }
+        let file_identity = opened_file_identity(&file).map_err(|error| error.to_string())?;
+        if expected.is_some_and(|identity| identity.file != file_identity) {
+            return Err("resume source changed before writer admission".into());
+        }
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .map_err(|error| error.to_string())?;
+        let loaded =
+            session::jsonl::loader::route_captured_session_source(&path, session_id, &content)
+                .map_err(|error| error.to_string())?;
+        let actual = session::JsonlWriter::fixed_session_mode_from_source(
+            &content,
+            &session_id.to_string(),
+        )?;
+        if mode.is_some_and(|expected| expected != actual) {
+            return Err(format!(
+                "session mode mismatch: expected {}, found {}",
+                mode.unwrap().as_str(),
+                actual.as_str()
+            ));
+        }
+        let current = open_read_file_pinned(parent, name, Some(&directory))
+            .map_err(|error| error.to_string())?;
+        if opened_file_identity(&current).map_err(|error| error.to_string())? != file_identity {
+            return Err("resume source changed during capture".into());
+        }
+        Ok((
+            content,
+            loaded,
+            ResumeSourceIdentity {
+                directory,
+                file: file_identity,
+            },
+        ))
+    })
+    .await
+    .map_err(|error| format!("resume source capture failed: {error}"))?
+}
+
+/// Resolve an unqualified UUID only when exactly one project file owns it.
+async fn unique_resume_source(
+    home: &Path,
+    session_id: Uuid,
+    require_single_link: bool,
+) -> Result<(std::path::PathBuf, ResumeSourceIdentity), String> {
+    let missing = || format!("No conversation found with session ID: {session_id}");
+    let logical_projects = home.join("projects");
+    let projects = tokio::fs::canonicalize(&logical_projects)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                missing()
+            } else {
+                error.to_string()
+            }
+        })?;
+    let mut entries = tokio::fs::read_dir(&projects)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut selected = None;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        if !entry
+            .file_type()
+            .await
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let logical_bucket = logical_projects.join(entry.file_name());
+        let mut files = tokio::fs::read_dir(entry.path())
+            .await
+            .map_err(|error| error.to_string())?;
+        while let Some(file) = files
+            .next_entry()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            let candidate = logical_bucket.join(file.file_name());
+            if candidate.extension().and_then(|value| value.to_str()) != Some("jsonl")
+                || candidate
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| session::jsonl::validate_uuid(value))
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    != Some(session_id)
+            {
+                continue;
+            }
+            match tokio::fs::symlink_metadata(&candidate).await {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                Ok(_) => return Err("resume source is not a regular file".into()),
+                Err(error) => return Err(error.to_string()),
+            }
+            let (_, _, identity) =
+                capture_resume_source(&candidate, session_id, None, None, require_single_link)
+                    .await?;
+            if selected.replace((candidate, identity)).is_some() {
+                return Err(format!("ambiguous conversation session ID: {session_id}"));
+            }
+        }
+    }
+    selected.ok_or_else(missing)
 }
 
 fn claim_source(
@@ -743,6 +981,312 @@ mod tests {
             resume_drops_turn: None,
             fork,
         }
+    }
+
+    #[tokio::test]
+    async fn selected_source_path_wins_and_bare_duplicate_uuid_is_rejected() {
+        let (_root, config, source_id, path, source) = fixture().await;
+        let duplicate_dir = config.lingxi_home.join("projects").join("duplicate");
+        std::fs::create_dir_all(&duplicate_dir).unwrap();
+        let duplicate = duplicate_dir.join(format!("{source_id}.jsonl"));
+        std::fs::write(&duplicate, source.replace("inherited", "other source")).unwrap();
+
+        let mut ambiguous = config.clone();
+        let error = prepare(&mut ambiguous, &resume(source_id, false))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(ambiguous.session_writer_lease.is_none());
+
+        let mut exact = config;
+        exact.session_transcript_path = Some(path.clone());
+        let prepared = prepare(&mut exact, &resume(source_id, false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            exact.session_transcript_path.as_deref(),
+            Some(path.as_path())
+        );
+        assert_eq!(prepared.source_content.as_ref(), source);
+        assert!(!prepared.source_content.contains("other source"));
+        assert_eq!(
+            std::fs::read_to_string(duplicate).unwrap(),
+            source.replace("inherited", "other source")
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_source_inode_is_rechecked_after_writer_claim() {
+        let (_root, config, source_id, path, source) = fixture().await;
+        let (_, _, pinned) =
+            capture_resume_source(&path, source_id, None, Some(ConversationMode::Code), true)
+                .await
+                .unwrap();
+        let _lease = claim_source(&config, source_id).unwrap();
+        let original = path.with_extension("original");
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, source.replace("inherited", "replacement")).unwrap();
+        assert!(capture_resume_source(
+            &path,
+            source_id,
+            Some(pinned),
+            Some(ConversationMode::Code),
+            true
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_to_string(original).unwrap(), source);
+    }
+
+    #[tokio::test]
+    async fn bare_uuid_preserves_uppercase_path_and_rejects_case_variant_duplicates() {
+        let (_root, config, _, path, _) = fixture().await;
+        let id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+        let upper = path
+            .parent()
+            .unwrap()
+            .join(format!("{}.jsonl", id.to_string().to_uppercase()));
+        let source = source_transcript(id, &config.cwd);
+        std::fs::write(&upper, &source).unwrap();
+        let (selected, _) = unique_resume_source(&config.lingxi_home, id, true)
+            .await
+            .unwrap();
+        assert_eq!(selected, upper);
+        let other = config.lingxi_home.join("projects").join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(format!("{id}.jsonl")), source).unwrap();
+        assert!(unique_resume_source(&config.lingxi_home, id, true)
+            .await
+            .err()
+            .unwrap()
+            .contains("ambiguous"));
+    }
+
+    #[tokio::test]
+    async fn uppercase_filename_recovers_relocation_and_empty_anchor_workspace() {
+        let (root, config, _, path, _) = fixture().await;
+        std::fs::remove_file(path).unwrap();
+        let id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+        let upper = session::jsonl::session_path(
+            &config.lingxi_home,
+            &config.cwd.to_string_lossy(),
+            &id.to_string().to_uppercase(),
+        );
+        let relocated = root.path().join("relocated-uppercase");
+        std::fs::create_dir(&relocated).unwrap();
+        let relocation =
+            serde_json::json!({"type":"relocated","sessionId":id,"relocatedCwd":relocated});
+        let source = format!("{}{relocation}\n", source_transcript(id, &config.cwd));
+        std::fs::write(&upper, source).unwrap();
+        let mut run = config.clone();
+        prepare(&mut run, &resume(id, false)).await.unwrap();
+        assert_eq!(run.cwd, relocated);
+        assert_eq!(
+            run.session_transcript_path.as_deref(),
+            Some(upper.as_path())
+        );
+        drop(run);
+
+        let draft = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"custom-title","sessionId":id,"customTitle":"Scheduled","mobileEmptySession":1,"cwd":config.cwd}),
+        );
+        std::fs::write(&upper, draft).unwrap();
+        let catalog = session::jsonl::loader::list_recent_sessions_in_scope_with_mode(
+            &config.lingxi_home,
+            &config.cwd.to_string_lossy(),
+            session::jsonl::loader::SessionDiscoveryScope::Current,
+            1,
+            Arc::new(HostFileSystem::new(config.cwd.clone())),
+            Some(ConversationMode::Code),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            catalog.sessions[0].custom_or_ai_title.as_deref(),
+            Some("Scheduled")
+        );
+        let mut run = config.clone();
+        let prepared = prepare(&mut run, &SessionStart::Continue { fork: false })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.source_id, id);
+        assert_eq!(run.cwd, config.cwd);
+        assert_eq!(
+            run.session_transcript_path.as_deref(),
+            Some(upper.as_path())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_hardlinked_resume_source_is_rejected_before_writing() {
+        let (root, mut config, source_id, path, source) = fixture().await;
+        let linked = root.path().join("other-transcript.jsonl");
+        std::fs::hard_link(&path, &linked).unwrap();
+        config.session_transcript_path = Some(path.clone());
+        assert!(prepare(&mut config, &resume(source_id, false))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(linked).unwrap(), source);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_source_symlink_and_changed_captured_snapshot_are_rejected() {
+        let (_root, config, source_id, path, source) = fixture().await;
+        let link_dir = config.lingxi_home.join("projects").join("link");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join(format!("{source_id}.jsonl"));
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let mut linked = config.clone();
+        linked.session_transcript_path = Some(link);
+        assert!(prepare(&mut linked, &resume(source_id, false))
+            .await
+            .is_err());
+
+        let mut captured = config;
+        captured.session_transcript_path = Some(path.clone());
+        captured.session_resume_snapshot = Some(DesktopSessionResumeSnapshot {
+            source_session_id: source_id.to_string(),
+            content: source.clone().into(),
+        });
+        std::fs::write(&path, source.replace("inherited", "changed")).unwrap();
+        assert!(prepare(&mut captured, &resume(source_id, false))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn continue_selects_code_before_limiting_and_retains_its_path() {
+        let (_root, mut config, source_id, path, _) = fixture().await;
+        let chat_id = Uuid::new_v4();
+        let chat_path = path.parent().unwrap().join(format!("{chat_id}.jsonl"));
+        let chat = source_transcript(chat_id, &config.cwd)
+            .replace("\"sessionMode\":\"code\"", "\"sessionMode\":\"chat\"")
+            .replace("2026-10-07", "2026-10-09");
+        std::fs::write(chat_path, chat).unwrap();
+        config.initial_conversation_mode = Some(ConversationMode::Code);
+        let prepared = prepare(&mut config, &SessionStart::Continue { fork: false })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.source_id, source_id);
+        assert_eq!(
+            config.session_transcript_path.as_deref(),
+            Some(path.as_path())
+        );
+        assert_eq!(
+            config.initial_conversation_mode,
+            Some(ConversationMode::Code)
+        );
+    }
+
+    #[tokio::test]
+    async fn continue_without_explicit_mode_restores_the_newest_session_mode() {
+        let (_root, mut config, _, path, _) = fixture().await;
+        let chat_id = Uuid::new_v4();
+        let chat_path = path.parent().unwrap().join(format!("{chat_id}.jsonl"));
+        let chat = source_transcript(chat_id, &config.cwd)
+            .replace("\"sessionMode\":\"code\"", "\"sessionMode\":\"chat\"")
+            .replace("2026-10-07", "2026-10-09");
+        std::fs::write(&chat_path, chat).unwrap();
+        let prepared = prepare(&mut config, &SessionStart::Continue { fork: false })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.source_id, chat_id);
+        assert_eq!(
+            config.session_transcript_path.as_deref(),
+            Some(chat_path.as_path())
+        );
+        assert_eq!(
+            config.initial_conversation_mode,
+            Some(ConversationMode::Chat)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_and_continue_accept_an_anchored_empty_code_draft() {
+        let (_root, config, source_id, path, _) = fixture().await;
+        let source = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"fixed-session-mode","sessionId":source_id,"sessionMode":"code","instructionEpoch":0}),
+            serde_json::json!({"type":"custom-title","sessionId":source_id,"customTitle":"Scheduled","mobileEmptySession":1,"cwd":config.cwd}),
+        );
+        std::fs::write(&path, source).unwrap();
+        for start in [
+            resume(source_id, false),
+            SessionStart::Continue { fork: false },
+        ] {
+            let mut run = config.clone();
+            let prepared = prepare(&mut run, &start).await.unwrap().unwrap();
+            assert!(prepared.messages.is_empty());
+            assert_eq!(run.session_transcript_path.as_deref(), Some(path.as_path()));
+        }
+        let mut truncated = config;
+        let error = prepare(
+            &mut truncated,
+            &SessionStart::Resume {
+                session_id: source_id,
+                resume_session_at: Some("missing".into()),
+                resume_drops_turn: None,
+                fork: false,
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("truncate"));
+    }
+
+    #[tokio::test]
+    async fn empty_draft_rejects_invalid_anchor_cwd_and_accepts_relocation() {
+        let (root, config, source_id, path, _) = fixture().await;
+        let header = serde_json::json!({"type":"fixed-session-mode","sessionId":source_id,"sessionMode":"code","instructionEpoch":0});
+        let marker = serde_json::json!({"type":"custom-title","sessionId":source_id,"customTitle":"Scheduled","mobileEmptySession":1});
+        for invalid in [None, Some(""), Some("relative")] {
+            let mut row = marker.clone();
+            if let Some(cwd) = invalid {
+                row["cwd"] = serde_json::json!(cwd);
+            }
+            let source = format!("{header}\n{row}\n");
+            std::fs::write(&path, &source).unwrap();
+            let mut run = config.clone();
+            run.session_transcript_path = Some(path.clone());
+            assert!(prepare(&mut run, &resume(source_id, false)).await.is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        }
+
+        let old = root.path().join("old-workspace");
+        std::fs::create_dir(&old).unwrap();
+        let mut row = marker;
+        row["cwd"] = serde_json::json!(old);
+        let wrong_bucket = format!("{header}\n{row}\n");
+        std::fs::write(&path, &wrong_bucket).unwrap();
+        let mut run = config.clone();
+        run.session_transcript_path = Some(path.clone());
+        assert!(prepare(&mut run, &resume(source_id, false)).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), wrong_bucket);
+
+        let relocated =
+            serde_json::json!({"type":"relocated","sessionId":source_id,"relocatedCwd":config.cwd});
+        let source = format!("{header}\n{row}\n{relocated}\n");
+        std::fs::write(&path, &source).unwrap();
+        let mut run = config.clone();
+        run.session_transcript_path = Some(path.clone());
+        let prepared = prepare(&mut run, &resume(source_id, false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(prepared.messages.is_empty());
+        assert_eq!(run.cwd, config.cwd);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
 
     #[tokio::test]

@@ -255,13 +255,22 @@ fn canonicalized_path_string(path: &str) -> String {
 }
 
 fn transcript_cwd_from_path(path: &Path, loaded: &LoadedTranscript) -> Option<String> {
-    let session_id = path.file_stem().and_then(|stem| stem.to_str());
-    if let Some(relocated) = session_id.and_then(|id| loaded.relocated_cwds.get(id)) {
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| Uuid::parse_str(stem).map_or_else(|_| stem.to_owned(), |id| id.to_string()));
+    if let Some(relocated) = session_id
+        .as_ref()
+        .and_then(|id| loaded.relocated_cwds.get(id))
+    {
         if !relocated.is_empty() {
             return Some(relocated.clone());
         }
     }
-    if let Some(cwd) = session_id.and_then(|id| loaded.mobile_empty_session_cwds.get(id)) {
+    if let Some(cwd) = session_id
+        .as_ref()
+        .and_then(|id| loaded.mobile_empty_session_cwds.get(id))
+    {
         return Some(cwd.clone());
     }
     loaded
@@ -276,13 +285,20 @@ fn transcript_cwd_from_path(path: &Path, loaded: &LoadedTranscript) -> Option<St
 /// only when its sanitized directory name agrees with the selected file.
 #[must_use]
 pub fn transcript_workspace_path(path: &Path, loaded: &LoadedTranscript) -> Option<String> {
-    let session_id = path.file_stem().and_then(|stem| stem.to_str());
-    if let Some(relocated) = session_id.and_then(|id| loaded.relocated_cwds.get(id)) {
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| Uuid::parse_str(stem).map_or_else(|_| stem.to_owned(), |id| id.to_string()));
+    if let Some(relocated) = session_id
+        .as_ref()
+        .and_then(|id| loaded.relocated_cwds.get(id))
+    {
         if !relocated.is_empty() && Path::new(&relocated).is_absolute() {
             return Some(relocated.clone());
         }
     }
     let cwd = session_id
+        .as_ref()
         .and_then(|id| loaded.mobile_empty_session_cwds.get(id))
         .map(String::as_str)
         .or_else(|| {
@@ -1526,7 +1542,9 @@ async fn enrich_candidate_uncached(
     // This semantic check belongs in the shared loader; Electron must not
     // blanket-filter zero-count rows because validated empty sessions are
     // real UUID-preserving conversation targets on mobile.
-    if loaded.messages_in_order.is_empty() && !loaded.mobile_empty_sessions.contains(&stem) {
+    if loaded.messages_in_order.is_empty()
+        && !loaded.mobile_empty_sessions.contains(&uuid.to_string())
+    {
         if loaded.malformed_line_count > 0 {
             *skipped_files += 1;
         }
@@ -1631,6 +1649,7 @@ async fn enrich_candidate_uncached(
     // `truncate_title`); the first-message fallback runs the full
     // `extract_title` transforms. Its `'(session)'` sentinel identifies the
     // empty case; the picker replaces that sentinel with the UUID prefix below.
+    let canonical_sid = uuid.to_string();
     let sid = stem.as_str();
     // claude `getLogDisplayTitle` (`gBe`) leads with the session's `agentName`
     // — for an agent-owned session the picker row shows the agent's name above
@@ -1642,12 +1661,15 @@ async fn enrich_candidate_uncached(
     // sub-logic is intricate. The port keeps `extract_title`'s first-message
     // path; an empty first-prompt fallback is replaced below with Claude's
     // `sessionId.slice(0, 8)` picker label.)
-    let tip = find_tip(&loaded, sid);
+    let tip = find_tip(&loaded, &canonical_sid);
     let mut title = loaded
         .agent_names
         .get(sid)
+        .or_else(|| loaded.agent_names.get(&canonical_sid))
         .or_else(|| loaded.custom_titles.get(sid))
+        .or_else(|| loaded.custom_titles.get(&canonical_sid))
         .or_else(|| loaded.ai_titles.get(sid))
+        .or_else(|| loaded.ai_titles.get(&canonical_sid))
         .or_else(|| tip.and_then(|tip| loaded.summaries.get(&tip.uuid)))
         .map_or_else(
             || extract_title(&loaded.messages_in_order),
@@ -1660,7 +1682,11 @@ async fn enrich_candidate_uncached(
             sid.chars().take(8).collect()
         };
     }
-    let pr_number = loaded.pr_numbers.get(sid).copied();
+    let pr_number = loaded
+        .pr_numbers
+        .get(sid)
+        .or_else(|| loaded.pr_numbers.get(&canonical_sid))
+        .copied();
     // `OEe`'s match source: `d.customTitle ?? d.aiTitle`. Note this skips
     // `agent_names`, which the DISPLAY title above leads with — an
     // agent-owned session is searchable by the title the user (or the AI)
@@ -1668,7 +1694,9 @@ async fn enrich_candidate_uncached(
     let custom_or_ai_title = loaded
         .custom_titles
         .get(sid)
+        .or_else(|| loaded.custom_titles.get(&canonical_sid))
         .or_else(|| loaded.ai_titles.get(sid))
+        .or_else(|| loaded.ai_titles.get(&canonical_sid))
         .cloned();
     let (resume_model, resume_model_profile) = persisted_model_ref(&loaded, tip);
     let workspace_path = scoped_cwd
@@ -2067,6 +2095,7 @@ pub async fn list_recent_sessions_in_scope_with_worktrees(
         &fs,
         worktree_paths,
         None,
+        None,
     )
     .await
 }
@@ -2127,9 +2156,9 @@ pub async fn list_recent_sessions_in_scope_with_worktrees_and_mode(
         &fs,
         worktree_paths,
         None,
+        Some(mode),
     )
     .await?;
-    catalog.sessions.retain(|row| row.mode == mode);
     if limit > 0 {
         catalog.sessions.truncate(limit);
     }
@@ -2261,6 +2290,7 @@ async fn find_session_inner(
         fs,
         worktree_paths,
         Some(session_id),
+        None,
     )
     .await
     {
@@ -2274,6 +2304,7 @@ async fn find_session_inner(
         usize::MAX,
         fs,
         worktree_paths,
+        None,
         None,
     )
     .await?;
@@ -2299,6 +2330,7 @@ async fn list_recent_sessions_inner(
         fs,
         worktree_paths,
         None,
+        None,
     )
     .await?
     .sessions)
@@ -2312,6 +2344,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
     only_session: Option<Uuid>,
+    mode: Option<SessionMode>,
 ) -> Result<SessionCatalog, LoaderError> {
     let mut candidates: Vec<CatalogCandidate> = Vec::new();
     let mut skipped_files = 0;
@@ -2345,7 +2378,19 @@ async fn list_recent_sessions_inner_with_diagnostics(
     if let Some(session_id) = only_session {
         candidates.retain(|candidate| candidate.uuid == session_id);
     }
-    let candidates = deduplicate_catalog_candidates(candidates);
+    let candidates = if mode.is_some() {
+        // Read each source before choosing a same-UUID winner: a newer Chat
+        // copy must not hide an older Code copy (or vice versa).
+        candidates.sort_by(|left, right| {
+            right
+                .file_modified
+                .cmp(&left.file_modified)
+                .then_with(|| right.file_created.cmp(&left.file_created))
+        });
+        candidates
+    } else {
+        deduplicate_catalog_candidates(candidates)
+    };
     let current_is_sdk_entrypoint = matches!(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
         Ok("sdk-cli" | "sdk-ts" | "sdk-py")
@@ -2359,6 +2404,16 @@ async fn list_recent_sessions_inner_with_diagnostics(
         &mut skipped_files,
     )
     .await?;
+    let had_rows = !rows.is_empty();
+    if let Some(mode) = mode {
+        rows.retain(|row| row.mode == mode);
+        let mut stems = HashSet::new();
+        rows.retain(|row| {
+            row.path
+                .file_stem()
+                .is_some_and(|stem| stems.insert(stem.to_os_string()))
+        });
+    }
     // Native Repository keeps the current/worktree buckets unbounded. Its
     // count applies separately to direct aliases and retained worktree
     // buckets; Current performs its final slice only after a linked merge.
@@ -2379,6 +2434,12 @@ async fn list_recent_sessions_inner_with_diagnostics(
     }
 
     if rows.is_empty() {
+        if mode.is_some() && had_rows {
+            return Ok(SessionCatalog {
+                sessions: rows,
+                skipped_files,
+            });
+        }
         if skipped_files > 0 {
             return Err(LoaderError::Io {
                 arg: project_dir_for_cwd(lingxi_home, cwd).display().to_string(),
@@ -6411,6 +6472,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mode_filter_precedes_same_uuid_source_deduplication() {
+        let (temp, home, cwd, dir) = setup();
+        let id = Uuid::new_v4();
+        let older = SystemTime::now() - Duration::from_secs(20);
+        let newer = older + Duration::from_secs(10);
+        write_session_id(&dir, id, &cwd, "code source", older);
+        let code_path = dir.join(format!("{id}.jsonl"));
+        let other = home.join("projects").join("other-project");
+        write_session_id(&other, id, &cwd, "chat source", newer);
+        let chat_path = other.join(format!("{id}.jsonl"));
+        let source = std::fs::read_to_string(&chat_path).unwrap();
+        let (_, rows) = source.split_once('\n').unwrap();
+        let header = json!({"type":"fixed-session-mode", "sessionId":id.to_string(), "sessionMode":"chat", "instructionEpoch":0});
+        std::fs::write(&chat_path, format!("{header}\n{rows}")).unwrap();
+        filetime::set_file_mtime(&chat_path, filetime::FileTime::from_system_time(newer)).unwrap();
+        let catalog = list_recent_sessions_in_scope_with_worktrees_and_mode(
+            &home,
+            &cwd,
+            SessionDiscoveryScope::All,
+            1,
+            make_fs(temp.path()),
+            &[],
+            Some(SessionMode::Code),
+        )
+        .await
+        .unwrap();
+        assert_eq!(catalog.sessions.len(), 1);
+        assert_eq!(catalog.sessions[0].path, code_path);
+        assert_eq!(catalog.sessions[0].mode, SessionMode::Code);
+    }
+
+    #[tokio::test]
     async fn find_session_returns_the_catalog_row_without_its_siblings() {
         let (temp, lingxi_home, cwd, dir) = setup();
         let base = SystemTime::now();
@@ -6489,6 +6582,7 @@ mod tests {
             5,
             &fs,
             &[],
+            None,
             None,
         )
         .await;

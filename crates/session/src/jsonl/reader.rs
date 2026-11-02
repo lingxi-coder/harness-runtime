@@ -14,6 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
+// Transcript filenames and session IDs are UUIDs whose letter case is not
+// significant. Keep non-UUID keys unchanged for the reader's general callers.
+fn session_metadata_key(value: &str) -> String {
+    uuid::Uuid::parse_str(value).map_or_else(|_| value.to_owned(), |id| id.to_string())
+}
+
 /// Remove Native message, attachment, tool-result, and MCP metadata members before the
 /// remaining row enters the typed-metadata parser. These arbitrary payloads go
 /// directly into the flat UTF-16 carrier, so deep ToolUse input and exact
@@ -809,14 +815,14 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
                 value.get("customTitle").and_then(Value::as_str),
             ) {
                 out.custom_titles.insert(sid.to_string(), title.to_string());
+                let key = session_metadata_key(sid);
                 if value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1) {
-                    out.mobile_empty_sessions.insert(sid.to_string());
+                    out.mobile_empty_sessions.insert(key.clone());
                     if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
-                        out.mobile_empty_session_cwds
-                            .insert(sid.to_string(), cwd.to_string());
+                        out.mobile_empty_session_cwds.insert(key, cwd.to_string());
                     }
                 } else {
-                    out.mobile_empty_sessions.remove(sid);
+                    out.mobile_empty_sessions.remove(&key);
                 }
             }
         } else if ty == "ai-title" {
@@ -955,7 +961,7 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             ) {
                 if !relocated_cwd.is_empty() {
                     out.relocated_cwds
-                        .insert(session_id.to_string(), relocated_cwd.to_string());
+                        .insert(session_metadata_key(session_id), relocated_cwd.to_string());
                 }
             }
         } else if ty == "history-suppression" {
