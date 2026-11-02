@@ -884,6 +884,21 @@ impl ModelRuntime {
         Ok(current)
     }
 
+    /// Host-only account catalog rebuild. The supplied snapshot must be the
+    /// same one used to assemble the account routes in `config`.
+    pub fn reconfigured_with_account_snapshot(
+        &self,
+        config: ClientConfig,
+        snapshot: &lingxi_core::host::provider_accounts::AccountSnapshot,
+    ) -> Result<Arc<Self>, LlmError> {
+        let mut current = Self::from_config(config)?;
+        current.credentials = self.credentials.clone();
+        current.account_pool = self.account_pool.clone();
+        current.capture_account_identities_from_snapshot(snapshot);
+        current.cache = self.cache.clone();
+        Ok(Arc::new(current))
+    }
+
     /// Share one host account health domain across main, auxiliary and child calls.
     pub fn with_account_pool(mut self, pool: Arc<crate::accounts::AccountPool>) -> Self {
         self.account_pool = Some(pool);
@@ -892,15 +907,21 @@ impl ModelRuntime {
     }
 
     fn capture_account_identities(&mut self) {
-        if let Some(pool) = self.account_pool.as_ref() {
-            let snapshot = pool.snapshot();
-            for (name, entry) in Arc::make_mut(&mut self.routes).iter_mut() {
-                entry.identity_generation = snapshot
-                    .accounts
-                    .iter()
-                    .find(|account| *name == format!("account.{}", account.account_id))
-                    .map(|account| account.identity_generation);
-            }
+        if let Some(snapshot) = self.account_pool.as_ref().map(|pool| pool.snapshot()) {
+            self.capture_account_identities_from_snapshot(&snapshot);
+        }
+    }
+
+    fn capture_account_identities_from_snapshot(
+        &mut self,
+        snapshot: &lingxi_core::host::provider_accounts::AccountSnapshot,
+    ) {
+        for (name, entry) in Arc::make_mut(&mut self.routes).iter_mut() {
+            entry.identity_generation = snapshot
+                .accounts
+                .iter()
+                .find(|account| *name == format!("account.{}", account.account_id))
+                .map(|account| account.identity_generation);
         }
     }
 
@@ -1110,14 +1131,35 @@ impl ModelRuntime {
         let Some(pool) = self.account_pool.as_ref() else {
             return Ok(None);
         };
+        self.service_account_coordinator_at_snapshot(profile, operation_model, pool.snapshot())
+    }
+
+    pub(crate) fn service_account_coordinator_at_snapshot(
+        &self,
+        profile: &str,
+        operation_model: &str,
+        snapshot: lingxi_core::host::provider_accounts::AccountSnapshot,
+    ) -> Result<Option<crate::accounts::AttemptCoordinator>, LlmError> {
+        let Some(pool) = self.account_pool.as_ref() else {
+            return Ok(None);
+        };
         let original = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
-        let snapshot = pool.snapshot();
-        let selected = pool.account_for_profile(profile);
-        let binding = selected
-            .as_ref()
-            .map_or(profile, |account| account.execution_binding_id.as_str());
+        let selected = snapshot
+            .accounts
+            .iter()
+            .find(|account| profile == format!("account.{}", account.account_id));
+        if profile.starts_with("account.")
+            && selected.is_none_or(|account| {
+                original.identity_generation != Some(account.identity_generation)
+            })
+        {
+            return Err(LlmError::AllAccountsUnavailable {
+                accounts: vec![],
+                earliest_recovery_ms: None,
+            });
+        }
+        let binding = selected.map_or(profile, |account| account.execution_binding_id.as_str());
         let provider = selected
-            .as_ref()
             .map(|account| account.provider_id.clone())
             .or_else(|| self.logical_account_provider(&snapshot, binding));
         let Some(provider) = provider else {
@@ -1140,6 +1182,9 @@ impl ModelRuntime {
             let Some(entry) = self.routes.get(&name) else {
                 continue;
             };
+            if entry.identity_generation != Some(account.identity_generation) {
+                continue;
+            }
             if !matches!(
                 entry.auth,
                 AuthStrategy::ApiKey
@@ -1191,7 +1236,7 @@ impl ModelRuntime {
             })
             .collect();
         let mut coordinator =
-            pool.coordinator_from_candidates(operation_model, candidates, &endpoints);
+            pool.coordinator_from_snapshot(operation_model, candidates, &endpoints, snapshot);
         if let Some(coordinator) = coordinator.as_mut() {
             if profile.starts_with("account.") {
                 coordinator.prefer_profile(profile);
@@ -1212,16 +1257,39 @@ impl ModelRuntime {
         let Some(pool) = self.account_pool.as_ref() else {
             return Ok(None);
         };
+        self.account_coordinator_at_snapshot(model, profile, pool.snapshot())
+    }
+
+    pub(crate) fn account_coordinator_at_snapshot(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        snapshot: lingxi_core::host::provider_accounts::AccountSnapshot,
+    ) -> Result<Option<crate::accounts::AttemptCoordinator>, LlmError> {
+        let Some(pool) = self.account_pool.as_ref() else {
+            return Ok(None);
+        };
         let mut route = self.registry.resolve_in(model, profile)?;
-        let snapshot = pool.snapshot();
-        let selected = pool.account_for_profile(&route.profile_name);
-        let binding = selected
-            .as_ref()
-            .map_or(route.profile_name.as_str(), |account| {
-                account.execution_binding_id.as_str()
+        let selected = snapshot
+            .accounts
+            .iter()
+            .find(|account| route.profile_name == format!("account.{}", account.account_id));
+        if route.profile_name.starts_with("account.")
+            && selected.is_none_or(|account| {
+                self.routes.get(&route.profile_name).is_none_or(|entry| {
+                    entry.identity_generation != Some(account.identity_generation)
+                })
+            })
+        {
+            return Err(LlmError::AllAccountsUnavailable {
+                accounts: vec![],
+                earliest_recovery_ms: None,
             });
+        }
+        let binding = selected.map_or(route.profile_name.as_str(), |account| {
+            account.execution_binding_id.as_str()
+        });
         let logical_provider = selected
-            .as_ref()
             .map(|account| account.provider_id.clone())
             .or_else(|| self.logical_account_provider(&snapshot, binding));
         let Some(logical_provider) = logical_provider else {
@@ -1250,6 +1318,13 @@ impl ModelRuntime {
             .filter(|account| account.provider_id == logical_provider)
         {
             let account_profile = format!("account.{}", account.account_id);
+            if self
+                .routes
+                .get(&account_profile)
+                .is_none_or(|entry| entry.identity_generation != Some(account.identity_generation))
+            {
+                continue;
+            }
             let target_billing = self.routes.get(&account_profile).map(|entry| {
                 entry
                     .profile
@@ -1313,7 +1388,13 @@ impl ModelRuntime {
                 )
             })
             .collect();
-        let mut coordinator = pool.coordinator(&route, &endpoints);
+        let mut candidates = vec![crate::ConnectionHop {
+            profile_name: route.profile_name.clone(),
+            request_model: route.request_model.clone(),
+        }];
+        candidates.extend(route.connection_chain);
+        let mut coordinator =
+            pool.coordinator_from_snapshot(&route.display_model, candidates, &endpoints, snapshot);
         if let (Some(coordinator), Some(profile)) = (
             coordinator.as_mut(),
             profile.filter(|profile| profile.starts_with("account.")),

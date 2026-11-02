@@ -10024,17 +10024,15 @@ impl ApiService {
             return false;
         };
         match runtime.service_account_coordinator(original_profile, "audio/binding") {
-            Ok(Some(mut coordinator)) => {
+            Ok(Some(coordinator)) => {
                 let Ok(scope) =
                     serde_json::from_str::<crate::accounts::AccountResourceScope>(scope)
                 else {
                     return false;
                 };
-                coordinator.pin_scope(&scope)
-                    && coordinator
-                        .candidate_profiles()
-                        .iter()
-                        .any(|profile| profile == actual_profile)
+                coordinator
+                    .permits(&scope, actual_profile, "audio/binding")
+                    .is_some()
             }
             Ok(None) => {
                 actual_profile == original_profile && scope.starts_with("explicit-service.")

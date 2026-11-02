@@ -4,6 +4,27 @@ use std::sync::Arc;
 
 struct ScheduledAnchorPermissionSink;
 
+fn scheduled_test_writer(
+    cwd: &std::path::Path,
+    path: &std::path::Path,
+    fs: Arc<dyn FileSystem>,
+    id: uuid::Uuid,
+) -> Arc<session::JsonlWriter> {
+    let state = cwd.join("test-session-state").join(id.to_string());
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let authority = Arc::new(session::jsonl::DurableTranscriptWriter::open(state).unwrap());
+    let writer = Arc::new(session::JsonlWriter::new(path.to_path_buf(), fs).with_durable_lock(authority));
+    writer
+        .activate_session_target(
+            lingxi_core::types::SessionId::from_uuid(id),
+            path.to_path_buf(),
+            cwd.to_path_buf(),
+        )
+        .unwrap();
+    writer
+}
+
 #[async_trait::async_trait]
 impl client::adapter::PermissionRequestSink for ScheduledAnchorPermissionSink {
     async fn emit_request(&self, _: client::protocol::permission::PermissionRequest) {}
@@ -65,7 +86,7 @@ async fn scheduled_anchor_is_idempotent_and_rejects_foreign_owner() {
     let id = uuid::Uuid::new_v4();
     let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
     let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cwd.clone()));
-    let writer = session::JsonlWriter::new(path.clone(), fs);
+    let writer = scheduled_test_writer(&cwd, &path, fs, id);
     let _lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
         .claim_session_id(&id.to_string(), std::process::id()).unwrap();
     writer.initialize_fixed_session_mode(&id.to_string(), ConversationMode::Chat, 0).await.unwrap();
@@ -86,7 +107,7 @@ async fn scheduled_anchor_is_idempotent_and_rejects_foreign_owner() {
     let existing_id = uuid::Uuid::new_v4();
     let existing_path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &existing_id.to_string());
     let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cwd.clone()));
-    let existing = session::JsonlWriter::new(existing_path.clone(), fs);
+    let existing = scheduled_test_writer(&cwd, &existing_path, fs, existing_id);
     let _existing_lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
         .claim_session_id(&existing_id.to_string(), std::process::id()).unwrap();
     existing.initialize_fixed_session_mode(&existing_id.to_string(), ConversationMode::Chat, 0).await.unwrap();

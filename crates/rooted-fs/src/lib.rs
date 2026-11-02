@@ -2201,6 +2201,43 @@ pub fn open_append_file_pinned(
     imp::open_append_file_pinned(root, relative, expected)
 }
 
+/// Open an existing regular file for read/write through a pinned root.
+///
+/// This never creates a missing target and never follows a final symlink.
+pub fn open_existing_file_for_update_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: &RootIdentity,
+) -> Result<std::fs::File, FsError> {
+    imp::open_recovery_file(root, relative, expected)
+}
+
+/// Reject multiple directory links to the same already-opened file.
+pub fn validate_open_file_single_link(file: &std::fs::File) -> Result<(), FsError> {
+    #[cfg(unix)]
+    let links = {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()
+            .map_err(|error| FsError::Io(error.to_string()))?
+            .nlink()
+    };
+    #[cfg(windows)]
+    let links = u64::from(file_link_count(file).map_err(|error| FsError::Io(error.to_string()))?);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        return Err(FsError::Io(
+            "open-file link validation is unsupported".into(),
+        ));
+    }
+    #[cfg(any(unix, windows))]
+    if links == 1 {
+        Ok(())
+    } else {
+        Err(FsError::Io("file must have exactly one link".into()))
+    }
+}
+
 /// Append through one pinned file handle, then sync both contents and parent
 /// before a durable recipient journal may acknowledge the appended row.
 pub fn append_file_durable(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {

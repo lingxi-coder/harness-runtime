@@ -115,8 +115,8 @@ mod tests {
         let sid = session_id.as_uuid();
         let rows = [
             serde_json::json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"chat","instructionEpoch":2}),
-            serde_json::json!({"type":"user","uuid":old_id.as_uuid(),"sessionId":sid,"parentUuid":null,"isMeta":true,"origin":{"type":"skill_activation","context_epoch":1,"skill_name":"old"},"message":{"role":"user","content":"same text"}}),
-            serde_json::json!({"type":"user","uuid":current_id.as_uuid(),"sessionId":sid,"parentUuid":old_id.as_uuid(),"isMeta":true,"origin":{"type":"skill_activation","context_epoch":2,"skill_name":"current"},"message":{"role":"user","content":"current instruction"}}),
+            serde_json::json!({"type":"user","uuid":old_id.as_uuid(),"sessionId":sid,"parentUuid":null,"isMeta":true,"origin":{"type":"skill_activation","context_epoch":1,"skill_name":"old","skill_path":"/skills/old"},"message":{"role":"user","content":"same text"}}),
+            serde_json::json!({"type":"user","uuid":current_id.as_uuid(),"sessionId":sid,"parentUuid":old_id.as_uuid(),"isMeta":true,"origin":{"type":"skill_activation","context_epoch":2,"skill_name":"current","skill_path":"/skills/current"},"message":{"role":"user","content":"current instruction"}}),
             serde_json::json!({"type":"user","uuid":user_id.as_uuid(),"sessionId":sid,"parentUuid":current_id.as_uuid(),"message":{"role":"user","content":"same text"}}),
             serde_json::json!({"type":"user","uuid":excluded_id.as_uuid(),"sessionId":sid,"parentUuid":user_id.as_uuid(),"isModelContextExcluded":true,"message":{"role":"user","content":"excluded evidence"}}),
         ];
@@ -172,6 +172,51 @@ mod tests {
         let model = orch.session.lock().await.model_context_history();
         assert!(model.iter().any(|row| row.id() == current_id));
         assert!(model.iter().any(|row| row.id() == user_id));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn captured_profile_ignores_malformed_individual_skill_origins() {
+        let _registry_guard = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session_id = lingxi_core::types::SessionId::new();
+        let sid = session_id.as_uuid();
+        let bad_name = MessageId::new();
+        let missing_path = MessageId::new();
+        let valid = MessageId::new();
+        let rows = [
+            serde_json::json!({"type":"fixed-session-mode","sessionId":sid,"sessionMode":"chat","instructionEpoch":0}),
+            serde_json::json!({"type":"user","uuid":bad_name.as_uuid(),"sessionId":sid,"parentUuid":null,"isMeta":true,"origin":{"type":"skill_activation","context_epoch":0,"skill_name":42,"skill_path":"/skills/bad"},"message":{"role":"user","content":"bad name"}}),
+            serde_json::json!({"type":"user","uuid":missing_path.as_uuid(),"sessionId":sid,"parentUuid":bad_name.as_uuid(),"isMeta":true,"origin":{"type":"skill_activation","context_epoch":0,"skill_name":"missing-path"},"message":{"role":"user","content":"missing path"}}),
+            serde_json::json!({"type":"user","uuid":valid.as_uuid(),"sessionId":sid,"parentUuid":missing_path.as_uuid(),"isMeta":true,"origin":{"type":"skill_activation","context_epoch":0,"skill_name":"valid","skill_path":"/skills/valid"},"message":{"role":"user","content":"valid instruction"}}),
+        ];
+        let source = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        let loaded = session::jsonl::route_lines(&source);
+        let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid.to_string());
+        let orch = orchestrator()
+            .with_conversation_mode(ConversationMode::Chat)
+            .with_session_id(session_id);
+        orch.restore_captured_session_history(
+            sid,
+            &messages,
+            &loaded.messages_in_order,
+            false,
+            permission::PermissionMode::Default,
+            ConversationMode::Chat,
+            &source,
+        )
+        .await
+        .unwrap();
+        let scoped_id = session_id.to_string();
+        let active = compaction::invoked_skills::filter_for_scope(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&scoped_id), None),
+        );
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name.string_at(""), Some("valid"));
     }
 
     #[tokio::test]
@@ -459,25 +504,9 @@ impl ConversationOrchestrator {
         let retired = compaction::invoked_skills::expired_message_ids_for_scope(
             compaction::invoked_skills::InvokedSkillScopeRef::new(Some(session_id), None),
         );
-        let restored_skill_rows = self
-            .transcript
-            .post_compact_skill_attachments
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
         {
             let mut session = self.session.lock().await;
             session.model_context_excluded_messages.extend(retired);
-            if retire {
-                let legacy_restored = restored_skill_rows.into_iter().filter(|id| {
-                    session.history.iter().find(|row| row.id() == *id).is_none_or(|row| !matches!(row, ConversationMessage::User { origin: Some(origin), .. } if origin.string_at("/type") == Some("skill_activation")))
-                }).collect::<Vec<_>>();
-                session
-                    .model_context_excluded_messages
-                    .extend(legacy_restored);
-            }
             // Only host-owned envelope provenance is inspected. Identical text
             // quoted in an attachment or tool result is never reclassified.
             let obsolete = session
@@ -564,7 +593,6 @@ impl ConversationOrchestrator {
     /// Passive rehydration of host-stamped instructions. No loader, hook,
     /// embedded command, setup step or user action is executed here.
     async fn restore_effective_skill_activations(&self, epoch: u64) {
-        use lingxi_core::types::{utf16_json::Utf16JsonProjection as Source, ContentBlock};
         let session_id = self.current_session_id().await.to_string();
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
         let history = self.session.lock().await.model_context_history();
@@ -578,7 +606,6 @@ impl ConversationOrchestrator {
             let accepted_message = message.clone();
             let ConversationMessage::User {
                 id,
-                content,
                 origin: Some(origin),
                 ..
             } = message
@@ -600,33 +627,10 @@ impl ConversationOrchestrator {
             if marker_epoch != Some(epoch) {
                 continue;
             }
-            if let Ok(name) = origin.subprojection("/skill_name") {
-                if compaction::invoked_skills::register_accepted_skill_message(
+            if origin.subprojection("/skill_name").is_ok() {
+                compaction::invoked_skills::register_accepted_skill_message(
                     &accepted_message,
                     scope,
-                ) {
-                    continue;
-                }
-                let units = content
-                    .iter()
-                    .flat_map(|block| match block {
-                        ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
-                        ContentBlock::TextJsUtf16 {
-                            utf16_code_units, ..
-                        } => utf16_code_units.clone(),
-                        _ => Vec::new(),
-                    })
-                    .collect::<Vec<_>>();
-                let body = Source::root_string(String::from_utf16_lossy(&units), units)
-                    .expect("restored skill source is text");
-                let path = origin.string_at("/skill_path").unwrap_or("");
-                compaction::invoked_skills::register_activation_with_message(
-                    &name,
-                    std::path::Path::new(path),
-                    &body,
-                    None,
-                    scope,
-                    id,
                 );
             } else if let Some(bodies) = attachments.get(&id) {
                 for (index, body) in bodies.iter().enumerate() {

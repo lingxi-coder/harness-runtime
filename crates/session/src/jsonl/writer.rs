@@ -715,6 +715,12 @@ impl JsonlWriter {
         {
             return;
         }
+        // Anchor commits hold the matching read lock through their durable IO.
+        // Take the write lock before publishing any part of the new target.
+        let mut active = self
+            .active_durable_target
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *self
             .durable_lock
             .write()
@@ -728,10 +734,7 @@ impl JsonlWriter {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id, target.clone());
-        *self
-            .active_durable_target
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target);
+        *active = Some(target);
         *self
             .active_path
             .write()
@@ -756,6 +759,83 @@ impl JsonlWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|target| target.path.clone())
+    }
+
+    /// Durably retain the active session as a scheduled-task owner.
+    ///
+    /// Validation and append share the writer mutex and the session's pinned
+    /// durable transaction. Dropping the caller's future does not release the
+    /// mutex while filesystem work is still running.
+    pub async fn ensure_scheduled_anchor(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        mode: ConversationMode,
+        expected_cwd: &Path,
+    ) -> Result<bool, TranscriptWriterError> {
+        let writer = self.clone();
+        let expected_cwd = expected_cwd.to_path_buf();
+        tokio::spawn(async move {
+            let _guard = writer.lock.lock().await;
+            let target = writer
+                .session_targets
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| FsError::Io("scheduled session has no durable target".into()))?;
+            let still_active = |writer: &Self, target: &DurableTranscriptTarget| {
+                writer.active_path() == target.path
+                    && writer
+                        .active_durable_target
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .is_some_and(|active| {
+                            active.path == target.path
+                                && active.cwd == target.cwd
+                                && Arc::ptr_eq(&active.writer, &target.writer)
+                        })
+            };
+            if target.cwd != expected_cwd || !still_active(&writer, &target) {
+                return Err(FsError::Io("scheduled session writer changed target".into()).into());
+            }
+            let captured = target.clone();
+            let committing_writer = writer.clone();
+            let added = tokio::task::spawn_blocking(move || {
+                captured.writer.with_transaction(|_| {
+                    let active = committing_writer
+                        .active_durable_target
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let current = active.as_ref().is_some_and(|target| {
+                        target.path == captured.path
+                            && target.cwd == captured.cwd
+                            && Arc::ptr_eq(&target.writer, &captured.writer)
+                    });
+                    if !current || committing_writer.active_path() != captured.path {
+                        return Err(
+                            FsError::Io("scheduled session writer changed target".into()).into(),
+                        );
+                    }
+                    let result = super::scheduled_anchor::ensure_anchor_at(
+                        &captured.path,
+                        &captured.cwd,
+                        session_id,
+                        mode,
+                    );
+                    drop(active);
+                    result
+                })
+            })
+            .await
+            .map_err(|error| FsError::Io(format!("scheduled anchor worker failed: {error}")))??;
+            if !still_active(&writer, &target) {
+                return Err(FsError::Io("scheduled session writer changed target".into()).into());
+            }
+            Ok(added)
+        })
+        .await
+        .map_err(|error| FsError::Io(format!("scheduled anchor task failed: {error}")))?
     }
 
     /// Capture a durable source cutoff without acquiring the conversation turn
@@ -3676,6 +3756,309 @@ mod tests {
         let fs: Arc<dyn FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
         (dir, path.clone(), JsonlWriter::new(path, fs))
+    }
+
+    fn scheduled_anchor_fixture() -> (
+        tempfile::TempDir,
+        SessionId,
+        PathBuf,
+        Arc<DurableTranscriptWriter>,
+        Arc<JsonlWriter>,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", session.as_uuid()));
+        let state = root.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let authority = Arc::new(DurableTranscriptWriter::open(state).unwrap());
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer =
+            Arc::new(JsonlWriter::new(path.clone(), fs).with_durable_lock(authority.clone()));
+        writer.activate_session_target_with_durable_lock(
+            session,
+            path.clone(),
+            root.path().to_path_buf(),
+            authority.clone(),
+        );
+        (root, session, path, authority, writer)
+    }
+
+    fn scheduled_header(session: SessionId) -> String {
+        format!(
+            "{}\n",
+            json!({"type":"fixed-session-mode","sessionId":session.as_uuid(),"sessionMode":"chat","instructionEpoch":0})
+        )
+    }
+
+    #[tokio::test]
+    async fn scheduled_anchor_validates_complete_owner_and_is_idempotent() {
+        let (root, session, path, _, writer) = scheduled_anchor_fixture();
+        // A missing transcript is rejected without creating it.
+        assert!(writer
+            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .await
+            .is_err());
+        assert!(!path.exists());
+
+        std::fs::write(&path, scheduled_header(session)).unwrap();
+        assert!(writer
+            .ensure_scheduled_anchor(session, ConversationMode::Chat, &root.path().join("other"))
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            scheduled_header(session)
+        );
+
+        let foreign = SessionId::new();
+        for suffix in [
+            "{\"type\":\"custom-title\",\"mobileEmptySession\":1".to_string(),
+            format!(
+                "{}\n",
+                json!({"type":"custom-title","sessionId":session.as_uuid(),"customTitle":"foreign cwd","cwd":"/foreign"})
+            ),
+            format!(
+                "{}\n",
+                json!({"type":"custom-title","sessionId":foreign.as_uuid(),"customTitle":"foreign"})
+            ),
+            format!(
+                "{}\n",
+                json!({"type":"custom-title","sessionId":session.as_uuid(),"customTitle":"old","mobileEmptySession":1,"cwd":"/other"})
+            ),
+        ] {
+            let source = format!("{}{suffix}", scheduled_header(session));
+            std::fs::write(&path, &source).unwrap();
+            assert!(writer
+                .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+                .await
+                .is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        }
+
+        let cwd = root.path().to_str().unwrap();
+        let source = format!(
+            "{}{}\n{}\n",
+            scheduled_header(session),
+            json!({"type":"custom-title","sessionId":session.as_uuid(),"customTitle":"Named","cwd":"/previous"}),
+            json!({"type":"relocated","sessionId":session.as_uuid(),"relocatedCwd":cwd}),
+        );
+        std::fs::write(&path, &source).unwrap();
+        assert!(writer
+            .ensure_scheduled_anchor(session, ConversationMode::Code, root.path())
+            .await
+            .is_err());
+        assert!(writer
+            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .await
+            .unwrap());
+        let retained = std::fs::read_to_string(&path).unwrap();
+        assert!(retained.contains("\"mobileEmptySession\":1"));
+        assert!(!writer
+            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), retained);
+        let invalid_after_marker = format!(
+            "{}{}\n",
+            retained,
+            json!({"type":"custom-title","sessionId":foreign.as_uuid(),"customTitle":"foreign"})
+        );
+        std::fs::write(&path, &invalid_after_marker).unwrap();
+        assert!(writer
+            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            invalid_after_marker
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_anchor_accepts_historical_marker_before_relocation() {
+        let (root, session, path, _, writer) = scheduled_anchor_fixture();
+        let source = format!(
+            "{}{}\n{}\n",
+            scheduled_header(session),
+            json!({"type":"custom-title","sessionId":session.as_uuid(),"customTitle":"Old","mobileEmptySession":1,"cwd":"/previous"}),
+            json!({"type":"relocated","sessionId":session.as_uuid(),"relocatedCwd":root.path().to_str().unwrap()}),
+        );
+        std::fs::write(&path, &source).unwrap();
+        assert!(!writer
+            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_anchor_rejects_hardlinked_transcript_without_writing() {
+        let (root, session, path, _, writer) = scheduled_anchor_fixture();
+        let source = scheduled_header(session);
+        std::fs::write(&path, &source).unwrap();
+        let other = root.path().join("other.jsonl");
+        std::fs::hard_link(&path, &other).unwrap();
+        assert!(writer
+            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(other).unwrap(), source);
+    }
+
+    #[tokio::test]
+    async fn scheduled_anchor_waiting_for_transaction_rejects_session_switch_before_write() {
+        let (root, session_a, path_a, authority, writer) = scheduled_anchor_fixture();
+        let source_a = scheduled_header(session_a);
+        std::fs::write(&path_a, &source_a).unwrap();
+        let session_b = SessionId::new();
+        let path_b = root.path().join(format!("{}.jsonl", session_b.as_uuid()));
+        let source_b = scheduled_header(session_b);
+        std::fs::write(&path_b, &source_b).unwrap();
+        let state_b = root.path().join("state-b");
+        std::fs::create_dir(&state_b).unwrap();
+        let authority_b = Arc::new(DurableTranscriptWriter::open(state_b).unwrap());
+        let transaction = authority.begin_transaction().unwrap();
+        let pending = tokio::spawn({
+            let writer = writer.clone();
+            let cwd = root.path().to_path_buf();
+            async move {
+                writer
+                    .ensure_scheduled_anchor(session_a, ConversationMode::Chat, &cwd)
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while writer.lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        writer.activate_session_target_with_durable_lock(
+            session_b,
+            path_b.clone(),
+            root.path().to_path_buf(),
+            authority_b,
+        );
+        drop(transaction);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(path_a).unwrap(), source_a);
+        assert_eq!(std::fs::read_to_string(path_b).unwrap(), source_b);
+    }
+
+    #[tokio::test]
+    async fn scheduled_anchor_rejects_inactive_target_and_replaced_authority() {
+        let (root, session_a, path_a, _, writer) = scheduled_anchor_fixture();
+        std::fs::write(&path_a, scheduled_header(session_a)).unwrap();
+        let redirected = root.path().join("redirected.jsonl");
+        writer.retarget(redirected.clone()).await;
+        assert!(writer
+            .ensure_scheduled_anchor(session_a, ConversationMode::Chat, root.path())
+            .await
+            .is_err());
+        assert!(!redirected.exists());
+        writer.retarget(path_a.clone()).await;
+        let state = root.path().join("state");
+        let original = root.path().join("original-state");
+        std::fs::rename(&state, &original).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        assert!(writer
+            .ensure_scheduled_anchor(session_a, ConversationMode::Chat, root.path())
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path_a).unwrap(),
+            scheduled_header(session_a)
+        );
+
+        let session_b = SessionId::new();
+        let path_b = root.path().join(format!("{}.jsonl", session_b.as_uuid()));
+        std::fs::write(&path_b, scheduled_header(session_b)).unwrap();
+        let authority_b = Arc::new(DurableTranscriptWriter::open(&state).unwrap());
+        writer.activate_session_target_with_durable_lock(
+            session_b,
+            path_b.clone(),
+            root.path().to_path_buf(),
+            authority_b,
+        );
+        assert!(writer
+            .ensure_scheduled_anchor(session_a, ConversationMode::Chat, root.path())
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path_b).unwrap(),
+            scheduled_header(session_b)
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_anchor_cancelled_wait_keeps_writer_locked_until_transaction_finishes() {
+        let (root, session, path, authority, writer) = scheduled_anchor_fixture();
+        let expected_cwd = root.path().to_path_buf();
+        std::fs::write(&path, scheduled_header(session)).unwrap();
+        let transaction = authority.begin_transaction().unwrap();
+        let pending = tokio::spawn({
+            let writer = writer.clone();
+            async move {
+                writer
+                    .ensure_scheduled_anchor(session, ConversationMode::Chat, &expected_cwd)
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if writer.lock.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        assert!(
+            writer.lock.try_lock().is_err(),
+            "background IO must retain the writer mutex"
+        );
+        let side_record = tokio::spawn({
+            let writer = writer.clone();
+            async move {
+                writer
+                    .append_side_record(
+                        &json!({"type":"tag","tag":"after-anchor","sessionId":session.as_uuid()}),
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!side_record.is_finished());
+        drop(transaction);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(guard) = writer.lock.try_lock() {
+                    drop(guard);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        side_record.await.unwrap().unwrap();
+        let retained = std::fs::read_to_string(path).unwrap();
+        assert!(retained.contains("\"mobileEmptySession\":1"));
+        assert!(retained.contains("after-anchor"));
     }
 
     fn identity_row(uuid: &str, content: &str) -> JsonlMessage {

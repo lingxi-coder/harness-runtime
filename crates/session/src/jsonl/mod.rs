@@ -27,6 +27,7 @@ pub mod path;
 pub mod re_append;
 pub mod reader;
 pub mod recover;
+mod scheduled_anchor;
 pub mod schema;
 pub mod title;
 pub mod transcript_compact;
@@ -36,6 +37,7 @@ pub mod writer;
 // Re-export pre-existing public surface so dependents keep their imports.
 pub use aliases::{read_session_aliases, record_session_alias, SESSION_ALIASES_FILE};
 pub use recover::{read_recover, RecoveryResult, StorageError};
+pub use scheduled_anchor::is_mode_only_draft;
 
 // New M5-07 public surface.
 pub use durable_writer::{

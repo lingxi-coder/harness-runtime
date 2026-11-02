@@ -512,7 +512,7 @@ mod account_tests {
         ProviderResponse, StreamingResponse,
     };
     use lingxi_core::host::provider_accounts::{AccountAuthKind, AccountMetadata, CredentialRef};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     struct NoNetwork;
     impl crate::test_support::FixtureTransport for NoNetwork {
         fn execute<'a>(
@@ -616,6 +616,312 @@ mod account_tests {
             .provider_services(sdk::protocol::Region::International, Arc::new(NoNetwork))
             .unwrap();
         (services, pool, clock, credentials)
+    }
+
+    #[derive(Debug)]
+    struct DisableDuringRebind {
+        pool: Arc<crate::accounts::AccountPool>,
+        base: Arc<crate::ModelRuntime>,
+        armed: AtomicBool,
+    }
+
+    impl crate::client::ModelRuntimeSource for DisableDuringRebind {
+        fn current(&self, _: &crate::ModelRuntime) -> Arc<crate::ModelRuntime> {
+            self.base.clone()
+        }
+
+        fn rebind_accounts(&self, captured: &crate::ModelRuntime) -> Arc<crate::ModelRuntime> {
+            // Return the already captured routes, as when account state changes
+            // just after route rebinding and before final admission.
+            let routes = Arc::new(captured.clone());
+            if self.armed.swap(false, Ordering::SeqCst) {
+                let mut snapshot = self.pool.snapshot();
+                snapshot.config_revision += 1;
+                snapshot
+                    .accounts
+                    .iter_mut()
+                    .find(|account| account.account_id == "a")
+                    .unwrap()
+                    .enabled = false;
+                self.pool.refresh(snapshot).unwrap();
+            }
+            routes
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_binding_rejects_account_disabled_during_route_rebind() {
+        let (services, pool, _, credentials) = account_fixture();
+        let base = services.credential_source.as_ref().unwrap().clone();
+        let source = Arc::new(DisableDuringRebind {
+            pool: pool.clone(),
+            base: Arc::new(base.clone()),
+            armed: AtomicBool::new(false),
+        });
+        let runtime = base.with_catalog_source(source.clone());
+        let api = crate::ApiService::new(
+            Arc::new(runtime),
+            Arc::new(NoNetwork),
+            Default::default(),
+            Default::default(),
+            "test",
+            None,
+            None,
+        );
+        let scope = |id: &str| {
+            serde_json::to_string(&crate::accounts::AccountResourceScope {
+                store_scope: "test".into(),
+                account_id: id.into(),
+                identity_generation: 1,
+            })
+            .unwrap()
+        };
+        assert!(
+            api.audio_account_binding_is_current("openai", "account.a", &scope("a"))
+                .await
+        );
+        assert!(
+            !api.audio_account_binding_is_current("openai", "account.b", &scope("a"))
+                .await
+        );
+        source.armed.store(true, Ordering::SeqCst);
+        assert!(
+            !api.audio_account_binding_is_current("openai", "account.a", &scope("a"))
+                .await
+        );
+        assert!(!pool.snapshot().accounts[0].enabled);
+        assert!(
+            api.audio_account_binding_is_current("openai", "account.b", &scope("b"))
+                .await
+        );
+        assert_eq!(credentials.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn audio_and_model_binding_reject_replaced_identity_until_rebound() {
+        let (services, pool, _, credentials) = account_fixture();
+        let base = services.credential_source.as_ref().unwrap();
+        let mut old_config = base.configuration();
+        let mut replacement = old_config
+            .providers
+            .iter()
+            .find(|profile| profile.profile_name == "openai")
+            .unwrap()
+            .clone();
+        let model = replacement.models[0].display_model.clone();
+        replacement.profile_name = "openai-next".into();
+        replacement.base_url = "https://new-endpoint.invalid/v1".into();
+        old_config.providers.push(replacement.clone());
+        let old_snapshot = pool.snapshot();
+        let mut new_snapshot = old_snapshot.clone();
+        new_snapshot.config_revision += 1;
+        let account = new_snapshot
+            .accounts
+            .iter_mut()
+            .find(|account| account.account_id == "a")
+            .unwrap();
+        account.identity_generation += 1;
+        account.execution_binding_id = "openai-next".into();
+        // Keep the same secret reference: generation and routing, not the
+        // spelling of the credential key, must distinguish the replacement.
+        assert_eq!(
+            account.credential_ref,
+            old_snapshot.accounts[0].credential_ref
+        );
+        pool.refresh(new_snapshot.clone()).unwrap();
+
+        // Rebuild A's config after B is live; its route must still be stamped A.
+        let old = base
+            .reconfigured_with_account_snapshot(old_config.clone(), &old_snapshot)
+            .unwrap();
+        let mut new_config = old_config;
+        let target = new_config
+            .providers
+            .iter_mut()
+            .find(|profile| profile.profile_name == "account.a")
+            .unwrap();
+        replacement.profile_name = "account.a".into();
+        replacement.credential = target.credential.clone();
+        replacement.connection.connection_id = Some("a".into());
+        *target = replacement;
+        let rebound = base
+            .reconfigured_with_account_snapshot(new_config, &new_snapshot)
+            .unwrap();
+        assert_ne!(
+            old.prompt_cache_profile(&model, Some("account.a"))
+                .unwrap()
+                .base_url,
+            rebound
+                .prompt_cache_profile(&model, Some("account.a"))
+                .unwrap()
+                .base_url,
+        );
+        let scope = crate::accounts::AccountResourceScope {
+            store_scope: "test".into(),
+            account_id: "a".into(),
+            identity_generation: 2,
+        };
+        let raw_scope = serde_json::to_string(&scope).unwrap();
+        let service = |runtime| {
+            crate::ApiService::new(
+                runtime,
+                Arc::new(NoNetwork),
+                Default::default(),
+                Default::default(),
+                "test",
+                None,
+                None,
+            )
+        };
+        assert!(
+            !service(old.clone())
+                .audio_account_binding_is_current("openai-next", "account.a", &raw_scope)
+                .await
+        );
+        assert!(
+            service(rebound.clone())
+                .audio_account_binding_is_current("openai-next", "account.a", &raw_scope)
+                .await
+        );
+        let actual_model = rebound
+            .resolve_media_route(&model, Some("account.a"))
+            .unwrap()
+            .main
+            .request_model;
+        let old_model = old.account_coordinator(&model, Some("openai-next"));
+        assert!(old_model
+            .ok()
+            .flatten()
+            .is_none_or(|coordinator| coordinator
+                .permits(&scope, "account.a", &actual_model)
+                .is_none()));
+        assert!(rebound
+            .account_coordinator(&model, Some("openai-next"))
+            .unwrap()
+            .unwrap()
+            .permits(&scope, "account.a", &actual_model)
+            .is_some());
+        assert_eq!(credentials.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn audio_candidates_and_account_enabled_state_share_one_snapshot() {
+        use lingxi_core::host::provider_accounts::ProviderAccountPolicy;
+        let (services, pool, _, _) = account_fixture();
+        let base = services.credential_source.as_ref().unwrap();
+        let mut config = base.configuration();
+        for profile in &mut config.providers {
+            let billing = if profile.profile_name == "openai" {
+                crate::ModelBillingMode::Subscription
+            } else {
+                crate::ModelBillingMode::PerToken
+            };
+            profile.pricing.billing_mode = Some(billing);
+            if let Some(wire) = &mut profile.wire_profile {
+                let billing = if billing == crate::ModelBillingMode::Subscription {
+                    sdk::protocol::BillingMode::Subscription
+                } else {
+                    sdk::protocol::BillingMode::PerToken
+                };
+                wire.pricing.billing_mode = billing;
+                for model in &mut wire.models {
+                    model.billing_mode = Some(billing);
+                }
+            }
+        }
+        let model = config
+            .providers
+            .iter()
+            .find(|profile| profile.profile_name == "openai")
+            .unwrap()
+            .models[0]
+            .display_model
+            .clone();
+        let runtime = base.reconfigured(config).unwrap();
+        let request_model = runtime
+            .resolve_media_route(&model, Some("account.a"))
+            .unwrap()
+            .main
+            .request_model;
+        let mut disabled_allowed = pool.snapshot();
+        disabled_allowed.config_revision += 1;
+        disabled_allowed.accounts[0].enabled = false;
+        disabled_allowed.provider_policies.insert(
+            "openai".into(),
+            ProviderAccountPolicy {
+                allow_subscription_to_metered: true,
+            },
+        );
+        pool.refresh(disabled_allowed.clone()).unwrap();
+        let mut enabled_disallowed = disabled_allowed.clone();
+        enabled_disallowed.config_revision += 1;
+        enabled_disallowed.accounts[0].enabled = true;
+        enabled_disallowed
+            .provider_policies
+            .get_mut("openai")
+            .unwrap()
+            .allow_subscription_to_metered = false;
+        pool.refresh(enabled_disallowed.clone()).unwrap();
+
+        let scope = crate::accounts::AccountResourceScope {
+            store_scope: "test".into(),
+            account_id: "a".into(),
+            identity_generation: 1,
+        };
+        let captured = runtime
+            .service_account_coordinator_at_snapshot(
+                "openai",
+                "audio/binding",
+                disabled_allowed.clone(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(captured
+            .permits(&scope, "account.a", "audio/binding")
+            .is_none());
+        assert!(runtime
+            .service_account_coordinator_at_snapshot(
+                "openai",
+                "audio/binding",
+                enabled_disallowed.clone()
+            )
+            .is_err());
+        let captured_model = runtime
+            .account_coordinator_at_snapshot(&model, Some("openai"), disabled_allowed)
+            .unwrap()
+            .unwrap();
+        assert!(captured_model
+            .permits(&scope, "account.a", &request_model)
+            .is_none());
+        assert!(runtime
+            .account_coordinator_at_snapshot(&model, Some("openai"), enabled_disallowed.clone())
+            .is_err());
+
+        enabled_disallowed.config_revision += 1;
+        enabled_disallowed
+            .provider_policies
+            .get_mut("openai")
+            .unwrap()
+            .allow_subscription_to_metered = true;
+        pool.refresh(enabled_disallowed.clone()).unwrap();
+        let allowed = runtime
+            .service_account_coordinator_at_snapshot(
+                "openai",
+                "audio/binding",
+                enabled_disallowed.clone(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(allowed
+            .permits(&scope, "account.a", "audio/binding")
+            .is_some());
+        let allowed_model = runtime
+            .account_coordinator_at_snapshot(&model, Some("openai"), enabled_disallowed)
+            .unwrap()
+            .unwrap();
+        assert!(allowed_model
+            .permits(&scope, "account.a", &request_model)
+            .is_some());
     }
 
     #[tokio::test]
