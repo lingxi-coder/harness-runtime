@@ -234,6 +234,14 @@ pub struct RenderedBranch {
     pub content: String,
 }
 
+/// Exact bytes and physical target published for an independent branch.
+#[derive(Debug, Clone)]
+pub struct PublishedBranch {
+    pub result: BranchResult,
+    pub content: String,
+    pub authority: crate::jsonl::writer::TranscriptFileAuthority,
+}
+
 /// Publish selected history and its fresh independent profile in one atomic,
 /// no-overwrite operation. The captured source is never reopened or modified.
 ///
@@ -244,39 +252,69 @@ pub struct RenderedBranch {
 pub async fn create_branch_from_captured(
     options: CapturedBranch<'_>,
     fs: Arc<dyn FileSystem>,
-) -> Result<BranchResult, BranchError> {
+) -> Result<PublishedBranch, BranchError> {
+    create_branch_from_captured_with_hook(options, fs, || {}).await
+}
+
+async fn create_branch_from_captured_with_hook(
+    options: CapturedBranch<'_>,
+    fs: Arc<dyn FileSystem>,
+    after_publication: impl FnOnce(),
+) -> Result<PublishedBranch, BranchError> {
     let rendered = render_branch_from_captured(options, fs.clone()).await?;
     let dst_path = session_path(
         options.lingxi_home,
         options.target_cwd,
         &options.target_session_id.to_string(),
     );
-    if let Some(parent_dir) = dst_path.parent() {
-        tokio::fs::create_dir_all(parent_dir)
-            .await
-            .map_err(BranchError::Io)?;
+    let logical_home = if options.lingxi_home.is_absolute() {
+        options.lingxi_home.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(BranchError::Io)?
+            .join(options.lingxi_home)
+    };
+    let absolute_path = if dst_path.is_absolute() {
+        dst_path
+    } else {
+        std::env::current_dir()
+            .map_err(BranchError::Io)?
+            .join(dst_path)
+    };
+    let relative = absolute_path
+        .strip_prefix(&logical_home)
+        .map_err(|_| BranchError::Io(std::io::Error::other("branch target escaped its home")))?
+        .to_path_buf();
+    if relative.components().count() != 3
+        || relative.components().next().map(|part| part.as_os_str())
+            != Some(std::ffi::OsStr::new("projects"))
+    {
+        return Err(BranchError::Io(std::io::Error::other(
+            "branch target is outside its project catalog",
+        )));
     }
-    // Publish copied messages and the fresh profile together, without ever
-    // replacing an existing target.
-    let root = dst_path
-        .parent()
-        .ok_or_else(|| BranchError::Io(std::io::Error::other("branch has no parent")))?
-        .to_owned();
-    let file = dst_path
-        .file_name()
-        .ok_or_else(|| BranchError::Io(std::io::Error::other("branch has no filename")))?
-        .to_owned();
-    let body = rendered.content;
-    tokio::task::spawn_blocking(move || {
+    let root = std::fs::canonicalize(&logical_home).map_err(BranchError::Io)?;
+    let body = rendered.content.clone();
+    let authority = tokio::task::spawn_blocking(move || {
         use lingxi_core::host::rooted_fs::{
-            atomic_write_pinned, root_identity, AtomicWriteOptions,
+            atomic_write_stream_pinned, ensure_directory_identity_pinned, opened_file_identity,
+            root_identity, AtomicWriteOptions,
         };
+        use std::io::Write;
         let identity =
             root_identity(&root).map_err(|error| std::io::Error::other(error.to_string()))?;
-        atomic_write_pinned(
+        ensure_directory_identity_pinned(&root, Path::new("projects"), &identity)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        ensure_directory_identity_pinned(
             &root,
-            Path::new(&file),
-            body.as_bytes(),
+            relative.parent().expect("validated branch parent"),
+            &identity,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let mut published_identity = None;
+        atomic_write_stream_pinned(
+            &root,
+            &relative,
             AtomicWriteOptions {
                 overwrite: false,
                 create_parents: false,
@@ -284,12 +322,37 @@ pub async fn create_branch_from_captured(
                 file_mode: 0o600,
             },
             &identity,
+            |temporary| {
+                published_identity = Some(opened_file_identity(temporary)?);
+                temporary
+                    .write_all(body.as_bytes())
+                    .map_err(|error| lingxi_core::host::FsError::Io(error.to_string()))
+            },
         )
-        .map_err(|error| std::io::Error::other(error.to_string()))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let authority = crate::jsonl::writer::TranscriptFileAuthority::from_capture(
+            root,
+            relative,
+            identity,
+            published_identity
+                .ok_or_else(|| std::io::Error::other("branch publication has no file identity"))?,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if authority
+            .read_checked()
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            != body.as_bytes()
+        {
+            return Err(std::io::Error::other(
+                "published branch changed before admission",
+            ));
+        }
+        Ok::<_, std::io::Error>(authority)
     })
     .await
     .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?
     .map_err(BranchError::Io)?;
+    after_publication();
 
     // A failed visualization copy degrades widgets to unavailable cards, but
     // must not lose an already-published branch.
@@ -301,7 +364,20 @@ pub async fn create_branch_from_captured(
     {
         tracing::warn!(%error, "branch: inline visualizations were not copied");
     }
-    Ok(rendered.result)
+    if authority
+        .read_checked()
+        .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?
+        != rendered.content.as_bytes()
+    {
+        return Err(BranchError::Io(std::io::Error::other(
+            "published branch changed before return",
+        )));
+    }
+    Ok(PublishedBranch {
+        result: rendered.result,
+        content: rendered.content,
+        authority,
+    })
 }
 
 async fn create_branch_in(
@@ -350,6 +426,7 @@ async fn create_branch_in(
         fs,
     )
     .await
+    .map(|published| published.result)
 }
 
 /// Render exactly the branch that would be published by
@@ -692,6 +769,52 @@ mod tests {
         json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":mode, "instructionEpoch":epoch}).to_string()
     }
 
+    #[tokio::test]
+    async fn published_branch_rejects_same_bytes_replacement_before_receipt() {
+        let home = tempfile::tempdir().unwrap();
+        let src = Uuid::new_v4();
+        let dst = Uuid::new_v4();
+        let content = format!(
+            "{}\n{}\n",
+            fixed_header(&src.to_string(), "code", 0),
+            user_line(
+                "11111111-1111-4111-8111-111111111111",
+                &src.to_string(),
+                None,
+                "selected"
+            )
+        );
+        let loaded = route_lines(&content);
+        let target = session_path(home.path(), "/target", &dst.to_string());
+        let saved = target.with_extension("published");
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+        let result = create_branch_from_captured_with_hook(
+            CapturedBranch {
+                lingxi_home: home.path(),
+                source_cwd: "/tmp/proj",
+                target_cwd: "/target",
+                source_session_id: src,
+                target_session_id: dst,
+                source_content: &content,
+                messages: &loaded.messages_in_order,
+                custom_title: None,
+                mode: None,
+            },
+            fs,
+            || {
+                let bytes = std::fs::read(&target).unwrap();
+                std::fs::rename(&target, &saved).unwrap();
+                std::fs::write(&target, bytes).unwrap();
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            std::fs::read(saved).unwrap()
+        );
+    }
+
     fn content_replacement_line(sid: &str, path: &str, agent_id: Option<&str>) -> String {
         let mut value = json!({
             "type": "content-replacement",
@@ -777,8 +900,8 @@ mod tests {
         let rendered_route = route_lines(&rendered.content);
         assert_eq!(rendered_route.messages_in_order.len(), 2);
         let result = create_branch_from_captured(options, fs).await.unwrap();
-        assert_eq!(result.new_session_id, dst);
-        assert_eq!(result.message_count, 2);
+        assert_eq!(result.result.new_session_id, dst);
+        assert_eq!(result.result.message_count, 2);
         assert_eq!(
             tokio::fs::read_to_string(source).await.unwrap(),
             "later source contents\n"

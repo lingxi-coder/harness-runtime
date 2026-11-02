@@ -41,7 +41,9 @@ mod permission_preference_tests {
             restarted
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .unwrap();
             assert_eq!(
@@ -79,14 +81,7 @@ mod permission_preference_tests {
                 })
                 .await
                 .unwrap();
-            handle
-                .submit(ClientCommand::ResumeSession {
-                    session_id,
-                    cwd: None,
-                    expected_mode: SessionModeDto::Code,
-                })
-                .await
-                .unwrap();
+            handle.resume_seeded_test_session(session_id).await.unwrap();
             let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert_eq!(
@@ -221,7 +216,9 @@ mod permission_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .unwrap();
             assert_ne!(
@@ -276,7 +273,9 @@ mod permission_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .unwrap();
             assert_ne!(

@@ -282,7 +282,7 @@ async fn warm_resume_missing_workspace_keeps_current_cwd_and_source_transcript()
 }
 
 #[tokio::test]
-async fn change_working_directory_moves_complete_jsonl_and_sidecars_before_publishing_cwd() {
+async fn change_working_directory_preserves_exact_jsonl_and_sidecars_before_publishing_cwd() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let boot = root.path().join("boot");
@@ -300,28 +300,21 @@ async fn change_working_directory_moves_complete_jsonl_and_sidecars_before_publi
         .await
         .unwrap();
     let moved = transcript(&home, &target, id);
-    assert_eq!(writer.active_path(), moved);
-    assert!(!old.exists());
-    assert!(std::fs::read_to_string(&moved)
+    assert_eq!(writer.active_path(), old);
+    assert!(!moved.exists());
+    assert!(std::fs::read_to_string(&old)
         .unwrap()
         .starts_with(&original));
-    let routed = session::jsonl::route_lines(&std::fs::read_to_string(&moved).unwrap());
+    let routed = session::jsonl::route_lines(&std::fs::read_to_string(&old).unwrap());
     assert_eq!(
         routed.relocated_cwds[&id.as_uuid().to_string()],
         target.to_string_lossy()
     );
     assert_eq!(
-        std::fs::read_to_string(
-            moved
-                .parent()
-                .unwrap()
-                .join(id.as_uuid().to_string())
-                .join("nested/output")
-        )
-        .unwrap(),
+        std::fs::read_to_string(old_sidecar.join("nested/output")).unwrap(),
         "complete-artifact"
     );
-    assert!(!old_sidecar.exists());
+    assert!(old_sidecar.exists());
     assert_eq!(
         cwd.snapshot(),
         (target.clone(), vec![target.clone(), additional])
@@ -331,7 +324,7 @@ async fn change_working_directory_moves_complete_jsonl_and_sidecars_before_publi
 }
 
 #[tokio::test]
-async fn failed_transcript_move_rolls_back_sidecars_and_does_not_publish_cwd() {
+async fn invalid_transcript_source_keeps_sidecars_and_does_not_publish_cwd() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let boot = root.path().join("boot");
@@ -340,7 +333,7 @@ async fn failed_transcript_move_rolls_back_sidecars_and_does_not_publish_cwd() {
     let id = SessionId::new();
     let (orch, writer, cwd, _) = fixture(&home, &boot, id).await;
     let old = transcript(&home, &boot, id);
-    std::fs::create_dir_all(&old).unwrap(); // Invalid transcript source forces writer rollback.
+    std::fs::create_dir_all(&old).unwrap(); // A directory cannot be a transcript source.
     let new = transcript(&home, &target, id);
     let old_sidecar = old.parent().unwrap().join(id.as_uuid().to_string());
     let new_sidecar = new.parent().unwrap().join(id.as_uuid().to_string());

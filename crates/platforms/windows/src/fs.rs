@@ -100,6 +100,17 @@ async fn read_utf8_prefix(path: &str, max_bytes: usize) -> Result<FileContent, F
 
 #[async_trait]
 impl FileSystem for WindowsFileSystem {
+    async fn ensure_directory_rooted_identity_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
+        let expected =
+            expected.ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
+        lingxi_core::host::rooted_fs::ensure_directory_identity_pinned(root, relative, expected)
+            .map(Some)
+    }
     async fn root_identity_no_follow(
         &self,
         root: &Path,
@@ -193,6 +204,26 @@ impl FileSystem for WindowsFileSystem {
         relative: &Path,
     ) -> Result<(), FsError> {
         lingxi_core::host::rooted_fs::validate_file_single_link(root, relative)
+    }
+
+    async fn read_file_rooted_single_link_checked(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<lingxi_core::host::rooted_fs::CheckedFileSnapshot, FsError> {
+        lingxi_core::host::rooted_fs::read_file_single_link_checked(root, relative)
+    }
+
+    async fn append_or_sync_file_rooted_durable_checked(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::CheckedFileSnapshot,
+        append: Option<&str>,
+    ) -> Result<(), FsError> {
+        lingxi_core::host::rooted_fs::append_or_sync_file_durable_checked(
+            root, relative, expected, append,
+        )
     }
 
     async fn append_file_rooted_durable(
@@ -290,6 +321,42 @@ impl FileSystem for WindowsFileSystem {
             content.as_bytes(),
             lingxi_core::host::AtomicWriteOptions::default(),
         )
+    }
+
+    async fn write_file_rooted_atomic_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<(), FsError> {
+        let expected =
+            expected.ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
+        lingxi_core::host::rooted_fs::atomic_write_pinned(
+            root,
+            relative,
+            content.as_bytes(),
+            lingxi_core::host::AtomicWriteOptions::default(),
+            expected,
+        )
+    }
+
+    async fn flock_exclusive_rooted_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<Box<dyn FlockGuard>, FsError> {
+        let expected =
+            expected.ok_or_else(|| FsError::Io("missing scheduler root identity".into()))?;
+        lingxi_core::host::rooted_fs::lock_exclusive_pinned(
+            root,
+            relative,
+            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+            lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
+            Some(expected),
+        )
+        .map(|guard| Box::new(guard) as Box<dyn FlockGuard>)
     }
 
     async fn flock_exclusive_rooted(

@@ -177,8 +177,8 @@ pub mod plan_files;
 pub mod plan_slug;
 pub mod platform;
 pub mod process;
-pub mod provider_accounts;
 pub mod prompting_gate;
+pub mod provider_accounts;
 pub mod read_auto_allow;
 pub mod refusal_api_text;
 pub mod repo_root_reload;
@@ -344,10 +344,10 @@ pub use orchestrator::{
     ModelMetadata, ModelPricing, ModelPricingTier, ModelProvenance, ModelRouteAnchor,
     ModelSelectionOrigin, ModelSelectionRequest, ModelSourceBinding, ModelUsageRow,
     ModelValidationMode, OrchestratorHandle, OutputEvent, OutputStream, OutputStyleListing,
-    PermissionControlState, PermissionModeAvailability, PlanSnapshot, PromptSnapshot,
-    PromptSuggestionContext, PromptSuggestionResult, PromptToolDescription, RateLimitSnapshot,
-    ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection, RecapOutcome,
-    RefusalContinuationJoin, RefusalContinuationPhase, RegisterRepoRootOutcome,
+    PermissionControlState, PermissionModeAvailability, PinnedResumeSource, PlanSnapshot,
+    PromptSnapshot, PromptSuggestionContext, PromptSuggestionResult, PromptToolDescription,
+    RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection,
+    RecapOutcome, RefusalContinuationJoin, RefusalContinuationPhase, RegisterRepoRootOutcome,
     RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage,
     SkillInfo, StatusSnapshot, SummarizeDirection, ToolResultProjection, TurnOutcome,
 };
@@ -441,12 +441,12 @@ pub mod refusal_server;
 pub mod refusal_server_control;
 pub mod refusal_state;
 
-pub mod invoked_skills;
 pub mod instruction_announcements;
 pub mod instruction_context_cache;
 pub mod instruction_memory_sanitize;
 /// Shared main/subagent instruction-loading boundary.
 pub mod instructions;
+pub mod invoked_skills;
 
 pub use tool_execution::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,

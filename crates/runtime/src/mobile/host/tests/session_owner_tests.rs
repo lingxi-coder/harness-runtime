@@ -27,6 +27,11 @@ fn duplicate_cold_mount_is_rejected_until_the_first_owner_drains() {
     let (id, _) = seed_replay_valid_session(tmp.path());
     let mut config = test_config(tmp.path());
     config.initial_session_id = Some(id.clone());
+    config.initial_session_transcript_path = Some(session::jsonl::session_path(
+        &config.lingxi_home,
+        &config.cwd.to_string_lossy(),
+        &id,
+    ));
     let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let first = build_mobile_engine(
@@ -143,6 +148,11 @@ fn cancelled_assembly_retires_the_partially_built_owner() {
     let (id, _) = seed_replay_valid_session(tmp.path());
     let mut config = test_config(tmp.path());
     config.initial_session_id = Some(id.clone());
+    config.initial_session_transcript_path = Some(session::jsonl::session_path(
+        &config.lingxi_home,
+        &config.cwd.to_string_lossy(),
+        &id,
+    ));
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let build = executor.spawn(build_mobile(
@@ -156,7 +166,9 @@ fn cancelled_assembly_retires_the_partially_built_owner() {
         .expect("assembly must reach the post-registry event");
     let home = std::path::PathBuf::from(super::super::canonical_cwd_string(&config.lingxi_home));
     let session_id = SessionId::from_uuid(uuid::Uuid::parse_str(&id).unwrap());
-    assert!(crate::mobile::transcript::session_owner_is_live(home, session_id));
+    assert!(crate::mobile::transcript::session_owner_is_live(
+        home, session_id
+    ));
     build.abort();
     executor.block_on(async {
         assert!(matches!(build.await, Err(error) if error.is_cancelled()));
@@ -178,11 +190,7 @@ fn hot_resume_cannot_steal_a_live_owner_and_new_sessions_are_also_claimed() {
         .block_on(async { second.inner().orchestrator.current_session_id().await });
     second.runtime().block_on(async {
         let error = second
-            .submit(ClientCommand::ResumeSession {
-                session_id: first_id.as_uuid().to_string(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(first_id.as_uuid().to_string())
             .await
             .expect_err("cannot resume a session owned by another engine");
         assert!(format!("{error:?}").contains("already mounted by another live owner"));
@@ -258,16 +266,102 @@ fn idle_scheduled_run_borrows_the_live_owner_and_marks_it_for_reload() {
     let (handle, _) = build_submit_handle_with_config(test_config(tmp.path()), tmp.path());
     handle.runtime().block_on(async {
         let id = handle.inner().orchestrator.current_session_id().await.as_uuid().to_string();
-        let body = format!(r#"{{"id":"d12345678","cron":"0 9 * * *","prompt":"brief","createdAt":1,"recurring":false,"automation":{{"version":2,"status":"active","model":"anthropic/claude-sonnet-4-6","reasoning":{{"type":"invalid-test-reasoning"}},"runMode":"selected_session","targetSessionId":"{id}","notificationPolicy":"all"}}}}"#);
+        let path = handle.inner().session_writer.active_path();
+        handle.inner().session_writer.append_mobile_empty_session(&id, "Selected", &handle.session_cwd()).await.unwrap();
+        let body = serde_json::json!({"id":"d12345678","cron":"0 9 * * *","prompt":"brief","createdAt":1,"recurring":false,"automation":{"version":2,"status":"active","model":"anthropic/claude-sonnet-4-6","reasoning":{"type":"invalid-test-reasoning"},"runMode":"selected_session","targetSessionId":id,"targetSessionTranscriptPath":path,"targetSessionMode":"code","targetSessionScopeKey":"project.test","notificationPolicy":"all"}}).to_string();
         let task: cron::CronTask = serde_json::from_str(&body).unwrap();
+        let root = std::path::PathBuf::from(handle.session_cwd());
+        let mut document = cron::ScheduledTasks::default();
+        document.tasks.push(task);
+        cron::tasks_file::write_automation_tasks_body(handle.fs.as_ref(), &root, &cron::serialize_tasks(&document)).await.unwrap();
+        let request = cron::claim_automation_run_now(handle.fs.as_ref(), &root, "d12345678", std::time::SystemTime::now()).await.unwrap();
         let firer = super::super::MobileTurnFirer { cfg: handle.firer_cfg.clone(), platform: handle.firer_platform.clone() };
-        let error = firer.fire_session("scheduled".into(), task.automation.as_ref(), None).await.unwrap_err();
+        let error = firer.fire_session_with_admission("scheduled".into(), request.task.automation.as_ref(), Some(&request), Some(super::super::automation::allow_cron_owner())).await.unwrap_err();
         // Invalid reasoning is checked after constructing the scheduled child;
         // reaching it proves the selected live owner was borrowed successfully.
         assert!(error.starts_with("paused:"), "{error}");
         assert!(!error.contains("already mounted"), "{error}");
         assert!(!error.contains("configuration is unavailable"), "{error}");
         assert!(handle.scheduled_reload.load(std::sync::atomic::Ordering::Acquire));
+    });
+}
+
+#[test]
+fn scheduled_borrow_rejects_same_path_replaced_after_live_owner_capture() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle_with_config(test_config(tmp.path()), tmp.path());
+    handle.runtime().block_on(async {
+        let id = handle
+            .inner()
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        let path = handle.inner().session_writer.active_path();
+        let old_authority = handle
+            .inner()
+            .session_writer
+            .active_transcript_authority()
+            .unwrap();
+        let original = path.with_extension("captured");
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let task: cron::CronTask = serde_json::from_value(serde_json::json!({
+            "id":"d12345678", "cron":"0 9 * * *", "prompt":"brief", "createdAt":1, "recurring":true,
+            "automation":{"version":2,"status":"active","model":"anthropic/claude-sonnet-4-6",
+                "reasoning":{"type":"automatic"},"runMode":"selected_session","targetSessionId":id,
+                "targetSessionTranscriptPath":path.to_string_lossy(),"targetSessionMode":"code",
+                "targetSessionScopeKey":"project.test","notificationPolicy":"all"}
+        }))
+        .unwrap();
+        let root = std::path::PathBuf::from(handle.session_cwd());
+        let mut document = cron::ScheduledTasks::default();
+        document.tasks.push(task);
+        cron::tasks_file::write_automation_tasks_body(
+            handle.fs.as_ref(),
+            &root,
+            &cron::serialize_tasks(&document),
+        )
+        .await
+        .unwrap();
+        let request = cron::claim_automation_run_now(
+            handle.fs.as_ref(),
+            &root,
+            "d12345678",
+            std::time::SystemTime::now(),
+        )
+        .await
+        .unwrap();
+        let firer = super::super::MobileTurnFirer {
+            cfg: handle.firer_cfg.clone(),
+            platform: handle.firer_platform.clone(),
+        };
+        let error = firer
+            .fire_session_with_admission(
+                "scheduled".into(),
+                request.task.automation.as_ref(),
+                Some(&request),
+                Some(super::super::automation::allow_cron_owner()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("busy:"), "{error}");
+        assert_eq!(
+            handle.inner().session_writer.active_transcript_authority(),
+            Some(old_authority)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+        assert!(
+            cron::list_owner_reservations_strict(handle.fs.as_ref(), &root)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&original, &path).unwrap();
     });
 }
 
@@ -302,12 +396,40 @@ fn run_now_can_target_its_own_idle_session() {
     let (handle, _) = build_submit_handle_with_config(test_config(tmp.path()), tmp.path());
     handle.runtime().block_on(async {
         let id = handle.inner().orchestrator.current_session_id().await.as_uuid().to_string();
-        let body = format!(r#"{{"tasks":[{{"id":"d12345678","cron":"0 9 * * *","prompt":"brief","createdAt":1,"recurring":false,"automation":{{"version":2,"status":"active","model":"anthropic/claude-sonnet-4-6","reasoning":{{"type":"invalid-test-reasoning"}},"runMode":"selected_session","targetSessionId":"{id}","notificationPolicy":"all"}}}}]}}"#);
+        let path = handle.inner().session_writer.active_path();
+        handle.inner().session_writer.append_mobile_empty_session(&id, "Selected", &handle.session_cwd()).await.unwrap();
+        let body = serde_json::json!({"tasks":[{"id":"d12345678","cron":"0 9 * * *","prompt":"brief","createdAt":1,"recurring":false,"automation":{"version":2,"status":"active","model":"anthropic/claude-sonnet-4-6","reasoning":{"type":"invalid-test-reasoning"},"runMode":"selected_session","targetSessionId":id,"targetSessionTranscriptPath":path,"targetSessionMode":"code","targetSessionScopeKey":"project.test","notificationPolicy":"all"}}]}).to_string();
         cron::tasks_file::write_automation_tasks_body(handle.fs.as_ref(), Path::new(&handle.session_cwd()), &body).await.unwrap();
-        let fired = handle.run_cron_task_now("d12345678".into()).await.expect("task must be claimed");
+        let fired = handle.run_cron_task_now("d12345678".into(), super::super::automation::allow_cron_owner()).await.expect("task must be claimed");
         let super::super::CronFireStatusDto::Failed { message } = fired.status else { panic!("invalid reasoning must fail") };
         assert!(!message.contains("busy:"), "self-targeted cron must not deadlock: {message}");
         assert!(!message.contains("configuration is unavailable"), "live owner must be borrowed: {message}");
         assert!(message.starts_with("paused:"), "invalid reasoning must be reached after mount: {message}");
+    });
+}
+
+#[test]
+fn scheduled_reader_rechecks_active_source_after_transition_acquisition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle_with_config(test_config(tmp.path()), tmp.path());
+    handle.runtime().block_on(async {
+        let source = handle.inner().session_writer.active_path();
+        let cwd = handle.session_cwd();
+        let id = handle.inner().orchestrator.current_session_id().await;
+        assert!(super::super::automation::mobile_cron_reader_matches_source(
+            &handle, &cwd, &source
+        ));
+        let transition = handle.loop_transition.clone().lock_owned().await;
+        let other_dir = tmp.path().join("different-session-source");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let replacement = other_dir.join(source.file_name().unwrap());
+        handle.inner().session_writer.retarget(replacement).await;
+        assert_eq!(handle.inner().orchestrator.current_session_id().await, id);
+        assert_eq!(handle.session_cwd(), cwd);
+        assert!(
+            !super::super::automation::mobile_cron_reader_matches_source(&handle, &cwd, &source)
+        );
+        handle.inner().session_writer.retarget(source).await;
+        drop(transition);
     });
 }

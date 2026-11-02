@@ -14,7 +14,8 @@ fn scheduled_test_writer(
     std::fs::create_dir_all(&state).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let authority = Arc::new(session::jsonl::DurableTranscriptWriter::open(state).unwrap());
-    let writer = Arc::new(session::JsonlWriter::new(path.to_path_buf(), fs).with_durable_lock(authority));
+    let writer =
+        Arc::new(session::JsonlWriter::new(path.to_path_buf(), fs).with_durable_lock(authority));
     writer
         .activate_session_target(
             lingxi_core::types::SessionId::from_uuid(id),
@@ -41,25 +42,64 @@ async fn scheduled_draft_is_discoverable_before_desktop_build_returns() {
     cfg.scheduled_durable_anchor = true;
     cfg.enable_automation_scheduler = false;
     cfg.isolated_credential_storage = true;
-    let path = session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), &id.to_string());
-    let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cfg.cwd.clone()));
+    let path = session::jsonl::session_path(
+        &cfg.lingxi_home,
+        &cfg.cwd.to_string_lossy(),
+        &id.to_string(),
+    );
+    let fs: Arc<dyn FileSystem> =
+        Arc::new(super::platform::DesktopFileSystem::new(cfg.cwd.clone()));
     let runtime = Box::pin(super::build(
         cfg.clone(),
         Arc::new(orchestrator::test_support::MockOutputStream::new()),
         Arc::new(ScheduledAnchorPermissionSink),
-    )).await.unwrap();
+    ))
+    .await
+    .unwrap();
     let source = std::fs::read_to_string(&path).unwrap();
-    let rows = source.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    let rows = source
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(rows[0]["type"], "fixed-session-mode");
-    assert!(rows.iter().any(|row| row["type"] == "custom-title" && row["mobileEmptySession"] == 1 && row["sessionId"] == id.to_string() && row["cwd"].as_str() == cfg.cwd.to_str()));
-    let catalog = session::jsonl::loader::list_recent_sessions(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), 20, fs).await.unwrap();
-    assert!(catalog.iter().any(|row| row.uuid == id && row.mode == ConversationMode::Chat && row.message_count == 0));
-    assert!(runtime.session_lifecycle.shutdown_and_drain().await.complete);
+    assert!(rows.iter().any(|row| row["type"] == "custom-title"
+        && row["mobileEmptySession"] == 1
+        && row["sessionId"] == id.to_string()
+        && row["cwd"].as_str() == cfg.cwd.to_str()));
+    let catalog = session::jsonl::loader::list_recent_sessions(
+        &cfg.lingxi_home,
+        &cfg.cwd.to_string_lossy(),
+        20,
+        fs,
+    )
+    .await
+    .unwrap();
+    assert!(catalog
+        .iter()
+        .any(|row| row.uuid == id && row.mode == ConversationMode::Chat && row.message_count == 0));
+    assert!(
+        runtime
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
+    );
     drop(runtime);
 
     let captured = std::fs::read_to_string(&path).unwrap();
+    cfg.lingxi_home = cfg.lingxi_home.canonicalize().unwrap();
+    let physical_path = path.canonicalize().unwrap();
+    let (authority, _) = session::jsonl::writer::TranscriptFileAuthority::capture(
+        cfg.lingxi_home.clone(),
+        physical_path
+            .strip_prefix(&cfg.lingxi_home)
+            .unwrap()
+            .to_path_buf(),
+    )
+    .unwrap();
     let retry = super::DesktopConfig {
-        session_transcript_path: Some(path.clone()),
+        session_transcript_path: Some(authority.path()),
+        session_transcript_authority: Some(authority),
         session_resume_snapshot: Some(super::DesktopSessionResumeSnapshot {
             source_session_id: id.to_string(),
             content: captured.into(),
@@ -70,10 +110,25 @@ async fn scheduled_draft_is_discoverable_before_desktop_build_returns() {
         retry,
         Arc::new(orchestrator::test_support::MockOutputStream::new()),
         Arc::new(ScheduledAnchorPermissionSink),
-    )).await.unwrap();
+    ))
+    .await
+    .unwrap();
     let resumed_source = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(resumed_source.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).is_ok_and(|row| row["mobileEmptySession"] == 1)).count(), 1);
-    assert!(resumed.session_lifecycle.shutdown_and_drain().await.complete);
+    assert_eq!(
+        resumed_source
+            .lines()
+            .filter(|line| serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|row| row["mobileEmptySession"] == 1))
+            .count(),
+        1
+    );
+    assert!(
+        resumed
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
+    );
 }
 
 #[tokio::test]
@@ -88,34 +143,119 @@ async fn scheduled_anchor_is_idempotent_and_rejects_foreign_owner() {
     let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cwd.clone()));
     let writer = scheduled_test_writer(&cwd, &path, fs, id);
     let _lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
-        .claim_session_id(&id.to_string(), std::process::id()).unwrap();
-    writer.initialize_fixed_session_mode(&id.to_string(), ConversationMode::Chat, 0).await.unwrap();
-    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Chat).await.unwrap());
+        .claim_session_id(&id.to_string(), std::process::id())
+        .unwrap();
+    writer
+        .initialize_fixed_session_mode(&id.to_string(), ConversationMode::Chat, 0)
+        .await
+        .unwrap();
+    assert!(super::assembly::ensure_scheduled_durable_anchor(
+        &writer,
+        &path,
+        &cwd,
+        &id.to_string(),
+        ConversationMode::Chat
+    )
+    .await
+    .unwrap());
     let anchored = std::fs::read(&path).unwrap();
-    assert!(!super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Chat).await.unwrap());
-    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Code).await.is_err());
-    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd.join("other"), &id.to_string(), ConversationMode::Chat).await.is_err());
-    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &uuid::Uuid::new_v4().to_string(), ConversationMode::Chat).await.is_err());
+    assert!(!super::assembly::ensure_scheduled_durable_anchor(
+        &writer,
+        &path,
+        &cwd,
+        &id.to_string(),
+        ConversationMode::Chat
+    )
+    .await
+    .unwrap());
+    assert!(super::assembly::ensure_scheduled_durable_anchor(
+        &writer,
+        &path,
+        &cwd,
+        &id.to_string(),
+        ConversationMode::Code
+    )
+    .await
+    .is_err());
+    assert!(super::assembly::ensure_scheduled_durable_anchor(
+        &writer,
+        &path,
+        &cwd.join("other"),
+        &id.to_string(),
+        ConversationMode::Chat
+    )
+    .await
+    .is_err());
+    assert!(super::assembly::ensure_scheduled_durable_anchor(
+        &writer,
+        &path,
+        &cwd,
+        &uuid::Uuid::new_v4().to_string(),
+        ConversationMode::Chat
+    )
+    .await
+    .is_err());
     assert_eq!(std::fs::read(&path).unwrap(), anchored);
-    let relocated = serde_json::json!({"type":"relocated", "sessionId":id, "relocatedCwd":cwd.join("other")});
-    writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{relocated}").unwrap();
+    let relocated =
+        serde_json::json!({"type":"relocated", "sessionId":id, "relocatedCwd":cwd.join("other")});
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{relocated}"
+    )
+    .unwrap();
     let foreign_relocation = std::fs::read(&path).unwrap();
-    assert!(super::assembly::ensure_scheduled_durable_anchor(&writer, &path, &cwd, &id.to_string(), ConversationMode::Chat).await.is_err());
+    assert!(super::assembly::ensure_scheduled_durable_anchor(
+        &writer,
+        &path,
+        &cwd,
+        &id.to_string(),
+        ConversationMode::Chat
+    )
+    .await
+    .is_err());
     assert_eq!(std::fs::read(&path).unwrap(), foreign_relocation);
     std::fs::write(&path, &anchored).unwrap();
 
     let existing_id = uuid::Uuid::new_v4();
-    let existing_path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &existing_id.to_string());
+    let existing_path =
+        session::jsonl::session_path(&home, &cwd.to_string_lossy(), &existing_id.to_string());
     let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(cwd.clone()));
     let existing = scheduled_test_writer(&cwd, &existing_path, fs, existing_id);
-    let _existing_lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
-        .claim_session_id(&existing_id.to_string(), std::process::id()).unwrap();
-    existing.initialize_fixed_session_mode(&existing_id.to_string(), ConversationMode::Chat, 0).await.unwrap();
+    let _existing_lease =
+        lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+            .claim_session_id(&existing_id.to_string(), std::process::id())
+            .unwrap();
+    existing
+        .initialize_fixed_session_mode(&existing_id.to_string(), ConversationMode::Chat, 0)
+        .await
+        .unwrap();
     let row = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":existing_id,"parentUuid":null,"cwd":cwd,"message":{"role":"user","content":"existing history"}});
-    writeln!(std::fs::OpenOptions::new().append(true).open(&existing_path).unwrap(), "{row}").unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&existing_path)
+            .unwrap(),
+        "{row}"
+    )
+    .unwrap();
     let original = std::fs::read(&existing_path).unwrap();
-    assert!(!session::jsonl::route_lines(std::str::from_utf8(&original).unwrap()).messages_in_order.is_empty());
-    assert!(!super::assembly::ensure_scheduled_durable_anchor(&existing, &existing_path, &cwd, &existing_id.to_string(), ConversationMode::Chat).await.unwrap());
+    assert!(
+        !session::jsonl::route_lines(std::str::from_utf8(&original).unwrap())
+            .messages_in_order
+            .is_empty()
+    );
+    assert!(!super::assembly::ensure_scheduled_durable_anchor(
+        &existing,
+        &existing_path,
+        &cwd,
+        &existing_id.to_string(),
+        ConversationMode::Chat
+    )
+    .await
+    .unwrap());
     assert_eq!(std::fs::read(&existing_path).unwrap(), original);
 }
 
@@ -964,4 +1104,115 @@ async fn cold_worktree_restore_keeps_extra_grants_and_ephemeral_restore_never_wr
     )
     .await;
     assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+}
+#[tokio::test]
+async fn desktop_cd_keeps_exact_source_across_cold_resume() {
+    use lingxi_core::host::session_context::ConversationMode;
+    let (_root, mut cfg) = super::tests::test_config(true);
+    let id = uuid::Uuid::new_v4();
+    cfg.session_id_override = Some(id.to_string());
+    cfg.initial_conversation_mode = Some(ConversationMode::Chat);
+    cfg.restore_draft = true;
+    cfg.scheduled_durable_anchor = true;
+    cfg.enable_automation_scheduler = false;
+    cfg.isolated_credential_storage = true;
+    let original_cwd = cfg.cwd.clone();
+    let target = original_cwd.join("new-cwd");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let source = session::jsonl::session_path(
+        &cfg.lingxi_home,
+        &original_cwd.to_string_lossy(),
+        &id.to_string(),
+    );
+    let runtime = Box::pin(super::build(
+        cfg.clone(),
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(ScheduledAnchorPermissionSink),
+    ))
+    .await
+    .unwrap();
+    let before = std::fs::metadata(&source).unwrap();
+    runtime
+        .change_working_directory(target.clone())
+        .await
+        .unwrap();
+    assert_eq!(runtime.session_cwd.cwd(), target);
+    assert_eq!(runtime.fork_writer.as_ref().unwrap().active_path(), source);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let after = std::fs::metadata(&source).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    }
+    #[cfg(not(unix))]
+    let _ = before;
+    let destination =
+        session::jsonl::session_path(&cfg.lingxi_home, &target.to_string_lossy(), &id.to_string());
+    assert!(!destination.exists());
+    let source_text = std::fs::read_to_string(&source).unwrap();
+    let marker = source_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["type"] == "relocated" && row["sessionId"] == id.to_string())
+        .last()
+        .unwrap();
+    assert_eq!(marker["relocatedCwd"].as_str(), target.to_str());
+    let fs: Arc<dyn FileSystem> = Arc::new(super::platform::DesktopFileSystem::new(target.clone()));
+    let rows =
+        session::jsonl::list_recent_sessions(&cfg.lingxi_home, &target.to_string_lossy(), 20, fs)
+            .await
+            .unwrap();
+    assert!(rows.iter().any(|row| row.uuid == id
+        && row.path == source
+        && row.mode == ConversationMode::Chat
+        && row.workspace_path.as_deref() == target.to_str()));
+    assert!(
+        runtime
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
+    );
+    drop(runtime);
+
+    let captured = std::fs::read_to_string(&source).unwrap();
+    let physical_source = source.canonicalize().unwrap();
+    cfg.lingxi_home = cfg.lingxi_home.canonicalize().unwrap();
+    let (authority, _) = session::jsonl::writer::TranscriptFileAuthority::capture(
+        cfg.lingxi_home.clone(),
+        physical_source
+            .strip_prefix(&cfg.lingxi_home)
+            .unwrap()
+            .to_path_buf(),
+    )
+    .unwrap();
+    cfg.cwd = target.clone();
+    cfg.initial_project_root = Some(original_cwd);
+    cfg.scheduled_durable_anchor = false;
+    cfg.session_transcript_path = Some(authority.path());
+    cfg.session_transcript_authority = Some(authority);
+    cfg.session_resume_snapshot = Some(super::DesktopSessionResumeSnapshot {
+        source_session_id: id.to_string(),
+        content: captured.into(),
+    });
+    let resumed = Box::pin(super::build(
+        cfg,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(ScheduledAnchorPermissionSink),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resumed.session_cwd.cwd(), target);
+    assert_eq!(
+        resumed.fork_writer.as_ref().unwrap().active_path(),
+        physical_source
+    );
+    assert!(
+        resumed
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
+    );
 }

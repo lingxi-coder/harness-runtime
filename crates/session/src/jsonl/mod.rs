@@ -35,9 +35,12 @@ pub mod uuid;
 pub mod writer;
 
 // Re-export pre-existing public surface so dependents keep their imports.
-pub use aliases::{read_session_aliases, record_session_alias, SESSION_ALIASES_FILE};
+pub use aliases::{
+    read_session_aliases, record_session_alias, record_session_cwd_alias, SESSION_ALIASES_FILE,
+    SESSION_CWD_ALIASES_FILE,
+};
 pub use recover::{read_recover, RecoveryResult, StorageError};
-pub use scheduled_anchor::is_mode_only_draft;
+pub use scheduled_anchor::{is_mode_only_draft, validated_empty_draft_cwd};
 
 // New M5-07 public surface.
 pub use durable_writer::{
@@ -80,9 +83,10 @@ pub use writer::{CapturedChatTranscript, ChatTranscriptCheckpoint, JsonlWriter};
 
 // New M5-08 public surface.
 pub use loader::{
-    build_conversation_chain, discovered_tool_names, find_session_exact_raw_with_diagnostics,
-    find_session_exact_with_diagnostics, find_session_in_scope_with_diagnostics,
-    find_session_with_diagnostics, find_tip, list_recent_sessions, list_recent_sessions_in_scope,
+    build_conversation_chain, describe_session_source, discovered_tool_names,
+    find_session_exact_raw_with_diagnostics, find_session_exact_with_diagnostics,
+    find_session_in_scope_with_diagnostics, find_session_with_diagnostics, find_tip,
+    list_recent_sessions, list_recent_sessions_in_scope,
     list_recent_sessions_in_scope_with_diagnostics, list_recent_sessions_in_scope_with_mode,
     list_recent_sessions_in_scope_with_worktrees,
     list_recent_sessions_in_scope_with_worktrees_and_mode, list_recent_sessions_with_diagnostics,
@@ -93,8 +97,8 @@ pub use loader::{
     read_agent_resume_state, read_agent_snapshot, resolve_job_transcript_raw, resolve_session_path,
     resolve_session_path_across_worktrees, resolve_session_path_in_scope, resolve_session_path_raw,
     search_sessions_by_custom_title, select_session_interactive, transcript_workspace_path,
-    JobTranscriptResolveOptions, LoaderError, ResolvedJobTranscriptPath, SessionCatalog,
-    SessionDiscoveryScope, SessionMetadata,
+    DescribedSessionSource, JobTranscriptResolveOptions, LoaderError, ResolvedJobTranscriptPath,
+    SessionCatalog, SessionDiscoveryScope, SessionMetadata,
 };
 pub use message_identity::SessionMessageIdentitySnapshot;
 pub use title::{derive_fork_name, extract_title, FORK_NAME_FALLBACK};

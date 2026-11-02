@@ -559,6 +559,7 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     config.session_resume_target_snapshot = None;
     config.session_resume_cost = None;
     config.session_transcript_path = None;
+    config.session_transcript_authority = None;
     config.session_writer_lease = None;
     config.session_id_override = None;
     config.parent_session_id = None;

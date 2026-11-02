@@ -131,6 +131,7 @@ pub async fn prepare(
         }
     };
     let (_, _, source_identity) = capture_resume_source(
+        &config.lingxi_home,
         &source_path,
         source_id,
         discovered_identity,
@@ -138,13 +139,22 @@ pub async fn prepare(
         !fork,
     )
     .await?;
+    if config
+        .session_transcript_authority
+        .as_ref()
+        .is_some_and(|authority| authority != &source_identity)
+    {
+        return Err("captured resume authority changed before admission".into());
+    }
+    let source_path = source_identity.path();
     let source_lease = claim_source(config, source_id)?;
     // The lease never authorizes substituting another path or inode. Reopen
     // the exact source and compare both its directory and file identities.
     let (captured, loaded, _) = capture_resume_source(
+        &config.lingxi_home,
         &source_path,
         source_id,
-        Some(source_identity),
+        Some(source_identity.clone()),
         config.initial_conversation_mode,
         !fork,
     )
@@ -181,7 +191,8 @@ pub async fn prepare(
         {
             return Err(missing());
         }
-        let workspace = validated_empty_draft_cwd(&content, source_id).ok_or_else(missing)?;
+        let workspace = session::jsonl::validated_empty_draft_cwd(&content, &source_id.to_string())
+            .ok_or_else(missing)?;
         // A relocation explicitly changes the workspace; otherwise the
         // recorded cwd must own this transcript's project bucket.
         if session::jsonl::loader::transcript_workspace_path(&source_path, &loaded)
@@ -254,7 +265,7 @@ pub async fn prepare(
             config.session_persistence.then(|| source_lease.clone()),
         )
     };
-    let (mounted_content, messages, entries) = if fork {
+    let (mounted_content, messages, entries, branch_authority) = if fork {
         let source_cwd = source_cwd
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| config.cwd.to_string_lossy().into_owned());
@@ -269,27 +280,32 @@ pub async fn prepare(
             custom_title: None,
             mode: config.initial_conversation_mode,
         };
-        let mounted_content: Arc<str> = if config.session_persistence {
-            session::branch::create_branch_from_captured(options, fs.clone())
+        let (mounted_content, branch_authority): (Arc<str>, _) = if config.session_persistence {
+            let published = session::branch::create_branch_from_captured(options, fs.clone())
                 .await
                 .map_err(|error| format!("could not create branch: {error}"))?;
-            tokio::fs::read_to_string(&target_path)
-                .await
-                .map_err(|error| error.to_string())?
-                .into()
+            (published.content.into(), Some(published.authority))
         } else {
-            session::branch::render_branch_from_captured(options, fs.clone())
-                .await
-                .map_err(|error| format!("could not create branch: {error}"))?
-                .content
-                .into()
+            (
+                session::branch::render_branch_from_captured(options, fs.clone())
+                    .await
+                    .map_err(|error| format!("could not create branch: {error}"))?
+                    .content
+                    .into(),
+                None,
+            )
         };
         let target = session::jsonl::route_lines(&mounted_content);
         let (target_messages, _) =
             session::jsonl::build_conversation_chain(&target, &session_id.to_string());
-        (mounted_content, target_messages, target.messages_in_order)
+        (
+            mounted_content,
+            target_messages,
+            target.messages_in_order,
+            branch_authority,
+        )
     } else {
-        (content.clone(), messages, loaded.messages_in_order)
+        (content.clone(), messages, loaded.messages_in_order, None)
     };
     config.session_id_override = Some(session_id.to_string());
     if let Some(workspace) = resumed_cwd {
@@ -311,7 +327,27 @@ pub async fn prepare(
             .collect();
         config.cwd = workspace;
     }
-    config.session_transcript_path = Some(target_path);
+    let target_authority = if config.session_persistence && fork {
+        let authority = branch_authority.ok_or("created branch has no publication authority")?;
+        if authority
+            .read_checked()
+            .map_err(|error| error.to_string())?
+            != mounted_content.as_bytes()
+        {
+            return Err("created branch target changed before admission".into());
+        }
+        Some(authority)
+    } else if config.session_persistence {
+        Some(source_identity)
+    } else {
+        None
+    };
+    config.session_transcript_path = Some(
+        target_authority
+            .as_ref()
+            .map_or(target_path, |authority| authority.path()),
+    );
+    config.session_transcript_authority = target_authority;
     config.session_resume_snapshot = Some(DesktopSessionResumeSnapshot {
         source_session_id: source_id.to_string(),
         content: content.clone(),
@@ -338,98 +374,66 @@ pub async fn prepare(
     }))
 }
 
-/// Validate the complete empty-draft timeline, including the latest anchor and
-/// any later relocations, before using its final cwd as workspace authority.
-fn validated_empty_draft_cwd(source: &str, session_id: Uuid) -> Option<std::path::PathBuf> {
-    use lingxi_core::types::utf16_json::Utf16JsonProjection;
-
-    if !session::jsonl::is_mode_only_draft(source, &session_id.to_string()) {
-        return None;
-    }
-    let mut cwd: Option<String> = None;
-    let mut anchored = false;
-    for line in source.lines().filter(|line| !line.trim().is_empty()) {
-        let row = Utf16JsonProjection::parse(line).ok()?;
-        if row.contains_property("cwd") {
-            let value = row
-                .string_at("/cwd")
-                .filter(|value| Path::new(value).is_absolute())?;
-            if cwd.as_deref().is_some_and(|previous| previous != value) {
-                return None;
-            }
-            cwd = Some(value.to_owned());
-        }
-        if row.contains_property("mobileEmptySession") {
-            if row.string_at("/type") != Some("custom-title")
-                || row.string_at("/customTitle").is_none()
-                || row.number_at("/mobileEmptySession") != Some(1.0)
-                || !row
-                    .string_at("/cwd")
-                    .is_some_and(|value| Path::new(value).is_absolute())
-            {
-                return None;
-            }
-            anchored = true;
-        } else if row.string_at("/type") == Some("custom-title") {
-            anchored = false;
-        }
-        if row.string_at("/type") == Some("relocated") {
-            let value = row
-                .string_at("/relocatedCwd")
-                .filter(|value| Path::new(value).is_absolute())?;
-            cwd = Some(value.to_owned());
-        }
-    }
-    anchored.then_some(cwd?).map(std::path::PathBuf::from)
-}
-
-#[derive(Clone, Copy)]
-struct ResumeSourceIdentity {
-    directory: lingxi_core::host::rooted_fs::RootIdentity,
-    file: lingxi_core::host::rooted_fs::RootIdentity,
-}
-
 async fn capture_resume_source(
+    home: &Path,
     path: &Path,
     session_id: Uuid,
-    expected: Option<ResumeSourceIdentity>,
+    expected: Option<session::jsonl::writer::TranscriptFileAuthority>,
     mode: Option<lingxi_core::host::session_context::ConversationMode>,
-    require_single_link: bool,
+    _require_single_link: bool,
 ) -> Result<
     (
         String,
         session::jsonl::LoadedTranscript,
-        ResumeSourceIdentity,
+        session::jsonl::writer::TranscriptFileAuthority,
     ),
     String,
 > {
     let path = path.to_path_buf();
+    let home = home.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        use lingxi_core::host::rooted_fs::{
-            open_read_file_pinned, opened_file_identity, root_identity,
-            validate_open_file_single_link,
+        let logical_home = if home.is_absolute() {
+            home
+        } else {
+            std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .join(home)
         };
-        use std::io::Read;
-
-        let parent = path.parent().ok_or("resume source has no parent")?;
-        let name = path.file_name().ok_or("resume source has no filename")?;
-        let name = Path::new(name);
-        let directory = match expected {
-            Some(identity) => identity.directory,
-            None => root_identity(parent).map_err(|error| error.to_string())?,
+        let root = std::fs::canonicalize(&logical_home).map_err(|error| error.to_string())?;
+        let relative = path
+            .strip_prefix(&logical_home)
+            .or_else(|_| path.strip_prefix(&root))
+            .map_err(|_| "resume source is outside the transcript home")?
+            .to_path_buf();
+        let components: Vec<_> = relative.components().collect();
+        if components.len() != 3
+            || components[0].as_os_str() != "projects"
+            || components
+                .iter()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+            || path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .and_then(|value| Uuid::parse_str(value).ok())
+                != Some(session_id)
+        {
+            return Err("resume source does not match its catalog identity".into());
+        }
+        let (authority, bytes) = match expected {
+            Some(authority) => {
+                if authority.path() != root.join(&relative) {
+                    return Err("resume source changed before writer admission".into());
+                }
+                let bytes = authority
+                    .read_checked()
+                    .map_err(|error| error.to_string())?;
+                (authority, bytes)
+            }
+            None => session::jsonl::writer::TranscriptFileAuthority::capture(root, relative)
+                .map_err(|error| error.to_string())?,
         };
-        let mut file = open_read_file_pinned(parent, name, Some(&directory))
-            .map_err(|error| error.to_string())?;
-        if require_single_link {
-            validate_open_file_single_link(&file).map_err(|error| error.to_string())?;
-        }
-        let file_identity = opened_file_identity(&file).map_err(|error| error.to_string())?;
-        if expected.is_some_and(|identity| identity.file != file_identity) {
-            return Err("resume source changed before writer admission".into());
-        }
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|error| error.to_string())?;
+        let content = String::from_utf8(bytes).map_err(|error| error.to_string())?;
         let loaded =
             session::jsonl::loader::route_captured_session_source(&path, session_id, &content)
                 .map_err(|error| error.to_string())?;
@@ -444,19 +448,14 @@ async fn capture_resume_source(
                 actual.as_str()
             ));
         }
-        let current = open_read_file_pinned(parent, name, Some(&directory))
-            .map_err(|error| error.to_string())?;
-        if opened_file_identity(&current).map_err(|error| error.to_string())? != file_identity {
+        if authority
+            .read_checked()
+            .map_err(|error| error.to_string())?
+            != content.as_bytes()
+        {
             return Err("resume source changed during capture".into());
         }
-        Ok((
-            content,
-            loaded,
-            ResumeSourceIdentity {
-                directory,
-                file: file_identity,
-            },
-        ))
+        Ok((content, loaded, authority))
     })
     .await
     .map_err(|error| format!("resume source capture failed: {error}"))?
@@ -467,7 +466,13 @@ async fn unique_resume_source(
     home: &Path,
     session_id: Uuid,
     require_single_link: bool,
-) -> Result<(std::path::PathBuf, ResumeSourceIdentity), String> {
+) -> Result<
+    (
+        std::path::PathBuf,
+        session::jsonl::writer::TranscriptFileAuthority,
+    ),
+    String,
+> {
     let missing = || format!("No conversation found with session ID: {session_id}");
     let logical_projects = home.join("projects");
     let projects = tokio::fs::canonicalize(&logical_projects)
@@ -521,15 +526,37 @@ async fn unique_resume_source(
                 Ok(_) => return Err("resume source is not a regular file".into()),
                 Err(error) => return Err(error.to_string()),
             }
-            let (_, _, identity) =
-                capture_resume_source(&candidate, session_id, None, None, require_single_link)
-                    .await?;
+            let (_, _, identity) = capture_resume_source(
+                home,
+                &candidate,
+                session_id,
+                None,
+                None,
+                require_single_link,
+            )
+            .await?;
             if selected.replace((candidate, identity)).is_some() {
                 return Err(format!("ambiguous conversation session ID: {session_id}"));
             }
         }
     }
     selected.ok_or_else(missing)
+}
+
+/// Resolve a bare UUID only when exactly one physical project source exists.
+/// The returned authority is the first opened, no-follow source identity.
+pub async fn resolve_unique_resume_source(
+    home: &Path,
+    session_id: Uuid,
+) -> Result<
+    (
+        std::path::PathBuf,
+        session::jsonl::writer::TranscriptFileAuthority,
+    ),
+    String,
+> {
+    let (_, authority) = unique_resume_source(home, session_id, true).await?;
+    Ok((authority.path(), authority))
 }
 
 fn claim_source(
@@ -956,9 +983,10 @@ mod tests {
         String,
     ) {
         let root = tempfile::tempdir().unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
         let mut config = DesktopConfig::default();
-        config.cwd = root.path().join("project");
-        config.lingxi_home = root.path().join("home");
+        config.cwd = canonical_root.join("project");
+        config.lingxi_home = canonical_root.join("home");
         tokio::fs::create_dir_all(&config.cwd).await.unwrap();
         let source_id = Uuid::new_v4();
         let path = session::jsonl::session_path(
@@ -1020,15 +1048,22 @@ mod tests {
     #[tokio::test]
     async fn selected_source_inode_is_rechecked_after_writer_claim() {
         let (_root, config, source_id, path, source) = fixture().await;
-        let (_, _, pinned) =
-            capture_resume_source(&path, source_id, None, Some(ConversationMode::Code), true)
-                .await
-                .unwrap();
+        let (_, _, pinned) = capture_resume_source(
+            &config.lingxi_home,
+            &path,
+            source_id,
+            None,
+            Some(ConversationMode::Code),
+            true,
+        )
+        .await
+        .unwrap();
         let _lease = claim_source(&config, source_id).unwrap();
         let original = path.with_extension("original");
         std::fs::rename(&path, &original).unwrap();
         std::fs::write(&path, source.replace("inherited", "replacement")).unwrap();
         assert!(capture_resume_source(
+            &config.lingxi_home,
             &path,
             source_id,
             Some(pinned),

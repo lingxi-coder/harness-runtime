@@ -1,13 +1,17 @@
 use client::protocol::listings::SessionModeDto;
 
-/// A single validated capture used throughout a cold mobile mount. Neither a
-/// client-supplied transcript path nor a sanitized directory name identifies a
-/// workspace: both the transcript and cwd must come from the catalog record.
+/// A single validated capture used throughout a cold mobile mount. The selected
+/// path is validated against the catalog; the workspace and immutable profile
+/// come from that same captured record.
 pub(super) struct InitialMobileSession {
     pub id: uuid::Uuid,
+    pub selected_path: std::path::PathBuf,
     pub source: String,
     pub raw_source: Vec<u8>,
+    pub transcript_root: std::path::PathBuf,
+    pub transcript_relative: std::path::PathBuf,
     pub transcript_identity: lingxi_core::host::rooted_fs::RootIdentity,
+    pub transcript_file_identity: lingxi_core::host::rooted_fs::RootIdentity,
     pub mode: lingxi_core::host::session_context::ConversationMode,
     pub messages: Vec<session::jsonl::JsonlMessage>,
     pub replayed: orchestrator::ReplayedSession,
@@ -23,102 +27,114 @@ pub(super) async fn capture_initial_mobile_session(
 ) -> Result<Option<InitialMobileSession>, super::MobileBuildError> {
     use std::path::{Path, PathBuf};
 
-    let Some(requested) = cfg.initial_session_id.as_deref() else {
-        return Ok(None);
-    };
     let fail = |reason: String| {
         super::MobileBuildError::Orchestrator(format!("initial session resume: {reason}"))
     };
+    let (requested, selected) = match (
+        cfg.initial_session_id.as_deref(),
+        cfg.initial_session_transcript_path.as_deref(),
+    ) {
+        (None, None) => return Ok(None),
+        (Some(id), Some(path)) => (id, path),
+        _ => {
+            return Err(fail(
+                "session ID and selected transcript path are both required".into(),
+            ))
+        }
+    };
+    let selected_path = selected.to_path_buf();
     if cfg.app_agent_host {
         return Err(fail("Local App Agent cannot mount a conversation".into()));
     }
     let id = uuid::Uuid::parse_str(requested.strip_prefix("sess:").unwrap_or(requested))
         .map_err(|error| fail(format!("invalid session UUID: {error}")))?;
     let id_text = id.to_string();
-    let catalog = cfg.lingxi_home.join("projects");
-    let entries = std::fs::read_dir(&catalog)
-        .map_err(|error| fail(format!("session catalog unavailable: {error}")))?;
-    let canonical_catalog = catalog
-        .canonicalize()
-        .map_err(|error| fail(format!("invalid session catalog: {error}")))?;
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| fail(format!("session catalog: {error}")))?;
-        if !entry
-            .file_type()
-            .map_err(|error| fail(error.to_string()))?
-            .is_dir()
-        {
-            continue;
-        }
-        for source in std::fs::read_dir(entry.path())
-            .map_err(|error| fail(format!("session catalog: {error}")))?
-        {
-            let source = source.map_err(|error| fail(format!("session catalog: {error}")))?;
-            let candidate = source.path();
-            if candidate.extension().and_then(|name| name.to_str()) != Some("jsonl")
-                || candidate
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| uuid::Uuid::parse_str(name).ok())
-                    != Some(id)
-            {
-                continue;
-            }
-            if !source
-                .file_type()
-                .map_err(|error| fail(error.to_string()))?
-                .is_file()
-            {
-                return Err(fail("session source is not a regular file".into()));
-            }
-            let path = candidate
-                .canonicalize()
-                .map_err(|error| fail(format!("session source unavailable: {error}")))?;
-            if !path
-                .strip_prefix(&canonical_catalog)
-                .ok()
-                .is_some_and(|relative| relative.components().count() == 2)
-            {
-                return Err(fail("session source is outside catalog".into()));
-            }
-            candidates.push(path);
-        }
-    }
-    let path = match candidates.as_slice() {
-        [path] => path.clone(),
-        [] => return Err(fail(format!("session {id_text} was not found"))),
-        _ => {
-            return Err(fail(format!(
-                "session {id_text} has ambiguous catalog sources"
-            )))
-        }
-    };
     let model_fs = platform.filesystem();
-    let capture_path = path.clone();
-    let (raw_source, transcript_identity) = tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let root = capture_path
-            .parent()
-            .ok_or_else(|| "transcript has no parent".to_string())?;
-        let relative = Path::new(
-            capture_path
-                .file_name()
-                .ok_or_else(|| "transcript has no filename".to_string())?,
-        );
-        let identity =
-            lingxi_core::host::rooted_fs::root_identity(root).map_err(|error| error.to_string())?;
-        let mut file =
-            lingxi_core::host::rooted_fs::open_read_file_pinned(root, relative, Some(&identity))
+    let home = cfg
+        .lingxi_home
+        .canonicalize()
+        .map_err(|error| fail(format!("invalid session home: {error}")))?;
+    let catalog = home.join("projects");
+    // Catalog results may be in native coordinates or the mobile guest.
+    // Only canonicalize the trusted parent of projects; never resolve the
+    // selected bucket or file before the rooted no-follow traversal.
+    let native_in_catalog = selected
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|parent| parent.parent())
+        .and_then(|parent| parent.canonicalize().ok())
+        .is_some_and(|parent| parent == home);
+    let selected = if native_in_catalog {
+        selected.to_path_buf()
+    } else {
+        model_fs
+            .translate_model_path(&selected.to_string_lossy(), false)
+            .map_err(|error| fail(format!("invalid session source: {error}")))?
+            .map(PathBuf::from)
+            .unwrap_or_else(|| selected.to_path_buf())
+    };
+    let bucket = selected
+        .parent()
+        .ok_or_else(|| fail("transcript has no bucket".into()))?;
+    let selected_catalog = bucket
+        .parent()
+        .ok_or_else(|| fail("transcript has no catalog".into()))?;
+    let metadata = std::fs::symlink_metadata(selected_catalog)
+        .map_err(|error| fail(format!("session catalog unavailable: {error}")))?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || selected_catalog.canonicalize().ok().as_deref() != Some(catalog.as_path())
+    {
+        return Err(fail("session source is outside a real catalog".into()));
+    }
+    let bucket_name = bucket
+        .file_name()
+        .ok_or_else(|| fail("transcript has no bucket name".into()))?;
+    let name = selected
+        .file_name()
+        .ok_or_else(|| fail("transcript has no filename".into()))?;
+    let transcript_relative = Path::new("projects").join(bucket_name).join(name);
+    let path = home.join(&transcript_relative);
+    if path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        || path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| session::jsonl::validate_uuid(value))
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            != Some(id)
+    {
+        return Err(fail(
+            "selected transcript does not match the session UUID".into(),
+        ));
+    }
+    let transcript_root = home.clone();
+    let capture_root = home;
+    let capture_relative = transcript_relative.clone();
+    let (raw_source, transcript_identity, transcript_file_identity) =
+        tokio::task::spawn_blocking(move || {
+            use lingxi_core::host::rooted_fs::{
+                open_read_file_pinned, opened_file_identity, root_identity,
+                validate_open_file_single_link,
+            };
+            use std::io::Read;
+            let identity = root_identity(&capture_root).map_err(|error| error.to_string())?;
+            let mut file = open_read_file_pinned(&capture_root, &capture_relative, Some(&identity))
                 .map_err(|error| error.to_string())?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        Ok::<_, String>((bytes, identity))
-    })
-    .await
-    .map_err(|error| fail(error.to_string()))?
-    .map_err(fail)?;
+            validate_open_file_single_link(&file).map_err(|error| error.to_string())?;
+            let file_identity = opened_file_identity(&file).map_err(|error| error.to_string())?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            let current = open_read_file_pinned(&capture_root, &capture_relative, Some(&identity))
+                .map_err(|error| error.to_string())?;
+            if opened_file_identity(&current).map_err(|error| error.to_string())? != file_identity {
+                return Err("session source changed during capture".into());
+            }
+            Ok::<_, String>((bytes, identity, file_identity))
+        })
+        .await
+        .map_err(|error| fail(error.to_string()))?
+        .map_err(fail)?;
     let source = committed_mobile_source(&raw_source).map_err(fail)?;
     let loaded = session::jsonl::loader::route_captured_session_source(&path, id, &source)
         .map_err(|error| fail(format!("invalid captured transcript: {error}")))?;
@@ -137,6 +153,14 @@ pub(super) async fn capture_initial_mobile_session(
     }
     let recorded = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
         .ok_or_else(|| fail("transcript has no valid workspace".into()))?;
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &id_text);
+    if messages.is_empty() {
+        let anchored = session::jsonl::validated_empty_draft_cwd(&source, &id_text)
+            .ok_or_else(|| fail("empty session anchor is invalid".into()))?;
+        if anchored.as_path() != Path::new(&recorded) {
+            return Err(fail("empty session anchor workspace does not match".into()));
+        }
+    }
     let requested_cwd = Path::new(&recorded);
     let host = model_fs
         .translate_model_path(&recorded, false)
@@ -149,7 +173,13 @@ pub(super) async fn capture_initial_mobile_session(
         return Err(fail("workspace is not a directory".into()));
     }
     let logical = if let Some(runtime) = platform.mobile_linux() {
-        let mounts = runtime.current_mounts();
+        let mut mounts = runtime.current_mounts();
+        // The selected workspace was canonicalized above. Normalize the
+        // trusted mount roots the same way before the lexical reverse map,
+        // including hosts where /var and /private/var name the same tree.
+        for mount in &mut mounts {
+            mount.host_path = PathBuf::from(super::canonical_cwd_string(&mount.host_path));
+        }
         let guest = mobile_linux_api::map_host_path_to_guest(&host, &mounts)
             .map(PathBuf::from)
             .ok_or_else(|| fail("workspace is outside mounted storage".into()))?;
@@ -173,7 +203,6 @@ pub(super) async fn capture_initial_mobile_session(
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| logical.clone());
     let permission_mode = loaded.permission_modes.get(&id_text).cloned();
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &id_text);
     let replayed = if loaded.messages_in_order.is_empty()
         && loaded.mobile_empty_sessions.contains(&id_text)
         || super::mobile_anchored_startup_only(&loaded, id)
@@ -191,9 +220,13 @@ pub(super) async fn capture_initial_mobile_session(
     };
     Ok(Some(InitialMobileSession {
         id,
+        selected_path,
         source,
         raw_source,
+        transcript_root,
+        transcript_relative,
         transcript_identity,
+        transcript_file_identity,
         mode,
         messages,
         replayed,

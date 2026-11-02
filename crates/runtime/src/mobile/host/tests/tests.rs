@@ -35,8 +35,7 @@ use tool_skill::skill::SkillCommandType;
 use super::{
     build_mobile, builtin_provider_catalog, collect_session_agent_transcript_paths,
     enqueue_mobile_prompt_dispatch, find_session_agent_transcript_path,
-    lower_session_agent_snapshot, mobile_anchor_startup_scan_count, mobile_cron_schedule_error,
-    mobile_mcp_config_unchanged,
+    lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_mcp_config_unchanged,
     mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight, mobile_mcp_record_reload_intent,
     mobile_mcp_reload_requires_replacement, mobile_mcp_run_reload_job,
     mobile_mcp_state_is_transitional, session_agent_conversation_is_visible,
@@ -916,6 +915,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     observer
         .on_event(SubagentObservation::Completed {
             agent_id,
+            handback: None,
             content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""done""#)
                 .expect("completed observation fixture is JSON"),
             usage: lingxi_core::host::SubagentUsage::default(),
@@ -1265,17 +1265,29 @@ async fn lightweight_cron_store_crud_and_due_occurrence_need_no_engine() {
         Arc::new(PosixClock::new()),
     );
 
+    let automation = serde_json::json!({
+        "version": 2, "status": "active", "model": "anthropic/test",
+        "reasoning": {"type": "automatic"}, "runMode": "new_session",
+        "sessionMode": "code", "sessionScopeKey": "project.test"
+    })
+    .to_string();
     let created = store
-        .create("* * * * *".to_string(), "hello".to_string(), false)
+        .create_configured(
+            "* * * * *".to_string(),
+            "hello".to_string(),
+            false,
+            automation.clone(),
+        )
         .await
         .expect("one-shot creation");
     assert_eq!(1, store.list().await.len());
     let updated = store
-        .update(
+        .update_configured(
             created.id.clone(),
             "*/15 * * * *".to_string(),
             "updated".to_string(),
             true,
+            automation,
         )
         .await
         .expect("recurring update");
@@ -6378,11 +6390,7 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
     .expect("rebuild Mobile Shell host after restart");
     resumed.runtime().block_on(async {
         resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore completed session");
         resumed
@@ -6629,11 +6637,7 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
     resumed.runtime().block_on(async {
         resumed
-            .submit(client::protocol::commands::ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore the session containing the durable turn");
         resumed
@@ -6891,11 +6895,7 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
 
     resumed.runtime().block_on(async {
         resumed
-            .submit(client::protocol::commands::ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore the session containing the no-ID prompt");
         resumed
@@ -8207,9 +8207,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
 
     resumed.runtime().block_on(async {
         resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None, expected_mode: SessionModeDto::Code, })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore the session containing the skill turn");
         let paused = resumed
@@ -11827,11 +11825,7 @@ fn submit_resume_session_restores_anchored_empty_session_with_same_uuid() {
             .to_string();
 
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: expected.clone(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(expected.clone())
             .await
             .expect("anchored empty session resumes");
 
@@ -11878,11 +11872,7 @@ fn submit_resume_session_restores_its_persisted_permission_mode() {
         use lingxi_core::host::OrchestratorHandle;
 
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("resume persisted session");
         let orchestrator: Arc<dyn OrchestratorHandle> = handle.inner().orchestrator.clone();
@@ -12002,13 +11992,7 @@ fn anchored_session_with_deferred_tool_is_not_restored_as_empty() {
     reopened.runtime().block_on(async {
         let prior = reopened.inner().orchestrator.current_session_id().await;
         assert!(matches!(
-            reopened
-                .submit(ClientCommand::ResumeSession {
-                    session_id: source_id,
-                    cwd: None,
-                    expected_mode: SessionModeDto::Chat,
-                })
-                .await,
+            reopened.resume_seeded_test_session(source_id).await,
             Err(ClientError::Rejected { .. })
         ));
         assert_eq!(
@@ -12027,10 +12011,14 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
     let cfg = test_config(tmp.path());
     let cwd = cfg.cwd.to_string_lossy().into_owned();
     let source_path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_session_id);
-    let source_before = std::fs::read_to_string(&source_path).expect("read source transcript");
     let (handle, listener) = build_submit_handle_with_config(cfg.clone(), tmp.path());
 
     handle.runtime().block_on(async {
+        handle
+            .resume_seeded_test_session(source_session_id.clone())
+            .await
+            .unwrap();
+        let source_before = std::fs::read_to_string(&source_path).expect("read source transcript");
         handle
             .submit(ClientCommand::ForkSession {
                 session_id: source_session_id.clone(),
@@ -12095,8 +12083,7 @@ fn submit_fork_session_rejects_deferred_tools_for_current_and_other_source() {
         let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
         handle.runtime().block_on(async {
             if current_source {
-                handle.submit(ClientCommand::ResumeSession {
-                    session_id: source_id.clone(), cwd: None, expected_mode: SessionModeDto::Code, }).await.unwrap();
+                handle.resume_seeded_test_session(source_id.clone()).await.unwrap();
             }
             let assistant = uuid::Uuid::new_v4();
             use std::io::Write as _;
@@ -12118,7 +12105,7 @@ fn submit_fork_session_rejects_deferred_tools_for_current_and_other_source() {
             let error = handle.submit(ClientCommand::ForkSession {
                 session_id: source_id.clone(), target_mode: SessionModeDto::Code,
             }).await.unwrap_err();
-            assert!(matches!(error, ClientError::Rejected { message } if message.contains("Resume the original session first")));
+            assert!(matches!(error, ClientError::Rejected { message } if message.contains(if current_source { "Resume the original session first" } else { "select the source conversation first" })));
             assert_eq!(std::fs::read(&path).unwrap(), before);
             assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), before_files);
             assert_eq!(handle.inner().orchestrator.conversation_mode().await, previous);
@@ -12140,9 +12127,8 @@ fn submit_fork_session_rejects_unsettled_native_receipt_without_source_changes()
     let path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_id);
     let (handle, listener) = build_submit_handle_with_config(cfg.clone(), tmp.path());
     handle.runtime().block_on(async {
+        handle.resume_seeded_test_session(source_id.clone()).await.unwrap();
         let id = lingxi_core::types::SessionId::parse_prefixed(&source_id).unwrap();
-        let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))
-            .claim_session_id(&source_id, std::process::id()).unwrap().into_shared();
         let relative = std::path::PathBuf::from("session-state").join(id.as_uuid().to_string());
         let journal = session::jsonl::DurableJournal::open_under(&cfg.lingxi_home, &relative).unwrap();
         let output = DurableToolOutput { digest:"binding".into(), payload:serde_json::json!({}), media_refs:vec![] };
@@ -12172,7 +12158,6 @@ fn submit_fork_session_rejects_unsettled_native_receipt_without_source_changes()
         let wal_before = std::fs::read(&wal).unwrap();
         let snapshot_before = std::fs::read(&snapshot).unwrap();
         drop(journal);
-        drop(lease);
         let source_before = std::fs::read(&path).unwrap();
         let before_files = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
         let error = handle.submit(ClientCommand::ForkSession {
@@ -12291,13 +12276,7 @@ fn submit_resume_session_rehydrates_and_emits() {
     handle.runtime().block_on(async {
         use lingxi_core::host::OrchestratorHandle;
 
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: file_uuid.clone(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
-            .await;
+        let result = handle.resume_seeded_test_session(file_uuid.clone()).await;
         assert!(
             result.is_ok(),
             "ResumeSession against a replay-valid session must succeed, got {result:?}"
@@ -12359,11 +12338,7 @@ fn submit_resume_session_accepts_legacy_display_prefix() {
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: format!("sess:{file_uuid}"),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(format!("sess:{file_uuid}"))
             .await
             .expect("legacy prefixed session id must resume");
 
@@ -12394,12 +12369,7 @@ fn submit_resume_session_missing_is_rejected() {
 
     handle.runtime().block_on(async {
         let result = handle
-            .submit(ClientCommand::ResumeSession {
-                // A well-formed uuid that names no on-disk session.
-                session_id: "dddddddd-4444-4444-8444-dddddddddddd".into(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session("dddddddd-4444-4444-8444-dddddddddddd".into())
             .await;
         assert!(
             matches!(result, Err(ClientError::Rejected { .. })),
@@ -12415,6 +12385,31 @@ fn submit_resume_session_missing_is_rejected() {
     });
 }
 
+#[test]
+fn uuid_only_mobile_resume_command_rejects_even_when_source_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session_id, _) = seed_replay_valid_session(tmp.path());
+    let (handle, listener) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let before = handle.inner.orchestrator.current_session_id().await;
+        assert!(matches!(
+            handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id,
+                    cwd: None,
+                    expected_mode: SessionModeDto::Code,
+                })
+                .await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert_eq!(handle.inner.orchestrator.current_session_id().await, before);
+        assert!(!drained(&listener)
+            .await
+            .iter()
+            .any(|event| matches!(event, Ev::SessionResumed { .. })));
+    });
+}
+
 /// SESSIONS/HISTORY (live ResumeSession): a MALFORMED session id (not a uuid)
 /// is honestly REJECTED — we parse the id as a `Uuid` first and reject a
 /// non-uuid rather than fake a confirmation.
@@ -12424,13 +12419,7 @@ fn submit_resume_session_malformed_id_is_rejected() {
     let (handle, listener) = build_submit_handle(tmp.path());
 
     handle.runtime().block_on(async {
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: "not-a-uuid".into(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
-            .await;
+        let result = handle.resume_seeded_test_session("not-a-uuid".into()).await;
         assert!(
             matches!(result, Err(ClientError::Rejected { .. })),
             "a malformed session id must be Rejected, got {result:?}"
@@ -12471,13 +12460,7 @@ fn submit_resume_session_mid_turn_is_rejected() {
             "the freshly-armed turn token must not be cancelled yet"
         );
 
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: file_uuid,
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
-            .await;
+        let result = handle.resume_seeded_test_session(file_uuid).await;
         assert!(
             matches!(result, Err(ClientError::Rejected { .. })),
             "resume must be Rejected while a turn is in flight, got {result:?}"
@@ -12967,11 +12950,7 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
         );
 
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: original.as_uuid().to_string(),
-                cwd: None,
-                expected_mode: SessionModeDto::Code,
-            })
+            .resume_seeded_test_session(original.as_uuid().to_string())
             .await
             .unwrap();
         let resumed_scope = handle.inner.task_registry.handback_scope().await.unwrap();

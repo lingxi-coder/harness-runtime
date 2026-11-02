@@ -822,6 +822,18 @@ impl Eq for ResumeLifetimeGuard {}
 /// it, bridge/mobile hot-resume adopted the messages but silently reset compact
 /// bookkeeping and lost transcript-visibility flags already reconstructed by
 /// the JSONL loader.
+/// The opened transcript identity and bytes captured by a host before a
+/// resume. The writer must keep this same authority through publication and
+/// subsequent appends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedResumeSource {
+    pub root: std::path::PathBuf,
+    pub relative: std::path::PathBuf,
+    pub root_identity: crate::host::rooted_fs::RootIdentity,
+    pub file_identity: crate::host::rooted_fs::RootIdentity,
+    pub expected_content: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeRuntimeSnapshot {
     /// Host reservation that must outlive detached resume work.
@@ -829,6 +841,8 @@ pub struct ResumeRuntimeSnapshot {
     /// Exact transcript selected by the loader. A cross-worktree resume keeps
     /// appending here even when the stored working directory no longer exists.
     pub transcript_path: Option<std::path::PathBuf>,
+    /// File identity and contents captured from this exact selected source.
+    pub transcript_source: Option<PinnedResumeSource>,
     /// Existing transcript workspace to adopt while mounting this session.
     /// `None` keeps the caller's current working directory.
     pub working_directory: Option<std::path::PathBuf>,
@@ -4219,7 +4233,11 @@ pub enum ResponseTimingEvent {
 #[async_trait]
 pub trait OutputStream: Send + Sync {
     /// Observe selected accounts and sanitized aggregate routing failures.
-    async fn emit_provider_account_routing(&self, _event: &crate::host::provider_accounts::ProviderAccountRoutingEvent) {}
+    async fn emit_provider_account_routing(
+        &self,
+        _event: &crate::host::provider_accounts::ProviderAccountRoutingEvent,
+    ) {
+    }
     /// Whether this sink observes raw model-output progress for trusted host UI.
     /// This observation is separate from published messages and token accounting.
     fn wants_model_output_progress(&self) -> bool {

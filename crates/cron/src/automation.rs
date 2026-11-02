@@ -2,7 +2,201 @@
 use crate::{CronJobFirer, CronTask, FireStatus, FiredJob};
 use lingxi_core::host::{Clock, FileSystem};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc, time::SystemTime};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
+};
+
+/// A durable allocation of a conversation owner, independent of task history.
+/// A reservation records allocation; it does not imply that a turn ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerReservation {
+    pub session_id: String,
+    pub session_transcript_path: String,
+    pub session_mode: String,
+    pub session_scope_key: String,
+}
+
+fn validate_owner_reservation(reservation: &OwnerReservation) -> Result<(), String> {
+    let canonical_id = lingxi_core::types::SessionId::parse_prefixed(&reservation.session_id)
+        .ok_or("Invalid owner reservation session identity")?
+        .as_uuid()
+        .to_string();
+    if reservation.session_id != canonical_id
+        || !Path::new(&reservation.session_transcript_path).is_absolute()
+        || !matches!(reservation.session_mode.as_str(), "chat" | "code")
+        || reservation.session_scope_key.trim().is_empty()
+        || reservation.session_scope_key.len() > 8192
+    {
+        return Err("Invalid owner reservation source".into());
+    }
+    Ok(())
+}
+
+struct LockedAutomationScope {
+    scope_root: PathBuf,
+    scope_identity: Option<lingxi_core::host::rooted_fs::RootIdentity>,
+    state_root: PathBuf,
+    state_identity: Option<lingxi_core::host::rooted_fs::RootIdentity>,
+    lock: Box<dyn lingxi_core::host::FlockGuard>,
+}
+
+impl LockedAutomationScope {
+    async fn acquire(fs: &dyn FileSystem, root: &Path) -> Result<Self, String> {
+        let scope_identity = fs
+            .root_identity_no_follow(root)
+            .await
+            .map_err(|error| error.to_string())?;
+        let state_identity = fs
+            .ensure_directory_rooted_identity_pinned(
+                root,
+                Path::new(crate::tasks_file::CLAUDE_DIR),
+                scope_identity.as_ref(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let state_root = root.join(crate::tasks_file::CLAUDE_DIR);
+        let lock = crate::tasks_file::lock_automation_tasks_pinned(
+            fs,
+            &state_root,
+            state_identity.as_ref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let scope = Self {
+            scope_root: root.to_path_buf(),
+            scope_identity,
+            state_root,
+            state_identity,
+            lock,
+        };
+        scope.validate(fs).await?;
+        Ok(scope)
+    }
+
+    async fn validate(&self, fs: &dyn FileSystem) -> Result<(), String> {
+        self.lock
+            .validate_current()
+            .map_err(|error| error.to_string())?;
+        if fs
+            .root_identity_no_follow(&self.scope_root)
+            .await
+            .map_err(|error| error.to_string())?
+            != self.scope_identity
+            || fs
+                .root_identity_no_follow(&self.state_root)
+                .await
+                .map_err(|error| error.to_string())?
+                != self.state_identity
+        {
+            return Err("Scheduler scope or state directory changed during transaction".into());
+        }
+        self.lock
+            .validate_current()
+            .map_err(|error| error.to_string())
+    }
+}
+
+// Caller holds both scheduler locks. An empty, malformed, partial, or
+// conflicting existing journal is corruption, never an empty owner list.
+async fn read_owner_reservations_locked(
+    fs: &dyn FileSystem,
+    root: &Path,
+    expected_root: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+) -> Result<
+    (
+        Vec<OwnerReservation>,
+        lingxi_core::host::rooted_fs::CheckedFileSnapshot,
+    ),
+    String,
+> {
+    let relative = Path::new(crate::tasks_file::OWNER_RESERVATIONS_FILE);
+    let snapshot = fs
+        .read_file_rooted_single_link_checked(root, relative)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !snapshot.matches_root(expected_root) {
+        return Err("Scheduler root changed during owner reservation read".into());
+    }
+    let Some(content) = snapshot.content.as_ref() else {
+        return Ok((Vec::new(), snapshot));
+    };
+    if content.is_empty() || !content.ends_with('\n') {
+        return Err("Incomplete owner reservation ledger".into());
+    }
+    let mut owners: Vec<OwnerReservation> = Vec::new();
+    let mut by_id = std::collections::HashMap::<String, usize>::new();
+    for line in content.split_terminator('\n') {
+        let owner: OwnerReservation = serde_json::from_str(line)
+            .map_err(|error| format!("Invalid owner reservation ledger: {error}"))?;
+        validate_owner_reservation(&owner)?;
+        if let Some(index) = by_id.get(&owner.session_id) {
+            if owners[*index] != owner {
+                return Err("Conflicting owner reservation ledger entries".into());
+            }
+        } else {
+            by_id.insert(owner.session_id.clone(), owners.len());
+            owners.push(owner);
+        }
+    }
+    Ok((owners, snapshot))
+}
+
+/// List allocated owners while holding the scheduler's process and file locks.
+/// A genuinely missing ledger is empty; any malformed or partial entry fails.
+/// Acquiring the lock may create the scheduler directory and lock file, but
+/// this method never creates or changes task or ledger data.
+pub async fn list_owner_reservations_strict(
+    fs: &dyn FileSystem,
+    root: &Path,
+) -> Result<Vec<OwnerReservation>, String> {
+    let _guard = crate::lock_cron_file().await;
+    let scope = LockedAutomationScope::acquire(fs, root).await?;
+    let (owners, _) =
+        read_owner_reservations_locked(fs, &scope.state_root, scope.state_identity.as_ref())
+            .await?;
+    scope.validate(fs).await?;
+    Ok(owners)
+}
+
+async fn reserve_owner_locked(
+    fs: &dyn FileSystem,
+    scope: &LockedAutomationScope,
+    owner: &OwnerReservation,
+) -> Result<(), String> {
+    validate_owner_reservation(owner)?;
+    let relative = Path::new(crate::tasks_file::OWNER_RESERVATIONS_FILE);
+    let (owners, expected) =
+        read_owner_reservations_locked(fs, &scope.state_root, scope.state_identity.as_ref())
+            .await?;
+    scope.validate(fs).await?;
+    if let Some(previous) = owners
+        .iter()
+        .find(|entry| entry.session_id == owner.session_id)
+    {
+        if previous != owner {
+            return Err("Session already has a different owner reservation".into());
+        }
+        // A previous append could have reached the file but failed to sync.
+        fs.append_or_sync_file_rooted_durable_checked(&scope.state_root, relative, &expected, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        return scope.validate(fs).await;
+    }
+    let mut line = serde_json::to_string(owner).map_err(|error| error.to_string())?;
+    line.push('\n');
+    fs.append_or_sync_file_rooted_durable_checked(
+        &scope.state_root,
+        relative,
+        &expected,
+        Some(&line),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    scope.validate(fs).await
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +264,14 @@ pub struct AutomationRun {
     pub model: String,
     pub reasoning: serde_json::Value,
     pub session_id: Option<String>,
+    /// Exact source selected for this run, when known to the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    /// Opaque native routing metadata; never an authorization capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope_key: Option<String>,
     pub summary: Option<String>,
     pub error: Option<String>,
 }
@@ -89,10 +291,27 @@ pub struct CronAutomation {
     pub reasoning: serde_json::Value,
     #[serde(default)]
     pub run_mode: RunMode,
+    /// Creation mode and native owner scope for new/task-session runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_scope_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_scope_key: Option<String>,
     #[serde(default)]
     pub notification_policy: NotificationPolicy,
     #[serde(default)]
@@ -108,6 +327,42 @@ pub const AUTOMATION_CANCELLED_PREFIX: &str = "cancelled:";
 pub const AUTOMATION_INTERRUPTED_PREFIX: &str = "interrupted:";
 /// Descriptive alias for host adapters.
 pub type AutomationConfig = CronAutomation;
+
+/// Validate the explicit execution source before a host admits a configured run.
+/// The opaque scope is routing metadata and does not grant filesystem access.
+pub fn validate_automation_source(automation: &CronAutomation) -> Result<(), String> {
+    let valid_scope = |scope: Option<&str>| {
+        scope.is_some_and(|scope| !scope.trim().is_empty() && scope.len() <= 8192)
+    };
+    let valid_mode = |mode: Option<&str>| mode.is_some_and(|mode| matches!(mode, "chat" | "code"));
+    if automation.run_mode != RunMode::SelectedSession {
+        return if valid_mode(automation.session_mode.as_deref())
+            && valid_scope(automation.session_scope_key.as_deref())
+        {
+            Ok(())
+        } else {
+            Err("Choose a session mode and owner for this task".into())
+        };
+    }
+    let valid_id = automation
+        .target_session_id
+        .as_deref()
+        .and_then(lingxi_core::types::SessionId::parse_prefixed)
+        .is_some();
+    let valid_path = automation
+        .target_session_transcript_path
+        .as_deref()
+        .is_some_and(|path| !path.is_empty() && Path::new(path).is_absolute());
+    if !valid_id
+        || !valid_path
+        || !valid_mode(automation.target_session_mode.as_deref())
+        || !valid_scope(automation.target_session_scope_key.as_deref())
+    {
+        return Err("Choose a conversation with an exact source, mode and owner".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 /// Claimed immutable execution input. Hosts must not substitute another target.
 pub struct AutomationRunRequest {
@@ -120,6 +375,9 @@ pub struct AutomationRunRequest {
 /// Persistable result from a host session executor.
 pub struct AutomationRunResult {
     pub session_id: String,
+    pub session_transcript_path: Option<String>,
+    pub session_mode: Option<String>,
+    pub session_scope_key: Option<String>,
     pub summary: String,
 }
 fn epoch(t: SystemTime) -> u64 {
@@ -305,6 +563,9 @@ pub async fn claim_automation_run(
             model: config.model.clone(),
             reasoning: config.reasoning.clone(),
             session_id: None,
+            session_transcript_path: None,
+            session_mode: None,
+            session_scope_key: None,
             summary: None,
             error: None,
         });
@@ -357,10 +618,53 @@ fn same_execution_configuration(current: &CronTask, snapshot: &CronTask) -> bool
         && current_config.model == saved_config.model
         && current_config.reasoning == saved_config.reasoning
         && current_config.run_mode == saved_config.run_mode
+        && current_config.session_mode == saved_config.session_mode
+        && current_config.session_scope_key == saved_config.session_scope_key
         && current_config.target_session_id == saved_config.target_session_id
+        && current_config.target_session_transcript_path == saved_config.target_session_transcript_path
+        && current_config.target_session_mode == saved_config.target_session_mode
+        && current_config.target_session_scope_key == saved_config.target_session_scope_key
         // The first task-session binding is written by this run itself.
-        && (saved_config.owned_session_id.is_none()
-            || current_config.owned_session_id == saved_config.owned_session_id)
+        && ((saved_config.owned_session_id.is_none()
+                && saved_config.owned_session_transcript_path.is_none()
+                && saved_config.owned_session_mode.is_none()
+                && saved_config.owned_session_scope_key.is_none())
+            || (current_config.owned_session_id == saved_config.owned_session_id
+                && current_config.owned_session_transcript_path == saved_config.owned_session_transcript_path
+                && current_config.owned_session_mode == saved_config.owned_session_mode
+                && current_config.owned_session_scope_key == saved_config.owned_session_scope_key))
+}
+
+// A previously unbound task session may gain an owner during this run. Only a
+// source already persisted on this exact run may justify that transition;
+// an independent configuration edit must not be mistaken for our own bind.
+fn first_owned_binding_matches_run(current: &CronTask, request: &AutomationRunRequest) -> bool {
+    let (Some(current), Some(saved)) = (
+        current.automation.as_ref(),
+        request.task.automation.as_ref(),
+    ) else {
+        return false;
+    };
+    let unbound = |config: &CronAutomation| {
+        config.owned_session_id.is_none()
+            && config.owned_session_transcript_path.is_none()
+            && config.owned_session_mode.is_none()
+            && config.owned_session_scope_key.is_none()
+    };
+    if !unbound(saved) || unbound(current) {
+        return true;
+    }
+    if saved.run_mode != RunMode::TaskSession {
+        return false;
+    }
+    current.runs.iter().any(|run| {
+        run.id == request.run_id
+            && owns_run(run, request)
+            && run.session_id == current.owned_session_id
+            && run.session_transcript_path == current.owned_session_transcript_path
+            && run.session_mode == current.owned_session_mode
+            && run.session_scope_key == current.owned_session_scope_key
+    })
 }
 
 /// Durable disposition of a result attempt; I/O failures are returned separately.
@@ -394,7 +698,8 @@ pub async fn finish_automation_run_checked(
     let Some(task) = doc.tasks.iter_mut().find(|t| t.id == request.task.id) else {
         return Ok(AutomationFinishDisposition::Superseded);
     };
-    let configuration_unchanged = same_execution_configuration(task, &request.task);
+    let configuration_unchanged = same_execution_configuration(task, &request.task)
+        && first_owned_binding_matches_run(task, request);
     let Some(a) = task.automation.as_mut() else {
         return Ok(AutomationFinishDisposition::Superseded);
     };
@@ -405,10 +710,16 @@ pub async fn finish_automation_run_checked(
         return Ok(AutomationFinishDisposition::Superseded);
     }
     if let Err(error) = result {
-        if error.starts_with(AUTOMATION_BUSY_PREFIX) && a.status == AutomationStatus::Active {
+        if error.starts_with(AUTOMATION_BUSY_PREFIX)
+            && a.status == AutomationStatus::Active
+            && configuration_unchanged
+        {
             run.status = AutomationRunStatus::Queued;
             run.started_at = None;
             run.session_id = None;
+            run.session_transcript_path = None;
+            run.session_mode = None;
+            run.session_scope_key = None;
             run.owner_pid = None;
             // A later occurrence may have queued while this host discovered
             // the target was busy. Retry the original durable run and merge
@@ -425,10 +736,39 @@ pub async fn finish_automation_run_checked(
     run.finished_at = Some(now);
     match result {
         Ok(value) => {
+            let conflict = |existing: &Option<String>, incoming: &Option<String>| {
+                existing
+                    .as_ref()
+                    .zip(incoming.as_ref())
+                    .is_some_and(|(left, right)| left != right)
+            };
+            if run
+                .session_id
+                .as_deref()
+                .is_some_and(|id| !same_session_id(Some(id), &value.session_id))
+                || conflict(&run.session_transcript_path, &value.session_transcript_path)
+                || conflict(&run.session_mode, &value.session_mode)
+                || conflict(&run.session_scope_key, &value.session_scope_key)
+            {
+                return Err("Execution result does not match the bound session source".into());
+            }
             run.status = AutomationRunStatus::Succeeded;
-            run.session_id = Some(value.session_id.clone());
+            if run.session_id.is_none() {
+                run.session_id = Some(value.session_id.clone());
+            }
+            if value.session_transcript_path.is_some() {
+                run.session_transcript_path
+                    .clone_from(&value.session_transcript_path);
+            }
+            if value.session_mode.is_some() {
+                run.session_mode.clone_from(&value.session_mode);
+            }
+            if value.session_scope_key.is_some() {
+                run.session_scope_key.clone_from(&value.session_scope_key);
+            }
             run.summary = Some(value.summary.clone());
-            if a.run_mode == RunMode::TaskSession
+            if configuration_unchanged
+                && a.run_mode == RunMode::TaskSession
                 && request
                     .task
                     .automation
@@ -436,7 +776,10 @@ pub async fn finish_automation_run_checked(
                     .is_some_and(|config| config.run_mode == RunMode::TaskSession)
                 && a.owned_session_id.is_none()
             {
-                a.owned_session_id = Some(value.session_id.clone());
+                a.owned_session_id = run.session_id.clone();
+                a.owned_session_transcript_path = run.session_transcript_path.clone();
+                a.owned_session_mode = run.session_mode.clone();
+                a.owned_session_scope_key = run.session_scope_key.clone();
             }
         }
         Err(error) => {
@@ -569,7 +912,8 @@ mod tests {
                 started_at: Some(run), finished_at: (run < 30).then_some(run),
                 status: if run < 30 { AutomationRunStatus::Succeeded } else { AutomationRunStatus::Running },
                 model: "provider/model".into(), reasoning: serde_json::Value::Null,
-                session_id: None, summary: None, error: None,
+                session_id: None, session_transcript_path: None, session_mode: None,
+                session_scope_key: None, summary: None, error: None,
             }).collect::<Vec<_>>()}})
         }).collect::<Vec<_>>()} ).to_string());
         prune_history(&mut doc);
@@ -590,29 +934,249 @@ mod tests {
             .count()
             <= 20));
     }
+
+    #[test]
+    fn execution_snapshot_compares_every_session_source_field() {
+        let doc = crate::tasks_file::parse_automation_tasks(
+            &serde_json::json!({"tasks": [{
+                "id": "task", "cron": "* * * * *", "prompt": "test", "createdAt": 1,
+                "automation": {"version": 2, "model": "p/m", "runMode": "task_session",
+                    "sessionMode": "chat", "sessionScopeKey": "scope",
+                    "targetSessionId": "target-a", "targetSessionTranscriptPath": "/target/a",
+                    "targetSessionMode": "chat", "targetSessionScopeKey": "target-scope",
+                    "ownedSessionId": "owned-a", "ownedSessionTranscriptPath": "/owned/a",
+                    "ownedSessionMode": "chat", "ownedSessionScopeKey": "owned-scope"}
+            }]})
+            .to_string(),
+        );
+        let original = &doc.tasks[0];
+        assert!(same_execution_configuration(original, original));
+        let changes: &[fn(&mut CronAutomation)] = &[
+            |a| a.session_mode = Some("code".into()),
+            |a| a.session_scope_key = Some("other".into()),
+            |a| a.target_session_id = Some("target-b".into()),
+            |a| a.target_session_transcript_path = Some("/target/b".into()),
+            |a| a.target_session_mode = Some("code".into()),
+            |a| a.target_session_scope_key = Some("other".into()),
+            |a| a.owned_session_id = Some("owned-b".into()),
+            |a| a.owned_session_transcript_path = Some("/owned/b".into()),
+            |a| a.owned_session_mode = Some("code".into()),
+            |a| a.owned_session_scope_key = Some("other".into()),
+        ];
+        for edit in changes {
+            let mut current = original.clone();
+            edit(current.automation.as_mut().unwrap());
+            assert!(!same_execution_configuration(&current, original));
+        }
+    }
+
+    #[test]
+    fn automation_source_requires_explicit_mode_and_bounded_scope() {
+        let mut config: CronAutomation = serde_json::from_value(serde_json::json!({
+            "version":2,"model":"provider/model","runMode":"new_session",
+            "sessionMode":"chat","sessionScopeKey":"global"
+        }))
+        .unwrap();
+        for mode in [RunMode::NewSession, RunMode::TaskSession] {
+            config.run_mode = mode;
+            assert!(validate_automation_source(&config).is_ok());
+            config.session_scope_key = Some("x".repeat(8193));
+            assert!(validate_automation_source(&config).is_err());
+            config.session_scope_key = Some("global".into());
+            config.session_mode = None;
+            assert!(validate_automation_source(&config).is_err());
+            config.session_mode = Some("chat".into());
+        }
+        config.run_mode = RunMode::SelectedSession;
+        config.target_session_id = Some("sess:11111111-2222-4333-8444-555555555555".into());
+        config.target_session_transcript_path = Some("/catalog/selected.jsonl".into());
+        config.target_session_mode = Some("code".into());
+        config.target_session_scope_key = Some("selected-owner".into());
+        assert!(validate_automation_source(&config).is_ok());
+        for edit in [
+            (|a: &mut CronAutomation| a.target_session_id = None) as fn(&mut CronAutomation),
+            |a| a.target_session_transcript_path = Some("relative.jsonl".into()),
+            |a| a.target_session_mode = Some("unknown".into()),
+            |a| a.target_session_scope_key = Some(" ".into()),
+        ] {
+            let mut invalid = config.clone();
+            edit(&mut invalid);
+            assert!(validate_automation_source(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn session_source_identity_requires_valid_matching_uuids() {
+        let id = "11111111-2222-4333-8444-555555555555";
+        assert!(same_session_id(Some(&format!("sess:{id}")), id));
+        assert!(!same_session_id(Some("damaged-id"), "damaged-id"));
+        assert!(!same_session_id(None, id));
+        assert!(!same_session_id(
+            Some(id),
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ));
+    }
 }
 
-/// Persist the selected/created session before starting its turn, so failure or
-/// interruption still has a result destination and task-session retries reuse it.
-pub async fn bind_automation_run_session(
+/// Persist a run's exact session identity and task-owned source in the
+/// same tasks-file transaction, before its first turn can start.
+pub async fn bind_automation_run_session_with_source(
     fs: &dyn FileSystem,
     root: &Path,
     request: &AutomationRunRequest,
     session_id: &str,
+    session_transcript_path: &str,
+    session_mode: &str,
+    session_scope_key: Option<&str>,
+) -> Result<(), String> {
+    let (id, source) = normalize_bound_source(
+        session_id,
+        session_transcript_path,
+        session_mode,
+        session_scope_key,
+    )?;
+    bind_automation_run_session_inner(fs, root, request, &id, source, OwnerBindingAction::Bind)
+        .await
+}
+
+/// Durably reserve a complete owner before its transcript is created. This
+/// never changes the task or run: a failed creation leaves only an allocated
+/// ledger entry, and a later attempt may allocate a fresh session identity.
+pub async fn reserve_automation_owner(
+    fs: &dyn FileSystem,
+    root: &Path,
+    request: &AutomationRunRequest,
+    session_id: &str,
+    session_transcript_path: &str,
+    session_mode: &str,
+    session_scope_key: Option<&str>,
+) -> Result<(), String> {
+    let (id, source) = normalize_bound_source(
+        session_id,
+        session_transcript_path,
+        session_mode,
+        session_scope_key,
+    )?;
+    bind_automation_run_session_inner(
+        fs,
+        root,
+        request,
+        &id,
+        source,
+        OwnerBindingAction::ReserveOnly,
+    )
+    .await
+}
+
+fn normalize_bound_source<'a>(
+    session_id: &str,
+    session_transcript_path: &'a str,
+    session_mode: &'a str,
+    session_scope_key: Option<&'a str>,
+) -> Result<(String, BoundSource<'a>), String> {
+    let id = lingxi_core::types::SessionId::parse_prefixed(session_id)
+        .ok_or("Invalid scheduled session identity")?
+        .as_uuid()
+        .to_string();
+    if !Path::new(session_transcript_path).is_absolute()
+        || !matches!(session_mode, "chat" | "code")
+        || session_scope_key.is_none_or(|scope| scope.trim().is_empty() || scope.len() > 8192)
+    {
+        return Err("Invalid scheduled session source".into());
+    }
+    let source = BoundSource {
+        path: session_transcript_path,
+        mode: session_mode,
+        scope: session_scope_key,
+    };
+    Ok((id, source))
+}
+
+#[derive(Clone, Copy)]
+struct BoundSource<'a> {
+    path: &'a str,
+    mode: &'a str,
+    scope: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnerBindingAction {
+    ReserveOnly,
+    Bind,
+}
+
+fn same_session_id(left: Option<&str>, right: &str) -> bool {
+    let Some(left) = left else {
+        return false;
+    };
+    matches!(
+        (
+            lingxi_core::types::SessionId::parse_prefixed(left),
+            lingxi_core::types::SessionId::parse_prefixed(right)
+        ),
+        (Some(a), Some(b)) if a == b
+    )
+}
+
+fn source_matches_snapshot(
+    request: &AutomationRunRequest,
+    id: &str,
+    source: BoundSource<'_>,
+) -> bool {
+    let Some(config) = request.task.automation.as_ref() else {
+        return false;
+    };
+    match config.run_mode {
+        RunMode::SelectedSession => {
+            same_session_id(config.target_session_id.as_deref(), id)
+                && config.target_session_transcript_path.as_deref() == Some(source.path)
+                && config.target_session_mode.as_deref() == Some(source.mode)
+                && config.target_session_scope_key.as_deref() == source.scope
+                && source.scope.is_some()
+        }
+        RunMode::NewSession | RunMode::TaskSession => {
+            config.session_mode.as_deref() == Some(source.mode)
+                && config.session_scope_key.as_deref() == source.scope
+                && (config.run_mode != RunMode::TaskSession
+                    || (config.owned_session_id.is_none()
+                        && config.owned_session_transcript_path.is_none()
+                        && config.owned_session_mode.is_none()
+                        && config.owned_session_scope_key.is_none())
+                    || (same_session_id(config.owned_session_id.as_deref(), id)
+                        && config.owned_session_transcript_path.as_deref() == Some(source.path)
+                        && config.owned_session_mode.as_deref() == Some(source.mode)
+                        && config.owned_session_scope_key.as_deref() == source.scope))
+        }
+    }
+}
+
+async fn bind_automation_run_session_inner(
+    fs: &dyn FileSystem,
+    root: &Path,
+    request: &AutomationRunRequest,
+    session_id: &str,
+    source: BoundSource<'_>,
+    action: OwnerBindingAction,
 ) -> Result<(), String> {
     let _guard = crate::lock_cron_file().await;
-    let _file = crate::tasks_file::lock_automation_tasks(fs, root)
-        .await
-        .map_err(|e| e.to_string())?;
-    let body = crate::tasks_file::read_automation_tasks_body(fs, root)
-        .await
-        .map_err(|e| e.to_string())?;
+    let scope = LockedAutomationScope::acquire(fs, root).await?;
+    let body = crate::tasks_file::read_automation_tasks_body_pinned(
+        fs,
+        &scope.state_root,
+        scope.state_identity.as_ref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    scope.validate(fs).await?;
     let mut doc = crate::tasks_file::parse_automation_tasks_strict(&body)?;
     let task = doc
         .tasks
         .iter_mut()
         .find(|t| t.id == request.task.id)
         .ok_or("Scheduled task was removed")?;
+    let stale_source = !same_execution_configuration(task, &request.task)
+        || !first_owned_binding_matches_run(task, request)
+        || !source_matches_snapshot(request, session_id, source);
     let now = epoch(SystemTime::now());
     let expired = task.expires_at.is_some_and(|expiry| expiry <= now);
     let config = task
@@ -624,15 +1188,20 @@ pub async fn bind_automation_run_session(
         .iter_mut()
         .find(|r| r.id == request.run_id && owns_run(r, request))
         .ok_or("Run is no longer active")?;
-    if expired || config.status != AutomationStatus::Active {
-        run.status = AutomationRunStatus::Cancelled;
-        run.started_at = None;
-        run.finished_at = Some(now);
+    if expired || config.status != AutomationStatus::Active || stale_source {
         let reason = if expired {
             "Schedule expired before execution began"
+        } else if stale_source {
+            "Task source changed before execution began"
         } else {
             "Task stopped before execution began"
         };
+        if action == OwnerBindingAction::ReserveOnly {
+            return Err(format!("{AUTOMATION_CANCELLED_PREFIX}{reason}"));
+        }
+        run.status = AutomationRunStatus::Cancelled;
+        run.started_at = None;
+        run.finished_at = Some(now);
         run.error = Some(reason.into());
         if expired {
             config.status = AutomationStatus::Completed;
@@ -646,11 +1215,50 @@ pub async fn bind_automation_run_session(
             }
         }
         prune_history(&mut doc);
-        crate::tasks_file::write_automation_tasks_body(fs, root, &crate::serialize_tasks(&doc))
-            .await
-            .map_err(|e| e.to_string())?;
+        scope.validate(fs).await?;
+        crate::tasks_file::write_automation_tasks_body_pinned(
+            fs,
+            &scope.state_root,
+            &crate::serialize_tasks(&doc),
+            scope.state_identity.as_ref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        scope.validate(fs).await?;
         return Err(format!("{AUTOMATION_CANCELLED_PREFIX}{reason}"));
     }
+    let already_bound = run.session_transcript_path.is_some()
+        || run.session_mode.is_some()
+        || run.session_scope_key.is_some();
+    if run
+        .session_id
+        .as_deref()
+        .is_some_and(|id| !same_session_id(Some(id), session_id))
+        || (already_bound
+            && (run.session_transcript_path.as_deref() != Some(source.path)
+                || run.session_mode.as_deref() != Some(source.mode)
+                || run.session_scope_key.as_deref() != source.scope))
+    {
+        return Err("Run is already bound to a different session source".into());
+    }
+    // Record allocation first: if the subsequent task write or the process
+    // fails, the independently durable owner remains available for recovery.
+    let owner = OwnerReservation {
+        session_id: session_id.into(),
+        session_transcript_path: source.path.into(),
+        session_mode: source.mode.into(),
+        session_scope_key: source
+            .scope
+            .ok_or("Missing scheduled session owner")?
+            .into(),
+    };
+    reserve_owner_locked(fs, &scope, &owner).await?;
+    if action == OwnerBindingAction::ReserveOnly {
+        return Ok(());
+    }
+    run.session_transcript_path = Some(source.path.to_owned());
+    run.session_mode = Some(source.mode.to_owned());
+    run.session_scope_key = source.scope.map(str::to_owned);
     run.session_id = Some(session_id.into());
     if config.run_mode == RunMode::TaskSession
         && request
@@ -661,10 +1269,20 @@ pub async fn bind_automation_run_session(
         && config.owned_session_id.is_none()
     {
         config.owned_session_id = Some(session_id.into());
+        config.owned_session_transcript_path = Some(source.path.to_owned());
+        config.owned_session_mode = Some(source.mode.to_owned());
+        config.owned_session_scope_key = source.scope.map(str::to_owned);
     }
-    crate::tasks_file::write_automation_tasks_body(fs, root, &crate::serialize_tasks(&doc))
-        .await
-        .map_err(|e| e.to_string())
+    scope.validate(fs).await?;
+    crate::tasks_file::write_automation_tasks_body_pinned(
+        fs,
+        &scope.state_root,
+        &crate::serialize_tasks(&doc),
+        scope.state_identity.as_ref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    scope.validate(fs).await
 }
 
 /// Claim an explicit Run now request without advancing the automatic schedule.
@@ -777,6 +1395,9 @@ async fn claim_manual_run(
             model: config.model.clone(),
             reasoning: config.reasoning.clone(),
             session_id: None,
+            session_transcript_path: None,
+            session_mode: None,
+            session_scope_key: None,
             summary: None,
             error: None,
         });

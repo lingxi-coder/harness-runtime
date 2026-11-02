@@ -52,15 +52,18 @@ pub use orchestrator::{MediaConversationAttachment, RealtimeAgentSessionIo};
 pub use assembly::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
 };
-use automation::{
-    cron_task_active, finalize_cron_occurrence, fired_cron_dto, mobile_automation_runtime,
-    mobile_cron_schedule_error, mobile_cron_session_gate, read_cron_tasks,
-    supervise_mobile_automation_with_cancel, try_mobile_automation_runtime,
-};
 #[cfg(test)]
 use automation::supervise_mobile_automation;
+use automation::{
+    busy_cron_dto, cron_task_active, finalize_cron_occurrence, fired_cron_dto,
+    mobile_automation_runtime, mobile_cron_schedule_error, mobile_cron_session_gate,
+    read_cron_tasks, read_cron_tasks_for_mutation, reserve_mobile_cron_owner,
+    supervise_mobile_automation_with_cancel, try_mobile_automation_runtime,
+};
 pub use automation::{
-    CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto, MobileCronStoreHandle,
+    CronDueOccurrenceDto, CronFireStatusDto, CronOwnerCandidateDto, CronOwnerReservationDto,
+    CronTaskDto, FiredCronJobDto, MobileCronAdmission, MobileCronOwnerAdmission,
+    MobileCronStoreHandle,
 };
 use automation::{MobileTurnFirer, MOBILE_CRON_HANDLES};
 pub use configuration::{parse_mobile_provider_config_json, MobileBuildError, MobileConfig};
@@ -132,8 +135,8 @@ use provider_services::anthropic_route_id;
 
 #[cfg(test)]
 use automation::{
-    cron_replay_session, cron_scheduled_turn_outcome, cron_target_session_mode, cron_task_dto,
-    decode_cron_automation, ImmediateDenyPermissionSink, MobileCronBorrow,
+    cron_scheduled_turn_outcome, cron_task_dto, decode_cron_automation,
+    ImmediateDenyPermissionSink, MobileCronBorrow,
 };
 
 mod configuration_admin;
@@ -170,7 +173,6 @@ use client::protocol::listings::{
 use client::protocol::permission::PermissionResponseDto;
 use client::protocol::text::ClientTextDto;
 use command_api::RegistrySlashDispatcher;
-use cron::CronJobFirer;
 
 use mcp::{McpRegistry, McpServerConfig};
 
@@ -312,7 +314,9 @@ impl MobileSessionRetirement {
         receipt: Option<Arc<MobileRetirementReceipt>>,
     ) -> Self {
         if let Some(receipt) = &receipt {
-            receipt.installed.store(true, std::sync::atomic::Ordering::Release);
+            receipt
+                .installed
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         Self {
             state: Some(MobileSessionRetirementState {
@@ -355,7 +359,9 @@ impl MobileSessionRetirementState {
                 Err(error) => {
                     tracing::warn!(%error, "mobile background task drain is unconfirmed");
                     tokio::time::sleep(retry).await;
-                    retry = retry.saturating_mul(2).min(std::time::Duration::from_secs(60));
+                    retry = retry
+                        .saturating_mul(2)
+                        .min(std::time::Duration::from_secs(60));
                 }
             }
         }
@@ -368,7 +374,9 @@ impl MobileSessionRetirementState {
         // this registry; never run those destructors under the write lock.
         drop(handlers);
         if let Some(receipt) = self.receipt {
-            receipt.complete.store(true, std::sync::atomic::Ordering::Release);
+            receipt
+                .complete
+                .store(true, std::sync::atomic::Ordering::Release);
             receipt.changed.notify_waiters();
         }
     }
@@ -403,6 +411,14 @@ impl Drop for MobileSessionRetirement {
 /// runtime); F3-05 adds the async `submit` that drives the orchestrator and
 /// resolves the permission gate.
 pub struct MobileRuntime {
+    /// Scheduled child lifecycle/tool recovery starts only after host owner confirmation.
+    scheduled_startup: std::sync::Mutex<
+        Option<
+            std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), MobileBuildError>> + Send>,
+            >,
+        >,
+    >,
     pub(crate) provider_account_catalog: crate::provider_accounts::ProviderAccountCatalog,
     pub(crate) account_runtime: Arc<crate::account_pool_store::AccountRuntimeSource>,
     /// Official provider settings data from the same settled startup snapshot.
@@ -1610,7 +1626,7 @@ impl MobileRuntime {
         home: &std::path::Path,
         session_id: lingxi_core::types::SessionId,
         cwd: &str,
-    ) {
+    ) -> Result<(), ClientError> {
         let next_session_id = session_id.as_uuid().to_string();
         let previous_session_id = self
             .active_session_uuid
@@ -1680,8 +1696,11 @@ impl MobileRuntime {
             }
         }
         let active = self.session_writer.active_path();
-        let path = if active.file_stem().and_then(|value| value.to_str())
-            == Some(&session_id.as_uuid().to_string())
+        let path = if active
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            == Some(session_id.as_uuid())
         {
             active
         } else {
@@ -1694,13 +1713,11 @@ impl MobileRuntime {
         // The owned orchestrator switch has already prepared and installed this
         // session's durable lock. Publish the same target to host consumers;
         // retargeting only the display path would leave durable appends behind.
-        if let Err(error) = self.session_writer.activate_session_target(
-            session_id,
-            path,
-            std::path::PathBuf::from(cwd),
-        ) {
-            tracing::error!(%error, %session_id, "mobile session transcript authority was not prepared");
-        }
+        self.session_writer
+            .activate_session_target(session_id, path, std::path::PathBuf::from(cwd))
+            .map_err(|error| ClientError::Internal {
+                message: format!("session transcript authority: {error}"),
+            })?;
         // Keep the live session uuid in lockstep with the session on every
         // retarget (New/Resume/Clear).
         let session_uuid = next_session_id;
@@ -1727,6 +1744,7 @@ impl MobileRuntime {
             self.task_registry
                 .set_workflow_session_filter(Some(session_uuid.clone()));
         }
+        Ok(())
     }
 }
 
@@ -4541,6 +4559,7 @@ impl MobileEngineHandle {
         task_id: String,
         scheduled_at: Option<u64>,
         manual_at: Option<u64>,
+        owner_admission: automation::MobileCronAdmissionLease,
     ) -> Option<FiredCronJobDto> {
         let firer = MobileTurnFirer {
             cfg: cfg.clone(),
@@ -4552,6 +4571,7 @@ impl MobileEngineHandle {
         let claim_fs = fs.clone();
         let claim_cwd = cwd.clone();
         let claim_clock = clock.clone();
+        let tracked_admission = owner_admission.admission();
         supervise_mobile_automation_with_cancel(
             fs,
             cwd,
@@ -4590,8 +4610,11 @@ impl MobileEngineHandle {
                 }
             },
             move |request, cancel| async move {
-                firer.fire_automation_with_cancel(&request, cancel).await
+                firer
+                    .fire_automation_with_cancel(&request, cancel, owner_admission)
+                    .await
             },
+            Some(tracked_admission),
         )
         .await
     }
@@ -4606,6 +4629,11 @@ impl MobileEngineHandle {
             .runtime()
             .block_on(mobile_live_plugin_skill_count(&self.inner.dispatcher));
         u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    /// Controllers may fire admitted scheduled children but cannot own turns.
+    pub fn is_scheduler_controller(&self) -> bool {
+        self.firer_cfg.scheduler_controller
     }
 
     /// Create a conversation session for `model`.
@@ -4627,6 +4655,11 @@ impl MobileEngineHandle {
     // it is not narrowed to `&str` just to satisfy the lint.
     #[allow(clippy::needless_pass_by_value)]
     pub fn create_session(&self, _model: String) -> Result<u64, MobileEngineError> {
+        if self.firer_cfg.scheduler_controller {
+            return Err(MobileEngineError::Internal(
+                "scheduler controller does not own a conversation".into(),
+            ));
+        }
         // One connection ⇒ one engine host ⇒ a single session ref (1). The
         // orchestrator is already constructed and bound; New/Resume swap it in
         // place (F3-05) without minting a new handle.
@@ -4716,10 +4749,13 @@ impl MobileEngineHandle {
     ) -> Result<(), ClientError> {
         self.inner
             .retarget_session_context(&self.lingxi_home, session_id, cwd)
-            .await;
+            .await?;
         let transcript_path = self.inner.session_writer.active_path();
-        if transcript_path.file_stem().and_then(|name| name.to_str())
-            != Some(&session_id.as_uuid().to_string())
+        if transcript_path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .and_then(|name| uuid::Uuid::parse_str(name).ok())
+            != Some(session_id.as_uuid())
         {
             return Err(ClientError::Internal {
                 message: "session transcript identity does not match the active UUID".into(),
@@ -5058,12 +5094,32 @@ impl MobileEngineHandle {
         Ok(())
     }
 
+    #[cfg(test)]
+    async fn resume_seeded_test_session(&self, session_id: String) -> Result<(), ClientError> {
+        let uuid = uuid::Uuid::parse_str(session_id.strip_prefix("sess:").unwrap_or(&session_id))
+            .map_err(|error| ClientError::Rejected {
+            message: error.to_string(),
+        })?;
+        let id = lingxi_core::types::SessionId::from_uuid(uuid);
+        let path = self
+            .inner
+            .session_writer
+            .session_target_path(id)
+            .unwrap_or_else(|| {
+                session::jsonl::session_path(
+                    &self.lingxi_home,
+                    &self.session_cwd(),
+                    &uuid.to_string(),
+                )
+            });
+        self.resume_workspace_session(session_id, path.to_string_lossy().into_owned())
+            .await
+    }
+
     async fn resume_session_impl(
         &self,
         session_id: String,
-        cwd: Option<String>,
-        selected_path: Option<std::path::PathBuf>,
-        expected_mode: Option<session::jsonl::SessionMode>,
+        pinned: restoration::InitialMobileSession,
     ) -> Result<(), ClientError> {
         if self.active_cancel.lock().await.is_some() {
             return Err(ClientError::Rejected {
@@ -5084,73 +5140,31 @@ impl MobileEngineHandle {
                 message: format!("resume: {error}"),
             })?;
         let reservation = lingxi_core::host::orchestrator::ResumeLifetimeGuard::new(reservation);
-        // Resolve the catalog key the same way the ResumeSession gate
-        // compared it: CANONICAL spelling, and an empty string treated as
-        // "unset" (the gate's own `filter(|c| !c.is_empty())` skips it, so a
-        // literal `""` must not become the project-dir key here either).
-        let cwd = match cwd.as_deref().filter(|c| !c.is_empty()) {
-            Some(requested) => canonical_cwd_string(std::path::Path::new(requested)),
-            None => self.session_cwd().clone(),
-        };
-        // Capture exactly one source for history, directory, permissions and
-        // mode. Picker resume never resolves its UUID a second time.
-        let mut captured = match selected_path.as_deref() {
-            Some(path) => {
-                session::jsonl::load_routed_session_from_path_with_source(
-                    path,
-                    uuid,
-                    self.host_fs.clone(),
-                )
-                .await
-            }
-            None => {
-                session::jsonl::load_routed_session_with_source(
-                    &self.lingxi_home,
-                    &cwd,
-                    uuid,
-                    self.host_fs.clone(),
-                )
-                .await
-            }
-        };
-        // CLI discovery deliberately omits empty files. A current mobile/cron
-        // anchor is an explicit durable owner, so admit only that exact typed
-        // record and leave ordinary missing/corrupt transcripts rejected.
-        if captured.is_err() {
-            let path = selected_path.clone().unwrap_or_else(|| {
-                session::jsonl::session_path(&self.lingxi_home, &cwd, &uuid.to_string())
-            });
-            if let Ok(file) = self
-                .host_fs
-                .read_file(&path.to_string_lossy(), None, None)
-                .await
-            {
-                let loaded = session::jsonl::route_lines(&file.content);
-                if loaded.mobile_empty_sessions.contains(&uuid.to_string()) {
-                    captured = Ok((path, file.content, loaded));
-                }
-            }
-        }
-        // A hot mount cannot change this runtime's immutable profile. Reject
-        // both caller/source and current/source mismatches before any restore,
-        // writer retarget, hook, or permission mutation.
-        let current_mode = self.inner.orchestrator.conversation_mode().await.mode;
-        if let Some((_, source, _)) = captured.as_ref().ok() {
-            let actual = session::jsonl::JsonlWriter::fixed_session_mode_from_source(
-                source,
-                &uuid.to_string(),
-            )
-            .map_err(|error| ClientError::Rejected {
-                message: format!("resume: invalid conversation mode: {error}"),
-            })?;
-            if actual != current_mode || expected_mode.is_some_and(|expected| expected != actual) {
-                return Err(ClientError::Rejected {
-                    message: format!("resume: session mode mismatch (source {})", actual.as_str()),
-                });
-            }
-        } else if expected_mode.is_some_and(|expected| expected != current_mode) {
+        if pinned.id != uuid {
             return Err(ClientError::Rejected {
-                message: "resume: expected mode does not match the live session".into(),
+                message: "captured session identity changed".into(),
+            });
+        }
+        let cwd = self.session_cwd().clone();
+        let pinned_source = Some(lingxi_core::host::PinnedResumeSource {
+            root: pinned.transcript_root.clone(),
+            relative: pinned.transcript_relative.clone(),
+            root_identity: pinned.transcript_identity,
+            file_identity: pinned.transcript_file_identity,
+            expected_content: pinned.source.clone(),
+        });
+        let captured = Ok::<_, session::jsonl::LoaderError>((
+            pinned.replayed.transcript_path.clone(),
+            pinned.source.clone(),
+            session::jsonl::route_lines(&pinned.source),
+        ));
+        let current_mode = self.inner.orchestrator.conversation_mode().await.mode;
+        if pinned.mode != current_mode {
+            return Err(ClientError::Rejected {
+                message: format!(
+                    "resume: session mode mismatch (source {})",
+                    pinned.mode.as_str()
+                ),
             });
         }
         if let Some(scheduler) = self.inner.wakeup_scheduler.get() {
@@ -5216,7 +5230,13 @@ impl MobileEngineHandle {
                         &uuid.to_string(),
                     )
                     .map_err(orchestrator::resume::ResumeError::Profile)?;
-                    replay_mobile_anchored_startup(path, source, loaded, uuid, profile.instruction_epoch)
+                    replay_mobile_anchored_startup(
+                        path,
+                        source,
+                        loaded,
+                        uuid,
+                        profile.instruction_epoch,
+                    )
                 } else {
                     orchestrator::resume::replay_captured_session(path, source, loaded, uuid)?
                 };
@@ -5245,6 +5265,7 @@ impl MobileEngineHandle {
                     .resume_runtime_with_model_preference(replayed.handle_runtime_snapshot())
                     .await;
                 resume_runtime.lifetime_guard = Some(reservation.clone());
+                resume_runtime.transcript_source = pinned_source.clone();
                 if let Err(error) = handle
                     .resume_session(
                         lingxi_core::types::SessionId::from_uuid(uuid),
@@ -5358,6 +5379,7 @@ impl MobileEngineHandle {
                             lingxi_core::host::ResumeRuntimeSnapshot {
                                 lifetime_guard: Some(reservation.clone()),
                                 transcript_path: captured_empty_source,
+                                transcript_source: pinned_source,
                                 transcript_metadata: captured_empty_metadata,
                                 working_directory: restored_directory,
                                 ..Default::default()
@@ -7429,6 +7451,16 @@ impl MobileEngineHandle {
     }
 
     async fn submit_impl(&self, command: ClientCommand) -> Result<(), ClientError> {
+        if self.firer_cfg.scheduler_controller {
+            return Err(ClientError::Rejected {
+                message: "scheduler controller does not own a conversation".into(),
+            });
+        }
+        if matches!(&command, ClientCommand::ResumeSession { .. }) {
+            return Err(ClientError::Rejected {
+                message: "resume requires the selected transcript path".into(),
+            });
+        }
         // Branch publication keeps its owner until the durable write completes.
         if matches!(&command, ClientCommand::ForkSession { .. }) {
             return self.submit_owned_transition(command).await;
@@ -7442,7 +7474,10 @@ impl MobileEngineHandle {
     /// The caller owns both the foreground transition and this session's cron
     /// gate. Preserve the flag if the caller is cancelled during a reload.
     async fn reload_scheduled_if_needed(&self) -> Result<(), ClientError> {
-        if !self.scheduled_reload.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        if !self
+            .scheduled_reload
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             return Ok(());
         }
         struct RestoreFlag<'a>(&'a std::sync::atomic::AtomicBool, bool);
@@ -7454,8 +7489,46 @@ impl MobileEngineHandle {
             }
         }
         let mut flag = RestoreFlag(&self.scheduled_reload, true);
-        let id = self.inner.orchestrator.current_session_id().await.as_uuid().to_string();
-        self.resume_session_impl(id, None, None, None).await?;
+        let id = self
+            .inner
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        let path = self.inner.session_writer.active_path();
+        let existing = self
+            .inner
+            .session_writer
+            .active_transcript_authority()
+            .ok_or_else(|| ClientError::Rejected {
+                message: "active session has no captured transcript authority".into(),
+            })?;
+        let captured = self
+            .capture_workspace_session_source(&id, &path.to_string_lossy())
+            .await?;
+        let selected = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+            captured.transcript_root.clone(),
+            captured.transcript_relative.clone(),
+            captured.transcript_identity,
+            captured.transcript_file_identity,
+        )
+        .map_err(|error| ClientError::Rejected {
+            message: format!("session source: {error}"),
+        })?;
+        if !existing.same_source(&selected)
+            || existing
+                .read_checked()
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("session source: {error}"),
+                })?
+                != captured.raw_source
+        {
+            return Err(ClientError::Rejected {
+                message: "scheduled session source changed".into(),
+            });
+        }
+        self.resume_session_impl(id, captured).await?;
         flag.1 = false;
         Ok(())
     }
@@ -8332,18 +8405,19 @@ impl MobileEngineHandle {
                 let cwd = self.session_cwd();
                 let source_id = lingxi_core::types::SessionId::from_uuid(source_uuid);
                 let source_uuid_text = source_uuid.to_string();
-                let source_path = if source_uuid == handle.current_session_id().await.as_uuid() {
-                    self.inner.session_writer.active_path()
-                } else {
-                    session::jsonl::session_path(&self.lingxi_home, &cwd, &source_uuid_text)
-                };
-                if source_path.file_stem().and_then(|name| name.to_str())
-                    != Some(source_uuid_text.as_str())
-                {
+                if source_uuid != handle.current_session_id().await.as_uuid() {
                     return Err(ClientError::Rejected {
-                        message: "fork: source transcript identity changed".into(),
+                        message: "fork: select the source conversation first".into(),
                     });
                 }
+                let source_path = self.inner.session_writer.active_path();
+                let source_authority = self
+                    .inner
+                    .session_writer
+                    .active_transcript_authority()
+                    .ok_or_else(|| ClientError::Rejected {
+                        message: "fork: active session has no captured source".into(),
+                    })?;
                 let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
                     self.lingxi_home.join("sessions"),
                 );
@@ -8363,10 +8437,9 @@ impl MobileEngineHandle {
                 })?;
                 let source = tokio::task::spawn_blocking(move || {
                     authority.with_transaction(|_| {
-                        std::fs::read_to_string(&source_path).map_err(|error| {
-                            session::jsonl::TranscriptWriterError::Fs(
-                                lingxi_core::host::FsError::Io(error.to_string()),
-                            )
+                        let bytes = source_authority.read_checked()?;
+                        String::from_utf8(bytes).map_err(|error| {
+                            lingxi_core::host::FsError::Io(error.to_string()).into()
                         })
                     })
                 })
@@ -8377,7 +8450,19 @@ impl MobileEngineHandle {
                 .map_err(|error| ClientError::Rejected {
                     message: format!("fork: source transcript unavailable: {error}"),
                 })?;
-                let loaded = session::jsonl::route_lines(&source);
+                let loaded = session::jsonl::loader::route_captured_session_source(
+                    &source_path,
+                    source_uuid,
+                    &source,
+                )
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("fork: invalid source: {error}"),
+                })?;
+                if loaded.malformed_line_count != 0 {
+                    return Err(ClientError::Rejected {
+                        message: "fork: source transcript is malformed".into(),
+                    });
+                }
                 let source_mode = session::jsonl::JsonlWriter::fixed_session_mode_from_source(
                     &source,
                     &source_uuid_text,
@@ -8431,11 +8516,23 @@ impl MobileEngineHandle {
                 .map_err(|error| ClientError::Rejected {
                     message: format!("fork: could not duplicate session {session_id}: {error}"),
                 })?;
+                let published =
+                    result
+                        .authority
+                        .read_checked()
+                        .map_err(|error| ClientError::Rejected {
+                            message: format!("fork: published session changed: {error}"),
+                        })?;
+                if published != result.content.as_bytes() {
+                    return Err(ClientError::Rejected {
+                        message: "fork: published session changed".into(),
+                    });
+                }
                 drop(source_lease);
                 self.event_sink
                     .emit(ClientEvent::SessionForked {
                         source_session_id: source_uuid.to_string(),
-                        session_id: result.new_session_id.to_string(),
+                        session_id: result.result.new_session_id.to_string(),
                         mode: lower_session_mode(target_mode),
                     })
                     .await;
@@ -8564,30 +8661,11 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
-            // `ResumeSession` names a prior session to hot-restore onto the live
-            // orchestrator (SESSIONS/HISTORY). The orchestrator now exposes a real
-            // rehydrate seam (`OrchestratorHandle::resume_session`, the symmetric
-            // twin of `clear_session`): we load + validate the on-disk JSONL, adopt
-            // it into the RUNNING orchestrator IN PLACE (named id + replayed
-            // history + JSONL parent-uuid chain pointer), and emit a
-            // `SessionResumed` carrying the full restored transcript so the client
-            // renders the rehydrated conversation atomically. An explicitly
-            // anchored mobile zero-message session restores with an empty
-            // transcript and the same UUID. Other missing, corrupt, or malformed
-            // sessions are honestly `Rejected`, so we never emit a FALSE
-            // `SessionResumed`.
-            ClientCommand::ResumeSession {
-                session_id,
-                cwd,
-                expected_mode,
-            } => {
-                let expected_mode = match expected_mode {
-                    SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
-                    SessionModeDto::Code => session::jsonl::SessionMode::Code,
-                };
-                self.resume_session_impl(session_id, cwd, None, Some(expected_mode))
-                    .await
-            }
+            // A UUID alone cannot identify the source selected by the host.
+            // Exact-source mobile resumes use resume_workspace_session.
+            ClientCommand::ResumeSession { .. } => Err(ClientError::Rejected {
+                message: "resume requires the selected transcript path".into(),
+            }),
             // ── Background tasks (v3 Phase 1: workflow-on-mobile) ───────────
             //
             // The Task command family routes to the real mobile `TaskRegistry`
@@ -10127,8 +10205,13 @@ impl MobileEngineHandle {
         &self,
         task_id: String,
         scheduled_at_ms: u64,
+        owner_admission: Arc<MobileCronAdmission>,
     ) -> Option<FiredCronJobDto> {
-        let transition = self.loop_transition.lock().await;
+        let owner_admission = owner_admission.begin()?;
+        let transition = match self.loop_transition.try_lock() {
+            Ok(transition) => transition,
+            Err(_) => return Some(busy_cron_dto(task_id)),
+        };
         let cfg = self.current_mobile_config().ok()?;
         let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let fs = self.fs.clone();
@@ -10137,56 +10220,28 @@ impl MobileEngineHandle {
             .tasks
             .into_iter()
             .find(|task| task.id == task_id)?;
-        if existing.automation.is_some() {
-            if mobile_cron_schedule_error(&existing.cron, existing.recurring.unwrap_or(false))
-                .is_some()
-            {
-                return None;
-            }
-            drop(transition);
-            return self
-                .fire_automation_task(cfg, task_id, Some(scheduled_at_ms), None)
-                .await;
+        if existing.automation.is_none() {
+            return Some(fired_cron_dto(
+                &existing,
+                Err("paused: Complete automation settings are required".into()),
+            ));
         }
-        let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd)
-            .await
-            .ok()?;
-        let mut document = read_cron_tasks(fs.as_ref(), &cwd).await;
-        let now = self.firer_platform.clock().now();
-        let now_ms = now
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or(0);
-        let task = document
-            .tasks
-            .iter()
-            .find(|task| task.id == task_id)?
-            .clone();
-        let recurring = task.recurring.unwrap_or(false);
-        if !cron_task_active(&task) || mobile_cron_schedule_error(&task.cron, recurring).is_some() {
+        if mobile_cron_schedule_error(&existing.cron, existing.recurring.unwrap_or(false)).is_some()
+        {
             return None;
         }
-        let expected = cron::next_fire_epoch_ms_for_persisted_task(&task, now)?;
-        if expected != scheduled_at_ms || scheduled_at_ms > now_ms {
-            return None;
-        }
-
-        let firer = MobileTurnFirer {
-            cfg: cfg.clone(),
-            platform: self.firer_platform.clone(),
+        drop(transition);
+        let owner_admission = match reserve_mobile_cron_owner(
+            owner_admission,
+            existing.automation.as_ref().expect("checked automation"),
+        )
+        .await
+        {
+            Ok(admission) => admission,
+            Err(error) => return Some(fired_cron_dto(&existing, Err(error))),
         };
-        let fired = fired_cron_dto(&task, firer.fire(&task.id, &task.prompt).await);
-        if !fired.retryable {
-            finalize_cron_occurrence(&mut document, &task.id, now_ms);
-            let _ = cron::tasks_file::write_automation_tasks_body(
-                fs.as_ref(),
-                &cwd,
-                &cron::serialize_tasks(&document),
-            )
-            .await;
-        }
-        Some(fired)
+        self.fire_automation_task(cfg, task_id, Some(scheduled_at_ms), None, owner_admission)
+            .await
     }
 
     /// Mark a retry-exhausted occurrence complete without running it again.
@@ -10203,7 +10258,9 @@ impl MobileEngineHandle {
         else {
             return false;
         };
-        let mut document = read_cron_tasks(fs.as_ref(), &cwd).await;
+        let Ok(mut document) = read_cron_tasks_for_mutation(fs.as_ref(), &cwd, false).await else {
+            return false;
+        };
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -10235,8 +10292,13 @@ impl MobileEngineHandle {
         &self,
         task_id: String,
         scheduled_at_ms: u64,
+        owner_admission: Arc<MobileCronAdmission>,
     ) -> Option<FiredCronJobDto> {
-        let transition = self.loop_transition.lock().await;
+        let owner_admission = owner_admission.begin()?;
+        let transition = match self.loop_transition.try_lock() {
+            Ok(transition) => transition,
+            Err(_) => return Some(busy_cron_dto(task_id)),
+        };
         let cfg = self.current_mobile_config().ok()?;
         let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let fs = self.fs.clone();
@@ -10246,19 +10308,40 @@ impl MobileEngineHandle {
             .into_iter()
             .find(|task| task.id == task_id)?;
         // Stable manual occurrence identities require the versioned run ledger.
-        if task.automation.is_none()
-            || mobile_cron_schedule_error(&task.cron, task.recurring.unwrap_or(false)).is_some()
-        {
+        if task.automation.is_none() {
+            return Some(fired_cron_dto(
+                &task,
+                Err("paused: Complete automation settings are required".into()),
+            ));
+        }
+        if mobile_cron_schedule_error(&task.cron, task.recurring.unwrap_or(false)).is_some() {
             return None;
         }
         drop(transition);
-        self.fire_automation_task(cfg, task_id, None, Some(scheduled_at_ms))
+        let owner_admission = match reserve_mobile_cron_owner(
+            owner_admission,
+            task.automation.as_ref().expect("checked automation"),
+        )
+        .await
+        {
+            Ok(admission) => admission,
+            Err(error) => return Some(fired_cron_dto(&task, Err(error))),
+        };
+        self.fire_automation_task(cfg, task_id, None, Some(scheduled_at_ms), owner_admission)
             .await
     }
 
     /// Execute a task immediately without moving its recurring/one-shot anchor.
-    pub async fn run_cron_task_now(&self, task_id: String) -> Option<FiredCronJobDto> {
-        let transition = self.loop_transition.lock().await;
+    pub async fn run_cron_task_now(
+        &self,
+        task_id: String,
+        owner_admission: Arc<MobileCronAdmission>,
+    ) -> Option<FiredCronJobDto> {
+        let owner_admission = owner_admission.begin()?;
+        let transition = match self.loop_transition.try_lock() {
+            Ok(transition) => transition,
+            Err(_) => return Some(busy_cron_dto(task_id)),
+        };
         let cfg = self.current_mobile_config().ok()?;
         let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let fs = self.fs.clone();
@@ -10267,38 +10350,28 @@ impl MobileEngineHandle {
             .tasks
             .into_iter()
             .find(|task| task.id == task_id)?;
-        if existing.automation.is_some() {
-            if mobile_cron_schedule_error(&existing.cron, existing.recurring.unwrap_or(false))
-                .is_some()
-            {
-                return None;
-            }
-            drop(transition);
-            return self.fire_automation_task(cfg, task_id, None, None).await;
+        if existing.automation.is_none() {
+            return Some(fired_cron_dto(
+                &existing,
+                Err("paused: Complete automation settings are required".into()),
+            ));
         }
-        let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cwd)
-            .await
-            .ok()?;
-        let task = read_cron_tasks(fs.as_ref(), &cwd)
-            .await
-            .tasks
-            .into_iter()
-            .find(|task| task.id == task_id)?;
-        let firer = MobileTurnFirer {
-            cfg: cfg.clone(),
-            platform: self.firer_platform.clone(),
-        };
-        if !cron_task_active(&task) {
+        if mobile_cron_schedule_error(&existing.cron, existing.recurring.unwrap_or(false)).is_some()
+        {
             return None;
         }
-        let result = firer
-            .fire_session(task.prompt.clone(), task.automation.as_ref(), None)
-            .await;
-        let session_id = result.as_ref().ok().map(|value| value.session_id.clone());
-        let mut dto = fired_cron_dto(&task, result.map(|value| value.summary));
-        dto.session_id = session_id;
-        Some(dto)
+        drop(transition);
+        let owner_admission = match reserve_mobile_cron_owner(
+            owner_admission,
+            existing.automation.as_ref().expect("checked automation"),
+        )
+        .await
+        {
+            Ok(admission) => admission,
+            Err(error) => return Some(fired_cron_dto(&existing, Err(error))),
+        };
+        self.fire_automation_task(cfg, task_id, None, None, owner_admission)
+            .await
     }
 }
 

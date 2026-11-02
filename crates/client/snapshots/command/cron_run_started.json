@@ -1,5 +1,8 @@
 {
   "type": "cron_run_started",
   "run_id": "run-1",
-  "session_id": "session-1"
+  "session_id": "session-1",
+  "transcript_path": "/project/session.jsonl",
+  "session_mode": "code",
+  "session_scope_key": "scope-1"
 }

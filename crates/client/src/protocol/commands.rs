@@ -748,6 +748,10 @@ define_client_command! {
     CronRunStarted {
         run_id: String,
         session_id: String,
+        transcript_path: String,
+        session_mode: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_scope_key: Option<String>,
     },
     ScheduledRunTurn {
         run_id: String,
@@ -1143,9 +1147,19 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::TaskMessage { task_id, message } => {
                 Self::TaskMessage { task_id, message }
             }
-            ClientCommandWire::CronRunStarted { run_id, session_id } => {
-                Self::CronRunStarted { run_id, session_id }
-            }
+            ClientCommandWire::CronRunStarted {
+                run_id,
+                session_id,
+                transcript_path,
+                session_mode,
+                session_scope_key,
+            } => Self::CronRunStarted {
+                run_id,
+                session_id,
+                transcript_path,
+                session_mode,
+                session_scope_key,
+            },
             ClientCommandWire::ScheduledRunTurn {
                 run_id,
                 prompt,
@@ -1596,9 +1610,25 @@ pub struct CronAutomationDto {
     pub reasoning: ReasoningSelectionDto,
     pub run_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_scope_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_scope_key: Option<String>,
     pub notification_policy: String,
     #[serde(default)]
     pub runs: Vec<CronRunDto>,
@@ -1625,6 +1655,12 @@ pub struct CronRunDto {
     pub model: String,
     pub reasoning: ReasoningSelectionDto,
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope_key: Option<String>,
     pub summary: Option<String>,
     pub error: Option<String>,
 }

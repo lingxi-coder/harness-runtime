@@ -1007,11 +1007,33 @@ enum PreparedTranscriptSwitch {
         cwd: std::path::PathBuf,
         durable_lock: Arc<session::jsonl::DurableTranscriptWriter>,
         metadata: Option<Vec<Utf16JsonProjection>>,
+        source: Option<(session::jsonl::writer::TranscriptFileAuthority, String)>,
     },
 }
 
 impl PreparedTranscriptSwitch {
     async fn import_resume_identity(&self, required_source: bool) -> Result<(), HandleError> {
+        if let Self::Durable {
+            writer,
+            path,
+            durable_lock,
+            source: Some((authority, content)),
+            ..
+        } = self
+        {
+            return writer
+                .bootstrap_prepared_session_message_identity_snapshot_with_source_authority(
+                    path,
+                    durable_lock.clone(),
+                    authority,
+                    content.as_bytes(),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    HandleError::ActionFailed(format!("Transcript identity import failed: {error}"))
+                });
+        }
         let (writer, path, authority) = match self {
             Self::None => return Ok(()),
             Self::Legacy { writer, path, .. } => (writer, path, None),
@@ -1064,7 +1086,7 @@ impl PreparedTranscriptSwitch {
         }
     }
 
-    fn activate(self) {
+    fn activate(self) -> Result<(), HandleError> {
         match self {
             Self::Durable {
                 writer,
@@ -1073,19 +1095,25 @@ impl PreparedTranscriptSwitch {
                 cwd,
                 durable_lock,
                 metadata,
+                source,
             } => {
+                writer
+                    .activate_session_target_with_durable_lock_and_authority(
+                        session_id,
+                        path,
+                        cwd,
+                        durable_lock,
+                        source.map(|(authority, _)| authority),
+                    )
+                    .map_err(|error| {
+                        HandleError::ActionFailed(format!("Transcript activation failed: {error}"))
+                    })?;
                 if let Some(metadata) = metadata {
                     writer.install_session_metadata_source(
                         &session_id.as_uuid().to_string(),
                         &metadata,
                     );
                 }
-                writer.activate_session_target_with_durable_lock(
-                    session_id,
-                    path,
-                    cwd,
-                    durable_lock,
-                );
             }
             Self::Legacy {
                 writer,
@@ -1098,6 +1126,7 @@ impl PreparedTranscriptSwitch {
             }
             _ => {}
         }
+        Ok(())
     }
 }
 
@@ -1109,8 +1138,14 @@ impl ConversationOrchestrator {
         selected_path: Option<std::path::PathBuf>,
         selected_cwd: Option<std::path::PathBuf>,
         metadata: Option<Vec<Utf16JsonProjection>>,
+        source: Option<lingxi_core::host::PinnedResumeSource>,
     ) -> Result<PreparedTranscriptSwitch, HandleError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref().cloned() else {
+            if source.is_some() {
+                return Err(HandleError::ActionFailed(
+                    "captured transcript has no writer".into(),
+                ));
+            }
             return Ok(PreparedTranscriptSwitch::None);
         };
         let cwd = selected_cwd.unwrap_or_else(|| self.current_cwd());
@@ -1133,6 +1168,25 @@ impl ConversationOrchestrator {
                     "durable session switch did not prepare its transcript authority".into(),
                 )
             })?;
+            let source = source
+                .map(|source| {
+                    let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+                        source.root,
+                        source.relative,
+                        source.root_identity,
+                        source.file_identity,
+                    )
+                    .map_err(|error| {
+                        HandleError::ActionFailed(format!("invalid transcript authority: {error}"))
+                    })?;
+                    if authority.path() != path {
+                        return Err(HandleError::ActionFailed(
+                            "captured transcript does not match the target".into(),
+                        ));
+                    }
+                    Ok((authority, source.expected_content))
+                })
+                .transpose()?;
             Ok(PreparedTranscriptSwitch::Durable {
                 writer,
                 session_id,
@@ -1140,8 +1194,14 @@ impl ConversationOrchestrator {
                 cwd,
                 durable_lock,
                 metadata,
+                source,
             })
         } else {
+            if source.is_some() {
+                return Err(HandleError::ActionFailed(
+                    "captured transcript requires a durable writer".into(),
+                ));
+            }
             Ok(PreparedTranscriptSwitch::Legacy {
                 writer,
                 path,
@@ -1358,6 +1418,7 @@ impl ConversationOrchestrator {
             None,
             None,
             Some(Vec::new()),
+            None,
         )?;
         prepared_transcript.prepare_legacy().await;
         self.compaction_runtime.roll_over_total_tokens_context();
@@ -1373,7 +1434,7 @@ impl ConversationOrchestrator {
         // All fallible and awaiting work is complete. Publish the captured
         // transcript authority, cost scope, and conversation state in one
         // synchronous critical section so caller cancellation cannot split it.
-        prepared_transcript.activate();
+        prepared_transcript.activate()?;
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
         s.history.clear();
@@ -1591,6 +1652,7 @@ impl ConversationOrchestrator {
             runtime.transcript_path.clone(),
             resumed_cwd.clone(),
             runtime.transcript_metadata.clone(),
+            runtime.transcript_source.clone(),
         )?;
         prepared_transcript
             .import_resume_identity(runtime.transcript_path.is_some())
@@ -1612,7 +1674,7 @@ impl ConversationOrchestrator {
         if let Some(registry) = &self.task_registry {
             registry.reset_agent_session_statistics(session_id, None);
         }
-        prepared_transcript.activate();
+        prepared_transcript.activate()?;
         if let Some(cwd) = resumed_cwd {
             self.session_cwd.change_cwd(cwd.clone());
             *self
@@ -6327,6 +6389,7 @@ mod tests {
             lingxi_core::host::ResumeRuntimeSnapshot {
                 lifetime_guard: None,
                 transcript_path: None,
+                transcript_source: None,
                 working_directory: None,
                 worktree_session: None,
                 transcript_metadata: None,

@@ -51,6 +51,35 @@ impl ScheduledWorkspace {
         title: &str,
         target: Option<uuid::Uuid>,
     ) -> Result<Option<Self>, String> {
+        Self::prepare_inner(config, task_id, title, target, None)
+    }
+
+    /// A selected session borrows scheduled instructions only when the
+    /// manifest identifies the exact captured source and its current cwd.
+    pub fn prepare_selected(
+        config: &MobileConfig,
+        task_id: &str,
+        title: &str,
+        target: uuid::Uuid,
+        current_cwd: &Path,
+        captured_source: &Path,
+    ) -> Result<Option<Self>, String> {
+        Self::prepare_inner(
+            config,
+            task_id,
+            title,
+            Some(target),
+            Some((current_cwd, captured_source)),
+        )
+    }
+
+    fn prepare_inner(
+        config: &MobileConfig,
+        task_id: &str,
+        title: &str,
+        target: Option<uuid::Uuid>,
+        selected: Option<(&Path, &Path)>,
+    ) -> Result<Option<Self>, String> {
         if !is_global_controller(config) {
             return Ok(None);
         }
@@ -117,14 +146,23 @@ impl ScheduledWorkspace {
             }
         }
         let host = checked;
-        for child in ["work", "outputs"] {
-            directory(&host.join(child))?;
-        }
         let guest_root = if config.logical_cwd.is_some() {
             config.brand_runtime_profile.config_guest_path()
         } else {
             root.clone()
         };
+        let logical = guest_root.join(&manifest.workspace);
+        if let Some((current_cwd, captured_source)) = selected {
+            let target = target.ok_or("selected scheduled session has no identity")?;
+            let expected_source =
+                session::jsonl::session_path(root, &logical.to_string_lossy(), &target.to_string());
+            if logical.as_path() != current_cwd || expected_source.as_path() != captured_source {
+                return Ok(None);
+            }
+        }
+        for child in ["work", "outputs"] {
+            directory(&host.join(child))?;
+        }
         // A task selecting another task's conversation cannot inherit its memory.
         let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
         directory(&root.join("automations"))?;
@@ -145,7 +183,7 @@ impl ScheduledWorkspace {
         }
         Ok(Some(Self {
             host,
-            logical: guest_root.join(&manifest.workspace),
+            logical,
             memory_host,
             memory_logical: guest_root.join("automations").join(key).join("memory.md"),
             relative: manifest.workspace,
@@ -229,6 +267,68 @@ mod tests {
             std::fs::read_to_string(restored.memory_host).unwrap(),
             "persistent memory"
         );
+    }
+
+    #[test]
+    fn selected_manifest_only_applies_to_its_exact_source_and_current_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let workspace = ScheduledWorkspace::prepare(&config, "original", "task", None)
+            .unwrap()
+            .unwrap();
+        let id = uuid::Uuid::new_v4();
+        workspace
+            .bind(&config.lingxi_home, &id.to_string())
+            .unwrap();
+        let source = session::jsonl::session_path(
+            &std::fs::canonicalize(&config.lingxi_home).unwrap(),
+            &workspace.logical.to_string_lossy(),
+            &id.to_string(),
+        );
+        let other = config
+            .lingxi_home
+            .join("projects/other")
+            .join(format!("{id}.jsonl"));
+        assert!(ScheduledWorkspace::prepare_selected(
+            &config,
+            "selected",
+            "task",
+            id,
+            &workspace.logical,
+            &other
+        )
+        .unwrap()
+        .is_none());
+        assert!(ScheduledWorkspace::prepare_selected(
+            &config,
+            "selected",
+            "task",
+            id,
+            Path::new("/elsewhere"),
+            &source
+        )
+        .unwrap()
+        .is_none());
+        let selected_memory_dir = config
+            .lingxi_home
+            .join("automations")
+            .join(format!("{:x}", Sha256::digest(b"selected")));
+        assert!(
+            !selected_memory_dir.exists(),
+            "a source mismatch must not create task memory"
+        );
+        let matching = ScheduledWorkspace::prepare_selected(
+            &config,
+            "selected",
+            "task",
+            id,
+            &workspace.logical,
+            &source,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matching.logical, workspace.logical);
+        assert_ne!(matching.memory_host, workspace.memory_host);
     }
 
     #[test]

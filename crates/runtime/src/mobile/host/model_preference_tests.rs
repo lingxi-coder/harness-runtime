@@ -63,18 +63,13 @@ mod model_preference_tests {
         let (handle, _) = build_submit_handle(tmp.path());
         handle.runtime().block_on(async {
             handle.submit(ClientCommand::ListModels).await.unwrap();
-            handle
-                .submit(ClientCommand::ResumeSession {
-                    session_id,
-                    cwd: None,
-                    expected_mode: SessionModeDto::Code,
-                })
-                .await
-                .unwrap();
+            handle.resume_seeded_test_session(session_id).await.unwrap();
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .unwrap();
             assert!(!home.join("last-model.json").exists());
@@ -193,7 +188,9 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: Some("openai/gpt-5.6-sol".into()), mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: Some("openai/gpt-5.6-sol".into()),
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .unwrap();
             assert_eq!(
@@ -232,14 +229,7 @@ mod model_preference_tests {
                 })
                 .await
                 .unwrap();
-            handle
-                .submit(ClientCommand::ResumeSession {
-                    session_id,
-                    cwd: None,
-                    expected_mode: SessionModeDto::Code,
-                })
-                .await
-                .unwrap();
+            handle.resume_seeded_test_session(session_id).await.unwrap();
             assert_eq!(selected_model(&handle).await, "github-copilot/gpt-5.6-sol");
             assert_eq!(
                 model_preference::load(&cfg.lingxi_home).as_deref(),
@@ -248,7 +238,9 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: Some("openai/gpt-5.6-sol".into()), mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: Some("openai/gpt-5.6-sol".into()),
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .unwrap();
             assert_eq!(selected_model(&handle).await, "openai/gpt-5.6-sol");
@@ -281,7 +273,9 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .unwrap();
             let session_id = handle
@@ -297,14 +291,7 @@ mod model_preference_tests {
                 })
                 .await
                 .unwrap();
-            handle
-                .submit(ClientCommand::ResumeSession {
-                    session_id,
-                    cwd: None,
-                    expected_mode: SessionModeDto::Code,
-                })
-                .await
-                .unwrap();
+            handle.resume_seeded_test_session(session_id).await.unwrap();
             assert_eq!(selected_model(&handle).await, "github-copilot/gpt-5.6-sol");
         });
     }
@@ -320,14 +307,7 @@ mod model_preference_tests {
         let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
         handle.runtime().block_on(async {
             assert_ne!(selected_model(&handle).await, disabled);
-            handle
-                .submit(ClientCommand::ResumeSession {
-                    session_id,
-                    cwd: None,
-                    expected_mode: SessionModeDto::Code,
-                })
-                .await
-                .unwrap();
+            handle.resume_seeded_test_session(session_id).await.unwrap();
             assert_ne!(selected_model(&handle).await, disabled);
             listener.received.lock().await.clear();
             assert!(handle
@@ -340,7 +320,9 @@ mod model_preference_tests {
             assert!(handle
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: Some(disabled.into()), mode: client::protocol::listings::SessionModeDto::Code, })
+                    model: Some(disabled.into()),
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
                 .await
                 .is_err());
             assert_eq!(

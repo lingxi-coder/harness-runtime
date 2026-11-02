@@ -96,8 +96,9 @@ pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
     initialize_mobile_lifecycle_runtime, parse_mobile_provider_config_json,
     spawn_mobile_lifecycle_task, wait_for_mobile_session_release, CronDueOccurrenceDto,
-    CronFireStatusDto, CronTaskDto, FiredCronJobDto, MediaAgentHandoffRequest,
-    MediaConversationAttachment, MediaSessionContext, MobileBuildError, MobileConfig,
+    CronFireStatusDto, CronOwnerCandidateDto, CronOwnerReservationDto, CronTaskDto,
+    FiredCronJobDto, MediaAgentHandoffRequest, MediaConversationAttachment, MediaSessionContext,
+    MobileBuildError, MobileConfig, MobileCronAdmission, MobileCronOwnerAdmission,
     MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileRuntime,
     MobileSessionDiscoveryScope, ProviderCatalogEntryDto, RealtimeAgentSessionIo,
 };

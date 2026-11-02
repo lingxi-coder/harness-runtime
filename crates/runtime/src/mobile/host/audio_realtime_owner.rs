@@ -21,13 +21,24 @@ impl MobileEngineHandle {
         limits: RealtimeAgentLimits,
         cancel: CancellationToken,
     ) -> Result<RealtimeAgentEnd, OrchestratorError> {
+        if self.firer_cfg.scheduler_controller {
+            return Err(OrchestratorError::Internal(
+                "scheduler controller does not own a conversation".into(),
+            ));
+        }
         let transition = self.loop_transition.lock().await;
-        let current = self.inner.orchestrator.current_session_id().await.as_uuid().to_string();
+        let current = self
+            .inner
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
         let gate = super::mobile_cron_session_gate(&self.session_cwd(), &current);
         let scheduled_guard = gate.lock().await;
-        self.reload_scheduled_if_needed()
-            .await
-            .map_err(|error| OrchestratorError::Internal(format!("scheduled session reload: {error}")))?;
+        self.reload_scheduled_if_needed().await.map_err(|error| {
+            OrchestratorError::Internal(format!("scheduled session reload: {error}"))
+        })?;
         let turn = self
             .reserve_turn(None)
             .await
@@ -49,69 +60,71 @@ impl MobileEngineHandle {
         let questions = self.ask_user_question_broker.clone();
         let task_turn = turn.clone();
         let (mut result_tx, result_rx) = oneshot::channel();
-        let task = self.runtime().spawn(self.turn_tasks.track_future(async move {
-            let audio_cancel = task_turn.cancel.child_token();
-            let run = orch.run_realtime_agent(
-                prepared,
-                control,
-                events,
-                inputs,
-                output,
-                limits,
-                false,
-                audio_cancel.clone(),
-            );
-            tokio::pin!(run);
-            let completed = tokio::select! { biased;
-                _ = cancel.cancelled() => { task_turn.cancel.cancel(); None },
-                _ = result_tx.closed() => { task_turn.cancel.cancel(); None },
-                _ = audio_cancel.cancelled() => None,
-                result = &mut run => Some(result),
-            };
-            let result = match completed {
-                Some(result) => result,
-                None => {
-                    if let Some(owner) = task_turn.permission_owner_id {
-                        permission_gate.cancel_owner(owner).await;
+        let task = self
+            .runtime()
+            .spawn(self.turn_tasks.track_future(async move {
+                let audio_cancel = task_turn.cancel.child_token();
+                let run = orch.run_realtime_agent(
+                    prepared,
+                    control,
+                    events,
+                    inputs,
+                    output,
+                    limits,
+                    false,
+                    audio_cancel.clone(),
+                );
+                tokio::pin!(run);
+                let completed = tokio::select! { biased;
+                    _ = cancel.cancelled() => { task_turn.cancel.cancel(); None },
+                    _ = result_tx.closed() => { task_turn.cancel.cancel(); None },
+                    _ = audio_cancel.cancelled() => None,
+                    result = &mut run => Some(result),
+                };
+                let result = match completed {
+                    Some(result) => result,
+                    None => {
+                        if let Some(owner) = task_turn.permission_owner_id {
+                            permission_gate.cancel_owner(owner).await;
+                        }
+                        run.await
                     }
-                    run.await
-                }
-            };
-            questions.cancel_closed().await;
-            if let Err(error) = &result {
-                sink.emit(client::adapter::map_orchestrator_error(error))
+                };
+                questions.cancel_closed().await;
+                if let Err(error) = &result {
+                    sink.emit(client::adapter::map_orchestrator_error(error))
+                        .await;
+                } else {
+                    let cancelled = task_turn.cancel.is_cancelled()
+                        || matches!(result, Ok(RealtimeAgentEnd::Cancelled));
+                    sink.emit(ClientEvent::TurnEnded {
+                        outcome: if cancelled {
+                            client::protocol::events::TurnOutcomeDto::Cancelled
+                        } else {
+                            client::protocol::events::TurnOutcomeDto::EndTurn
+                        },
+                        stop_reason: Some("realtime_audio".into()),
+                        cost: client::adapter::lowering::lower_cost_snapshot(
+                            &orch.snapshot_cost_real().await,
+                        ),
+                    })
                     .await;
-            } else {
-                let cancelled = task_turn.cancel.is_cancelled()
-                    || matches!(result, Ok(RealtimeAgentEnd::Cancelled));
-                sink.emit(ClientEvent::TurnEnded {
-                    outcome: if cancelled {
-                        client::protocol::events::TurnOutcomeDto::Cancelled
-                    } else {
-                        client::protocol::events::TurnOutcomeDto::EndTurn
-                    },
-                    stop_reason: Some("realtime_audio".into()),
-                    cost: client::adapter::lowering::lower_cost_snapshot(
-                        &orch.snapshot_cost_real().await,
-                    ),
-                })
-                .await;
-            }
-            let mut active = active_cancel.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
-            {
-                *active = None;
-            }
-            drop(active);
-            if let Some(owner_id) = task_turn.permission_owner_id {
-                permission_gate.end_main_turn(owner_id);
-            }
-            message_queue.clear_active_turn().await;
-            task_turn.mark_completed();
-            let _ = result_tx.send(result);
-        }));
+                }
+                let mut active = active_cancel.lock().await;
+                if active
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
+                {
+                    *active = None;
+                }
+                drop(active);
+                if let Some(owner_id) = task_turn.permission_owner_id {
+                    permission_gate.end_main_turn(owner_id);
+                }
+                message_queue.clear_active_turn().await;
+                task_turn.mark_completed();
+                let _ = result_tx.send(result);
+            }));
         turn.set_task_handle(task);
         drop(scheduled_guard);
         drop(transition);

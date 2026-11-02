@@ -315,6 +315,9 @@ pub async fn build_mobile_inner(
         None,
         None,
         None,
+        None,
+        None,
+        false,
     )
     .await
 }
@@ -327,6 +330,8 @@ pub(super) async fn build_mobile_inner_for_scheduled(
     listener: Arc<dyn ClientEventListener>,
     permission_sink: Arc<dyn PermissionRequestSink>,
     borrowed_sessions: Option<Arc<crate::mobile::transcript::MobileTranscriptSessionSwitcher>>,
+    captured_initial_session: Option<super::restoration::InitialMobileSession>,
+    new_session_id: Option<lingxi_core::types::SessionId>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let receipt = Arc::new(super::MobileRetirementReceipt::default());
     let result = build_mobile_inner_with_ask(
@@ -340,6 +345,9 @@ pub(super) async fn build_mobile_inner_for_scheduled(
         None,
         borrowed_sessions,
         Some(receipt.clone()),
+        captured_initial_session,
+        new_session_id,
+        true,
     )
     .await;
     if result.is_err() {
@@ -348,6 +356,29 @@ pub(super) async fn build_mobile_inner_for_scheduled(
         receipt.wait_if_installed().await;
     }
     result
+}
+
+/// Plan the exact writer target from the same configuration and captured
+/// source that assembly will use. Scheduled ownership is persisted against
+/// this path before a fresh transcript can become visible.
+pub(super) fn planned_mobile_transcript_path(
+    cfg: &MobileConfig,
+    initial: Option<&super::restoration::InitialMobileSession>,
+    session_id: lingxi_core::types::SessionId,
+) -> std::path::PathBuf {
+    if let Some(initial) = initial {
+        return initial.replayed.transcript_path.clone();
+    }
+    let home = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.lingxi_home));
+    let cwd = cfg
+        .logical_cwd
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(super::canonical_cwd_string(&cfg.cwd)));
+    orchestrator::transcript_paths::main_transcript_path(
+        &home,
+        &cwd.to_string_lossy(),
+        &session_id.as_uuid().to_string(),
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -362,14 +393,40 @@ pub(super) async fn build_mobile_inner_with_ask(
     initial_turn_queue: Option<(Arc<msgqueue::MessageQueueManager>, Arc<DurableTurnStore>)>,
     borrowed_sessions: Option<Arc<crate::mobile::transcript::MobileTranscriptSessionSwitcher>>,
     retirement_receipt: Option<Arc<super::MobileRetirementReceipt>>,
+    captured_initial_session: Option<super::restoration::InitialMobileSession>,
+    new_session_id: Option<lingxi_core::types::SessionId>,
+    defer_scheduled_startup: bool,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let mut cfg = cfg;
+    if cfg.scheduler_controller
+        && (cfg.initial_session_id.is_some() || cfg.initial_session_transcript_path.is_some())
+    {
+        return Err(MobileBuildError::Orchestrator(
+            "scheduler controller cannot mount a conversation".into(),
+        ));
+    }
     cfg.lingxi_home = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.lingxi_home));
     cfg.cwd = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.cwd));
     // Validate the selected identity, fixed mode and captured cwd before any
     // writer, startup connection, lifecycle hook or background task exists.
     let initial_session =
-        super::restoration::capture_initial_mobile_session(&cfg, &platform).await?;
+        match captured_initial_session {
+            Some(initial) => {
+                if cfg.initial_session_id.as_deref().and_then(|id| {
+                    uuid::Uuid::parse_str(id.strip_prefix("sess:").unwrap_or(id)).ok()
+                }) != Some(initial.id)
+                    || cfg.initial_session_transcript_path.as_deref()
+                        != Some(initial.selected_path.as_path())
+                    || cfg.session_mode != initial.mode
+                {
+                    return Err(MobileBuildError::Orchestrator(
+                        "captured session source no longer matches its configuration".into(),
+                    ));
+                }
+                Some(initial)
+            }
+            None => super::restoration::capture_initial_mobile_session(&cfg, &platform).await?,
+        };
     if let Some(initial) = &initial_session {
         cfg.cwd = initial.host_cwd.clone();
         cfg.logical_cwd = Some(initial.logical_cwd.clone());
@@ -400,10 +457,15 @@ pub(super) async fn build_mobile_inner_with_ask(
 
     let cwd = cfg.cwd.clone();
     let logical_cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cwd.clone());
+    if initial_session.is_some() && new_session_id.is_some() {
+        return Err(MobileBuildError::Orchestrator(
+            "captured and new session identities conflict".into(),
+        ));
+    }
     let main_session_id = initial_session
         .as_ref()
         .map(|initial| lingxi_core::types::SessionId::from_uuid(initial.id))
-        .unwrap_or_default();
+        .unwrap_or_else(|| new_session_id.unwrap_or_default());
     let main_session_uuid = main_session_id.as_uuid().to_string();
     let transcript_sessions = match borrowed_sessions {
         Some(owner)
@@ -432,38 +494,34 @@ pub(super) async fn build_mobile_inner_with_ask(
             .map_err(|error| {
                 MobileBuildError::Orchestrator(format!("transcript authority: {error}"))
             })?;
-    let transcript_path = initial_session.as_ref().map_or_else(
-        || {
-            orchestrator::transcript_paths::main_transcript_path(
-                &cfg.lingxi_home,
-                &logical_cwd.to_string_lossy(),
-                &main_session_uuid,
-            )
-        },
-        |initial| initial.replayed.transcript_path.clone(),
-    );
+    let transcript_path =
+        planned_mobile_transcript_path(&cfg, initial_session.as_ref(), main_session_id);
     if let Some(initial) = &initial_session {
         // The preflight cannot claim a writer before rejecting a mode mismatch.
         // Recheck the same bytes under the authority before mounting the owner.
         let captured = initial.raw_source.clone();
         let repaired = initial.source.clone();
+        let root = initial.transcript_root.clone();
+        let relative = initial.transcript_relative.clone();
         let transcript_identity = initial.transcript_identity.clone();
-        let path = transcript_path.clone();
+        let transcript_file_identity = initial.transcript_file_identity.clone();
         let authority = transcript_authority.clone();
         tokio::task::spawn_blocking(move || {
             authority.with_transaction(|_| {
-                use std::io::Read;
-                let root = path.parent().ok_or_else(|| {
-                    lingxi_core::host::FsError::Io("transcript has no parent".into())
-                })?;
-                let relative = std::path::Path::new(path.file_name().ok_or_else(|| {
-                    lingxi_core::host::FsError::Io("transcript has no filename".into())
-                })?);
-                let mut file = lingxi_core::host::rooted_fs::open_read_file_pinned(
-                    root,
-                    relative,
-                    Some(&transcript_identity),
-                )?;
+                use lingxi_core::host::rooted_fs::{
+                    open_existing_file_for_update_pinned, opened_file_identity,
+                    validate_open_file_single_link,
+                };
+                use std::io::{Read, Seek, SeekFrom, Write};
+                let mut file =
+                    open_existing_file_for_update_pinned(&root, &relative, &transcript_identity)?;
+                validate_open_file_single_link(&file)?;
+                if opened_file_identity(&file)? != transcript_file_identity {
+                    return Err(lingxi_core::host::FsError::Io(
+                        "session source identity changed during capture".into(),
+                    )
+                    .into());
+                }
                 let mut current = Vec::new();
                 file.read_to_end(&mut current)
                     .map_err(|error| lingxi_core::host::FsError::Io(error.to_string()))?;
@@ -473,21 +531,34 @@ pub(super) async fn build_mobile_inner_with_ask(
                     ));
                 }
                 if current != repaired.as_bytes() {
-                    // Repair only the prevalidated final suffix while holding
-                    // the session transaction, before any writer or hook starts.
-                    drop(file);
-                    lingxi_core::host::rooted_fs::atomic_write_pinned(
-                        root,
-                        relative,
-                        repaired.as_bytes(),
-                        lingxi_core::host::rooted_fs::AtomicWriteOptions {
-                            overwrite: true,
-                            create_parents: false,
-                            dir_mode: 0o700,
-                            file_mode: 0o600,
-                        },
-                        &transcript_identity,
-                    )?;
+                    // A torn suffix can only be truncated or completed with a
+                    // newline. Repair the checked inode, never replace it.
+                    if current.starts_with(repaired.as_bytes()) {
+                        file.set_len(repaired.len() as u64)
+                            .map_err(|error| lingxi_core::host::FsError::Io(error.to_string()))?;
+                    } else if repaired.as_bytes().starts_with(&current) {
+                        file.seek(SeekFrom::End(0))
+                            .and_then(|_| file.write_all(&repaired.as_bytes()[current.len()..]))
+                            .map_err(|error| lingxi_core::host::FsError::Io(error.to_string()))?;
+                    } else {
+                        return Err(lingxi_core::host::FsError::Io(
+                            "invalid session suffix repair".into(),
+                        )
+                        .into());
+                    }
+                    file.sync_all()
+                        .map_err(|error| lingxi_core::host::FsError::Io(error.to_string()))?;
+                }
+                let current_file = lingxi_core::host::rooted_fs::open_read_file_pinned(
+                    &root,
+                    &relative,
+                    Some(&transcript_identity),
+                )?;
+                if opened_file_identity(&current_file)? != transcript_file_identity {
+                    return Err(lingxi_core::host::FsError::Io(
+                        "session source changed before mounting".into(),
+                    )
+                    .into());
                 }
                 Ok(())
             })
@@ -548,7 +619,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Keep iOS/Android MCP discovery on the same parser and precedence rules
     // as desktop. The app-private settings file is the mobile equivalent of
     // the user global config; `.mcp.json` remains project-scoped.
-    let configured_mcp = if cfg.app_agent_host {
+    let configured_mcp = if cfg.app_agent_host || cfg.scheduler_controller {
         Vec::new()
     } else {
         mobile_mcp_preflight(
@@ -642,9 +713,40 @@ pub(super) async fn build_mobile_inner_with_ask(
         session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), host_fs.clone())
             .with_durable_lock(transcript_authority),
     );
-    if !cfg.app_agent_host {
+    if !cfg.app_agent_host && !cfg.scheduler_controller {
+        let file_authority = initial_session
+            .as_ref()
+            .map(|initial| {
+                session::jsonl::writer::TranscriptFileAuthority::from_capture(
+                    initial.transcript_root.clone(),
+                    initial.transcript_relative.clone(),
+                    initial.transcript_identity,
+                    initial.transcript_file_identity,
+                )
+            })
+            .transpose()
+            .map_err(|error| {
+                MobileBuildError::Orchestrator(format!("transcript authority: {error}"))
+            })?;
+        if let (Some(initial), Some(authority)) = (&initial_session, &file_authority) {
+            session_writer
+                .bootstrap_session_message_identity_snapshot_with_source_authority(
+                    &transcript_path,
+                    authority,
+                    initial.source.as_bytes(),
+                )
+                .await
+                .map_err(|error| {
+                    MobileBuildError::Orchestrator(format!("transcript identity: {error}"))
+                })?;
+        }
         session_writer
-            .activate_session_target(main_session_id, transcript_path, logical_cwd.clone())
+            .activate_session_target_with_authority(
+                main_session_id,
+                transcript_path,
+                logical_cwd.clone(),
+                file_authority,
+            )
             .map_err(|error| {
                 MobileBuildError::Orchestrator(format!("transcript activation: {error}"))
             })?;
@@ -2909,7 +3011,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .with_mcp_registry(mcp_registry.clone())
         .with_task_registry(task_registry.clone())
         .with_mod_agent_name_registry(subagent_spawner_arc.agent_name_registry());
-    if !cfg.app_agent_host {
+    if !cfg.app_agent_host && !cfg.scheduler_controller {
         orch_inner = orch_inner.with_jsonl_writer(session_writer.clone());
     }
     // P0.1 (gated): attach the memdir prefetch when enabled above.
@@ -3339,15 +3441,17 @@ pub(super) async fn build_mobile_inner_with_ask(
             }
         }
     }
-    if let Some(initial) = &initial_session {
-        orchestrator::replay_deferred_tools_after_resume(
-            &orch,
-            initial.replayed.runtime_metadata.deferred_tools.clone(),
-        )
-        .await
-        .map_err(|error| {
-            MobileBuildError::Orchestrator(format!("restore deferred tools: {error}"))
-        })?;
+    if !defer_scheduled_startup {
+        if let Some(initial) = &initial_session {
+            orchestrator::replay_deferred_tools_after_resume(
+                &orch,
+                initial.replayed.runtime_metadata.deferred_tools.clone(),
+            )
+            .await
+            .map_err(|error| {
+                MobileBuildError::Orchestrator(format!("restore deferred tools: {error}"))
+            })?;
+        }
     }
     // The journal is bound to the captured owner before any lifecycle hook can
     // observe the session. Its worker is started only after assembly completes.
@@ -3377,32 +3481,67 @@ pub(super) async fn build_mobile_inner_with_ask(
     //     when no matching hook is registered (the common case). No matching
     //     `SessionEnd` is fired here: like desktop, `build_mobile` returns the
     //     runtime and the FFI host drops it with no hook-capable teardown seam.
-    if !cfg.app_agent_host {
-        let session_start = orch
-            .fire_session_start(if initial_session.is_some() {
-                "resume"
-            } else {
-                "startup"
-            })
-            .await;
-        if session_start.reload_skills {
-            let handler = mobile_reload_skills_handler(
-                shared_command_registry.clone(),
-                cwd.clone(),
-                cfg.lingxi_home.clone(),
-                cwd.clone(),
-                device_skill_tools.clone(),
-                tools.clone(),
-                workflow_tool.clone(),
-                workflow_command_snapshot.clone(),
-                Vec::new(),
-            );
-            if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
-                let _ = handler.handle(&parsed).await;
-            }
+    let startup_orchestrator = orch.clone();
+    let startup_deferred_tools = defer_scheduled_startup
+        .then(|| {
+            initial_session
+                .as_ref()
+                .map(|initial| initial.replayed.runtime_metadata.deferred_tools.clone())
+        })
+        .flatten();
+    let startup_is_resume = initial_session.is_some();
+    let startup_enabled = !cfg.app_agent_host && !cfg.scheduler_controller;
+    let startup_registry = shared_command_registry.clone();
+    let startup_cwd = cwd.clone();
+    let startup_home = cfg.lingxi_home.clone();
+    let startup_device_tools = device_skill_tools.clone();
+    let startup_tools = tools.clone();
+    let startup_workflow_tool = workflow_tool.clone();
+    let startup_workflow_commands = workflow_command_snapshot.clone();
+    let startup: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), MobileBuildError>> + Send>,
+    > = Box::pin(async move {
+        if let Some(deferred_tools) = startup_deferred_tools {
+            orchestrator::replay_deferred_tools_after_resume(&startup_orchestrator, deferred_tools)
+                .await
+                .map_err(|error| {
+                    MobileBuildError::Orchestrator(format!("restore deferred tools: {error}"))
+                })?;
         }
-        orch.fire_instructions_loaded().await;
-    }
+        if startup_enabled {
+            let session_start = startup_orchestrator
+                .fire_session_start(if startup_is_resume {
+                    "resume"
+                } else {
+                    "startup"
+                })
+                .await;
+            if session_start.reload_skills {
+                let handler = mobile_reload_skills_handler(
+                    startup_registry,
+                    startup_cwd.clone(),
+                    startup_home,
+                    startup_cwd,
+                    startup_device_tools,
+                    startup_tools,
+                    startup_workflow_tool,
+                    startup_workflow_commands,
+                    Vec::new(),
+                );
+                if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
+                    let _ = handler.handle(&parsed).await;
+                }
+            }
+            startup_orchestrator.fire_instructions_loaded().await;
+        }
+        Ok(())
+    });
+    let scheduled_startup = if defer_scheduled_startup {
+        Some(startup)
+    } else {
+        startup.await?;
+        None
+    };
     // Publish the effective boot mode as an authoritative event. Auto may be
     // downgraded to Default by the model/provider/killswitch gate, so clients
     // must not infer the effective value from their persisted preference.
@@ -3414,7 +3553,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             mode: initial_permission_mode.clone(),
         })
         .await;
-    if !cfg.app_agent_host {
+    if !cfg.app_agent_host && !cfg.scheduler_controller {
         let mode = super::lower_session_mode(orch.conversation_mode().await.mode);
         let event = if let Some(initial) = &initial_session {
             ClientEvent::SessionResumed {
@@ -3477,6 +3616,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .await
         .map_err(MobileBuildError::Orchestrator)?;
     Ok(MobileRuntime {
+        scheduled_startup: StdMutex::new(scheduled_startup),
         provider_account_catalog,
         session_cwd,
         provider_catalog,
@@ -3643,6 +3783,7 @@ fn build_mobile_engine_on_worker(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let mut cfg = cfg;
     let app_agent_host = cfg.app_agent_host;
+    let scheduler_controller = cfg.scheduler_controller;
     if app_agent_host && cfg.media_attachment_handle.is_some() {
         return Err(MobileEngineError::Internal(
             "Local App Agent engines cannot own a media attachment".into(),
@@ -3682,6 +3823,7 @@ fn build_mobile_engine_on_worker(
     // runtime per fired job (the same pattern as `lingxi_home`/`session_cwd`/`fs`).
     let mut firer_cfg = cfg.clone();
     firer_cfg.initial_session_id = None;
+    firer_cfg.initial_session_transcript_path = None;
     let firer_platform = platform.clone();
     // Construct turn ownership before the runtime so every adapter-originated
     // event is filtered/reclassified by the same connection-scoped lifecycle
@@ -3715,6 +3857,9 @@ fn build_mobile_engine_on_worker(
             Some((message_queue.clone(), durable_turns.clone())),
             None,
             None,
+            None,
+            None,
+            false,
         ))
         .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
     let mounted_cwd = inner.session_cwd.cwd();
@@ -3736,7 +3881,7 @@ fn build_mobile_engine_on_worker(
 
     let skill_count = 0;
     let turn_tasks = tokio_util::task::TaskTracker::new();
-    if !app_agent_host {
+    if !app_agent_host && !scheduler_controller {
         inner.main_report_waker.bind_queue(message_queue.clone());
         runtime.block_on(async {
             if let Err(error) = inner.orchestrator.recover_main_reports().await {
@@ -3759,29 +3904,30 @@ fn build_mobile_engine_on_worker(
             loop_state.clone(),
             loop_delivery.clone(),
         ));
-    let session_cron = if !app_agent_host && tool_cron::cron_tools_enabled() {
-        let scheduler = Arc::new(
-            cron::CronScheduler::new(
-                inner.task_registry.clone(),
-                fs.clone(),
-                firer_platform.clock(),
-                Arc::new(platform_posix_minimal::runtime::PosixRuntime::new()),
-                cron::tasks_file::session_scheduled_tasks_path(
-                    firer_cfg.logical_cwd.as_deref().unwrap_or(&firer_cfg.cwd),
-                ),
-            )
-            .with_session_id(initial_session_key.clone()),
-        );
-        runtime
-            .block_on(async {
-                scheduler.set_session_delivery(loop_delivery).await;
-                scheduler.clone().start().await
-            })
-            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
-        Some(scheduler)
-    } else {
-        None
-    };
+    let session_cron =
+        if !app_agent_host && !scheduler_controller && tool_cron::cron_tools_enabled() {
+            let scheduler = Arc::new(
+                cron::CronScheduler::new(
+                    inner.task_registry.clone(),
+                    fs.clone(),
+                    firer_platform.clock(),
+                    Arc::new(platform_posix_minimal::runtime::PosixRuntime::new()),
+                    cron::tasks_file::session_scheduled_tasks_path(
+                        firer_cfg.logical_cwd.as_deref().unwrap_or(&firer_cfg.cwd),
+                    ),
+                )
+                .with_session_id(initial_session_key.clone()),
+            );
+            runtime
+                .block_on(async {
+                    scheduler.set_session_delivery(loop_delivery).await;
+                    scheduler.clone().start().await
+                })
+                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+            Some(scheduler)
+        } else {
+            None
+        };
     let _ = inner.wakeup_scheduler.set(loop_scheduler.clone());
     inner
         .orchestrator
@@ -4437,7 +4583,7 @@ fn build_mobile_engine_on_worker(
             Some(provider_config::startup_catalog::CatalogRefreshGuard(task));
     }
     let _ = queued_slash_handle.set(Arc::downgrade(&handle));
-    if !app_agent_host {
+    if !app_agent_host && !scheduler_controller {
         // This runs on every scope switch / reconnect within one process, not
         // just at process start, so drop the handles whose engine is already
         // gone before appending. Without this the vector grows for the app's
@@ -4449,7 +4595,7 @@ fn build_mobile_engine_on_worker(
         handles.retain(|existing| existing.strong_count() > 0);
         handles.push(Arc::downgrade(&handle));
     }
-    if !app_agent_host {
+    if !app_agent_host && !scheduler_controller {
         handle.runtime().block_on(handle.emit_controls_snapshot());
         handle.runtime().block_on(handle.emit_typescript_lsp_mode());
     }

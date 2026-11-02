@@ -27,7 +27,9 @@
 //! the durable continuation, including when the process exited before updating
 //! `last-prompt` (Claude Code 2.1.286).
 
-use crate::jsonl::aliases::{normalized_directory_path, read_session_aliases};
+use crate::jsonl::aliases::{
+    normalized_directory_path, read_session_aliases, read_session_cwd_aliases,
+};
 use crate::jsonl::path::{project_dir_name, sanitized_cwd, MAX_SANITIZED_LENGTH};
 use crate::jsonl::re_append::find_last_typed_field;
 use crate::jsonl::reader::{
@@ -857,6 +859,7 @@ async fn append_repository_project_dirs(
 
 struct DiscoveryDirectories {
     project_dirs: Vec<PathBuf>,
+    cwd_aliases: Vec<(PathBuf, PathBuf)>,
     target_cwds: Vec<String>,
     unfiltered_dirs: Vec<PathBuf>,
     limited_dirs: Vec<PathBuf>,
@@ -917,6 +920,7 @@ async fn discover_session_directories(
     };
     let mut project_dirs = vec![current_storage];
     let mut target_cwds = vec![cwd.to_string()];
+    let mut cwd_aliases = Vec::new();
     let mut unfiltered_dirs = Vec::new();
     let mut limited_dirs = Vec::new();
     let mut has_aliases = false;
@@ -924,6 +928,7 @@ async fn discover_session_directories(
         append_project_dirs_matching(&projects_root, &mut project_dirs, |_| true).await?;
         return Ok(DiscoveryDirectories {
             project_dirs,
+            cwd_aliases,
             target_cwds: Vec::new(),
             unfiltered_dirs,
             limited_dirs,
@@ -1022,24 +1027,65 @@ async fn discover_session_directories(
     // Read only the link files at the current directory and (for Repository)
     // its closest containing worktree root. A linked directory's own aliases
     // are never traversed, nor are aliases at unrelated sibling worktree roots.
-    let mut alias_sources = vec![current_project];
+    let mut alias_sources = vec![(current_project.clone(), PathBuf::from(cwd))];
     if scope == SessionDiscoveryScope::Repository {
         if let Some(root) = repository_root.filter(|root| root.as_str() != cwd) {
-            push_project_dir(&mut alias_sources, project_dir_for_cwd(lingxi_home, root));
+            alias_sources.push((project_dir_for_cwd(lingxi_home, root), PathBuf::from(root)));
         }
     }
-    for source in alias_sources {
+    for (source, source_cwd) in alias_sources {
         for alias in read_session_aliases(&source).await {
             has_aliases = true;
             if !project_dirs.contains(&alias) {
-                push_project_dir(&mut unfiltered_dirs, alias.clone());
                 push_project_dir(&mut limited_dirs, alias.clone());
             }
+            // A directory may already have been found by collision recovery.
+            // The explicit link still grants its directory-wide semantics.
+            push_project_dir(&mut unfiltered_dirs, alias.clone());
             push_project_dir(&mut project_dirs, alias);
         }
+        let canonical = normalized_directory_path(&source_cwd);
+        let canonical_bucket = project_dir_for_cwd(lingxi_home, &canonical.to_string_lossy());
+        let mut exact_alias_sources = vec![source];
+        if !exact_alias_sources.contains(&canonical_bucket) {
+            exact_alias_sources.push(canonical_bucket);
+        }
+        for alias_source in exact_alias_sources {
+            for path in read_session_cwd_aliases(lingxi_home, &alias_source).await {
+                has_aliases = true;
+                let alias = (path, source_cwd.clone());
+                if !cwd_aliases.contains(&alias) {
+                    cwd_aliases.push(alias);
+                }
+            }
+        }
+    }
+    if scope == SessionDiscoveryScope::Current && !cwd_aliases.is_empty() {
+        // The generic sanitized-name recovery may otherwise classify the
+        // whole original bucket as current just because its newest session
+        // relocated here. `/cd` links authorize only the named transcript.
+        let canonical_home = std::fs::canonicalize(lingxi_home).ok();
+        let relative = |path: &Path| {
+            path.strip_prefix(lingxi_home)
+                .ok()
+                .or_else(|| {
+                    canonical_home
+                        .as_ref()
+                        .and_then(|home| path.strip_prefix(home).ok())
+                })
+                .map(Path::to_path_buf)
+        };
+        project_dirs.retain(|directory| {
+            directory == &current_project
+                || unfiltered_dirs.contains(directory)
+                || !cwd_aliases
+                    .iter()
+                    .any(|(path, _)| path.parent().and_then(&relative) == relative(directory))
+        });
     }
     Ok(DiscoveryDirectories {
         project_dirs,
+        cwd_aliases,
         target_cwds,
         unfiltered_dirs,
         limited_dirs,
@@ -1328,6 +1374,99 @@ async fn collect_dir(
     Ok(true)
 }
 
+// An alias is written before the cwd marker, and can also remain after a later
+// `/cd`. It may nominate a source for discovery only while that source's own
+// validated relocation metadata names the alias's directory.
+fn cwd_alias_matches_source(path: &Path, cwd: &Path, source: &str) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    if crate::jsonl::JsonlWriter::fixed_session_mode_from_source(source, stem).is_err() {
+        return false;
+    }
+    let loaded = route_lines(source);
+    transcript_workspace_path(path, &loaded).is_some_and(|recorded| {
+        normalized_directory_path(Path::new(&recorded)) == normalized_directory_path(cwd)
+    })
+}
+
+fn retain_current_cwd_alias_rows(
+    rows: &mut Vec<SessionMetadata>,
+    ordinary_paths: &HashSet<PathBuf>,
+    aliases: &[(PathBuf, PathBuf)],
+) {
+    rows.retain(|row| {
+        ordinary_paths.contains(&row.path)
+            || aliases.iter().any(|(path, cwd)| {
+                path == &row.path
+                    && row.workspace_path.as_deref().is_some_and(|recorded| {
+                        normalized_directory_path(Path::new(recorded))
+                            == normalized_directory_path(cwd)
+                    })
+            })
+    });
+}
+
+async fn collect_cwd_aliases(
+    aliases: &[(PathBuf, PathBuf)],
+    fs: &Arc<dyn FileSystem>,
+    candidates: &mut Vec<CatalogCandidate>,
+    only_session: Option<Uuid>,
+) {
+    let current_is_sdk_entrypoint = matches!(
+        std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+        Ok("sdk-cli" | "sdk-ts" | "sdk-py")
+    );
+    for (path, cwd) in aliases {
+        if candidates.iter().any(|candidate| candidate.path == *path) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(uuid) = Uuid::parse_str(stem) else {
+            continue;
+        };
+        if only_session.is_some_and(|session| session != uuid) {
+            continue;
+        }
+        let Ok(metadata) = tokio::fs::metadata(path).await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Some(path_str) = path.to_str() else {
+            continue;
+        };
+        let Ok(read) = fs.read_file(path_str, None, None).await else {
+            continue;
+        };
+        let first = read
+            .content
+            .trim_start_matches('\u{feff}')
+            .split('\n')
+            .next()
+            .unwrap_or("");
+        if first_line_hides_session(first, current_is_sdk_entrypoint)
+            || !cwd_alias_matches_source(path, cwd, &read.content)
+        {
+            continue;
+        }
+        let Ok(file_modified) = metadata.modified() else {
+            continue;
+        };
+        candidates.push(CatalogCandidate {
+            uuid,
+            path: path.clone(),
+            stem: stem.to_string(),
+            file_len: metadata.len(),
+            file_modified,
+            file_created: metadata.created().unwrap_or(file_modified),
+        });
+    }
+}
+
 /// Enrich every candidate, several at a time.
 ///
 /// Each row is an independent full parse of one transcript, so a project with
@@ -1340,6 +1479,7 @@ async fn enrich_candidates(
     current_is_sdk_entrypoint: bool,
     target_cwds: &[String],
     unfiltered_dirs: &[PathBuf],
+    uncached_paths: &[PathBuf],
     skipped_files: &mut usize,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let parallelism = std::thread::available_parallelism()
@@ -1356,7 +1496,11 @@ async fn enrich_candidates(
                 break;
             };
             let fs = Arc::clone(fs);
-            let cache_identity = cache_identity.clone();
+            let cache_identity = if uncached_paths.contains(&candidate.path) {
+                None
+            } else {
+                cache_identity.clone()
+            };
             let target_cwds =
                 if candidate.path.parent().is_some_and(|parent| {
                     unfiltered_dirs.iter().any(|directory| directory == parent)
@@ -1494,14 +1638,6 @@ async fn enrich_candidate_uncached(
     scoped_cwd: &mut Option<String>,
     skipped_files: &mut usize,
 ) -> Result<Option<SessionMetadata>, LoaderError> {
-    let CatalogCandidate {
-        uuid,
-        path,
-        stem,
-        file_modified,
-        file_created,
-        ..
-    } = candidate;
     // Route the file TOLERANTLY ([`read_routed`]) rather than `read_all`:
     // besides the chain participants (`messages_in_order`, identical to what
     // `read_all` returned) it yields the Tier-1 metadata side-maps the picker
@@ -1509,7 +1645,7 @@ async fn enrich_candidate_uncached(
     // leafUuid), `custom_titles` + `ai_titles` (keyed by sessionId). See
     // `LoadedTranscript`.
     let content = match fs
-        .read_file(path.to_str().expect("UTF-8 path"), None, None)
+        .read_file(candidate.path.to_str().expect("UTF-8 path"), None, None)
         .await
     {
         Ok(read) => read.content,
@@ -1518,6 +1654,33 @@ async fn enrich_candidate_uncached(
             return Ok(None);
         }
     };
+    enrich_candidate_from_content(
+        candidate,
+        content,
+        current_is_sdk_entrypoint,
+        target_cwds,
+        scoped_cwd,
+        skipped_files,
+    )
+    .await
+}
+
+async fn enrich_candidate_from_content(
+    candidate: CatalogCandidate,
+    content: String,
+    current_is_sdk_entrypoint: bool,
+    target_cwds: &[String],
+    scoped_cwd: &mut Option<String>,
+    skipped_files: &mut usize,
+) -> Result<Option<SessionMetadata>, LoaderError> {
+    let CatalogCandidate {
+        uuid,
+        path,
+        stem,
+        file_modified,
+        file_created,
+        ..
+    } = candidate;
     *scoped_cwd = scoped_cwd_from_source(&content);
     let mode = match crate::jsonl::JsonlWriter::fixed_session_mode_from_source(&content, &stem) {
         Ok(mode) => mode,
@@ -1554,7 +1717,11 @@ async fn enrich_candidate_uncached(
     // The prefix check is only an early reject. A missing/partial first
     // line must not turn into an implicit allow: re-run the authoritative
     // cwd extraction after the tolerant full parse.
-    if !transcript_matches_target_dirs(scoped_cwd.as_deref(), target_cwds) {
+    let authoritative_cwd = transcript_workspace_path(&path, &loaded);
+    if !transcript_matches_target_dirs(
+        authoritative_cwd.as_deref().or(scoped_cwd.as_deref()),
+        target_cwds,
+    ) {
         return Ok(None);
     }
 
@@ -1699,23 +1866,24 @@ async fn enrich_candidate_uncached(
         .or_else(|| loaded.ai_titles.get(&canonical_sid))
         .cloned();
     let (resume_model, resume_model_profile) = persisted_model_ref(&loaded, tip);
-    let workspace_path = scoped_cwd
-        .as_deref()
-        .filter(|cwd| Path::new(cwd).is_absolute())
-        .filter(|cwd| {
-            path.parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                .is_some_and(|bucket| {
-                    project_dir_name(cwd) == bucket
-                        || project_dir_name(&canonicalized_path_string(cwd)) == bucket
-                })
-                || target_cwds.iter().any(|target| {
-                    canonicalized_path_string(target) == canonicalized_path_string(cwd)
-                })
-        })
-        .map(str::to_string)
-        .or_else(|| transcript_workspace_path(&path, &loaded));
+    let workspace_path = authoritative_cwd.or_else(|| {
+        scoped_cwd
+            .as_deref()
+            .filter(|cwd| Path::new(cwd).is_absolute())
+            .filter(|cwd| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|bucket| {
+                        project_dir_name(cwd) == bucket
+                            || project_dir_name(&canonicalized_path_string(cwd)) == bucket
+                    })
+                    || target_cwds.iter().any(|target| {
+                        canonicalized_path_string(target) == canonicalized_path_string(cwd)
+                    })
+            })
+            .map(str::to_string)
+    });
 
     Ok(Some(SessionMetadata {
         uuid,
@@ -2208,6 +2376,206 @@ pub async fn find_session_in_scope_with_diagnostics(
     find_session_inner(lingxi_home, cwd, scope, session_id, &fs, &worktree_paths).await
 }
 
+/// Metadata and empty-anchor status from one pinned exact transcript source.
+pub struct DescribedSessionSource {
+    pub metadata: SessionMetadata,
+    pub empty_session: bool,
+}
+
+/// Describe the selected source without resolving its UUID to another file.
+/// The source must remain inside the trusted projects root and the requested
+/// discovery scope, with its fixed identity and workspace checked against the
+/// same captured bytes used to construct the row.
+pub async fn describe_session_source(
+    home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    source: &Path,
+    session_id: Uuid,
+) -> Result<DescribedSessionSource, LoaderError> {
+    describe_session_source_inner(home, cwd, scope, source, session_id, || {}).await
+}
+
+async fn describe_session_source_inner<F: FnOnce()>(
+    home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    source: &Path,
+    session_id: Uuid,
+    after_read: F,
+) -> Result<DescribedSessionSource, LoaderError> {
+    use crate::jsonl::writer::TranscriptFileAuthority;
+    use lingxi_core::host::rooted_fs;
+    use std::io::Read;
+
+    let missing = || LoaderError::SessionNotFound {
+        arg: session_id.to_string(),
+    };
+    let io_error = |error: String| LoaderError::Io {
+        arg: source.display().to_string(),
+        source: std::io::Error::other(error),
+    };
+    if !home.is_absolute() || !source.is_absolute() {
+        return Err(missing());
+    }
+    let canonical_home =
+        std::fs::canonicalize(home).map_err(|error| io_error(error.to_string()))?;
+    let relative = source
+        .strip_prefix(home)
+        .or_else(|_| source.strip_prefix(&canonical_home))
+        .map_err(|_| missing())?
+        .to_path_buf();
+    let mut components = relative.components();
+    let (
+        Some(std::path::Component::Normal(projects)),
+        Some(std::path::Component::Normal(_bucket)),
+        Some(std::path::Component::Normal(_file)),
+        None,
+    ) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    )
+    else {
+        return Err(missing());
+    };
+    if projects != "projects"
+        || source.extension().and_then(|s| s.to_str()) != Some("jsonl")
+        || source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            != Some(session_id)
+    {
+        return Err(missing());
+    }
+
+    let worktrees = if scope == SessionDiscoveryScope::Repository {
+        git_worktree_paths(cwd)
+    } else {
+        Vec::new()
+    };
+    let dirs = discover_session_directories(home, cwd, scope, &worktrees, usize::MAX).await?;
+    // Catalog candidates can spell the same trusted home through its alias or
+    // canonical root. Compare relative components without resolving buckets.
+    let relative_to_home = |path: &Path| {
+        path.strip_prefix(home)
+            .or_else(|_| path.strip_prefix(&canonical_home))
+            .ok()
+            .map(Path::to_path_buf)
+    };
+    let source_parent = relative.parent().ok_or_else(missing)?;
+    let ordinary = dirs
+        .project_dirs
+        .iter()
+        .any(|path| relative_to_home(path).as_deref() == Some(source_parent));
+    let unfiltered = dirs
+        .unfiltered_dirs
+        .iter()
+        .any(|path| relative_to_home(path).as_deref() == Some(source_parent));
+    let aliases: Vec<&Path> = dirs
+        .cwd_aliases
+        .iter()
+        .filter_map(|(path, alias_cwd)| {
+            (relative_to_home(path).as_deref() == Some(relative.as_path()))
+                .then_some(alias_cwd.as_path())
+        })
+        .collect();
+    if !ordinary && aliases.is_empty() {
+        return Err(missing());
+    }
+
+    let root =
+        rooted_fs::root_identity(&canonical_home).map_err(|error| io_error(error.to_string()))?;
+    let mut file = rooted_fs::open_read_file_pinned(&canonical_home, &relative, Some(&root))
+        .map_err(|error| io_error(error.to_string()))?;
+    rooted_fs::validate_open_file_single_link(&file)
+        .map_err(|error| io_error(error.to_string()))?;
+    let identity =
+        rooted_fs::opened_file_identity(&file).map_err(|error| io_error(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| io_error(error.to_string()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| io_error(error.to_string()))?;
+    let authority = TranscriptFileAuthority::from_capture(canonical_home, relative, root, identity)
+        .map_err(|error| io_error(error.to_string()))?;
+    after_read();
+    if authority
+        .read_checked()
+        .map_err(|error| io_error(error.to_string()))?
+        != bytes
+    {
+        return Err(io_error("session source changed during capture".into()));
+    }
+    let content = String::from_utf8(bytes).map_err(|error| io_error(error.to_string()))?;
+    let loaded = route_captured_session_source(source, session_id, &content)?;
+    if loaded.malformed_line_count != 0 {
+        return Err(io_error("session source contains malformed rows".into()));
+    }
+    let workspace = transcript_workspace_path(source, &loaded);
+    let in_ordinary_scope = ordinary
+        && (unfiltered
+            || scope == SessionDiscoveryScope::All
+            || transcript_matches_target_dirs(workspace.as_deref(), &dirs.target_cwds));
+    let in_alias_scope = aliases
+        .iter()
+        .any(|alias_cwd| cwd_alias_matches_source(source, alias_cwd, &content));
+    if !in_ordinary_scope && !in_alias_scope {
+        return Err(missing());
+    }
+    let empty_session = loaded.messages_in_order.is_empty()
+        && loaded
+            .mobile_empty_sessions
+            .contains(&session_id.to_string());
+    if empty_session
+        && crate::jsonl::validated_empty_draft_cwd(&content, &session_id.to_string()).is_none()
+    {
+        return Err(io_error("invalid empty session anchor".into()));
+    }
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let candidate = CatalogCandidate {
+        uuid: session_id,
+        path: source.to_path_buf(),
+        stem: source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(missing)?
+            .to_string(),
+        file_len: metadata.len(),
+        file_modified: modified,
+        file_created: metadata.created().unwrap_or(modified),
+    };
+    let current_is_sdk_entrypoint = matches!(
+        std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+        Ok("sdk-cli" | "sdk-ts" | "sdk-py")
+    );
+    let mut skipped = 0;
+    let row = enrich_candidate_from_content(
+        candidate,
+        content.clone(),
+        current_is_sdk_entrypoint,
+        &[],
+        &mut None,
+        &mut skipped,
+    )
+    .await?
+    .ok_or(LoaderError::EmptyDirectory)?;
+    if authority
+        .read_checked()
+        .map_err(|error| io_error(error.to_string()))?
+        != content.as_bytes()
+    {
+        return Err(io_error("session source changed during description".into()));
+    }
+    Ok(DescribedSessionSource {
+        metadata: row,
+        empty_session,
+    })
+}
+
 /// Resolve an exact UUID once, then enrich only that selected transcript. This
 /// keeps a launch hint and its source path on the same discovery decision.
 pub async fn find_session_exact_with_diagnostics(
@@ -2254,6 +2622,7 @@ pub async fn find_session_exact_raw_with_diagnostics(
         vec![candidate],
         &fs,
         current_is_sdk_entrypoint,
+        &[],
         &[],
         &[],
         &mut skipped_files,
@@ -2350,6 +2719,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
     let mut skipped_files = 0;
     let DiscoveryDirectories {
         project_dirs,
+        cwd_aliases,
         target_cwds,
         unfiltered_dirs,
         limited_dirs,
@@ -2374,6 +2744,11 @@ async fn list_recent_sessions_inner_with_diagnostics(
             tracing::debug!(path = %project_dir.display(), %error, "linked session directory unavailable");
         }
     }
+    let ordinary_paths: HashSet<PathBuf> = candidates
+        .iter()
+        .map(|candidate| candidate.path.clone())
+        .collect();
+    collect_cwd_aliases(&cwd_aliases, fs, &mut candidates, only_session).await;
 
     if let Some(session_id) = only_session {
         candidates.retain(|candidate| candidate.uuid == session_id);
@@ -2395,15 +2770,24 @@ async fn list_recent_sessions_inner_with_diagnostics(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
         Ok("sdk-cli" | "sdk-ts" | "sdk-py")
     );
+    let uncached_paths: Vec<PathBuf> = cwd_aliases
+        .iter()
+        .filter(|(path, _)| !ordinary_paths.contains(path))
+        .map(|(path, _)| path.clone())
+        .collect();
     let mut rows = enrich_candidates(
         candidates,
         fs,
         current_is_sdk_entrypoint,
         &target_cwds,
         &unfiltered_dirs,
+        &uncached_paths,
         &mut skipped_files,
     )
     .await?;
+    // A second read can overlap a later `/cd`. The final catalog row must
+    // still name the alias destination, not just the earlier preflight read.
+    retain_current_cwd_alias_rows(&mut rows, &ordinary_paths, &cwd_aliases);
     let had_rows = !rows.is_empty();
     if let Some(mode) = mode {
         rows.retain(|row| row.mode == mode);
@@ -3207,11 +3591,28 @@ async fn select_session_path_from_directories(
 ) -> Result<PathBuf, LoaderError> {
     let arg = session_id.to_string();
     let mut selected: Option<(PathBuf, SystemTime)> = None;
-    for directory in directories.project_dirs {
-        let candidate = directory.join(format!("{arg}.jsonl"));
+    let mut candidates: Vec<(PathBuf, Option<PathBuf>)> = directories
+        .project_dirs
+        .iter()
+        .map(|directory| (directory.join(format!("{arg}.jsonl")), None))
+        .collect();
+    for (path, cwd) in &directories.cwd_aliases {
+        if path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| Uuid::parse_str(stem).ok())
+            != Some(session_id)
+            || candidates.iter().any(|(candidate, _)| candidate == path)
+        {
+            continue;
+        }
+        candidates.push((path.clone(), Some(cwd.clone())));
+    }
+    for (candidate, alias_cwd) in candidates {
         let metadata = match tokio::fs::metadata(&candidate).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) if alias_cwd.is_some() => continue,
             Err(_) if require_unique_messages => continue,
             // An inaccessible local candidate has Native's "unknown" presence
             // and must not silently select an unrelated global transcript.
@@ -3224,6 +3625,17 @@ async fn select_session_path_from_directories(
         // unreadable local candidate is "unknown" and remains selectable;
         // global fallback accepts only a positive message marker.
         let content = tokio::fs::read(&candidate).await.ok();
+        if let Some(cwd) = &alias_cwd {
+            let Some(source) = content
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            else {
+                continue;
+            };
+            if !cwd_alias_matches_source(&candidate, cwd, source) {
+                continue;
+            }
+        }
         let has_messages = content.as_ref().is_some_and(|bytes| {
             [
                 b"\"type\":\"user\"".as_slice(),
@@ -3244,7 +3656,10 @@ async fn select_session_path_from_directories(
         let transcript_cwd = loaded
             .as_ref()
             .and_then(|loaded| transcript_cwd_from_path(&candidate, loaded));
-        if !directories.unfiltered_dirs.contains(&directory)
+        if alias_cwd.is_none()
+            && !candidate
+                .parent()
+                .is_some_and(|parent| directories.unfiltered_dirs.iter().any(|dir| dir == parent))
             && !transcript_matches_target_dirs(transcript_cwd.as_deref(), &directories.target_cwds)
         {
             continue;
@@ -6597,6 +7012,78 @@ mod tests {
         .await;
         assert!(matches!(full, Err(LoaderError::Io { .. })));
         assert!(matches!(found, Err(LoaderError::Io { .. })));
+    }
+
+    #[tokio::test]
+    async fn exact_source_description_rejects_same_bytes_replaced_during_capture() {
+        let (_temp, home, cwd, dir) = setup();
+        let id = write_session(&dir, &cwd, "selected", SystemTime::now(), false, None);
+        let source = dir.join(format!("{id}.jsonl"));
+        let replacement = dir.join("replacement");
+        let old = dir.join("old");
+        let bytes = std::fs::read(&source).unwrap();
+        std::fs::write(&replacement, &bytes).unwrap();
+        let target = source.clone();
+        let result = describe_session_source_inner(
+            &home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            &source,
+            id,
+            || {
+                std::fs::rename(&target, &old).unwrap();
+                std::fs::rename(&replacement, &target).unwrap();
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a new inode must not inherit the captured authority"
+        );
+        assert_eq!(std::fs::read(source).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn cwd_alias_rechecks_the_parsed_source_after_concurrent_relocation() {
+        let (temp, _, original_cwd, dir) = setup();
+        let target_b = temp.path().join("B");
+        let target_c = temp.path().join("C");
+        std::fs::create_dir_all(&target_b).unwrap();
+        std::fs::create_dir_all(&target_c).unwrap();
+        let id = write_session(&dir, &original_cwd, "test", SystemTime::now(), false, None);
+        let path = dir.join(format!("{id}.jsonl"));
+        let initial = std::fs::read_to_string(&path).unwrap();
+        let marker_b = json!({"type":"relocated", "sessionId":id, "relocatedCwd":target_b});
+        std::fs::write(&path, format!("{initial}{marker_b}\n")).unwrap();
+        let aliases = vec![(path.clone(), target_b.clone())];
+        let fs = make_fs(temp.path());
+        let mut candidates = Vec::new();
+        collect_cwd_aliases(&aliases, &fs, &mut candidates, None).await;
+        assert_eq!(candidates.len(), 1);
+
+        // Simulate /cd completing between candidate admission and parsing.
+        let captured = std::fs::read_to_string(&path).unwrap();
+        let marker_c = json!({"type":"relocated", "sessionId":id, "relocatedCwd":target_c});
+        std::fs::write(&path, format!("{captured}{marker_c}\n")).unwrap();
+        let mut skipped = 0;
+        let mut rows = enrich_candidates(
+            candidates,
+            &fs,
+            false,
+            &[target_b.to_string_lossy().into_owned()],
+            &[],
+            &[path],
+            &mut skipped,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].workspace_path.as_deref(), target_c.to_str());
+        retain_current_cwd_alias_rows(&mut rows, &HashSet::new(), &aliases);
+        assert!(
+            rows.is_empty(),
+            "an old B alias must not expose a session now in C"
+        );
     }
 
     #[tokio::test]

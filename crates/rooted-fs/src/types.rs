@@ -27,6 +27,12 @@ pub struct FileAppendError {
 pub trait FlockGuard: Send + Sync {
     /// The path the guard locks. Implementations may use this for diagnostics.
     fn path(&self) -> &str;
+
+    /// Verify that a pinned lock still names the inode held by this guard.
+    /// Virtual guards can keep their own serialization without path identity.
+    fn validate_current(&self) -> Result<(), FsError> {
+        Ok(())
+    }
 }
 
 /// Failure modes for the host `FileSystem` calls and the rooted primitives.

@@ -60,6 +60,12 @@ pub struct MobileConfig {
     /// Mount this existing conversation directly, or create a new one when absent.
     /// On resume `session_mode` must match the transcript's fixed mode.
     pub initial_session_id: Option<String>,
+    /// Exact transcript selected by the host, in the catalog's native or
+    /// mobile logical coordinates. Required together with `initial_session_id`.
+    pub initial_session_transcript_path: Option<std::path::PathBuf>,
+    /// A cron-only controller has no conversation transcript of its own.
+    /// Scheduled child sessions are admitted separately before creation.
+    pub scheduler_controller: bool,
     /// Optional host-owned model-invocable skill grants for this session.
     /// `None` offers every eligible skill; an empty list offers none.
     pub session_skill_allowlist: Option<Vec<String>>,
@@ -169,6 +175,11 @@ impl std::fmt::Debug for MobileConfig {
             .field("default_model", &self.default_model)
             .field("session_mode", &self.session_mode.as_str())
             .field("initial_session_id", &self.initial_session_id)
+            .field("scheduler_controller", &self.scheduler_controller)
+            .field(
+                "initial_session_transcript_path",
+                &self.initial_session_transcript_path,
+            )
             .field("session_skill_allowlist", &self.session_skill_allowlist)
             .field("workspace_trusted", &self.workspace_trusted)
             .field("inline_visualization", &self.inline_visualization)
@@ -255,6 +266,8 @@ impl Default for MobileConfig {
             default_model: crate::mobile::MobileEngineConfig::default().default_model,
             session_mode: session::jsonl::SessionMode::Code,
             initial_session_id: None,
+            initial_session_transcript_path: None,
+            scheduler_controller: false,
             session_skill_allowlist: None,
             workspace_trusted: false,
             inline_visualization: false,

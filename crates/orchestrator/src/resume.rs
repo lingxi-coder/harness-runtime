@@ -560,6 +560,7 @@ impl ReplayedSession {
         lingxi_core::host::ResumeRuntimeSnapshot {
             lifetime_guard: None,
             transcript_path: Some(self.transcript_path.clone()),
+            transcript_source: None,
             working_directory: self.working_directory.clone(),
             worktree_session: self.worktree_session.clone(),
             transcript_metadata: Some(self.transcript_metadata.clone()),

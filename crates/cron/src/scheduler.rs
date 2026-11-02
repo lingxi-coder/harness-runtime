@@ -2721,6 +2721,9 @@ mod scheduler_tick_tests {
     const NOW: u64 = 1_700_000_000;
     const TASKS_PATH: &str = "/proj/.lingxi/session-cron/scheduled_tasks.json";
     const AUTOMATION_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
+    const TEST_SESSION_ID: &str = "11111111-2222-4333-8444-555555555555";
+    const TEST_TRANSCRIPT_PATH: &str = "/project/11111111-2222-4333-8444-555555555555.jsonl";
+    const TEST_SESSION_SCOPE: &str = "scope-test";
     const OUTPUT_DIR: &str = "/proj/task-output";
 
     struct MemFs {
@@ -2807,6 +2810,39 @@ mod scheduler_tick_tests {
                 .entry(path.to_string())
                 .or_default()
                 .push_str(content);
+            Ok(())
+        }
+
+        async fn read_file_rooted_single_link_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+        ) -> Result<lingxi_core::host::rooted_fs::CheckedFileSnapshot, FsError> {
+            let path = lingxi_core::host::rooted_fs::checked_join(root, relative)?;
+            let content = match self.read_file(&path.to_string_lossy(), None, None).await {
+                Ok(file) => Some(file.content),
+                Err(FsError::NotFound(_)) => None,
+                Err(error) => return Err(error),
+            };
+            Ok(lingxi_core::host::rooted_fs::CheckedFileSnapshot::virtual_snapshot(content))
+        }
+
+        async fn append_or_sync_file_rooted_durable_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: &lingxi_core::host::rooted_fs::CheckedFileSnapshot,
+            append: Option<&str>,
+        ) -> Result<(), FsError> {
+            let path = lingxi_core::host::rooted_fs::checked_join(root, relative)?;
+            let path = path.to_string_lossy().to_string();
+            let mut files = self.files.lock().await;
+            if files.get(&path).map(String::as_str) != expected.content.as_deref() {
+                return Err(FsError::Io("ledger changed".into()));
+            }
+            if let Some(line) = append {
+                files.entry(path).or_default().push_str(line);
+            }
             Ok(())
         }
 
@@ -4482,6 +4518,9 @@ mod scheduler_tick_tests {
             self.fast_finished.notify_one();
             Ok(crate::AutomationRunResult {
                 session_id: "fast-session".into(),
+                session_transcript_path: None,
+                session_mode: None,
+                session_scope_key: None,
                 summary: "done".into(),
             })
         }
@@ -4593,7 +4632,8 @@ mod scheduler_tick_tests {
             AUTOMATION_PATH,
             &serde_json::json!({"tasks":[{
                 "id":"review-task", "cron":"* * * * *", "prompt":"run", "createdAt":(NOW-120)*1000,
-                "recurring":true, "automation":{"version":2,"model":"provider/model"}
+                "recurring":true, "automation":{"version":2,"model":"provider/model",
+                    "sessionMode":"code","sessionScopeKey":TEST_SESSION_SCOPE}
             }]})
             .to_string(),
         )
@@ -4631,11 +4671,17 @@ mod scheduler_tick_tests {
             .unwrap(),
             crate::AutomationFinishDisposition::Superseded,
         );
-        assert!(
-            crate::bind_automation_run_session(fs.as_ref(), root, &first, "stale-chat")
-                .await
-                .is_err()
-        );
+        assert!(crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &first,
+            TEST_SESSION_ID,
+            TEST_TRANSCRIPT_PATH,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .is_err());
         let retry = crate::claim_automation_run(fs.as_ref(), root, "review-task", now, None)
             .await
             .unwrap();
@@ -4653,11 +4699,17 @@ mod scheduler_tick_tests {
             .unwrap(),
             crate::AutomationFinishDisposition::Superseded,
         );
-        assert!(
-            crate::bind_automation_run_session(fs.as_ref(), root, &first, "stale-chat")
-                .await
-                .is_err()
-        );
+        assert!(crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &first,
+            TEST_SESSION_ID,
+            TEST_TRANSCRIPT_PATH,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .is_err());
         let mut doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
         doc.tasks[0].automation.as_mut().unwrap().runs[0].owner_pid =
             Some(std::process::id().wrapping_add(1));
@@ -4680,11 +4732,14 @@ mod scheduler_tick_tests {
             .unwrap(),
             crate::AutomationFinishDisposition::Superseded,
         );
-        assert!(crate::bind_automation_run_session(
+        assert!(crate::bind_automation_run_session_with_source(
             fs.as_ref(),
             root,
             &retry,
-            "wrong-process-chat"
+            TEST_SESSION_ID,
+            TEST_TRANSCRIPT_PATH,
+            "code",
+            Some(TEST_SESSION_SCOPE),
         )
         .await
         .is_err());
@@ -4776,10 +4831,17 @@ mod scheduler_tick_tests {
         )
         .await
         .unwrap();
-        let error =
-            crate::bind_automation_run_session(fs.as_ref(), root, &request, "never-started")
-                .await
-                .unwrap_err();
+        let error = crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            TEST_SESSION_ID,
+            TEST_TRANSCRIPT_PATH,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap_err();
         assert!(error.starts_with(crate::AUTOMATION_CANCELLED_PREFIX));
         let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
         let config = doc.tasks[0].automation.as_ref().unwrap();
@@ -4894,6 +4956,9 @@ mod scheduler_tick_tests {
                 &retry,
                 &Ok(crate::AutomationRunResult {
                     session_id: "chat".into(),
+                    session_transcript_path: None,
+                    session_mode: None,
+                    session_scope_key: None,
                     summary: "done".into()
                 }),
                 NOW * 1000
@@ -4960,6 +5025,9 @@ mod scheduler_tick_tests {
             self.fs.fail_writes.store(self.failures, Ordering::SeqCst);
             Ok(crate::AutomationRunResult {
                 session_id: "completed-chat".into(),
+                session_transcript_path: None,
+                session_mode: None,
+                session_scope_key: None,
                 summary: "actual result".into(),
             })
         }
@@ -5099,6 +5167,9 @@ mod scheduler_tick_tests {
                 &request,
                 &Ok(crate::AutomationRunResult {
                     session_id: "chat".into(),
+                    session_transcript_path: None,
+                    session_mode: None,
+                    session_scope_key: None,
                     summary: "old recurring result".into()
                 }),
                 NOW * 1000

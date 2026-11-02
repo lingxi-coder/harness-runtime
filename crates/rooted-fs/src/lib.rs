@@ -667,6 +667,29 @@ mod imp {
         root_identity_from_file(&directory, relative)
     }
 
+    pub(super) fn ensure_directory_identity_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: &RootIdentity,
+    ) -> Result<RootIdentity, FsError> {
+        let (parent, name) = open_parent_checked(root, relative, false, Some(expected))?;
+        let descriptor = private_security_descriptor()?;
+        let directory = nt_create_relative(
+            &parent,
+            &name,
+            relative,
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN_IF,
+            FILE_DIRECTORY_FILE,
+            FILE_ATTRIBUTE_DIRECTORY,
+            descriptor.0,
+        )?;
+        ensure_directory(&directory, relative)?;
+        sync_parent_pinned(root, relative, Some(expected))?;
+        root_identity_from_file(&directory, relative)
+    }
+
     pub(super) fn create_directory_new_pinned(
         root: &Path,
         relative: &Path,
@@ -1042,6 +1065,7 @@ mod imp {
         Ok(RootedFileLock {
             _file: file,
             path: root.join(relative).display().to_string(),
+            validation: None,
         })
     }
 
@@ -1431,11 +1455,12 @@ mod imp {
         root: &Path,
         relative: &Path,
         expected: Option<&RootIdentity>,
+        require_single_link: bool,
     ) -> Result<std::fs::File, FsError> {
         const FILE_APPEND_DATA: u32 = 0x0004;
         let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
         let descriptor = private_security_descriptor()?;
-        open_regular_with_security(
+        let file = open_regular_with_security(
             &parent,
             &file_name,
             relative,
@@ -1444,7 +1469,11 @@ mod imp {
             FILE_OPEN_IF,
             FILE_ATTRIBUTE_NORMAL,
             descriptor.0,
-        )
+        )?;
+        if require_single_link {
+            validate_open_file_single_link(&file)?;
+        }
+        Ok(file)
     }
 
     pub(super) fn read_to_string_pinned(
@@ -1832,10 +1861,14 @@ mod imp {
         )?;
         file.lock_exclusive()
             .map_err(|error| map_io(relative, error))?;
-        Ok(RootedFileLock {
+        let guard = RootedFileLock {
             _file: file,
             path: root.join(relative).display().to_string(),
-        })
+            validation: expected
+                .map(|identity| (root.to_path_buf(), relative.to_path_buf(), *identity)),
+        };
+        guard.validate_current()?;
+        Ok(guard)
     }
 
     pub(super) fn try_lock_exclusive(
@@ -1864,6 +1897,7 @@ mod imp {
         Ok(RootedFileLock {
             _file: file,
             path: root.join(relative).display().to_string(),
+            validation: None,
         })
     }
 
@@ -1949,6 +1983,7 @@ impl Default for AtomicWriteOptions {
 pub struct RootedFileLock {
     _file: std::fs::File,
     path: String,
+    validation: Option<(PathBuf, PathBuf, RootIdentity)>,
 }
 
 impl RootedFileLock {
@@ -1974,6 +2009,19 @@ impl RootedFileLock {
 impl FlockGuard for RootedFileLock {
     fn path(&self) -> &str {
         &self.path
+    }
+
+    fn validate_current(&self) -> Result<(), FsError> {
+        let Some((root, relative, expected)) = &self.validation else {
+            return Ok(());
+        };
+        validate_open_file_single_link(&self._file)?;
+        let current = imp::open_read_file_pinned(root, relative, Some(expected))?;
+        validate_open_file_single_link(&current)?;
+        if opened_file_identity(&current)? != opened_file_identity(&self._file)? {
+            return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+        }
+        Ok(())
     }
 }
 
@@ -2049,6 +2097,16 @@ pub fn ensure_private_directory(
     dir_mode: u32,
 ) -> Result<RootIdentity, FsError> {
     imp::ensure_private_directory(root, relative, dir_mode)
+}
+
+/// Create or open one directory beneath an unchanged root without following
+/// links or changing permissions on an existing directory.
+pub fn ensure_directory_identity_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: &RootIdentity,
+) -> Result<RootIdentity, FsError> {
+    imp::ensure_directory_identity_pinned(root, relative, expected)
 }
 
 /// Acquire an exclusive lock without following any component below `root`.
@@ -2198,7 +2256,7 @@ pub fn open_append_file_pinned(
     relative: &Path,
     expected: Option<&RootIdentity>,
 ) -> Result<std::fs::File, FsError> {
-    imp::open_append_file_pinned(root, relative, expected)
+    imp::open_append_file_pinned(root, relative, expected, false)
 }
 
 /// Open an existing regular file for read/write through a pinned root.
@@ -2242,7 +2300,9 @@ pub fn validate_open_file_single_link(file: &std::fs::File) -> Result<(), FsErro
 /// before a durable recipient journal may acknowledge the appended row.
 pub fn append_file_durable(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
     let pin = root_identity(root)?;
-    let mut file = open_append_file_pinned(root, relative, Some(&pin))?;
+    // Validate on the very handle used to write, before even changing its
+    // permissions. A pathname check would permit a hard-link swap afterward.
+    let mut file = imp::open_append_file_pinned(root, relative, Some(&pin), true)?;
     file.write_all(content.as_bytes())
         .map_err(|error| map_io(relative, error))?;
     file.flush().map_err(|error| map_io(relative, error))?;
@@ -2256,6 +2316,171 @@ pub fn sync_file_no_follow(root: &Path, relative: &Path) -> Result<(), FsError> 
     let file = imp::open_recovery_file(root, relative, &pin)?;
     file.sync_all().map_err(|error| map_io(relative, error))?;
     sync_parent_pinned(root, relative, Some(&pin))
+}
+
+const CHECKED_LEDGER_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Content and root/file identity captured together from a checked ledger.
+#[derive(Debug, Clone)]
+pub struct CheckedFileSnapshot {
+    /// None means the leaf was absent under the captured root.
+    pub content: Option<String>,
+    root: Option<RootIdentity>,
+    file: Option<RootIdentity>,
+}
+
+impl CheckedFileSnapshot {
+    /// Construct a snapshot for a virtual filesystem that supplies its own
+    /// conditional-write implementation. Native implementations reject it.
+    pub fn virtual_snapshot(content: Option<String>) -> Self {
+        Self {
+            content,
+            root: None,
+            file: None,
+        }
+    }
+
+    /// Compare the snapshot's captured root with the scheduler lock's root.
+    pub fn matches_root(&self, expected: Option<&RootIdentity>) -> bool {
+        self.root.as_ref() == expected
+    }
+}
+
+fn read_checked_ledger(file: &mut std::fs::File, relative: &Path) -> Result<String, FsError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| map_io(relative, error))?;
+    let mut bytes = Vec::new();
+    (&mut *file)
+        .take(CHECKED_LEDGER_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| map_io(relative, error))?;
+    if bytes.len() as u64 > CHECKED_LEDGER_MAX_BYTES {
+        return Err(FsError::TooLarge {
+            actual: bytes.len() as u64,
+            limit: CHECKED_LEDGER_MAX_BYTES,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| FsError::BinaryFile(relative.display().to_string()))
+}
+
+fn verify_checked_ledger_current(
+    root: &Path,
+    relative: &Path,
+    root_pin: &RootIdentity,
+    file: &std::fs::File,
+) -> Result<(), FsError> {
+    validate_open_file_single_link(file)?;
+    // Reopening is only an identity check; all data reads and writes use the
+    // original descriptor. The recovery open is no-follow and nonblocking.
+    let current = imp::open_recovery_file(root, relative, root_pin)?;
+    validate_open_file_single_link(&current)?;
+    if opened_file_identity(&current)? != opened_file_identity(file)? {
+        return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+    }
+    Ok(())
+}
+
+/// Read an owner ledger through a nonblocking, no-follow, single-link handle.
+pub fn read_file_single_link_checked(
+    root: &Path,
+    relative: &Path,
+) -> Result<CheckedFileSnapshot, FsError> {
+    let root_pin = root_identity(root)?;
+    let mut file = match imp::open_recovery_file(root, relative, &root_pin) {
+        Ok(file) => file,
+        Err(FsError::NotFound(_)) => {
+            if root_identity(root)? != root_pin {
+                return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+            }
+            return Ok(CheckedFileSnapshot {
+                content: None,
+                root: Some(root_pin),
+                file: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    validate_open_file_single_link(&file)?;
+    let content = read_checked_ledger(&mut file, relative)?;
+    verify_checked_ledger_current(root, relative, &root_pin, &file)?;
+    Ok(CheckedFileSnapshot {
+        content: Some(content),
+        root: Some(root_pin),
+        file: Some(opened_file_identity(&file)?),
+    })
+}
+
+/// Compare the complete ledger and append or synchronize through one descriptor.
+/// The caller serializes cooperating writers; a changed file or path fails closed.
+pub fn append_or_sync_file_durable_checked(
+    root: &Path,
+    relative: &Path,
+    expected: &CheckedFileSnapshot,
+    append: Option<&str>,
+) -> Result<(), FsError> {
+    if expected.content.is_none() && append.is_none() {
+        return Err(FsError::Io("cannot sync an absent ledger".into()));
+    }
+    let root_pin = root_identity(root)?;
+    let expected_root = expected
+        .root
+        .as_ref()
+        .ok_or_else(|| FsError::Io("native ledger requires a rooted snapshot".into()))?;
+    if expected_root != &root_pin {
+        return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+    }
+    let mut file = if expected.content.is_some() {
+        let expected_file = expected
+            .file
+            .as_ref()
+            .ok_or_else(|| FsError::Io("native ledger requires a file snapshot".into()))?;
+        let opened = imp::open_recovery_file(root, relative, &root_pin)?;
+        if &opened_file_identity(&opened)? != expected_file {
+            return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+        }
+        opened
+    } else {
+        // Exclusive create cannot overwrite an entry that appeared after the
+        // caller observed an absent ledger. Pin that new inode when reopening
+        // it read/write so the same handle can compare and append.
+        let created = imp::open_create_new_file_pinned(root, relative, Some(&root_pin))?;
+        validate_open_file_single_link(&created)?;
+        let opened = imp::open_recovery_file(root, relative, &root_pin)?;
+        if opened_file_identity(&created)? != opened_file_identity(&opened)? {
+            return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+        }
+        opened
+    };
+    validate_open_file_single_link(&file)?;
+    let before = read_checked_ledger(&mut file, relative)?;
+    if before != expected.content.as_deref().unwrap_or_default() {
+        return Err(FsError::Io(
+            "owner ledger changed during transaction".into(),
+        ));
+    }
+    if let Some(line) = append {
+        if (before.len() as u64).saturating_add(line.len() as u64) > CHECKED_LEDGER_MAX_BYTES {
+            return Err(FsError::TooLarge {
+                actual: (before.len() as u64).saturating_add(line.len() as u64),
+                limit: CHECKED_LEDGER_MAX_BYTES,
+            });
+        }
+        file.seek(SeekFrom::End(0))
+            .map_err(|error| map_io(relative, error))?;
+        file.write_all(line.as_bytes())
+            .map_err(|error| map_io(relative, error))?;
+        file.flush().map_err(|error| map_io(relative, error))?;
+        let after = read_checked_ledger(&mut file, relative)?;
+        if after.len() != before.len() + line.len()
+            || !after.starts_with(&before)
+            || &after[before.len()..] != line
+        {
+            return Err(FsError::Io("owner ledger changed during append".into()));
+        }
+    }
+    file.sync_all().map_err(|error| map_io(relative, error))?;
+    sync_parent_pinned(root, relative, Some(&root_pin))?;
+    verify_checked_ledger_current(root, relative, &root_pin, &file)
 }
 
 /// Append while distinguishing an unopened target from an uncertain write.
@@ -2676,6 +2901,31 @@ mod imp {
         identity_from_fd(&directory, relative)
     }
 
+    pub(super) fn ensure_directory_identity_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: &RootIdentity,
+    ) -> Result<RootIdentity, FsError> {
+        let (parent, name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, Some(expected))?;
+        let created = match fs::mkdirat(&parent, &name, mode(PRIVATE_DIR_MODE, relative)?) {
+            Ok(()) => true,
+            Err(error) if error == rustix::io::Errno::EXIST => false,
+            Err(error) => return Err(map_unix_io(relative, error)),
+        };
+        let directory = fs::openat(
+            &parent,
+            &name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        if created {
+            fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))?;
+        }
+        identity_from_fd(&directory, relative)
+    }
+
     pub(super) fn create_directory_new_pinned(
         root: &Path,
         relative: &Path,
@@ -2900,6 +3150,7 @@ mod imp {
         Ok(RootedFileLock {
             _file: file,
             path: root.join(relative).display().to_string(),
+            validation: None,
         })
     }
 
@@ -2908,7 +3159,7 @@ mod imp {
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|error| map_unix_io(relative, error))?;
@@ -2929,7 +3180,7 @@ mod imp {
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|error| map_unix_io(relative, error))?;
@@ -3137,6 +3388,7 @@ mod imp {
         root: &Path,
         relative: &Path,
         expected: Option<&RootIdentity>,
+        require_single_link: bool,
     ) -> Result<std::fs::File, FsError> {
         let (parent, file_name) =
             open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
@@ -3148,9 +3400,13 @@ mod imp {
         )
         .map_err(|error| map_unix_io(relative, error))?;
         ensure_opened_regular(&fd, relative)?;
-        fs::fchmod(&fd, mode(PRIVATE_FILE_MODE, relative)?)
+        let file = std::fs::File::from(fd);
+        if require_single_link {
+            validate_open_file_single_link(&file)?;
+        }
+        fs::fchmod(&file, mode(PRIVATE_FILE_MODE, relative)?)
             .map_err(|error| map_unix_io(relative, error))?;
-        Ok(std::fs::File::from(fd))
+        Ok(file)
     }
 
     pub(super) fn read_to_string_pinned(
@@ -3656,10 +3912,14 @@ mod imp {
         let file = std::fs::File::from(fd);
         file.lock_exclusive()
             .map_err(|error| map_io(relative, error))?;
-        Ok(RootedFileLock {
+        let guard = RootedFileLock {
             _file: file,
             path: root.join(relative).display().to_string(),
-        })
+            validation: expected
+                .map(|identity| (root.to_path_buf(), relative.to_path_buf(), *identity)),
+        };
+        guard.validate_current()?;
+        Ok(guard)
     }
 
     pub(super) fn try_lock_exclusive(
@@ -3688,6 +3948,7 @@ mod imp {
         Ok(RootedFileLock {
             _file: file,
             path: root.join(relative).display().to_string(),
+            validation: None,
         })
     }
 
@@ -3701,7 +3962,7 @@ mod imp {
         let fd = fs::openat(
             &parent,
             &file_name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|error| map_unix_io(relative, error))?;
@@ -3773,6 +4034,14 @@ mod imp {
         _root: &Path,
         _relative: &Path,
         _dir_mode: u32,
+    ) -> Result<RootIdentity, FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn ensure_directory_identity_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: &RootIdentity,
     ) -> Result<RootIdentity, FsError> {
         Err(unsupported())
     }
@@ -3942,6 +4211,7 @@ mod imp {
         _root: &Path,
         _relative: &Path,
         _expected: Option<&RootIdentity>,
+        _require_single_link: bool,
     ) -> Result<std::fs::File, FsError> {
         Err(unsupported())
     }
@@ -4030,6 +4300,91 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn durable_append_rejects_hard_link_without_changing_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("business-data");
+        let ledger = directory.path().join("ledger.jsonl");
+        std::fs::write(&target, "preserve me\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::hard_link(&target, &ledger).unwrap();
+        let before = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert!(append_file_durable(directory.path(), Path::new("ledger.jsonl"), "bad\n").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserve me\n");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            before
+        );
+    }
+
+    #[test]
+    fn checked_ledger_requires_the_captured_file_even_when_replacement_bytes_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let relative = Path::new("owners.jsonl");
+        let missing = read_file_single_link_checked(dir.path(), relative).unwrap();
+        assert!(missing.content.is_none());
+        append_or_sync_file_durable_checked(dir.path(), relative, &missing, Some("owner\n"))
+            .unwrap();
+        let snapshot = read_file_single_link_checked(dir.path(), relative).unwrap();
+        append_or_sync_file_durable_checked(dir.path(), relative, &snapshot, None).unwrap();
+        std::fs::rename(dir.path().join(relative), dir.path().join("old")).unwrap();
+        std::fs::write(dir.path().join(relative), "owner\n").unwrap();
+        assert!(append_or_sync_file_durable_checked(
+            dir.path(),
+            relative,
+            &snapshot,
+            Some("other\n")
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join(relative)).unwrap(),
+            b"owner\n"
+        );
+        assert_eq!(std::fs::read(dir.path().join("old")).unwrap(), b"owner\n");
+    }
+
+    #[test]
+    fn checked_ledger_missing_snapshot_cannot_create_in_replaced_root() {
+        let container = tempfile::tempdir().unwrap();
+        let root = container.path().join("scope");
+        std::fs::create_dir(&root).unwrap();
+        let leaf = Path::new("owners.jsonl");
+        let missing = read_file_single_link_checked(&root, leaf).unwrap();
+        assert!(missing.content.is_none());
+        std::fs::rename(&root, container.path().join("previous")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(
+            append_or_sync_file_durable_checked(&root, leaf, &missing, Some("owner\n")).is_err()
+        );
+        assert!(!root.join(leaf).exists());
+        assert!(!container.path().join("previous").join(leaf).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_ledger_rejects_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("owners.jsonl");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = read_file_single_link_checked(&root, Path::new("owners.jsonl"));
+            let transcript = open_read_file_pinned(&root, Path::new("owners.jsonl"), None);
+            tx.send(result.is_err() && transcript.is_err()).unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
+            true
+        );
+    }
+
     #[test]
     fn new_directory_handle_refuses_existing_entries_and_wrong_root() {
         let root = tempfile::tempdir().unwrap();

@@ -1360,7 +1360,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ("command/start_realtime_audio.json", ClientCommand::StartRealtimeAudio {request_json:r#"{"operationId":"audio-1"}"#.into()}),
         ("command/realtime_audio_input.json", ClientCommand::RealtimeAudioInput {input_json:r#"{"type":"commit_input"}"#.into()}),
         ("command/stop_realtime_audio.json", ClientCommand::StopRealtimeAudio),
-        ("command/cron_run_started.json", ClientCommand::CronRunStarted {run_id: "run-1".into(), session_id: "session-1".into()}),
+        ("command/cron_run_started.json", ClientCommand::CronRunStarted {run_id: "run-1".into(), session_id: "session-1".into(), transcript_path: "/project/session.jsonl".into(), session_mode: "code".into(), session_scope_key: Some("scope-1".into())}),
         ("command/cron_run_completed.json", ClientCommand::CronRunCompleted {run_id: "run-1".into(), session_id: Some("session-1".into()), summary: Some("Completed".into()), error: None}),
         ("command/scheduled_run_turn.json", ClientCommand::ScheduledRunTurn {run_id: "run-1".into(), prompt: "Daily brief".into(), model: "openai/model".into(), reasoning: ReasoningSelectionDto::Automatic}),
         ("command/task_message.json", ClientCommand::TaskMessage { task_id: "a12345678".into(), message: "Please continue the review.".into() }),

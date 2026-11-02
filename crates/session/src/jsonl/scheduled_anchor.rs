@@ -80,6 +80,51 @@ pub fn is_mode_only_draft(source: &str, session_id: &str) -> bool {
     valid_rows && saw_row
 }
 
+/// Validate the complete empty-draft timeline, including the latest anchor and
+/// any later relocations, before using its final cwd as workspace authority.
+pub fn validated_empty_draft_cwd(source: &str, session_id: &str) -> Option<std::path::PathBuf> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    if !is_mode_only_draft(source, session_id) {
+        return None;
+    }
+    let mut cwd: Option<String> = None;
+    let mut anchored = false;
+    for line in source.lines().filter(|line| !line.trim().is_empty()) {
+        let row = Utf16JsonProjection::parse(line).ok()?;
+        if row.contains_property("cwd") {
+            let value = row
+                .string_at("/cwd")
+                .filter(|value| std::path::Path::new(value).is_absolute())?;
+            if cwd.as_deref().is_some_and(|previous| previous != value) {
+                return None;
+            }
+            cwd = Some(value.to_owned());
+        }
+        if row.contains_property("mobileEmptySession") {
+            if row.string_at("/type") != Some("custom-title")
+                || row.string_at("/customTitle").is_none()
+                || row.number_at("/mobileEmptySession") != Some(1.0)
+                || !row
+                    .string_at("/cwd")
+                    .is_some_and(|value| std::path::Path::new(value).is_absolute())
+            {
+                return None;
+            }
+            anchored = true;
+        } else if row.string_at("/type") == Some("custom-title") {
+            anchored = false;
+        }
+        if row.string_at("/type") == Some("relocated") {
+            let value = row
+                .string_at("/relocatedCwd")
+                .filter(|value| std::path::Path::new(value).is_absolute())?;
+            cwd = Some(value.to_owned());
+        }
+    }
+    anchored.then_some(cwd?).map(std::path::PathBuf::from)
+}
+
 /// Only recognize the known, typed metadata records emitted for a draft.
 fn is_draft_metadata_row(row: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
     let text = |pointer: &str| row.string_at(pointer).is_some();
@@ -199,7 +244,8 @@ pub(crate) fn ensure_anchor_at(
     cwd: &std::path::Path,
     session_id: lingxi_core::types::SessionId,
     mode: lingxi_core::host::session_context::ConversationMode,
-) -> Result<bool, super::TranscriptWriterError> {
+    authority: Option<&super::writer::TranscriptFileAuthority>,
+) -> Result<(bool, super::writer::TranscriptFileAuthority), super::TranscriptWriterError> {
     use lingxi_core::host::rooted_fs::{
         open_existing_file_for_update_pinned, open_read_file_pinned, opened_file_identity,
         root_identity, sync_parent_pinned, validate_open_file_single_link,
@@ -224,15 +270,29 @@ pub(crate) fn ensure_anchor_at(
     {
         return Err(invalid("scheduled transcript does not belong to its session").into());
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("scheduled transcript has no parent"))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| invalid("scheduled transcript has no filename"))?;
-    let relative = std::path::Path::new(name);
-    let root = root_identity(parent)?;
-    let mut file = open_existing_file_for_update_pinned(parent, relative, &root)?;
+    let (parent, relative, root, mut file) = if let Some(authority) = authority {
+        if authority.path() != path {
+            return Err(invalid("scheduled transcript authority changed target").into());
+        }
+        (
+            authority.root.clone(),
+            authority.relative.clone(),
+            authority.root_identity,
+            authority.open_checked()?,
+        )
+    } else {
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid("scheduled transcript has no parent"))?
+            .to_path_buf();
+        let relative = path
+            .file_name()
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| invalid("scheduled transcript has no filename"))?;
+        let root = root_identity(&parent)?;
+        let file = open_existing_file_for_update_pinned(&parent, &relative, &root)?;
+        (parent, relative, root, file)
+    };
     validate_open_file_single_link(&file)?;
     let identity = opened_file_identity(&file)?;
     let mut source = String::new();
@@ -342,7 +402,7 @@ pub(crate) fn ensure_anchor_at(
     let sync = file
         .sync_all()
         .map_err(|error| invalid(&error.to_string()))
-        .and_then(|()| sync_parent_pinned(parent, relative, Some(&root)));
+        .and_then(|()| sync_parent_pinned(&parent, &relative, Some(&root)));
     if let Err(error) = sync {
         return if added {
             Err(super::TranscriptWriterError::WrittenButNotDurable(error))
@@ -350,10 +410,12 @@ pub(crate) fn ensure_anchor_at(
             Err(error.into())
         };
     }
-    let current = open_read_file_pinned(parent, relative, Some(&root))?;
+    let current = open_read_file_pinned(&parent, &relative, Some(&root))?;
     if opened_file_identity(&current)? != identity || validate_open_file_single_link(&file).is_err()
     {
         return Err(invalid("scheduled transcript changed during anchor creation").into());
     }
-    Ok(added)
+    let authority =
+        super::writer::TranscriptFileAuthority::from_capture(parent, relative, root, identity)?;
+    Ok((added, authority))
 }

@@ -580,6 +580,9 @@ pub struct DesktopConfig {
     /// Canonical transcript selected by cold resume, or the new fork target.
     /// The writer must append to the same file that supplied resumed history.
     pub session_transcript_path: Option<std::path::PathBuf>,
+    /// Physical target captured after its first no-follow open. Existing
+    /// persistent resumes retain this authority through writer bootstrap.
+    pub session_transcript_authority: Option<session::jsonl::writer::TranscriptFileAuthority>,
     /// Bridge boot should restore an existing, metadata-only draft for this
     /// session ID after claiming its writer lease.
     pub restore_draft: bool,
@@ -1117,6 +1120,10 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("session_id_override", &self.session_id_override)
             .field("session_transcript_path", &self.session_transcript_path)
+            .field(
+                "session_transcript_authority",
+                &self.session_transcript_authority,
+            )
             .field("restore_draft", &self.restore_draft)
             .field("scheduled_durable_anchor", &self.scheduled_durable_anchor)
             .field(
@@ -1286,6 +1293,7 @@ impl Default for DesktopConfig {
             session_id_override: None,
             session_writer_lease: None,
             session_transcript_path: None,
+            session_transcript_authority: None,
             restore_draft: false,
             scheduled_durable_anchor: false,
             initial_prompt_directories: Vec::new(),
