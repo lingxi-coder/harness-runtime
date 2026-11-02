@@ -26,6 +26,26 @@ use std::time::SystemTime;
 
 pub use types::{FileAppendError, FileAppendStage, FlockGuard, FsError};
 
+/// Failure of a checked atomic replacement. Once `published` is true the
+/// destination may already contain the replacement and must not be retried as
+/// if no side effect occurred.
+#[derive(Debug, thiserror::Error)]
+#[error("atomic publish failed (published={published}): {error}")]
+pub struct AtomicPublishError {
+    pub published: bool,
+    #[source]
+    pub error: FsError,
+}
+
+impl From<FsError> for AtomicPublishError {
+    fn from(error: FsError) -> Self {
+        Self {
+            published: false,
+            error,
+        }
+    }
+}
+
 fn read_opened_to_string_limited(
     file: std::fs::File,
     relative: &Path,
@@ -120,6 +140,31 @@ where
     F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
 {
     imp::atomic_write_stream_pinned(root, relative, options, expected, write_body)
+}
+
+/// Stage and sync a replacement, then run a source guard immediately before
+/// publication. On failure the original destination remains untouched. The
+/// guard closes staging-time changes; it is not an OS-level compare-and-swap.
+pub fn atomic_write_stream_pinned_checked<F, G>(
+    root: &Path,
+    relative: &Path,
+    options: AtomicWriteOptions,
+    expected: &RootIdentity,
+    write_body: F,
+    before_publish: G,
+) -> Result<(), AtomicPublishError>
+where
+    F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+    G: FnOnce() -> Result<(), FsError>,
+{
+    imp::atomic_write_stream_pinned_checked(
+        root,
+        relative,
+        options,
+        expected,
+        write_body,
+        before_publish,
+    )
 }
 
 fn read_opened_tail_bytes(
@@ -1526,25 +1571,29 @@ mod imp {
         result
     }
 
-    fn atomic_write_stream_inner<F>(
+    fn atomic_write_stream_inner<F, G>(
         root: &Path,
         relative: &Path,
         options: AtomicWriteOptions,
         expected: &RootIdentity,
         write_body: F,
-    ) -> Result<(), FsError>
+        before_publish: G,
+    ) -> Result<(), AtomicPublishError>
     where
         F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+        G: FnOnce() -> Result<(), FsError>,
     {
         let (parent, file_name) =
             open_parent_checked(root, relative, options.create_parents, Some(expected))?;
         validate_optional_regular(&parent, &file_name, relative)?;
         let mut temp = create_temp(&parent, &file_name, relative)?;
-        let result = (|| {
+        let result: Result<(), AtomicPublishError> = (|| {
             write_body(&mut temp)?;
             temp.sync_all().map_err(|error| map_io(relative, error))?;
+            before_publish()?;
             validate_optional_regular(&parent, &file_name, relative)?;
-            rename_relative(&temp, &parent, &file_name, relative, options.overwrite)
+            rename_relative(&temp, &parent, &file_name, relative, options.overwrite)?;
+            Ok(())
         })();
         if result.is_err() {
             let _ = mark_delete(&temp, relative);
@@ -1588,7 +1637,30 @@ mod imp {
     where
         F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
     {
-        atomic_write_stream_inner(root, relative, options, expected, write_body)
+        atomic_write_stream_inner(root, relative, options, expected, write_body, || Ok(()))
+            .map_err(|error| error.error)
+    }
+
+    pub(super) fn atomic_write_stream_pinned_checked<F, G>(
+        root: &Path,
+        relative: &Path,
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+        write_body: F,
+        before_publish: G,
+    ) -> Result<(), AtomicPublishError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+        G: FnOnce() -> Result<(), FsError>,
+    {
+        atomic_write_stream_inner(
+            root,
+            relative,
+            options,
+            expected,
+            write_body,
+            before_publish,
+        )
     }
 
     pub(super) fn atomic_write(
@@ -3483,7 +3555,61 @@ mod imp {
     where
         F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
     {
-        atomic_write_stream_checked(root, relative, options, expected, write_body)
+        atomic_write_stream_checked(
+            root,
+            relative,
+            options,
+            expected,
+            write_body,
+            || Ok(()),
+            false,
+        )
+        .map_err(|error| error.error)
+    }
+
+    pub(super) fn atomic_write_stream_pinned_checked<F, G>(
+        root: &Path,
+        relative: &Path,
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+        write_body: F,
+        before_publish: G,
+    ) -> Result<(), AtomicPublishError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+        G: FnOnce() -> Result<(), FsError>,
+    {
+        atomic_write_stream_checked(
+            root,
+            relative,
+            options,
+            expected,
+            write_body,
+            before_publish,
+            false,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn atomic_write_stream_fail_parent_sync_for_test<F>(
+        root: &Path,
+        relative: &Path,
+        options: AtomicWriteOptions,
+        expected: &RootIdentity,
+        write_body: F,
+    ) -> Result<(), AtomicPublishError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+    {
+        atomic_write_stream_checked(
+            root,
+            relative,
+            options,
+            expected,
+            write_body,
+            || Ok(()),
+            true,
+        )
     }
     /// Move a fully written temporary file to `file_name` without replacing an
     /// existing entry.
@@ -3595,15 +3721,18 @@ mod imp {
         result
     }
 
-    fn atomic_write_stream_checked<F>(
+    fn atomic_write_stream_checked<F, G>(
         root: &Path,
         relative: &Path,
         options: AtomicWriteOptions,
         expected: &RootIdentity,
         write_body: F,
-    ) -> Result<(), FsError>
+        before_publish: G,
+        fail_parent_sync: bool,
+    ) -> Result<(), AtomicPublishError>
     where
         F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+        G: FnOnce() -> Result<(), FsError>,
     {
         let (parent, file_name) = open_parent_checked(
             root,
@@ -3622,9 +3751,29 @@ mod imp {
         )
         .map_err(|error| map_unix_io(relative, error))?;
         let mut temp = std::fs::File::from(temp_fd);
-        let result = (|| {
+        let temp_identity = opened_file_identity(&temp)?;
+        let verify_temp = || -> Result<(), FsError> {
+            let stat = fs::statat(&parent, &temp_name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|error| map_unix_io(relative, error))?;
+            let current = RootIdentity {
+                volume: u64::try_from(stat.st_dev)
+                    .map_err(|_| FsError::Io("invalid temp device".into()))?,
+                file: u64::try_from(stat.st_ino)
+                    .map_err(|_| FsError::Io("invalid temp inode".into()))?,
+            };
+            if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
+                || stat.st_nlink != 1
+                || current != temp_identity
+            {
+                return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+            }
+            Ok(())
+        };
+        let result: Result<(), AtomicPublishError> = (|| {
             write_body(&mut temp)?;
             temp.sync_all().map_err(|error| map_io(relative, error))?;
+            before_publish()?;
+            verify_temp()?;
             validate_optional_regular(&parent, &file_name, relative)?;
             if options.overwrite {
                 fs::renameat(&parent, &temp_name, &parent, &file_name)
@@ -3632,10 +3781,19 @@ mod imp {
             } else {
                 publish_without_replace(&parent, &temp_name, &file_name, relative)?;
             }
-            fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))?;
+            if fail_parent_sync {
+                return Err(AtomicPublishError {
+                    published: true,
+                    error: FsError::Io("injected parent sync failure".into()),
+                });
+            }
+            fs::fsync(&parent).map_err(|error| AtomicPublishError {
+                published: true,
+                error: map_unix_io(relative, error),
+            })?;
             Ok(())
         })();
-        if result.is_err() {
+        if result.is_err() && verify_temp().is_ok() {
             let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
         }
         result
@@ -4152,6 +4310,21 @@ mod imp {
         F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
     {
         Err(unsupported())
+    }
+
+    pub(super) fn atomic_write_stream_pinned_checked<F, G>(
+        _root: &Path,
+        _relative: &Path,
+        _options: AtomicWriteOptions,
+        _expected: &RootIdentity,
+        _write_body: F,
+        _before_publish: G,
+    ) -> Result<(), AtomicPublishError>
+    where
+        F: FnOnce(&mut std::fs::File) -> Result<(), FsError>,
+        G: FnOnce() -> Result<(), FsError>,
+    {
+        Err(unsupported().into())
     }
     pub(super) fn atomic_write(
         _root: &Path,
@@ -5257,6 +5430,79 @@ mod tests {
         assert_eq!(
             read_to_string(root.path(), relative).unwrap(),
             "new streamed transcript"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_stream_rejects_replaced_staging_entry_without_touching_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = Path::new("source.jsonl");
+        let target = root.path().join(relative);
+        std::fs::write(&target, b"original").unwrap();
+        let identity = root_identity(root.path()).unwrap();
+        let mut replaced_temp = None;
+        let result = atomic_write_stream_pinned_checked(
+            root.path(),
+            relative,
+            AtomicWriteOptions::default(),
+            &identity,
+            |file| {
+                file.write_all(b"staged")
+                    .map_err(|error| FsError::Io(error.to_string()))
+            },
+            || {
+                let temporary = std::fs::read_dir(root.path())
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".source.jsonl.tmp-")
+                    })
+                    .unwrap();
+                std::fs::rename(&temporary, root.path().join("detached-stage")).unwrap();
+                std::fs::write(&temporary, b"foreign-stage").unwrap();
+                replaced_temp = Some(temporary);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert_eq!(
+            std::fs::read(replaced_temp.unwrap()).unwrap(),
+            b"foreign-stage"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("detached-stage")).unwrap(),
+            b"staged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_stream_reports_uncertain_after_publish_sync_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = Path::new("source.jsonl");
+        std::fs::write(root.path().join(relative), b"original").unwrap();
+        let identity = root_identity(root.path()).unwrap();
+        let error = imp::atomic_write_stream_fail_parent_sync_for_test(
+            root.path(),
+            relative,
+            AtomicWriteOptions::default(),
+            &identity,
+            |file| {
+                file.write_all(b"published")
+                    .map_err(|error| FsError::Io(error.to_string()))
+            },
+        )
+        .unwrap_err();
+        assert!(error.published);
+        assert_eq!(
+            std::fs::read(root.path().join(relative)).unwrap(),
+            b"published"
         );
     }
 

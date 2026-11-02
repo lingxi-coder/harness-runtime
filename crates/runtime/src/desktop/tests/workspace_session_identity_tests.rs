@@ -1106,6 +1106,60 @@ async fn cold_worktree_restore_keeps_extra_grants_and_ephemeral_restore_never_wr
     assert_eq!(std::fs::read_to_string(path).unwrap(), content);
 }
 #[tokio::test]
+async fn fresh_desktop_prompt_publishes_writer_authority_for_capture_and_fork() {
+    use lingxi_core::host::session_context::ConversationMode;
+    use lingxi_core::host::OrchestratorHandle;
+
+    let (_root, mut cfg) = super::tests::test_config(true);
+    let id = lingxi_core::types::SessionId::new();
+    cfg.session_id_override = Some(id.as_uuid().to_string());
+    cfg.initial_conversation_mode = Some(ConversationMode::Code);
+    cfg.enable_automation_scheduler = false;
+    cfg.isolated_credential_storage = true;
+    let runtime = Box::pin(super::build(
+        cfg,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(ScheduledAnchorPermissionSink),
+    ))
+    .await
+    .unwrap();
+    runtime
+        .orchestrator
+        .initialize_conversation_mode()
+        .await
+        .unwrap();
+    let writer = runtime.fork_writer.as_ref().unwrap();
+    let row: session::JsonlMessage = serde_json::from_value(serde_json::json!({
+        "type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+        "sessionId":id.as_uuid(), "cwd":runtime.session_cwd.cwd(),
+        "message":{"role":"user", "content":"fresh desktop prompt"}
+    }))
+    .unwrap();
+    writer.append(&row).await.unwrap();
+    let authority = writer
+        .active_transcript_authority()
+        .expect("fresh writer authority");
+    writer.verify_active_transcript_source(&authority).unwrap();
+    let lease = runtime.current_session_writer_lease(id).await.unwrap();
+    assert_eq!(lease.canonical_session_id(), Some(id));
+    let capture = runtime
+        .capture_current_session_transcript(id)
+        .await
+        .unwrap();
+    assert_eq!(capture.transcript_path, authority.path());
+    assert_eq!(capture.source.as_bytes(), authority.read_checked().unwrap());
+    assert!(capture.source.contains("fresh desktop prompt"));
+    drop(lease);
+    assert!(
+        runtime
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
+    );
+}
+
+#[tokio::test]
 async fn desktop_cd_keeps_exact_source_across_cold_resume() {
     use lingxi_core::host::session_context::ConversationMode;
     let (_root, mut cfg) = super::tests::test_config(true);
