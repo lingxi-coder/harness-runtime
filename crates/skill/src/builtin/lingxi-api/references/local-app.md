@@ -16,12 +16,21 @@ Local publication adds to the device's Apps library; it does not publish to a
 public market. Version switching, source restore/remix, permission grants,
 background authorization and public uploads can be native-only operations.
 Explain the corresponding Apps UI when no model tool exists. `agent_catalog`
-lists public model identifiers; it neither returns credentials nor grants access.
+lists public model and built-in/MCP tool identifiers; it neither returns credentials nor grants access.
 
 App-to-Agent communication uses the pinned official AG-UI 1.0 contract. Agent-to-App
 page tools use WebMCP. They are opposite directions, not interchangeable wire
 formats. Host approvals and provider credentials remain native-owned. An App
 cannot approve its own request or obtain general host administration access.
+
+Neither interface automatically publishes an independent MCP server. If the
+user needs an MCP server, assess its implementation, transport, lifecycle,
+registration and authorization separately against the current host. A page
+tool is available through its WebMCP context, not automatically to every MCP
+client. For multi-user apps, define and enforce each user's identity, data and
+Chat access in the application; an App Agent thread ID is not user isolation.
+Multiple learners do not imply parallel Agent runs: consult the current
+`local-app` skill and host limits rather than assuming concurrency.
 
 Generate only schema 2 packages and the current host API and Agent persistence
 format. Do not add compatibility aliases, old API decoders, old Agent-data
@@ -72,3 +81,11 @@ Agent task merely because a connection was lost.
 Source anchors: Harness `crates/local-app/assets/skill/SKILL.md`,
 `crates/tools/ui/src/desktop_local_app.rs`, `crates/runtime/src/app_agent_input.rs`;
 product `docs/{LOCAL_APP_AGENT_PROTOCOL,MOBILE_LOCAL_APP_AGENT,LOCAL_APP_REMOTE_ACCESS}.md`.
+
+For a multi-learner educational app, the application must implement learner
+identity, authorization, learning records and business-data isolation. App Agent
+threads are conversation identifiers, not authorization. A separate MCP server
+needs its own transport, host lifecycle, registration and authentication; an
+App/WebMCP declaration does not publish one. Host agent_catalog returns approved
+model and tool IDs (including built-in/MCP tools), never credentials. Check the
+live schema instead of assuming it lists only models or permits parallel runs.

@@ -268,14 +268,18 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
 ) {
     // ----- cross-platform subset (also linked by harness-runtime::desktop) -----------
     tool_file::register_all(reg, ctx.clone());
-    if let Some(config_home) = config_home {
-        tool_task::register_mobile_with_config_home(reg, ctx.clone(), config_home);
+    if let Some(config_home) = config_home.as_ref() {
+        tool_task::register_mobile_with_config_home(reg, ctx.clone(), config_home.clone());
     } else {
         tool_task::register_mobile(reg, ctx.clone());
     }
     tool_web::register_all(reg, ctx.clone(), None);
     tool_plan::register_all(reg, ctx.clone());
-    tool_meta::register_all(reg, ctx.clone());
+    if let Some(home) = config_home {
+        tool_meta::register_all_with_settings_path(reg, ctx.clone(), home.join("settings.json"));
+    } else {
+        tool_meta::register_all(reg, ctx.clone());
+    }
     // Audit fix (#7): the cron tools (Create/List/Delete/RemoteTrigger) are
     // registered, but mobile starts NO `cron::CronScheduler` (the desktop root is
     // the only place one runs) and wires no `task_registry` for it to fire into —

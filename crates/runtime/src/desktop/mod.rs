@@ -932,6 +932,7 @@ pub fn desktop_tool_registry(
     // cell either: every tool falls back to `ctx.workspace` / the process cwd.
     let _ = register_desktop_tools(
         &mut reg,
+        lingxi_core::settings::loader::user_settings_path().unwrap_or_default(),
         ctx,
         coordinator,
         None,
@@ -1564,6 +1565,7 @@ mod desktop_fusion_executor_boot_test;
 #[allow(clippy::too_many_arguments)]
 pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
+    user_settings_path: std::path::PathBuf,
     ctx: BuiltinToolContext,
     coordinator: Option<CoordinatorWiring>,
     ask_user_question_resolver: Option<
@@ -1599,7 +1601,7 @@ pub fn register_desktop_tools(
     tool_shell::register_all_with_cwd_firer(reg, ctx.clone(), cwd_changed_firer, live_cwd.clone());
     tool_web::register_all(reg, ctx.clone(), web_side_query);
     tool_plan::register_all(reg, ctx.clone());
-    tool_meta::register_all(reg, ctx.clone());
+    tool_meta::register_all_with_settings_path(reg, ctx.clone(), user_settings_path);
     // The `computer` tool (M8-P11b). Cross-platform-registerable — its own
     // `is_enabled()` gates on `ctx.computer_control` being wired (real backend
     // only on macOS today), so registering it unconditionally here is safe:

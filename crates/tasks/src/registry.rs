@@ -4526,11 +4526,82 @@ impl TaskRegistry {
         self.notification_revision.subscribe()
     }
 
-    /// Test readiness without consuming any recipient’s notifications.
+    /// A successful handback already owns delivery of this run's result. Retire
+    /// its redundant completion notice without retiring the resumable task or
+    /// the admitted report. Errors and new terminal artifacts still notify.
+    async fn settle_reported_agent_completions(&self) {
+        use lingxi_core::host::handback::{HandbackDisposition, HandbackRecipient};
+        let mut map = self.tasks.write().await;
+        let rests = self.pending_rest.read().await;
+        let settled: Vec<_> = map
+            .iter()
+            .filter_map(|(id, state)| {
+                let TaskState::LocalAgent(agent) = state else {
+                    return None;
+                };
+                if agent.base.status != TaskStatus::Completed
+                    || agent.error.is_some()
+                    || agent.outcome.killed_by.is_some()
+                    || agent.outcome.worktree_path.is_some()
+                    || agent.outcome.worktree_branch.is_some()
+                    || agent.outcome.max_turns_reached.is_some()
+                {
+                    return None;
+                }
+                let handback = agent.handback.as_ref()?;
+                let receipt = handback.receipt.as_ref()?;
+                if receipt.run != handback.run
+                    || receipt.recipient != handback.recipient
+                    || !matches!(
+                        handback.disposition,
+                        Some(HandbackDisposition::Send | HandbackDisposition::Flagged)
+                    )
+                {
+                    return None;
+                }
+                let recipient = match receipt.recipient {
+                    HandbackRecipient::Main { .. } => None,
+                    HandbackRecipient::Agent { agent_id, .. } => Some(agent_id),
+                };
+                if Self::notification_recipient(state, &map) != recipient {
+                    return None;
+                }
+                let rest = rests.get(id);
+                if self.has_live_background_children_locked(
+                    &map,
+                    Some(agent.agent_id),
+                    rest.and_then(|r| r.agent_name.as_deref()),
+                    rest.and_then(|r| r.team_name.as_deref()),
+                ) {
+                    return None;
+                }
+                Some(id.clone())
+            })
+            .collect();
+        drop(rests);
+        let mut rests = self.pending_rest.write().await;
+        for id in settled {
+            let Some(TaskState::LocalAgent(agent)) = map.get_mut(&id) else {
+                continue;
+            };
+            agent.base.notified = true;
+            if matches!(
+                agent.agent_list_lifecycle.finalizing,
+                lingxi_core::host::task_registry::FieldPresence::Value(true)
+            ) {
+                agent.agent_list_lifecycle.finalizing =
+                    lingxi_core::host::task_registry::FieldPresence::Value(false);
+            }
+            rests.remove(&id);
+        }
+    }
+
+    /// Test readiness without consuming any recipient’s pending notifications.
     pub async fn has_pending_task_notifications_for(
         &self,
         recipient: Option<lingxi_core::types::AgentId>,
     ) -> bool {
+        self.settle_reported_agent_completions().await;
         if self
             .pending_monitor_events
             .lock()
@@ -4632,6 +4703,7 @@ impl TaskRegistry {
         recipient: Option<lingxi_core::types::AgentId>,
         task_delivery_policy: TaskDeliveryPolicy,
     ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
+        self.settle_reported_agent_completions().await;
         self.refresh_output_offsets(recipient).await;
         use crate::handle::{status_to_wire, task_type_to_wire};
         let mut map = self.tasks.write().await;

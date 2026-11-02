@@ -212,7 +212,8 @@ impl Tool for CronDeleteTool {
     ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronDelete removes a cron job from .claude/scheduled_tasks.json".into(),
+                reason: "CronDelete removes a cron job from the branded project session-cron store"
+                    .into(),
             },
             updated_input: None,
             update_destination: None,
@@ -229,7 +230,7 @@ impl Tool for CronDeleteTool {
             return "Cancel a cron job previously scheduled with CronCreate. Removes it from the in-memory session store.".into();
         }
         // PARITY 2.1.263 `mbn(true)`.
-        "Cancel a cron job previously scheduled with CronCreate. Removes it from .claude/scheduled_tasks.json (durable jobs) or the in-memory session store (session-only jobs).".into()
+        "Cancel a cron job previously scheduled with CronCreate. Removes it from the branded project session-cron store (durable jobs) or the in-memory session store (session-only jobs).".into()
     }
 
     async fn validate_input(
@@ -490,7 +491,7 @@ mod tests {
         }
     }
 
-    /// Seed `<root>/.claude/scheduled_tasks.json` with the given task ids.
+    /// Seed `<root>/the branded project session-cron store` with the given task ids.
     async fn seed_ids(root: &Path, ids: &[&str]) {
         let path = cron_file_path(root);
         tokio::fs::create_dir_all(path.parent().unwrap())

@@ -20,6 +20,8 @@ domains; do not load every reference for a general question.
 | Topic | Read when the question concerns |
 | --- | --- |
 | [overview](references/overview.md) | Product surfaces, capability discovery, platform differences, offline use |
+| [teams](references/teams.md) | Teams identity, membership, connectors and Bot boundaries |
+| [accounts](references/accounts.md) | Host-global provider accounts, model permissions, execution routing |
 | [configuration](references/configuration.md) | Settings, MCP, permissions, hooks, plugins, skill customization |
 | [media](references/media.md) | Camera, microphone, audio, transcription, speech, live assistance |
 | [webrtc](references/webrtc.md) | Remote Control, device connections, media transport |
@@ -58,3 +60,10 @@ Use the current host's version/status entry when an exact build matters. These
 references are not live availability snapshots or an up-to-date online catalog.
 For SDK symbols and parameters, inspect the selected revision's schema/source
 or compiler-generated documentation instead of guessing from another release.
+
+This is product documentation, not a model-provider API. LingXi configuration
+uses its resolved branded paths. Claude Code conventions are not a substitute
+for LingXi source/schema. Anthropic identifiers remain legitimate only for an
+actual Anthropic backend. Label evidence as bundled documentation, inspected
+source/schema, host status, test result or live operation. Do not present a
+second answer from the same bundled guide as independent verification.

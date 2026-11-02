@@ -77,8 +77,13 @@ fn register_slice(reg: &mut SkillRegistry, slice: &[BundledSkill]) {
 
 /// Parse a compiled-in skill template with bundled provenance.
 fn parse_builtin(entry: &BundledSkill) -> Skill {
+    let rendered = if entry.name == "lingxi-api" {
+        branding::render_namespace_template(entry.raw)
+    } else {
+        entry.raw.to_owned()
+    };
     let mut skill = parse_skill_markdown(
-        entry.raw,
+        &rendered,
         std::path::PathBuf::from(format!("<bundled:{}>", entry.name)),
         SkillSource::Bundled,
         LoadedFrom::Bundled,

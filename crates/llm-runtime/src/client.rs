@@ -44,6 +44,90 @@ pub(crate) struct RouteEntry {
     websocket_connect_timeout_ms: Option<u64>,
 }
 
+/// Project local discovery into ordinary function schemas for generic routes.
+fn portable_local_tool_discovery(
+    request: &LlmRequest,
+) -> Result<std::borrow::Cow<'_, LlmRequest>, LlmError> {
+    use lingxi_llm_client::protocol::{ContentBlock, JsonPayload};
+    let has_local_defer = request.input.hosted_openai_tool_search().is_none()
+        && request.input.hosted_openrouter_tool_search().is_none()
+        && request.input.tools.iter().any(|tool| tool.defer_loading);
+    let has_references = request
+        .input
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .any(|block| {
+            let ContentBlock::ToolResult {
+                blocks: Some(blocks),
+                ..
+            } = block
+            else {
+                return false;
+            };
+            (0..blocks.array_len("").unwrap_or(0)).any(|index| {
+                blocks.array_item(index).is_some_and(|item| {
+                    item.string_at("/type").as_deref() == Some("tool_reference")
+                })
+            })
+        });
+    if !has_local_defer && !has_references {
+        return Ok(std::borrow::Cow::Borrowed(request));
+    }
+    let mut request = request.clone();
+    // Explicit SDK hosted-search requests retain their own provider contract.
+    // Local Harness discovery does not manufacture a hosted-search descriptor.
+    if request.input.hosted_openai_tool_search().is_none()
+        && request.input.hosted_openrouter_tool_search().is_none()
+    {
+        for tool in &mut request.input.tools {
+            tool.defer_loading = false;
+        }
+    }
+    for message in &mut request.input.messages {
+        for block in &mut message.content {
+            if let ContentBlock::ToolResult {
+                blocks: Some(blocks),
+                ..
+            } = block
+            {
+                let Some(count) = blocks.array_len("") else {
+                    continue;
+                };
+                let mut items = Vec::with_capacity(count);
+                let mut changed = false;
+                for index in 0..count {
+                    let item = blocks.array_item(index).expect("valid array index");
+                    if item.string_at("/type").as_deref() == Some("tool_reference") {
+                        changed = true;
+                        let name = item.string_at("/tool_name").unwrap_or_default();
+                        items.push(
+                            JsonPayload::from_generated_value(&serde_json::json!({
+                                "type": "text", "text": format!("Tool available: {name}")
+                            }))
+                            .map_err(|error| {
+                                LlmError::InvalidRequest {
+                                    message: error.to_string(),
+                                }
+                            })?,
+                        );
+                    } else {
+                        items.push(item);
+                    }
+                }
+                if changed {
+                    *blocks = JsonPayload::array_from_items(
+                        &items,
+                        lingxi_llm_client::exact_json::JsonEncoding::JavaScript,
+                    )
+                    .map_err(crate::upstream::error)?;
+                }
+            }
+        }
+    }
+    Ok(std::borrow::Cow::Owned(request))
+}
+
 fn credential_scope(entry: &RouteEntry, profile_name: &str) -> CredentialScope {
     let mut scope = CredentialScope::new(entry.provider_id.clone(), profile_name)
         .with_route(entry.base_url.clone(), entry.protocol);
@@ -1575,6 +1659,23 @@ impl ModelRuntime {
 
         let effective_protocol =
             self.protocol_for_model(&request.input.model, request.profile.as_deref())?;
+        // ToolSearch discovers local function tools on every provider. Only
+        // Anthropic-wire routes understand its native deferred schemas and
+        // tool_reference receipts. Adapt a request-local clone, including
+        // replay history, after account routing; never mutate stored history.
+        let portable;
+        let request = if !matches!(
+            effective_protocol,
+            ProtocolFamily::AnthropicMessages
+                | ProtocolFamily::VertexClaude
+                | ProtocolFamily::BedrockClaude
+                | ProtocolFamily::FoundryClaude
+        ) {
+            portable = portable_local_tool_discovery(request)?;
+            portable.as_ref()
+        } else {
+            request
+        };
         let adapted;
         let request = if let Some(source) = request.execution.input_protocol.filter(|source| {
             lingxi_llm_client::replay::native_family(*source)
@@ -3164,6 +3265,48 @@ fn append_beta(existing: Option<&str>, beta: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_discovery_projects_schemas_and_replay_without_mutating_history() {
+        use super::{portable_local_tool_discovery, LlmRequest};
+        use lingxi_llm_client::protocol::ContentBlock;
+        let mut request = LlmRequest::new("gpt-6-astra");
+        request.input.tools = serde_json::from_value(serde_json::json!([
+            {"name":"mcp__docs", "description":"Docs", "input_schema":{"type":"object"}, "defer_loading":true}
+        ])).unwrap();
+        request.input.messages = serde_json::from_value(serde_json::json!([
+            {"role":"user", "content":[{"type":"tool_result", "tool_use_id":"search-1",
+              "content":"Found docs", "blocks":[
+                {"type":"text", "text":"keep"},
+                {"type":"tool_reference", "tool_name":"mcp__docs"}
+              ]}]}
+        ]))
+        .unwrap();
+        let original = request.clone();
+        let projected = portable_local_tool_discovery(&request).unwrap();
+        assert_eq!(request, original);
+        assert!(!projected.input.tools[0].defer_loading);
+        assert_eq!(
+            projected.input.tools[0].input_schema,
+            request.input.tools[0].input_schema
+        );
+        let ContentBlock::ToolResult {
+            blocks: Some(blocks),
+            ..
+        } = &projected.input.messages[0].content[0]
+        else {
+            panic!("tool result")
+        };
+        assert_eq!(blocks.array_len(""), Some(2));
+        assert_eq!(
+            blocks.array_item(0).unwrap().string_at("/text").as_deref(),
+            Some("keep")
+        );
+        assert_eq!(
+            blocks.array_item(1).unwrap().string_at("/text").as_deref(),
+            Some("Tool available: mcp__docs")
+        );
+    }
+
     use super::append_beta;
 
     // ---- Task 2: `append_beta` pure-fn unit tests ----

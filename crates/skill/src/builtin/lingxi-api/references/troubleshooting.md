@@ -33,3 +33,15 @@ prove physical camera, signed credentials, remote approval or task completion.
 
 Source anchors: Harness bundled `debug`/`doctor` commands, host status and tool
 results; product acceptance records for the exact build under investigation.
+
+Desktop logs default to the client userData/logs/desktop.jsonl; session JSONL
+and subagents are under the resolved config-home/projects/<encoded-project>/.
+Resolve those paths from the running host; brands and relocated homes differ.
+Match session ID, child/task ID, timestamps and the package/source receipt.
+Read only relevant text/tool/error records; redact credentials and opaque
+provider reasoning payloads. Compare the actual package's dependency fingerprints,
+not merely neighboring checkout heads. A local unsupported-capability encoding
+error does not prove a request was sent to a different provider. In particular,
+ToolSearch plus defer_loading on a GPT route indicates a discovery wire mismatch.
+Host-supplied SubagentHandback unavailable indicates a host dispatch problem;
+verify its receipt/disposition rather than treating plain text as delivered.

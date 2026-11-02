@@ -97,6 +97,25 @@ fn tool_search_uses_overridable_native_unsupported_model_list_case_insensitively
 }
 
 #[test]
+fn local_tool_search_is_available_on_non_anthropic_wire_protocols() {
+    use llm_runtime::ProtocolFamily;
+    for protocol in [
+        ProtocolFamily::OpenAiResponses,
+        ProtocolFamily::OpenAiChat,
+        ProtocolFamily::AzureOpenAi,
+        ProtocolFamily::GeminiGenerateContent,
+        ProtocolFamily::GeminiInteractions,
+        ProtocolFamily::VertexGemini,
+    ] {
+        let api = ToolSearchGateApi::new(Some(protocol));
+        assert!(
+            tool_search_supported_for_request(&api, "gpt-6", None, None),
+            "{protocol:?}"
+        );
+    }
+}
+
+#[test]
 fn foundry_tool_search_gate_applies_the_observed_negative_capability() {
     let _flag_override = ToolSearchFlagOverride::set(Vec::new());
     let source = lingxi_core::types::utf16_json::Utf16JsonProjection::from("native-custom-model");

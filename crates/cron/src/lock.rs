@@ -147,7 +147,7 @@ pub async fn acquire_scheduler_lease(
     let _file_guard = crate::tasks_file::lock_scheduled_tasks(fs, root)
         .await
         .map_err(|error| CronLockError::Io(error.to_string()))?;
-    let path = Path::new(".claude").join(crate::tasks_file::SCHEDULED_TASKS_LOCK);
+    let path = crate::tasks_file::scheduled_tasks_lock_relative_path();
     let prior = fs.read_file_rooted_no_follow(root, &path).await;
     let mut replace_owned = false;
     if let Ok(content) = &prior {
@@ -195,11 +195,22 @@ pub async fn acquire_scheduler_lease(
 
 /// Release only the lease owned by this conversation.
 pub async fn release_scheduler_lease(fs: &dyn FileSystem, root: &Path, identity: &str) {
+    // Shutdown of a project that never scheduled anything is read-only.
+    if fs
+        .read_file_rooted_no_follow(
+            root,
+            &crate::tasks_file::scheduled_tasks_lock_relative_path(),
+        )
+        .await
+        .is_err()
+    {
+        return;
+    }
     let _guard = crate::lock_cron_file().await;
     let Ok(_file_guard) = crate::tasks_file::lock_scheduled_tasks(fs, root).await else {
         return;
     };
-    let path = Path::new(".claude").join(crate::tasks_file::SCHEDULED_TASKS_LOCK);
+    let path = crate::tasks_file::scheduled_tasks_lock_relative_path();
     let Ok(content) = fs.read_file_rooted_no_follow(root, &path).await else {
         return;
     };

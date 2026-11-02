@@ -24,7 +24,7 @@ use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Project-relative `.claude` subdir holding the single tasks file.
+/// Project-relative branded subdir holding the single tasks file.
 pub const CLAUDE_DIR: &str = branding::DOT_DIR;
 /// Single-file name (claude-code `SCHEDULED_TASKS_FILE`).
 pub const SCHEDULED_TASKS_FILE: &str = "scheduled_tasks.json";
@@ -122,7 +122,7 @@ pub struct CronTask {
 /// once per process, under a marker line, so they never show up as untracked.
 ///
 /// The marker must stay OURS even though the patterns below cover the shared
-/// `.claude/` session-cron store: the upstream writer short-circuits on finding
+/// branded session-cron store: the upstream writer short-circuits on finding
 /// its own marker, so writing `# claude-code-runtime` here would make a
 /// co-installed Claude Code believe it had already excluded its runtime files
 /// and silently skip its own block. Whether OUR block is already present is
@@ -130,21 +130,25 @@ pub struct CronTask {
 /// string, so a project carrying the upstream block still gets ours.
 pub const RUNTIME_EXCLUDE_MARKER: &str = "# lingxi-code-runtime";
 /// The patterns appended after [`RUNTIME_EXCLUDE_MARKER`].
-pub const RUNTIME_EXCLUDE_PATTERNS: [&str; 13] = [
-    "**/.claude/scheduled_tasks.lock",
-    "**/.claude/scheduled_tasks.json",
-    "**/.claude/scheduled_tasks.mutation.lock",
-    "**/.lingxi/scheduled_tasks.lock",
-    "**/.lingxi/scheduled_tasks.json",
-    "**/.lingxi/routines/.state/",
-    "**/.lingxi/worktrees/",
-    "**/.lingxi/checkpoints/",
-    "**/.lingxi/mailbox/",
-    "**/.lingxi/agent-registry.json",
-    "**/.lingxi/agent-memory-local",
-    "**/.lingxi/first-run",
-    "**/.lingxi/assistant-daemon-state.json",
-];
+pub static RUNTIME_EXCLUDE_PATTERNS: std::sync::LazyLock<Vec<String>> =
+    std::sync::LazyLock::new(|| {
+        let dir = branding::DOT_DIR;
+        vec![
+            format!("**/{dir}/session-cron/scheduled_tasks.lock"),
+            format!("**/{dir}/session-cron/scheduled_tasks.json"),
+            format!("**/{dir}/session-cron/scheduled_tasks.mutation.lock"),
+            format!("**/{dir}/scheduled_tasks.lock"),
+            format!("**/{dir}/scheduled_tasks.json"),
+            format!("**/{dir}/routines/.state/"),
+            format!("**/{dir}/worktrees/"),
+            format!("**/{dir}/checkpoints/"),
+            format!("**/{dir}/mailbox/"),
+            format!("**/{dir}/agent-registry.json"),
+            format!("**/{dir}/agent-memory-local"),
+            format!("**/{dir}/first-run"),
+            format!("**/{dir}/assistant-daemon-state.json"),
+        ]
+    });
 
 static RUNTIME_EXCLUDE_ENSURED: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
@@ -233,7 +237,7 @@ pub fn ensure_runtime_files_excluded(project_root: &Path) {
         ""
     };
     let mut block = String::from(RUNTIME_EXCLUDE_MARKER);
-    for pattern in RUNTIME_EXCLUDE_PATTERNS {
+    for pattern in RUNTIME_EXCLUDE_PATTERNS.iter() {
         block.push('\n');
         block.push_str(pattern);
     }
@@ -276,28 +280,32 @@ pub struct UnmodeledTask {
     pub raw: Utf16JsonProjection,
 }
 
-/// Absolute path to the SESSION cron tasks file for `project_root`
-/// (`<project_root>/.claude/scheduled_tasks.json`) — the store Claude Code
-/// itself reads and writes. The v2 task centre lives beside it under
-/// [`CLAUDE_DIR`]; see [`scheduled_tasks_path`].
+/// Project-relative session Cron directory under the injected brand namespace.
 #[must_use]
-pub fn session_scheduled_tasks_path(project_root: &Path) -> PathBuf {
-    project_root.join(".claude").join(SCHEDULED_TASKS_FILE)
+pub fn session_cron_relative_dir() -> PathBuf {
+    PathBuf::from(branding::DOT_DIR).join("session-cron")
 }
 
-/// Task-center storage, kept separate from Claude session cron.
+/// Absolute session Cron tasks path, separate from [`scheduled_tasks_path`].
+#[must_use]
+pub fn session_scheduled_tasks_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(session_cron_relative_dir())
+        .join(SCHEDULED_TASKS_FILE)
+}
+
+/// Task-center storage, kept separate from session Cron.
 #[must_use]
 pub fn scheduled_tasks_path(project_root: &Path) -> PathBuf {
     project_root.join(CLAUDE_DIR).join(SCHEDULED_TASKS_FILE)
 }
 
-/// Absolute path to the lock file beside the SESSION tasks file
-/// (`<project_root>/.claude/scheduled_tasks.lock`) — the scheduler leader
+/// Absolute path to the lock file beside the session tasks file — the scheduler leader
 /// lease that [`crate::lock::acquire_scheduler_lease`] writes. Distinct from
 /// the per-mutation lock [`lock_scheduled_tasks`] takes.
 #[must_use]
 pub fn scheduled_tasks_lock_path(project_root: &Path) -> PathBuf {
-    project_root.join(".claude").join(SCHEDULED_TASKS_LOCK)
+    project_root.join(scheduled_tasks_lock_relative_path())
 }
 
 /// Root-relative path used by hardened filesystem operations.
@@ -307,32 +315,35 @@ pub fn scheduled_tasks_relative_path() -> PathBuf {
 }
 
 /// Root-relative form of [`scheduled_tasks_lock_path`] — the session-cron
-/// leader lease, NOT the per-mutation lock (that one is
-/// `.claude/scheduled_tasks.mutation.lock`, taken by [`lock_scheduled_tasks`]).
+/// leader lease, distinct from the mutation lock taken by [`lock_scheduled_tasks`].
 #[must_use]
 pub fn scheduled_tasks_lock_relative_path() -> PathBuf {
-    PathBuf::from(".claude").join(SCHEDULED_TASKS_LOCK)
+    session_cron_relative_dir().join(SCHEDULED_TASKS_LOCK)
 }
 
 /// Recover the project root from a canonical scheduled-tasks path.
 #[must_use]
 pub fn project_root_from_tasks_path(tasks_file: &Path) -> Option<&Path> {
-    let state_dir = tasks_file.parent()?;
-    if ![
-        std::ffi::OsStr::new(CLAUDE_DIR),
-        std::ffi::OsStr::new(".claude"),
-    ]
-    .contains(&state_dir.file_name()?)
-        || tasks_file.file_name()? != std::ffi::OsStr::new(SCHEDULED_TASKS_FILE)
-    {
+    if tasks_file.file_name()? != std::ffi::OsStr::new(SCHEDULED_TASKS_FILE) {
         return None;
     }
-    state_dir.parent().map(|root| {
-        if root.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            root
+    let state_dir = tasks_file.parent()?;
+    let root = if state_dir.file_name()? == std::ffi::OsStr::new("session-cron") {
+        let branded = state_dir.parent()?;
+        if branded.file_name()? != std::ffi::OsStr::new(branding::DOT_DIR) {
+            return None;
         }
+        branded.parent()?
+    } else {
+        if state_dir.file_name()? != std::ffi::OsStr::new(branding::DOT_DIR) {
+            return None;
+        }
+        state_dir.parent()?
+    };
+    Some(if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
     })
 }
 
@@ -343,7 +354,7 @@ pub async fn lock_scheduled_tasks(
 ) -> Result<Box<dyn FlockGuard>, FsError> {
     fs.flock_exclusive_rooted(
         project_root,
-        &Path::new(".claude").join("scheduled_tasks.mutation.lock"),
+        &session_cron_relative_dir().join("scheduled_tasks.mutation.lock"),
     )
     .await
 }
@@ -361,7 +372,7 @@ pub async fn lock_automation_tasks(
 pub async fn read_tasks_body(fs: &dyn FileSystem, project_root: &Path) -> Result<String, FsError> {
     fs.read_file_rooted_no_follow(
         project_root,
-        &Path::new(".claude").join(SCHEDULED_TASKS_FILE),
+        &session_cron_relative_dir().join(SCHEDULED_TASKS_FILE),
     )
     .await
     .map(|content| content.content)
@@ -387,7 +398,7 @@ pub async fn write_tasks_body(
         .map_err(|error| FsError::Io(error.to_string()))?;
     fs.write_file_rooted_atomic(
         project_root,
-        &Path::new(".claude").join(SCHEDULED_TASKS_FILE),
+        &session_cron_relative_dir().join(SCHEDULED_TASKS_FILE),
         &output,
     )
     .await
@@ -646,6 +657,28 @@ pub fn serialize_tasks(tasks: &ScheduledTasks) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn branded_session_store_is_distinct_and_old_paths_are_rejected() {
+        let root = std::path::Path::new("/project");
+        let session = super::session_scheduled_tasks_path(root);
+        assert_eq!(
+            session,
+            root.join(branding::DOT_DIR)
+                .join("session-cron")
+                .join(super::SCHEDULED_TASKS_FILE)
+        );
+        assert_ne!(session, super::scheduled_tasks_path(root));
+        assert_eq!(super::project_root_from_tasks_path(&session), Some(root));
+        assert!(
+            super::project_root_from_tasks_path(&root.join(".claude/scheduled_tasks.json"))
+                .is_none()
+        );
+        assert_eq!(
+            super::scheduled_tasks_lock_path(root),
+            root.join(super::scheduled_tasks_lock_relative_path())
+        );
+    }
+
     use super::*;
     use std::path::Path;
 
@@ -708,7 +741,10 @@ mod tests {
         let p = scheduled_tasks_path(Path::new("/proj"));
         assert_eq!(p, Path::new("/proj/.lingxi/scheduled_tasks.json"));
         let l = scheduled_tasks_lock_path(Path::new("/proj"));
-        assert_eq!(l, Path::new("/proj/.claude/scheduled_tasks.lock"));
+        assert_eq!(
+            l,
+            Path::new("/proj/.lingxi/session-cron/scheduled_tasks.lock")
+        );
         assert_eq!(
             project_root_from_tasks_path(Path::new(".lingxi/scheduled_tasks.json")),
             Some(Path::new("."))

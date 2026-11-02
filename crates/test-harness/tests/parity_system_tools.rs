@@ -62,10 +62,8 @@ fn wire_identifiers_match_production_constants() {
     let fx = fx();
     let w = &fx["wire_identifiers"];
 
-    use tool_cron::schedule_cron::{
-        generate_cron_task_id, CRON_FILE_SUFFIX, CRON_SUBDIR, SIX_FIELD_REJECTION,
-    };
-    use tool_meta::config::{CONFIG_FIELDS_ALLOWED, CONFIG_FILE_NAME, CONFIG_SUBDIR};
+    use tool_cron::schedule_cron::{generate_cron_task_id, SIX_FIELD_REJECTION};
+    use tool_meta::config::{CONFIG_FILE_NAME, CONFIG_SUBDIR, SUPPORTED_SETTINGS};
     use tool_meta::tool_search::TOOL_SEARCH_MAX_RESULTS;
     use tool_skill::skill::MAX_SKILL_DESCRIPTOR_LEN;
     use tool_ui::ask_user_question::{MAX_ASK_LABEL_LEN, MAX_ASK_OPTIONS, MAX_ASK_QUESTION_LEN};
@@ -91,25 +89,22 @@ fn wire_identifiers_match_production_constants() {
     );
     assert_eq!(w["config_file_name"].as_str().unwrap(), CONFIG_FILE_NAME);
     assert_eq!(w["config_subdir"].as_str().unwrap(), CONFIG_SUBDIR);
-    let allowed: Vec<String> = w["config_fields_allowed"]
+    let allowed: Vec<String> = w["supported_config_settings"]
         .as_array()
         .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_eq!(
-        allowed,
-        CONFIG_FIELDS_ALLOWED
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect::<Vec<_>>()
-    );
+    let mut actual = SUPPORTED_SETTINGS
+        .keys()
+        .map(|key| (*key).to_owned())
+        .collect::<Vec<_>>();
+    actual.sort();
+    assert_eq!(allowed, actual);
     assert_eq!(
         w["max_skill_descriptor_len"].as_u64().unwrap(),
         MAX_SKILL_DESCRIPTOR_LEN as u64
     );
-    assert_eq!(w["cron_subdir"].as_str().unwrap(), CRON_SUBDIR);
-    assert_eq!(w["cron_file_suffix"].as_str().unwrap(), CRON_FILE_SUFFIX);
     let cron_id = generate_cron_task_id();
     assert_eq!(w["cron_task_id_length"].as_u64().unwrap(), 8);
     assert_eq!(cron_id.len(), 8);

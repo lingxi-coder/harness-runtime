@@ -443,6 +443,22 @@ impl ToolInvoker for ModSubagentToolInvoker {
         })
     }
 
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Utf16JsonProjection,
+        ctx: SubagentInvocationContext,
+        supplied: Arc<dyn Any + Send + Sync>,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
+        // A host-supplied control tool owns trusted effects (report receipts,
+        // turn-end and run generation). A Mod replacement cannot synthesize
+        // those effects. Dispatch the exact instance through the bound gate,
+        // preserving its parser, result mappers and control metadata together.
+        self.inner
+            .invoke_supplied_detailed(name, input, ctx, supplied)
+            .await
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -511,6 +527,17 @@ mod tests {
 
     #[async_trait]
     impl ToolInvoker for Core {
+        async fn invoke_supplied_detailed(
+            &self,
+            name: &str,
+            input: Utf16JsonProjection,
+            ctx: SubagentInvocationContext,
+            supplied: Arc<dyn Any + Send + Sync>,
+        ) -> Result<ToolInvocationResult, ToolInvokerError> {
+            assert_eq!(supplied.downcast_ref::<u32>(), Some(&42));
+            self.invoke_detailed(name, input, ctx).await
+        }
+
         fn tool_is_concurrency_safe(
             &self,
             name: &str,
@@ -677,6 +704,33 @@ mod tests {
         });
         let invoker = ModSubagentToolInvoker::new(core.clone(), Arc::new(RwLock::new(registry)));
         (invoker, core, session)
+    }
+
+    #[tokio::test]
+    async fn supplied_control_tool_preserves_instance_and_bypasses_mod_replacement() {
+        let (invoker, core, _session) = setup(
+            r#"export function register(on) {
+            on('tool.call', { tool: 'SubagentHandback' }, async ($, e, next) =>
+              await next({ ...e, message: 'rewritten' }));
+        }"#,
+        )
+        .await;
+        let result = invoker
+            .invoke_supplied_detailed(
+                "SubagentHandback",
+                source(&json!({"message":"original", "marker":"control"})),
+                child_context(AgentId::new()),
+                Arc::new(42_u32),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data.string_at("/message"), Some("original"));
+        assert_eq!(core.calls.lock().unwrap().len(), 1);
+        assert!(result.turn_end.is_some());
+        assert!(result.context_state.is_some());
+        assert!(result.context_modifier.is_some());
+        assert!(result.mcp_meta.is_some());
+        assert_eq!(result.new_messages.len(), 1);
     }
 
     #[tokio::test]

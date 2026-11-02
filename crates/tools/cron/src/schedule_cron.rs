@@ -1,7 +1,7 @@
 //! `CronCreateTool` — schedule a prompt on a 5-field cron schedule and persist
-//! the job into the project's single `<root>/.claude/scheduled_tasks.json` file.
+//! durable jobs in the branded project session-cron store.
 //!
-//! 1:1 parity rewrite of claude-code `CronCreateTool.ts`. The model supplies a
+//! The model supplies a
 //! 5-field cron expression plus the prompt to enqueue at each fire time, with
 //! optional `recurring` (default true) and `durable` (default false) flags.
 //!
@@ -10,13 +10,10 @@
 //!   shared parser and surfaces as the generic "Expected 5 fields" message).
 //! - `id = [0-9a-f]{8}` (`randomUUID().slice(0, 8)`).
 //!
-//! Persistence (1:1 with claude-code `cronTasks.ts`): a DURABLE job is appended
-//! to the single project-relative file `<projectRoot>/.claude/scheduled_tasks.json`
+//! A DURABLE job is appended to the single project-relative tasks file
 //! shaped `{ "tasks": [ CronTask, … ] }` (camelCase fields, `createdAt` in epoch
 //! **milliseconds**, NO `durable`/next-fire on disk — those are runtime-only).
-//! A SESSION-ONLY job (`durable:false`) is NOT written to disk at all (matching
-//! claude-code's separate in-memory session store and the tool's own
-//! "Session-only (not written to disk …)" promise).
+//! A SESSION-ONLY job (`durable:false`) stays in the live scheduler without a disk write.
 //!
 //! The desktop tool registers the job with the live
 //! [`cron::scheduler::CronScheduler`] immediately. Durable state remains
@@ -290,23 +287,14 @@ impl CronExpression {
 
 /// Tool name byte-lock.
 pub const CRON_CREATE_TOOL_NAME: &str = "CronCreate";
-/// Legacy per-job subdirectory under `~/.lingxi/` (retained as a wire-identifier
-/// lock; the durable path is now the single project file
-/// [`cron::tasks_file::SCHEDULED_TASKS_FILE`]).
-pub const CRON_SUBDIR: &str = "cron";
-/// Legacy per-job file extension (retained as a wire-identifier lock).
-pub const CRON_FILE_SUFFIX: &str = ".json";
 /// 6-field rejection message (retained for the wire-identifier parity lock).
 pub const SIX_FIELD_REJECTION: &str =
     "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)";
-/// Legacy iteration-count constant; upstream counts calendar jumps, not minutes.
-pub const NEXT_FIRE_HORIZON_MINUTES: u64 = 60 * 24 * 366;
 /// Maximum number of scheduled jobs allowed at once (CronCreateTool.ts:25).
 const MAX_JOBS: usize = 50;
 
-/// Absolute path to the single project tasks file
-/// (`<project_root>/.claude/scheduled_tasks.json`). 1:1 with claude-code, which
-/// keys cron persistence off the project root (the session cwd), NOT the user
+/// Absolute path to the branded project session-cron tasks file.
+/// Cron persistence belongs to the project root (the session cwd), not the user
 /// config-home. Thin re-export of [`cron::tasks_file::session_scheduled_tasks_path`] so
 /// every cron tool resolves the path identically.
 #[must_use]
@@ -394,9 +382,9 @@ fn semantic_bool(v: Option<JsonValueView<'_>>, default: bool) -> bool {
 /// `CronScheduler`, iOS/Android through their OS wake + `run_cron_task_if_due`.
 fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -> String {
     let where_ = if durable {
-        "Persisted to .claude/scheduled_tasks.json"
+        "Persisted to the branded project session-cron store"
     } else {
-        "Session-only (not written to disk, dies when Claude exits)"
+        "Session-only (not written to disk, dies when LingXi exits)"
     };
     if recurring {
         // Claude Code 2.1.270 model-facing result, including its fixed seven-day limit.
@@ -479,7 +467,7 @@ static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
             },
             "durable": {
                 "type": "boolean",
-                "description": "true = persist to .claude/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions."
+                "description": "true = persist to the branded project session-cron store and survive restarts. false (default) = in-memory only, dies when this LingXi session ends. Use true only when the user asks the task to survive across sessions."
             }
         },
         "required": ["cron", "prompt"]
@@ -495,7 +483,7 @@ static SESSION_ONLY_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     schema
         .replace_pointer_projection(
             "/properties/durable/description",
-            tool_api::tool_trait::source_text_projection("Has no effect — durable persistence is not available. All jobs are session-only (in-memory, gone when this Claude session ends)."),
+            tool_api::tool_trait::source_text_projection("Has no effect — durable persistence is not available. All jobs are session-only (in-memory, gone when this LingXi session ends)."),
         )
         .expect("generated session-only schema description exists");
     schema
@@ -540,13 +528,13 @@ fn amber_sentinel_enabled() -> bool {
 /// `cron::default_recurring_max_age`), so the model is never promised an expiry
 /// the scheduler does not enforce.
 fn build_prompt_text() -> String {
-    let durability = "## Durability\n\nBy default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .claude/scheduled_tasks.json so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.";
+    let durability = "## Durability\n\nBy default (durable: false) the job lives only in this LingXi session — nothing is written to disk, and the job is gone when LingXi exits. Pass durable: true to write to the branded project session-cron store so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.";
     let durability = if durable_enabled() {
         durability
     } else {
-        "## Session-only\n\nJobs live only in this Claude session — nothing is written to disk, and the job is gone when Claude exits."
+        "## Session-only\n\nJobs live only in this LingXi session — nothing is written to disk, and the job is gone when LingXi exits."
     };
-    let durable_runtime = "Durable jobs persist to .claude/scheduled_tasks.json and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. ";
+    let durable_runtime = "Durable jobs persist to the branded project session-cron store and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. ";
     let durable_runtime = if durable_enabled() {
         durable_runtime
     } else {
@@ -660,7 +648,8 @@ impl Tool for CronCreateTool {
     ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronCreate persists a cron job to .claude/scheduled_tasks.json".into(),
+                reason: "CronCreate persists a cron job to the branded project session-cron store"
+                    .into(),
             },
             updated_input: None,
             update_destination: None,
@@ -670,10 +659,10 @@ impl Tool for CronCreateTool {
 
     async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         if !durable_enabled() {
-            return "Schedule a prompt to run at a future time within this Claude session — either recurring on a cron schedule, or once at a specific time.".into();
+            return "Schedule a prompt to run at a future time within this LingXi session — either recurring on a cron schedule, or once at a specific time.".into();
         }
         // PARITY 2.1.270 durable gate on.
-        "Schedule a prompt to run at a future time — either recurring on a cron schedule, or once at a specific time. Pass durable: true to persist to .claude/scheduled_tasks.json; otherwise session-only.".into()
+        "Schedule a prompt to run at a future time — either recurring on a cron schedule, or once at a specific time. Pass durable: true to persist to the branded project session-cron store; otherwise session-only.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
@@ -1050,15 +1039,15 @@ mod tests {
 
     use serde_json::Value;
 
-    /// Latest 2.1.270 `aIn(true)` with Monitor disabled; no path normalization.
+    /// Current product prompt with Monitor disabled; exact text contract.
     #[test]
-    fn prompt_matches_2_1_263_pbn() {
+    fn prompt_matches_current_product_contract() {
         let _serial = cron::autonomous_loop::TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
         telemetry::test_clear_flag("tengu_kairos_cron_durable");
-        let expected = include_str!("../tests/fixtures/cron_create_prompt_2_1_263.txt");
+        let expected = include_str!("../tests/fixtures/cron_create_prompt.txt");
         let actual = build_prompt_text();
         assert_eq!(actual, expected);
     }
@@ -1109,8 +1098,7 @@ mod tests {
         }
     }
 
-    /// Read the parsed `{ "tasks": [...] }` document at
-    /// `<root>/.claude/scheduled_tasks.json` (empty if absent).
+    /// Read the branded session Cron document (empty if absent).
     async fn read_doc(root: &std::path::Path) -> cron::tasks_file::ScheduledTasks {
         let path = cron::tasks_file::session_scheduled_tasks_path(root);
         match tokio::fs::read_to_string(&path).await {
@@ -1122,7 +1110,6 @@ mod tests {
     #[test]
     fn constants_locked() {
         assert_eq!(CRON_CREATE_TOOL_NAME, "CronCreate");
-        assert_eq!(CRON_SUBDIR, "cron");
         assert_eq!(MAX_JOBS, 50);
     }
 
@@ -1222,11 +1209,11 @@ mod tests {
     fn result_content_variants() {
         assert_eq!(
             build_result_content("d12345678", "Every day at 9:00 AM", true, false),
-            "Scheduled recurring job d12345678 (Every day at 9:00 AM). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+            "Scheduled recurring job d12345678 (Every day at 9:00 AM). Session-only (not written to disk, dies when LingXi exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
         );
         assert_eq!(
             build_result_content("d87654321", "February 28 at 2:30pm", false, true),
-            "Scheduled one-shot task d87654321 (February 28 at 2:30pm). Persisted to .claude/scheduled_tasks.json. It will fire once then auto-delete."
+            "Scheduled one-shot task d87654321 (February 28 at 2:30pm). Persisted to the branded project session-cron store. It will fire once then auto-delete."
         );
     }
 
@@ -1368,7 +1355,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let victim = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(victim.path(), tmp.path().join(".claude")).unwrap();
+        std::os::unix::fs::symlink(victim.path(), tmp.path().join(branding::DOT_DIR)).unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
 
         let err = tool
@@ -1482,7 +1469,7 @@ mod tests {
         // live scheduler (mobile fires it from its own OS wake), so the result
         // is the oracle text.
         assert!(content.ends_with(
-            "Persisted to .claude/scheduled_tasks.json. It will fire once then auto-delete."
+            "Persisted to the branded project session-cron store. It will fire once then auto-delete."
         ));
         // PARITY 2.1.263 `nCe`: recurring:false ⇒ the `recurring` key is omitted
         // on disk (and the reader normalises a literal `false` to absent too).
@@ -1712,15 +1699,22 @@ mod tests {
         // Unix epoch and the matcher's `year > 1970` sentinel keeps the 366-day
         // horizon (all in 1970) from matching any narrow date.
     }
+    struct PromptFlagGuard;
+    impl Drop for PromptFlagGuard {
+        fn drop(&mut self) {
+            telemetry::test_clear_flag("tengu_kairos_cron_durable");
+            telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+        }
+    }
+
     #[tokio::test]
-    async fn all_local_tool_prompt_branches_match_latest_oracle_without_normalization() {
+    async fn all_local_tool_prompt_branches_match_current_product_contract() {
         let _serial = cron::autonomous_loop::TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let cases: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/cron_contracts_2_1_270.json"
-        ))
-        .unwrap();
+        let _flags = PromptFlagGuard;
+        let cases: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/cron_contracts.json")).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let create = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let delete = crate::cron_delete::CronDeleteTool::new(shell_test_ctx_in(

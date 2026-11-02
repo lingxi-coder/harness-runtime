@@ -91,7 +91,7 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
     truncate_to_width(s, max_width)
 }
 
-/// Read the single `<root>/.claude/scheduled_tasks.json` file into the `jobs`
+/// Read the single `<root>/the branded project session-cron store` file into the `jobs`
 /// shape, in FILE order (the oracle `bFe` does not sort). A missing /
 /// unparseable file yields no jobs. Every persisted task is durable by
 /// definition, so the `durable:false`
@@ -367,7 +367,7 @@ impl Tool for CronListTool {
     ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronList reads .claude/scheduled_tasks.json".into(),
+                reason: "CronList reads the branded project session-cron store".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -384,7 +384,7 @@ impl Tool for CronListTool {
             return "List all cron jobs scheduled via CronCreate in this session.".into();
         }
         // PARITY 2.1.263 `hbn(true)`.
-        "List all cron jobs scheduled via CronCreate, both durable (.claude/scheduled_tasks.json) and session-only.".into()
+        "List all cron jobs scheduled via CronCreate, both durable (the branded project session-cron store) and session-only.".into()
     }
 
     async fn validate_input(
@@ -457,7 +457,7 @@ mod tests {
         }
     }
 
-    /// Seed the single `<root>/.claude/scheduled_tasks.json` file with the given
+    /// Seed the single `<root>/the branded project session-cron store` file with the given
     /// tasks (everything on disk is durable by definition — there is no on-disk
     /// `durable` field).
     async fn seed_tasks(root: &Path, tasks: Vec<cron::tasks_file::CronTask>) {

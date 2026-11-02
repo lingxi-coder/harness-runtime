@@ -354,13 +354,13 @@ fn skippable_loop_file_error(error: &std::io::Error) -> bool {
     ) || cfg!(windows) && matches!(error.raw_os_error(), Some(19 | 206 | 267 | 1142 | 1921))
 }
 
-/// 2.1.270 `_( )`: project-root `.claude/loop.md`, then current-directory
+/// 2.1.270 `_( )`: project-root `.lingxi/loop.md`, then current-directory
 /// `loop.md`. Node's UTF-8 replacement decoding precedes ECMAScript trimming.
 /// Expected path/access failures (`Dt` plus EISDIR) are skipped; unexpected
 /// errors such as EIO propagate.
 pub fn read_loop_file_at(project_root: &Path, cwd: &Path) -> std::io::Result<Option<LoopFile>> {
     let candidates = [
-        project_root.join(".claude").join("loop.md"),
+        project_root.join(branding::DOT_DIR).join("loop.md"),
         cwd.join("loop.md"),
     ];
     for path in candidates {
@@ -1657,12 +1657,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("nested");
         std::fs::create_dir_all(root.path().join(".claude")).unwrap();
-        std::fs::create_dir_all(root.path().join(".lingxi")).unwrap();
-        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
-        std::fs::write(root.path().join(".lingxi/loop.md"), "wrong legacy file").unwrap();
-        std::fs::write(cwd.join(".claude/loop.md"), "wrong cwd root").unwrap();
+        std::fs::create_dir_all(root.path().join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::write(root.path().join(".claude/loop.md"), "obsolete file").unwrap();
+        std::fs::write(cwd.join(".lingxi/loop.md"), "wrong cwd root").unwrap();
         std::fs::write(cwd.join("loop.md"), "cwd tasks").unwrap();
-        let project_file = root.path().join(".claude/loop.md");
+        let project_file = root.path().join(".lingxi/loop.md");
         std::fs::write(&project_file, b"\xef\xbb\xbfroot \xff task\n").unwrap();
         let found = read_loop_file_at(root.path(), &cwd).unwrap().unwrap();
         assert_eq!(found.path, project_file);
@@ -1709,9 +1709,9 @@ mod tests {
         let _g = guard();
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("nested");
-        std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(root.path().join(branding::DOT_DIR)).unwrap();
         std::fs::create_dir(&cwd).unwrap();
-        std::fs::write(root.path().join(".claude/loop.md"), "root tasks").unwrap();
+        std::fs::write(root.path().join(".lingxi/loop.md"), "root tasks").unwrap();
         let rt = LoopRuntime::default();
         let sentinel = Utf16JsonProjection::from(LOOP_FILE_DYNAMIC_SENTINEL);
         let first = rt

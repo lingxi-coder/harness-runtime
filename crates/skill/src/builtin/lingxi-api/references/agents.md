@@ -25,3 +25,12 @@ spawned processes stopped. Report terminal state from the owning task service.
 Source anchors: Harness `crates/agent/src/{builtins,tool_resolver}.rs`,
 `crates/tools/agent/src/agent.rs`, `crates/fusion`,
 `crates/runtime/src/desktop/background_agent.rs`.
+
+Execution completion is distinct from report delivery. When handback is enabled,
+only a host-issued receipt establishes delivered/flagged delivery; withheld or
+pending reports are not successful parent results. Plain text and a Done label
+are insufficient. Host-supplied control tools use the enforcing invoker and
+cannot be replaced by a Mod result. Cancel/resume preserves run-generation and
+receipt identity. Pool and host configuration determine actual concurrency.
+lingxi-code-guide has only Read/Grep/Glob and the same bundled references as this
+skill: repeating that corpus is not independent verification of source code.

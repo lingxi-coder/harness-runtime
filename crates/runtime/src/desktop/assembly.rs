@@ -37,11 +37,11 @@ use super::{
     append_restricted_builtin_denies, apple_events_override, apply_worktree_launch,
     auto_mode_propose, aws_auth_refresher, background_agent, build_agent_mcp_tool_set,
     build_shared_credential_stack_for_config, capture_legacy_opening_balance,
-    configure_session_hook_root, cron_command, cron_management, cron_native,
-    cron_scheduler_enabled, current_uid, desktop_command_registry, desktop_fusion_attempts,
-    desktop_fusion_executor, desktop_skill_registry, discover_plugin_set,
-    emit_mcp_servers_inventory, ephemeral_session_home, expand_trusted_dir, file_changed_watch,
-    fork_resume, fusion_command, fusion_recorder, is_env_truthy, job_dir_from_env, lingxi_temp_dir,
+    configure_session_hook_root, cron_command, cron_native, cron_scheduler_enabled, current_uid,
+    desktop_command_registry, desktop_fusion_attempts, desktop_fusion_executor,
+    desktop_skill_registry, discover_plugin_set, emit_mcp_servers_inventory,
+    ephemeral_session_home, expand_trusted_dir, file_changed_watch, fork_resume, fusion_command,
+    fusion_recorder, is_env_truthy, job_dir_from_env, lingxi_temp_dir,
     load_ask_user_question_timeout, load_blocked_marketplaces,
     load_boot_permission_tiers_with_policy_snapshot, load_effective_settings_for_config,
     load_managed_plugin_names, load_merged_agent_push_notif_enabled,
@@ -4118,38 +4118,9 @@ pub async fn build_with_credential_stack(
     //        GrowthBook fleet flag, which itself defaults on).
     let cron_scheduler = if (cfg.app_invocation.is_none() && cfg.team_invocation.is_none())
         && !cron_native::is_child_runtime()
-        && cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref())
+        && cron_scheduler_enabled(std::env::var(branding::DISABLE_CRON_ENV).ok().as_deref())
     {
         if cfg.enable_automation_scheduler && cfg.host_workspace_trusted == Some(true) {
-            let migration_model = provider_adapter_handle
-                .list_model_listings()
-                .into_iter()
-                .find(|listing| {
-                    listing.request_model == default_model_id
-                        && default_model_profile
-                            .as_ref()
-                            .is_none_or(|profile| &listing.provider_id == profile)
-                })
-                .map(|listing| {
-                    lingxi_core::host::qualified_model_ref(
-                        &listing.request_model,
-                        Some(&listing.provider_id),
-                    )
-                });
-            let migration_reasoning = cfg.initial_effort.as_ref().map_or_else(
-                || serde_json::json!({"type":"automatic"}),
-                |id| serde_json::json!({"type":"level", "id":id}),
-            );
-            cron_management::migrate_legacy(
-                &DesktopFileSystem::new(cwd.clone()),
-                &cwd,
-                migration_model,
-                migration_reasoning,
-            )
-            .await
-            .map_err(|error| {
-                BuildError::DurableSession(format!("Scheduled task migration failed: {error}"))
-            })?;
             if cron::scheduled_tasks_path(&cwd).exists() {
                 cron::automation::recover_orphaned_automation_runs(
                     &DesktopFileSystem::new(cwd.clone()),
@@ -5258,6 +5229,7 @@ pub async fn build_with_credential_stack(
     let local_app_tool_ctx = cfg.local_apps.then(|| tool_ctx.clone());
     let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools(
         &mut tools_inner,
+        cfg.lingxi_home.join("settings.json"),
         tool_ctx,
         coordinator_wiring,
         ask_user_question_resolver,
@@ -6688,7 +6660,7 @@ pub async fn build_with_credential_stack(
         ),
     ));
     reg.register_builtin_handler(worktree_command_handler);
-    if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
+    if cron_scheduler_enabled(std::env::var(branding::DISABLE_CRON_ENV).ok().as_deref()) {
         // `/cron` is an explicit management action. Keep it out of the model
         // permission loop and invoke the same validated cron tools directly.
         reg.register_builtin_handler(cron_command_handler);

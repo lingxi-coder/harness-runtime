@@ -4863,6 +4863,7 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
     lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
         lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
+            handback: None,
             agent_id,
             content: Utf16JsonProjection::parse(r#""done""#).unwrap(),
             total_tool_use_count: 3,

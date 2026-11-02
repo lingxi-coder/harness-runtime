@@ -2317,7 +2317,9 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .await;
             }
             lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
-                agent_id, ..
+                agent_id,
+                handback,
+                ..
             } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
@@ -2328,7 +2330,9 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
                         agent: SessionAgentSummaryDto {
-                            report_delivery: None,
+                            report_delivery: handback
+                                .as_ref()
+                                .and_then(|state| state.delivery_status().map(str::to_owned)),
                             agent_id: agent_key.clone(),
                             name: bound.name.into(),
                             agent_type: bound.agent_type,
@@ -8619,6 +8623,10 @@ impl MobileEngineHandle {
             }
         }
         let row = session::agent_rows::read_row(path.parent()?, &agent_id).await;
+        let report_delivery = row
+            .as_ref()
+            .and_then(|row| row.handback_state.as_ref())
+            .and_then(|state| state.delivery_status().map(str::to_owned));
         let (row_name, row_type, row_model, row_model_profile, parked) = row
             .map(|row| {
                 (
@@ -8665,7 +8673,7 @@ impl MobileEngineHandle {
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
         Some(SessionAgentSummaryDto {
-            report_delivery: None,
+            report_delivery,
             agent_id,
             name: client::protocol::text::ClientTextDto::from_projection(&name)
                 .expect("agent label is text"),

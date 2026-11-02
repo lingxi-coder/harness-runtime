@@ -451,6 +451,7 @@ mod tests {
             token_count: 1,
         };
         let completed = || SubagentObservation::Completed {
+            handback: None,
             agent_id,
             content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
                 .expect("null is valid JSON"),

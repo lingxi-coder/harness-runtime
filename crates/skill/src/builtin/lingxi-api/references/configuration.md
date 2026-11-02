@@ -2,16 +2,16 @@
 
 Use the current `update-config` skill for settings/hooks when it is available;
 it includes the loader's actual Settings JSON Schema. Settings are layered:
-user `~/.lingxi/settings.json`, project `.lingxi/settings.json`, and private
-project `.lingxi/settings.local.json`. Managed policy can restrict them.
+user `~/{{config_dir}}/settings.json`, project `{{config_dir}}/settings.json`, and private
+project `{{config_dir}}/settings.local.json`. Managed policy can restrict them.
 Resolve the host's configured home rather than assuming the default path.
 
 MCP has separate storage:
 
 | Scope | Default store |
 | --- | --- |
-| User | `~/.lingxi.json`, top-level `mcpServers` |
-| Local project | `~/.lingxi.json`, `projects[<cwd>].mcpServers` |
+| User | `~/{{global_config_file}}`, top-level `mcpServers` |
+| Local project | `~/{{global_config_file}}`, `projects[<cwd>].mcpServers` |
 | Shared project | `<project>/.mcp.json`, `mcpServers` |
 
 Use an available LingXi CLI's `mcp` subcommands or the native MCP settings UI.
@@ -49,3 +49,15 @@ does not install its required MCP server or add a tool by mentioning its name.
 Source anchors: Harness `crates/configuration-admin/src/mcp_bridge.rs`,
 `crates/command-api/src/builtins/bundled/update_config_skill.rs`; product
 `apps/cli/host/src/commands/mcp.rs` and native settings surfaces.
+
+Configuration has distinct owners: Harness settings are the layers above;
+Desktop preferences are userData/settings.v1.json; provider account metadata is
+host-global under provider-accounts/<store_scope>.json, with credentials in the
+native broker/secure store. Bot and Local App grants have their own native
+owners. These are not interchangeable JSON files. /config opens the resolved
+Harness user file, not Desktop appearance settings. Config cannot set native
+appearance preferences. Do not infer .claude or CLAUDE.md paths from code ancestry. Provider-specific
+authentication variables apply only to the selected provider; actual Anthropic
+protocol identifiers and credentials remain valid on an Anthropic route.
+A host-pinned session config-home/global-config path takes priority over ambient
+process variables. Empty {{config_dir_env}} is treated as unset.

@@ -689,7 +689,9 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     })
                     .await;
             }
-            SubagentObservation::Completed { agent_id, .. } => {
+            SubagentObservation::Completed {
+                agent_id, handback, ..
+            } => {
                 let persistent = self
                     .bound_agents
                     .lock()
@@ -709,8 +711,16 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                 // keeps its binding so a later message can resume it. That
                 // difference now lives in `clear_state` alone, where it is a
                 // fact about the engine rather than a word the user reads.
-                self.emit_update(agent_id, "completed", None, !persistent)
-                    .await;
+                self.emit_update_with_report(
+                    agent_id,
+                    "completed",
+                    None,
+                    !persistent,
+                    handback
+                        .as_ref()
+                        .and_then(|state| state.delivery_status().map(str::to_owned)),
+                )
+                .await;
             }
             SubagentObservation::Failed { agent_id, error } => {
                 self.emit_terminal_with_activity(agent_id, "failed", Some(error.into()))
@@ -772,6 +782,18 @@ impl DesktopSessionAgentObserver {
         latest_activity: Option<ClientTextDto>,
         clear_state: bool,
     ) {
+        self.emit_update_with_report(agent_id, status, latest_activity, clear_state, None)
+            .await;
+    }
+
+    async fn emit_update_with_report(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        status: &str,
+        latest_activity: Option<ClientTextDto>,
+        clear_state: bool,
+        report_delivery: Option<String>,
+    ) {
         let key = agent_id.to_string();
         let Some(bound) = self.bound_agents.lock().await.get(&key).cloned() else {
             // before_start may fail after the synchronous allocation receipt
@@ -786,6 +808,7 @@ impl DesktopSessionAgentObserver {
                 if let Some(observed) = receipt {
                     let mut agent = observed.agent;
                     agent.status = status.to_string();
+                    agent.report_delivery = report_delivery;
                     agent.latest_activity = latest_activity;
                     agent.updated_at_ms = Some(unix_time_ms());
                     self.emit_observed(
@@ -804,7 +827,7 @@ impl DesktopSessionAgentObserver {
             ClientEvent::SessionAgentUpdated {
                 session_id: bound.session_id,
                 agent: SessionAgentSummaryDto {
-                    report_delivery: None,
+                    report_delivery,
                     agent_id: key.clone(),
                     name: bound.name,
                     agent_type: bound.agent_type,
@@ -875,6 +898,7 @@ mod tests {
 
     fn completed(agent_id: lingxi_core::types::AgentId) -> SubagentObservation {
         SubagentObservation::Completed {
+            handback: None,
             agent_id,
             content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""done""#)
                 .expect("completed observation fixture is JSON"),

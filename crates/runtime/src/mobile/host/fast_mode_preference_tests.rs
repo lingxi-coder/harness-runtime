@@ -5,7 +5,7 @@ mod fast_mode_preference_tests {
     fn permit_org_fast_mode(home: &std::path::Path) {
         std::fs::create_dir_all(home).unwrap();
         std::fs::write(
-            home.join(branding::LEGACY_GLOBAL_CONFIG_FILE),
+            home.join(branding::GLOBAL_CONFIG_FILE),
             r#"{"penguinModeOrgEnabled":true}"#,
         )
         .unwrap();

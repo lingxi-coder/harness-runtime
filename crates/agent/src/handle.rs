@@ -1944,9 +1944,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 total_duration_ms,
                 assistant_message_count,
                 last_request_id,
+                handback,
                 ..
             } => {
                 observer_events.emit_terminal(SubagentObservation::Completed {
+                    handback: handback.clone(),
                     agent_id,
                     content: content.clone(),
                     usage: usage.clone(),
@@ -2559,6 +2561,7 @@ impl PoolSubagentSpawner {
                         last_request_id,
                         cumulative_usage,
                         usage_complete,
+                        handback,
                         ..
                     } => {
                         let final_usage = subagent_usage_from_llm_usage(usage);
@@ -2585,6 +2588,7 @@ impl PoolSubagentSpawner {
                         .await;
                         if let Some(observer_events) = observer_events.as_ref() {
                             observer_events.emit_terminal(SubagentObservation::Completed {
+                                handback: handback.clone(),
                                 agent_id: forward_agent_id,
                                 content: result.clone(),
                                 usage: final_usage,
