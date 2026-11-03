@@ -10423,6 +10423,8 @@ impl ApiService {
         });
         let main_conversation = !req.execution.isolated_query
             && query_source_category(source) == Some(QuerySourceCategory::Main);
+        tracing::debug!(target: "llm_runtime::continuation", main_conversation,
+            query_source = source, isolated_query = req.execution.isolated_query, "conversation lease");
         let mut conversation_lease = Some(if main_conversation {
             ConversationLease::checkout(&self.responses_ws_session)
         } else {

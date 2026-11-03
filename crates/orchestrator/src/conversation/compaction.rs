@@ -4102,7 +4102,7 @@ impl ConversationOrchestrator {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return;
         };
-        let session_id_str = self.session.lock().await.session_id.to_string();
+        let session_id_str = self.session.lock().await.session_id.as_uuid().to_string();
         let explicit_parent = match marker {
             ConversationMessage::System {
                 compact_metadata: Some(metadata),

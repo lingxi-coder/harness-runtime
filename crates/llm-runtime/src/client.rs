@@ -3506,10 +3506,17 @@ impl ModelRuntime {
             .prepare(&mut draft)
             .await
             .map_err(crate::upstream::error)?;
-        let snapshot = session.last_request();
-        tracing::debug!(target: "llm_runtime::continuation", mode = ?snapshot.mode,
-            logical_bytes = snapshot.logical_bytes, wire_bytes = snapshot.wire_bytes,
-            new_items = snapshot.new_items);
+        {
+            let snapshot = session.last_request();
+            let transport = session.responses_transport();
+            tracing::debug!(target: "llm_runtime::continuation", mode = ?snapshot.mode,
+                logical_bytes = snapshot.logical_bytes, wire_bytes = snapshot.wire_bytes,
+                new_items = snapshot.new_items,
+                websocket_enabled = draft.profile().supports_websockets,
+                websocket_prepared = transport.is_some(),
+                http_fallback = transport.is_some_and(|transport| transport.fallback_to_http()),
+                previous_response_present = transport.is_some_and(|transport| transport.last_response_id().is_some()));
+        }
 
         let call = draft
             .seal()
