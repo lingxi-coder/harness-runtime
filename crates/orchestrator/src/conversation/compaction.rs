@@ -3104,7 +3104,9 @@ impl ConversationOrchestrator {
                 .active_goal
                 .as_ref()
                 .map(compaction::compact_active_goal_from_engine);
-            debug_assert!(marker.set_compact_metadata(metadata.clone()));
+            // Cold resume needs the preserved-tail links in release builds too.
+            let metadata_updated = marker.set_compact_metadata(metadata.clone());
+            debug_assert!(metadata_updated);
         }
         marker = self
             .mod_session_append_row(&marker, None, false, None)
