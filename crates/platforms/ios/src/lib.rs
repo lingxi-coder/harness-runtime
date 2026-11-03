@@ -254,7 +254,7 @@ fn append_additional_workspace_mounts(
             .and_then(std::path::Path::parent)
             .ok_or_else(|| "primary workspace mount has no user-home parent".to_string())?
             .to_path_buf();
-        let expected_primary = home.join(&profile.brand_id).join("projects");
+        let expected_primary = home.join(&profile.config_dir_name).join("projects");
         if canonical_primary != expected_primary {
             return Err(
                 "primary workspace host path does not match the selected brand home".into(),
@@ -293,12 +293,31 @@ fn append_additional_workspace_mounts(
             return Err("additional project mount may not expose the whole user home".into());
         }
         let is_local_app_source = guest.starts_with(&apps_guest) && guest != apps_guest;
+        let is_mode_workspace = ["chat", "code", "scheduled"].iter().any(|name| {
+            let root = config_guest.join(name);
+            guest.strip_prefix(&root).is_ok_and(|relative| {
+                if *name == "scheduled" && relative.as_os_str().is_empty() {
+                    return false;
+                }
+                let components = relative
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+                    .collect::<Vec<_>>();
+                components.iter().all(|value| {
+                    value != &profile.config_dir_name && value != "provider" && value != "providers"
+                }) && !components
+                    .windows(2)
+                    .any(|pair| pair[0] == "library" && pair[1] == "preferences")
+            })
+        });
         if guest == apps_guest || apps_guest.starts_with(guest) {
             return Err(
                 "additional project mount may not expose the Local App root or its parent".into(),
             );
         }
-        if paths_overlap(&mount.guest_path, &config_guest.to_string_lossy()) && !is_local_app_source
+        if paths_overlap(&mount.guest_path, &config_guest.to_string_lossy())
+            && !is_local_app_source
+            && !is_mode_workspace
         {
             return Err("additional project mount overlaps the protected brand config tree".into());
         }
@@ -628,7 +647,7 @@ mod tests {
     #[test]
     fn workspace_mount_uses_selected_brand_profile() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let workspace_host_path = temp.path().join("persistent/atlas_guest/atlas/projects");
+        let workspace_host_path = temp.path().join("persistent/atlas_guest/.atlas/projects");
         let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
         let mounts = build_mobile_linux_mounts(
             Some(workspace_host_path.clone()),
@@ -638,7 +657,7 @@ mod tests {
 
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].host_path, workspace_host_path);
-        assert_eq!(mounts[0].guest_path, "/home/atlas_guest/atlas/projects");
+        assert_eq!(mounts[0].guest_path, "/home/atlas_guest/.atlas/projects");
     }
 
     fn mount_fixture(
@@ -646,7 +665,7 @@ mod tests {
         profile: &mobile_linux_api::BrandRuntimeProfile,
     ) -> (PathBuf, PathBuf) {
         let home = root.join("persistent").join(&profile.linux_user);
-        let primary_host = home.join(&profile.brand_id).join("projects");
+        let primary_host = home.join(&profile.config_dir_name).join("projects");
         let app_host = home
             .join(&profile.config_dir_name)
             .join(".apps")
@@ -755,6 +774,65 @@ mod tests {
     }
 
     #[test]
+    fn explicit_mode_workspace_mounts_require_exact_home_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let (primary_host, _) = mount_fixture(temp.path(), &profile);
+        let primary = build_mobile_linux_mounts(
+            Some(primary_host.clone()),
+            Some("projects".into()),
+            &profile,
+        );
+        for name in ["chat", "code", "scheduled"] {
+            let host = primary_host.parent().unwrap().join(name).join("chosen");
+            std::fs::create_dir_all(&host).unwrap();
+            if name == "scheduled" {
+                let root = host.parent().unwrap().canonicalize().unwrap();
+                assert!(append_additional_workspace_mounts(
+                    primary.clone(),
+                    vec![external_mount(root, "/home/atlas_guest/.atlas/scheduled")],
+                    &profile,
+                )
+                .is_err());
+            }
+            let host = host.canonicalize().unwrap();
+            let guest = format!("/home/atlas_guest/.atlas/{name}/chosen");
+            let only_primary =
+                append_additional_workspace_mounts(primary.clone(), Vec::new(), &profile).unwrap();
+            assert_eq!(only_primary.len(), 1);
+            let mounts = append_additional_workspace_mounts(
+                primary.clone(),
+                vec![external_mount(host.clone(), &guest)],
+                &profile,
+            )
+            .unwrap();
+            assert_eq!(mounts.len(), 2);
+            assert_eq!(mounts[1].host_path, host);
+            assert_eq!(mounts[1].guest_path, guest);
+            assert!(append_additional_workspace_mounts(
+                primary.clone(),
+                vec![external_mount(
+                    host,
+                    format!("/home/atlas_guest/.atlas/{name}/wrong")
+                )],
+                &profile
+            )
+            .is_err());
+        }
+        let protected = primary_host.parent().unwrap().join("chat/providers");
+        std::fs::create_dir_all(&protected).unwrap();
+        assert!(append_additional_workspace_mounts(
+            primary,
+            vec![external_mount(
+                protected.canonicalize().unwrap(),
+                "/home/atlas_guest/.atlas/chat/providers"
+            )],
+            &profile
+        )
+        .is_err());
+    }
+
+    #[test]
     fn additional_mounts_reject_unmapped_private_and_symlink_paths() {
         let temp = tempfile::tempdir().expect("tempdir");
         let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
@@ -777,7 +855,7 @@ mod tests {
             ),
             external_mount(
                 primary_host.join("subdir"),
-                "/home/atlas_guest/atlas/projects/subdir",
+                "/home/atlas_guest/.atlas/projects/subdir",
             ),
             external_mount(
                 app_host.join(".."),

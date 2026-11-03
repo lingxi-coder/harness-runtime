@@ -18,6 +18,14 @@ use media_api::{MediaAttachmentId, MediaOperationId, MediaSessionRef};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Transcript-writer acknowledgments shared with the owning dispatch. A tool
+/// may use an invocation identity only after its exact assistant row is durable.
+#[derive(Clone)]
+pub struct DurableToolOrigins {
+    pub sources: Arc<Mutex<std::collections::HashMap<(String, String), Result<String, String>>>>,
+    pub changed: Arc<tokio::sync::Notify>,
+}
+
 /// Meaning of the cancellation token for a tool invocation.
 ///
 /// A model-turn interruption may hand a foreground Bash process to a background
@@ -49,6 +57,11 @@ pub struct ToolUseContext {
     /// request. Omitted for call sites that have no current assistant message
     /// (for example isolated unit tests and subagent helper invocations).
     pub assistant_message_id: Option<MessageId>,
+    /// Fixed mode captured by the owning native session at admission. This is
+    /// never obtained from model input or a later UI selection.
+    pub trusted_session_profile: Option<lingxi_core::host::session_context::SessionModeSnapshot>,
+    /// Writer-backed assistant-row acknowledgments for this session, if any.
+    pub durable_tool_origins: Option<DurableToolOrigins>,
     /// Raw assistant row for the currently dispatched completed block. This
     /// is independent of `messages` (the pre-query history snapshot) and is
     /// refreshed from trusted host facts for every nested invocation.
@@ -329,6 +342,8 @@ impl ToolUseContext {
             messages: Vec::new(),
             tool_use_id: None,
             assistant_message_id: None,
+            trusted_session_profile: None,
+            durable_tool_origins: None,
             available_tool_names: None,
             assistant_message: None,
             same_turn_tool_uses: Vec::new(),

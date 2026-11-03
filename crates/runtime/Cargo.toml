@@ -293,6 +293,7 @@ platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
 mobile-linux-android.workspace = true
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 # Native replay fixtures verify their bytes in desktop-only test builds too.
 sha2 = "0.10"
 # Shared host-side filesystem fixtures also run with only the mobile feature.

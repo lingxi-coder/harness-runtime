@@ -2271,7 +2271,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // profile revision. Building a fresh prompt can call Mods, so do that
         // outside the transition gate and retry if a selection changed while
         // it was assembled.
-        let (history, origin_session_id, parent_sys, instruction_context) = loop {
+        let (history, origin_session_id, parent_sys, instruction_context, owner_profile) = loop {
             let profile = self.conversation_profile().await;
             let parent_sys = match self.current_turn_system_prompt().await {
                 Some(prompt) => prompt,
@@ -2290,7 +2290,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 (s.model_context_history(), s.session_id)
             };
             drop(transition);
-            break (history, session_id, parent_sys, instruction_context);
+            break (history, session_id, parent_sys, instruction_context, profile);
         };
         if !history.iter().any(|message| {
             matches!(
@@ -2375,7 +2375,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
         };
 
         let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(
-            tool_api::tool_invoker_impl::RegistryToolInvoker::new(self.tools.clone()),
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(self.tools.clone())
+                .with_trusted_session(Some(owner_profile), self.transcript.jsonl_writer.as_ref().map(|_| tool_api::context::DurableToolOrigins {
+                    sources: self.transcript.tool_persisted_origins.clone(),
+                    changed: self.transcript.tool_source_assistant_notify.clone(),
+                })),
         );
         let inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: invoker,

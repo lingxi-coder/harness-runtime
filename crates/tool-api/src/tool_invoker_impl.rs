@@ -48,6 +48,8 @@ pub struct SuppliedTool(pub Arc<dyn crate::Tool>);
 /// Cheap to construct; clones share the same registry `Arc`.
 pub struct RegistryToolInvoker {
     registry: Arc<ToolRegistry>,
+    trusted_session_profile: Option<lingxi_core::host::session_context::SessionModeSnapshot>,
+    durable_tool_origins: Option<crate::context::DurableToolOrigins>,
     /// Permission gate consulted before every dispatch (enforcement 3b).
     /// `None` (the default) preserves the legacy always-dispatch behavior for
     /// tests / hosts without enforcement wired. When `Some`, this is the SAME
@@ -69,9 +71,23 @@ impl RegistryToolInvoker {
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
         Self {
             registry,
+            trusted_session_profile: None,
+            durable_tool_origins: None,
             gate: None,
             background_owned: false,
         }
+    }
+
+    /// Carry a parent session's immutable owner profile into nested tools.
+    #[must_use]
+    pub fn with_trusted_session(
+        mut self,
+        profile: Option<lingxi_core::host::session_context::SessionModeSnapshot>,
+        origins: Option<crate::context::DurableToolOrigins>,
+    ) -> Self {
+        self.trusted_session_profile = profile;
+        self.durable_tool_origins = origins;
+        self
     }
 
     /// Attach the permission gate consulted before each dispatch (3b). Without
@@ -109,6 +125,14 @@ impl RegistryToolInvoker {
 
 #[async_trait]
 impl ToolInvoker for RegistryToolInvoker {
+    fn durable_origin_state(
+        &self,
+    ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
+        self.durable_tool_origins.clone().map(|origins| {
+            lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(origins))
+        })
+    }
+
     async fn cleanup_computer_inputs(
         &self,
         agent_id: lingxi_core::types::AgentId,
@@ -138,6 +162,8 @@ impl ToolInvoker for RegistryToolInvoker {
             messages: vec![],
             tool_use_id: None,
             assistant_message_id: None,
+            trusted_session_profile: None,
+            durable_tool_origins: None,
             assistant_message: None,
             same_turn_tool_uses: vec![],
             agent_id: Some(agent_id),
@@ -355,6 +381,8 @@ impl RegistryToolInvoker {
                 messages: ctx.current_history.clone(),
                 tool_use_id: None,
                 assistant_message_id: None,
+                trusted_session_profile: None,
+                durable_tool_origins: None,
                 assistant_message: ctx.assistant_message.clone(),
                 same_turn_tool_uses: ctx.same_turn_tool_uses.clone(),
                 agent_id: None,
@@ -406,6 +434,16 @@ impl RegistryToolInvoker {
         tool_use_ctx.agent_name = ctx.agent_name.clone();
         tool_use_ctx.team_name = ctx.team_name.clone();
         tool_use_ctx.origin_session_id = ctx.origin_session_id;
+        tool_use_ctx.trusted_session_profile =
+            self.trusted_session_profile.clone().filter(|profile| {
+                ctx.origin_session_id
+                    .is_some_and(|id| id.as_uuid().to_string() == profile.session_id)
+            });
+        tool_use_ctx.durable_tool_origins = if tool_use_ctx.trusted_session_profile.is_some() {
+            self.durable_tool_origins.clone()
+        } else {
+            None
+        };
         tool_use_ctx.instruction_context = ctx.instruction_context.clone();
         tool_use_ctx.tool_execution_policy = ctx.tool_execution_policy;
         tool_use_ctx.trusted_effective_permission_mode =

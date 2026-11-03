@@ -5218,6 +5218,12 @@ impl ConversationOrchestrator {
                 self.replace_session_history_row(*turn_id, rewritten_merged)
                     .await;
                 let Some(writer) = writer_for_commit else {
+                    self.fail_local_app_publication_origins(
+                        std::slice::from_ref(&block_for_commit),
+                        &turn_id.as_uuid().to_string(),
+                        "assistant transcript is unavailable",
+                    )
+                    .await;
                     let _ = result_tx.send(None::<String>);
                     return;
                 };
@@ -5255,7 +5261,7 @@ impl ConversationOrchestrator {
                             &session_id_for_commit,
                             &line_uuid_for_commit,
                         );
-                        if let lingxi_core::types::ContentBlock::ToolUse { id, .. } =
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } =
                             &block_for_commit
                         {
                             self.record_source_tool_assistant_uuid(
@@ -5263,10 +5269,30 @@ impl ConversationOrchestrator {
                                 line_uuid_for_commit.clone(),
                             )
                             .await;
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &turn_id.as_uuid().to_string(),
+                                    Ok(line_uuid_for_commit.clone()),
+                                )
+                                .await;
+                            }
                         }
                         let _ = result_tx.send(Some(line_uuid_for_commit));
                     }
                     Err(error) => {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } =
+                            &block_for_commit
+                        {
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &turn_id.as_uuid().to_string(),
+                                    Err("assistant transcript write failed".into()),
+                                )
+                                .await;
+                            }
+                        }
                         self.record_transcript_append_failure(
                             &session_id_for_commit,
                             "assistant_block",
@@ -5284,6 +5310,12 @@ impl ConversationOrchestrator {
                 true
             };
             if !committed {
+                self.fail_local_app_publication_origins(
+                    &content[block_index..],
+                    &turn_id.as_uuid().to_string(),
+                    "assistant publication fence closed",
+                )
+                .await;
                 return map;
             }
             block_groups = next_block_groups;
@@ -5387,6 +5419,29 @@ impl ConversationOrchestrator {
         row.session_append_dispatched = true;
     }
 
+    async fn fail_local_app_publication_origins(
+        &self,
+        content: &[lingxi_core::types::ContentBlock],
+        assistant: &str,
+        reason: &str,
+    ) {
+        for block in content {
+            if let lingxi_core::types::ContentBlock::ToolUse {
+                id, name, input, ..
+            } = block
+            {
+                if name == "LocalApp"
+                    && input
+                        .string_at("/action")
+                        .is_none_or(|action| action == "publish")
+                {
+                    self.record_durable_tool_origin(id, assistant, Err(reason.to_owned()))
+                        .await;
+                }
+            }
+        }
+    }
+
     /// Commit one content-block row after terminal metadata is available.
     /// Native's interactive recorder excludes the incomplete assistant tail.
     /// Its event journal cursor and the headless shared-message write queue
@@ -5400,19 +5455,40 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|guard| !guard.is_current())
         {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant publication fence closed",
+            )
+            .await;
             return None;
         }
         if let Some(link) = &row.persisted_link {
             return Some(link.clone());
         }
         if row.stop_reason.is_none() || row.is_api_error {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant row has no durable terminal state",
+            )
+            .await;
             return None;
         }
         let inner_id = if self.is_persistent_app_chat() {
             // Replay groups the per-block rows into the exact live assistant
             // identity. A provider id is neither that host UUID nor a replay
             // authority; retain it separately as response metadata.
-            row.logical_message_id?.as_uuid().to_string()
+            let Some(logical) = row.logical_message_id else {
+                self.fail_local_app_publication_origins(
+                    &row.content,
+                    &row.row_id.as_uuid().to_string(),
+                    "assistant origin is unavailable",
+                )
+                .await;
+                return None;
+            };
+            logical.as_uuid().to_string()
         } else {
             row.provider_message_id.clone()
         };
@@ -5423,10 +5499,24 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|guard| !guard.is_current())
         {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant publication fence closed",
+            )
+            .await;
             return None;
         }
 
-        let writer = self.transcript.jsonl_writer.as_ref()?;
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant transcript is unavailable",
+            )
+            .await;
+            return None;
+        };
 
         let single = ConversationMessage::Assistant {
             per_turn_effort: (!row.is_api_error)
@@ -5513,9 +5603,17 @@ impl ConversationOrchestrator {
                     *self.transcript.last_jsonl_uuid.lock().await = Some(row_uuid.clone());
                     telemetry::emit_session_appended(&session_id_for_write, &row_uuid);
                     for block in &row_content {
-                        if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
                             self.record_source_tool_assistant_uuid(id, row_uuid.clone())
                                 .await;
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &row_uuid,
+                                    Ok(row_uuid.clone()),
+                                )
+                                .await;
+                            }
                         }
                     }
                     Some(crate::streaming_loop::PersistedAssistantRowLink {
@@ -5537,12 +5635,27 @@ impl ConversationOrchestrator {
         };
         if let Some(fence) = publication_guard {
             if !fence.commit_if_current(Box::pin(persist)).await {
+                self.fail_local_app_publication_origins(
+                    &row.content,
+                    &row.row_id.as_uuid().to_string(),
+                    "assistant publication fence closed",
+                )
+                .await;
                 return None;
             }
         } else {
             persist.await;
         }
-        result_rx.await.ok().flatten()
+        let result = result_rx.await.ok().flatten();
+        if result.is_none() {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant transcript write failed",
+            )
+            .await;
+        }
+        result
     }
 
     /// Physically remove transcript rows named by Native tombstones. Children
@@ -5635,6 +5748,14 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|fence| !fence.is_current())
         {
+            if let ConversationMessage::Assistant { id, content, .. } = &rewritten {
+                self.fail_local_app_publication_origins(
+                    content,
+                    &id.as_uuid().to_string(),
+                    "assistant publication fence closed",
+                )
+                .await;
+            }
             return rewritten;
         }
         let msg = &rewritten;
@@ -5649,6 +5770,14 @@ impl ConversationOrchestrator {
             return rewritten.clone();
         };
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            if let ConversationMessage::Assistant { content, .. } = msg {
+                self.fail_local_app_publication_origins(
+                    content,
+                    &turn_id.as_uuid().to_string(),
+                    "assistant transcript is unavailable",
+                )
+                .await;
+            }
             let note = self.note_assistant_commit(msg);
             if let Some(fence) = publication_fence {
                 fence.commit_if_current(Box::pin(note)).await;
@@ -5720,14 +5849,34 @@ impl ConversationOrchestrator {
                     // `tool_use` block in it shares that line's uuid as its
                     // `sourceToolAssistantUUID`.
                     for block in &assistant_content_for_write {
-                        if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
                             self.record_source_tool_assistant_uuid(id, line_uuid_for_write.clone())
                                 .await;
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &assistant_id.as_uuid().to_string(),
+                                    Ok(line_uuid_for_write.clone()),
+                                )
+                                .await;
+                            }
                         }
                     }
                     true
                 }
                 Err(error) => {
+                    for block in &assistant_content_for_write {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &assistant_id.as_uuid().to_string(),
+                                    Err("assistant transcript write failed".into()),
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     self.record_transcript_append_failure(
                         &session_id_for_write,
                         "assistant_merged",
@@ -5745,6 +5894,14 @@ impl ConversationOrchestrator {
             persist.await;
             true
         };
+        if !admitted {
+            self.fail_local_app_publication_origins(
+                &assistant_content,
+                &assistant_id.as_uuid().to_string(),
+                "assistant publication fence closed",
+            )
+            .await;
+        }
         if admitted && result_rx.await.unwrap_or(false) {
             let output = self.output.clone();
             let published_uuids = [Some(line_uuid)];

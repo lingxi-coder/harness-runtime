@@ -50,6 +50,29 @@ use super::{
     MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
+// A fixed-mode default is a sibling of the projects mount, so do not re-root
+// its boot permission policy onto the unrelated projects directory. Require
+// both host and logical guest paths to match the selected mode.
+pub(super) fn is_bound_mode_default_cwd(cfg: &MobileConfig, cwd: &std::path::Path) -> bool {
+    if cfg.app_agent_host {
+        return false;
+    }
+    let component = if cfg.scheduler_controller {
+        "scheduled"
+    } else {
+        match cfg.session_mode {
+            session::jsonl::SessionMode::Chat => "chat",
+            session::jsonl::SessionMode::Code => "code",
+        }
+    };
+    let expected_guest = cfg
+        .brand_runtime_profile
+        .config_guest_path()
+        .join(component);
+    cwd == cfg.lingxi_home.join(component)
+        && cfg.logical_cwd.as_deref() == Some(expected_guest.as_path())
+}
+
 // Recompute from admitted mobile settings for each plugin-owner connect. This
 // keeps a settings refresh from reviving a server that the current local
 // allow/deny policy now blocks, without adding a separate watcher.
@@ -1310,7 +1333,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         _ => None,
     };
     let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
-    let permission_cwd = if cfg.cwd.starts_with(cfg.lingxi_home.join("workspaces")) {
+    let permission_cwd = if cfg.cwd.starts_with(cfg.lingxi_home.join("workspaces"))
+        || is_bound_mode_default_cwd(&cfg, &cwd)
+    {
         cwd.clone()
     } else {
         match workspace_mounts.as_slice() {
@@ -2622,6 +2647,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         let app_host = Arc::new(crate::mobile::local_app_tools::MobileProjectAppHost {
             service: app_service,
             config_home: cfg.lingxi_home.clone(),
+            active_session_uuid: active_session_uuid.clone(),
             catalog: app_agent_catalog.clone(),
         });
         tools.register_builtin(Arc::new(
@@ -2636,6 +2662,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     let device_skill_tools = tools
         .available_tools(&tool_api::tool_trait::ToolStaticContext::default())
         .into_iter()
+        // A Chat owner may use installed apps, but it must not advertise or
+        // preload the bundled authoring workflow.
+        .filter(|tool| {
+            cfg.session_mode != session::jsonl::SessionMode::Chat
+                || tool.name() != local_app::TOOL_NAME
+        })
         .map(|tool| tool.name().to_owned())
         .collect::<Vec<_>>();
     let live_mcp_tool_ctx = tool_ctx.clone();

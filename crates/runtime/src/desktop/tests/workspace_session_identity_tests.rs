@@ -39,7 +39,7 @@ async fn scheduled_draft_is_discoverable_before_desktop_build_returns() {
     cfg.session_id_override = Some(id.to_string());
     cfg.initial_conversation_mode = Some(ConversationMode::Chat);
     cfg.restore_draft = true;
-    cfg.scheduled_durable_anchor = true;
+    cfg.durable_draft_title = Some("Scheduled task".into());
     cfg.enable_automation_scheduler = false;
     cfg.isolated_credential_storage = true;
     let path = session::jsonl::session_path(
@@ -149,49 +149,54 @@ async fn scheduled_anchor_is_idempotent_and_rejects_foreign_owner() {
         .initialize_fixed_session_mode(&id.to_string(), ConversationMode::Chat, 0)
         .await
         .unwrap();
-    assert!(super::assembly::ensure_scheduled_durable_anchor(
+    assert!(super::assembly::ensure_durable_draft_anchor(
         &writer,
         &path,
         &cwd,
         &id.to_string(),
-        ConversationMode::Chat
+        ConversationMode::Chat,
+        "Scheduled task"
     )
     .await
     .unwrap());
     let anchored = std::fs::read(&path).unwrap();
-    assert!(!super::assembly::ensure_scheduled_durable_anchor(
+    assert!(!super::assembly::ensure_durable_draft_anchor(
         &writer,
         &path,
         &cwd,
         &id.to_string(),
-        ConversationMode::Chat
+        ConversationMode::Chat,
+        "Scheduled task"
     )
     .await
     .unwrap());
-    assert!(super::assembly::ensure_scheduled_durable_anchor(
+    assert!(super::assembly::ensure_durable_draft_anchor(
         &writer,
         &path,
         &cwd,
         &id.to_string(),
-        ConversationMode::Code
+        ConversationMode::Code,
+        "Scheduled task"
     )
     .await
     .is_err());
-    assert!(super::assembly::ensure_scheduled_durable_anchor(
+    assert!(super::assembly::ensure_durable_draft_anchor(
         &writer,
         &path,
         &cwd.join("other"),
         &id.to_string(),
-        ConversationMode::Chat
+        ConversationMode::Chat,
+        "Scheduled task"
     )
     .await
     .is_err());
-    assert!(super::assembly::ensure_scheduled_durable_anchor(
+    assert!(super::assembly::ensure_durable_draft_anchor(
         &writer,
         &path,
         &cwd,
         &uuid::Uuid::new_v4().to_string(),
-        ConversationMode::Chat
+        ConversationMode::Chat,
+        "Scheduled task"
     )
     .await
     .is_err());
@@ -207,12 +212,13 @@ async fn scheduled_anchor_is_idempotent_and_rejects_foreign_owner() {
     )
     .unwrap();
     let foreign_relocation = std::fs::read(&path).unwrap();
-    assert!(super::assembly::ensure_scheduled_durable_anchor(
+    assert!(super::assembly::ensure_durable_draft_anchor(
         &writer,
         &path,
         &cwd,
         &id.to_string(),
-        ConversationMode::Chat
+        ConversationMode::Chat,
+        "Scheduled task"
     )
     .await
     .is_err());
@@ -247,12 +253,13 @@ async fn scheduled_anchor_is_idempotent_and_rejects_foreign_owner() {
             .messages_in_order
             .is_empty()
     );
-    assert!(!super::assembly::ensure_scheduled_durable_anchor(
+    assert!(!super::assembly::ensure_durable_draft_anchor(
         &existing,
         &existing_path,
         &cwd,
         &existing_id.to_string(),
-        ConversationMode::Chat
+        ConversationMode::Chat,
+        "Scheduled task"
     )
     .await
     .unwrap());
@@ -1167,7 +1174,7 @@ async fn desktop_cd_keeps_exact_source_across_cold_resume() {
     cfg.session_id_override = Some(id.to_string());
     cfg.initial_conversation_mode = Some(ConversationMode::Chat);
     cfg.restore_draft = true;
-    cfg.scheduled_durable_anchor = true;
+    cfg.durable_draft_title = Some("Scheduled task".into());
     cfg.enable_automation_scheduler = false;
     cfg.isolated_credential_storage = true;
     let original_cwd = cfg.cwd.clone();
@@ -1243,7 +1250,7 @@ async fn desktop_cd_keeps_exact_source_across_cold_resume() {
     .unwrap();
     cfg.cwd = target.clone();
     cfg.initial_project_root = Some(original_cwd);
-    cfg.scheduled_durable_anchor = false;
+    cfg.durable_draft_title = None;
     cfg.session_transcript_path = Some(authority.path());
     cfg.session_transcript_authority = Some(authority);
     cfg.session_resume_snapshot = Some(super::DesktopSessionResumeSnapshot {

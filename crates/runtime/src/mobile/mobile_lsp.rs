@@ -127,7 +127,7 @@ impl MobileLinuxGuestLspPathMapper {
         let mapping = WorkspaceMapping {
             host_root,
             guest_root: branding::LINGXI_RUNTIME_PROFILE
-                .workspace_root_guest_path()
+                .workspace_container_guest_path()
                 .join(format!("lingxi-lsp-{:016x}", hasher.finish())),
             purpose: MountPurpose::External,
         };
@@ -508,6 +508,7 @@ impl LspTransport for MobileLinuxLspTransport {
         if !self.available {
             return Err(LspError::Unavailable);
         }
+        let workspace = lsp_startup_workspace(config)?;
         let runtime = self.runtime()?;
         let mapper = self.path_mapper()?;
         let temp_root = self.temp_root()?;
@@ -519,8 +520,7 @@ impl LspTransport for MobileLinuxLspTransport {
         fs::create_dir_all(&temp_dir)
             .map_err(|error| LspError::Transport(format!("create lsp temp dir: {error}")))?;
 
-        let mut mounts =
-            mapper.readonly_mounts_for_workspace_folder(config.workspace_folder.as_deref());
+        let mut mounts = mapper.readonly_mounts_for_workspace_folder(Some(workspace));
         let guest_temp = format!("/tmp/lingxi-lsp-{}", connection_id);
         mounts.push(MountSpec {
             host_path: temp_dir.clone(),
@@ -548,7 +548,7 @@ impl LspTransport for MobileLinuxLspTransport {
             .open_raw_stdio(RawStdioOpenRequest {
                 command: config.command.clone(),
                 args: config.args.clone(),
-                cwd: config.workspace_folder.clone(),
+                cwd: Some(workspace.to_owned()),
                 env,
                 network: NetworkPolicy::Disabled,
                 resource_limits: ResourceLimits {
@@ -756,6 +756,18 @@ impl LspTransport for MobileLinuxLspTransport {
     }
 }
 
+/// A workspace-scoped registry supplies this from its live session owner.
+/// Never start an unscoped LSP process in the shared configuration container.
+fn lsp_startup_workspace(config: &LspServerConfig) -> Result<&str, LspError> {
+    config
+        .workspace_folder
+        .as_deref()
+        .filter(|workspace| !workspace.is_empty() && Path::new(workspace).is_absolute())
+        .ok_or_else(|| {
+            LspError::Transport("mobile LSP requires an absolute session workspace".into())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,6 +786,21 @@ mod tests {
         assert_eq!(
             config.extension_to_language.get(".jsx").map(String::as_str),
             Some("javascriptreact")
+        );
+    }
+
+    #[test]
+    fn lsp_startup_requires_an_explicit_absolute_owner_workspace() {
+        let mut config = global_typescript_lsp_config();
+        assert!(lsp_startup_workspace(&config).is_err());
+        config.workspace_folder = Some(String::new());
+        assert!(lsp_startup_workspace(&config).is_err());
+        config.workspace_folder = Some("relative".into());
+        assert!(lsp_startup_workspace(&config).is_err());
+        config.workspace_folder = Some("/home/lingxi/.lingxi/code".into());
+        assert_eq!(
+            lsp_startup_workspace(&config).unwrap(),
+            "/home/lingxi/.lingxi/code"
         );
     }
 

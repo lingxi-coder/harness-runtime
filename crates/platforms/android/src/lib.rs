@@ -226,7 +226,9 @@ fn workspace_root_is_allowed(
             .to_string_lossy()
             .eq_ignore_ascii_case(&profile.config_dir_name)
     });
-    if contains_selected_config_directory
+    let persistent_workspace = managed_root
+        .is_some_and(|root| mobile_linux_core::is_persistent_user_workspace(root, profile, mount));
+    if (contains_selected_config_directory && !persistent_workspace)
         || text.contains("keystore")
         || text.contains("credential")
         || text.contains("secret")
@@ -237,7 +239,7 @@ fn workspace_root_is_allowed(
     if let Some(managed_root) = managed_root {
         // The runtime user home lives under managed_root. Permit only its exact
         // guest/host workspace twin, using the same canonical policy as the SDK.
-        if mobile_linux_core::is_persistent_user_workspace(managed_root, profile, mount) {
+        if persistent_workspace {
             return true;
         }
         let workspace_root = workspace_root
@@ -528,8 +530,9 @@ mod tests {
         let managed_root = temp.path().join("mobile-linux/android-proot");
         let brand_profile =
             mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let workspace_id = if persistent { "projects" } else { "default" };
         let guest_workspace_path =
-            mobile_linux_api::guest_paths::workspace_for_profile(&brand_profile, "default");
+            mobile_linux_api::guest_paths::workspace_for_profile(&brand_profile, workspace_id);
         let workspace = if persistent {
             mobile_linux_api::guest_paths::workspace_host_path_for_profile(
                 &managed_root,
@@ -554,7 +557,7 @@ mod tests {
         runtime
             .configure_mounts(default_mobile_linux_mounts(
                 &workspace,
-                "default",
+                workspace_id,
                 &brand_profile,
             ))
             .await
@@ -564,6 +567,7 @@ mod tests {
         android_inputs.app_files_root = temp.path().to_path_buf();
         android_inputs.mobile_linux = runtime;
         android_inputs.mobile_linux_workspace_root = Some(workspace.clone());
+        android_inputs.mobile_linux_workspace_id = Some(workspace_id.to_string());
         android_inputs.mobile_linux_managed_root = Some(managed_root);
         let platform = AndroidPlatform::new(android_inputs);
 

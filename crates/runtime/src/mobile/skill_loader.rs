@@ -200,6 +200,7 @@ fn product_prompt_token(suffix: &str) -> String {
 /// [`SkillLoader`] backed by the shared live mobile [`CommandRegistry`].
 pub struct MobileDiskSkillLoader {
     registry: Arc<RwLock<CommandRegistry>>,
+    session_mode: SessionMode,
     command_snapshot_provider: Option<command_api::CommandSnapshotProvider>,
     session_id: Option<String>,
     prompt_cwd: Option<Arc<tool_api::SessionCwd>>,
@@ -213,9 +214,10 @@ impl MobileDiskSkillLoader {
     }
 
     #[must_use]
-    pub fn for_mode(registry: Arc<RwLock<CommandRegistry>>, _session_mode: SessionMode) -> Self {
+    pub fn for_mode(registry: Arc<RwLock<CommandRegistry>>, session_mode: SessionMode) -> Self {
         Self {
             registry,
+            session_mode,
             command_snapshot_provider: None,
             session_id: None,
             prompt_cwd: None,
@@ -272,7 +274,7 @@ impl MobileDiskSkillLoader {
         lingxi_home: &Path,
         home: &Path,
         session_id: Option<String>,
-        _session_mode: SessionMode,
+        session_mode: SessionMode,
     ) -> Self {
         let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         {
@@ -281,11 +283,17 @@ impl MobileDiskSkillLoader {
         }
         Self {
             registry,
+            session_mode,
             command_snapshot_provider: None,
             session_id,
             prompt_cwd: Some(tool_api::SessionCwd::new(cwd.to_path_buf(), Vec::new())),
             skill_usage_session: None,
         }
+    }
+
+    fn session_allows(&self, command: &SlashCommand) -> bool {
+        self.session_mode != SessionMode::Chat
+            || command.loaded_from.as_deref() != Some(crate::local_apps::SKILL_LOADED_FROM)
     }
 }
 
@@ -343,7 +351,9 @@ impl ToolSkillLoader for MobileDiskSkillLoader {
         registry
             .list_all()
             .into_iter()
-            .filter(|command| registry.session_skill_allowed(command))
+            .filter(|command| {
+                registry.session_skill_allowed(command) && self.session_allows(command)
+            })
             .map(|command| command.name.clone())
             .collect()
     }
@@ -354,7 +364,7 @@ impl ToolSkillLoader for MobileDiskSkillLoader {
         }
         let reg = self.registry.read().await;
         Ok(reg.resolve(name).and_then(|cmd| {
-            reg.session_skill_allowed(cmd)
+            (reg.session_skill_allowed(cmd) && self.session_allows(cmd))
                 .then(|| to_descriptor(cmd, self.session_id.as_deref()))
         }))
     }
@@ -420,6 +430,9 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         let Some(command) = registry.resolve(&resolved).cloned() else {
             return Ok(None);
         };
+        if !self.session_allows(&command) {
+            return Ok(None);
+        }
         drop(registry);
         let descriptor = to_descriptor(&command, self.session_id.as_deref());
         if descriptor.command_type != SkillCommandType::Prompt {

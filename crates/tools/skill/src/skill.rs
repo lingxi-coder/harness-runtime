@@ -568,7 +568,7 @@ impl SkillTool {
             ctx.subagent_registry.clone().ok_or_else(|| {
                 ToolError::Internal("Skill: subagent tool registry is not configured".into())
             })?,
-        );
+        ).with_trusted_session(ctx.trusted_session_profile.clone(), ctx.durable_tool_origins.clone());
         // (3b) Gate the fork's tool dispatch with the same permission gate the
         // main loop and the Agent tool use (`tools/agent/src/agent.rs`). Without
         // it `RegistryToolInvoker::gate` is `None` and the ENTIRE permission

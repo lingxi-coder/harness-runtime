@@ -31,13 +31,11 @@ fn directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn is_global_controller(config: &MobileConfig) -> bool {
-    let Some(home) = config.lingxi_home.parent() else {
+pub(super) fn is_scheduled_controller_cwd(config: &MobileConfig) -> bool {
+    if !config.scheduler_controller {
         return false;
-    };
-    let expected = home
-        .join(&config.brand_runtime_profile.brand_id)
-        .join("scheduled");
+    }
+    let expected = config.lingxi_home.join("scheduled");
     std::fs::canonicalize(&config.cwd)
         .ok()
         .zip(std::fs::canonicalize(expected).ok())
@@ -80,7 +78,7 @@ impl ScheduledWorkspace {
         target: Option<uuid::Uuid>,
         selected: Option<(&Path, &Path)>,
     ) -> Result<Option<Self>, String> {
-        if !is_global_controller(config) {
+        if !is_scheduled_controller_cwd(config) {
             return Ok(None);
         }
         let canonical_root =
@@ -222,15 +220,54 @@ mod tests {
     use super::*;
 
     fn config(root: &Path) -> MobileConfig {
-        let controller = root.join("atlas/scheduled");
+        let controller = root.join(".atlas/scheduled");
         std::fs::create_dir_all(&controller).unwrap();
         let mut config = crate::mobile::test_support::test_config(&controller);
         config.brand_runtime_profile =
             mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_user", ".atlas");
         config.lingxi_home = root.join(".atlas");
         std::fs::create_dir_all(&config.lingxi_home).unwrap();
-        config.logical_cwd = Some("/home/atlas_user/atlas/scheduled".into());
+        config.logical_cwd = Some("/home/atlas_user/.atlas/scheduled".into());
+        config.scheduler_controller = true;
         config
+    }
+
+    #[test]
+    fn default_and_custom_brand_controllers_use_the_hidden_config_home() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = crate::mobile::mobile_user_directories(
+            root.path().join("runtime").display().to_string(),
+        )
+        .unwrap();
+        dirs.prepare().unwrap();
+        let mut default = crate::mobile::test_support::test_config(Path::new(&dirs.scheduled_cwd));
+        default.lingxi_home = dirs.config_home.clone().into();
+        default.logical_cwd = Some(dirs.scheduled_guest_cwd.clone().into());
+        default.scheduler_controller = true;
+        let workspace = ScheduledWorkspace::prepare(&default, "task", "Default brand", None)
+            .unwrap()
+            .unwrap();
+        assert!(workspace.host.starts_with(
+            Path::new(&dirs.config_home)
+                .canonicalize()
+                .unwrap()
+                .join("workspaces")
+        ));
+        assert!(workspace
+            .logical
+            .starts_with("/home/lingxi/.lingxi/workspaces"));
+
+        let mut custom = config(root.path());
+        assert!(is_scheduled_controller_cwd(&custom));
+        let old = root.path().join("atlas/scheduled");
+        std::fs::create_dir_all(&old).unwrap();
+        custom.cwd = old;
+        assert!(!is_scheduled_controller_cwd(&custom));
+        assert!(
+            ScheduledWorkspace::prepare(&custom, "task", "Old root", None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -340,7 +377,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let project = root.path().join("atlas/projects/project/workspace");
+        let project = root.path().join(".atlas/projects/project/workspace");
         std::fs::create_dir_all(&project).unwrap();
         config.cwd = project;
         assert!(ScheduledWorkspace::prepare(&config, "task", "title", None)

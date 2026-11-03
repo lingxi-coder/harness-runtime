@@ -244,6 +244,7 @@ pub(crate) fn ensure_anchor_at(
     cwd: &std::path::Path,
     session_id: lingxi_core::types::SessionId,
     mode: lingxi_core::host::session_context::ConversationMode,
+    title: &str,
     authority: Option<&super::writer::TranscriptFileAuthority>,
 ) -> Result<(bool, super::writer::TranscriptFileAuthority), super::TranscriptWriterError> {
     use lingxi_core::host::rooted_fs::{
@@ -373,11 +374,6 @@ pub(crate) fn ensure_anchor_at(
     let added = !has_conversation && !loaded.mobile_empty_sessions.contains(&session);
     if added {
         validate_open_file_single_link(&file)?;
-        let title = loaded
-            .custom_titles
-            .get(&session)
-            .filter(|title| !title.is_empty())
-            .map_or("Scheduled task", String::as_str);
         let line = format!(
             "{}\n",
             serde_json::json!({

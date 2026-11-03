@@ -1,4 +1,5 @@
 use super::*;
+use client::adapter::PermissionRequestSink;
 use mobile_linux_api::{MobileLinuxCapability, MobileLinuxRuntimeMode};
 use tool_api::SessionCwd;
 
@@ -13,6 +14,108 @@ fn unavailable_mobile_linux_capability() -> MobileLinuxCapability {
         pty: false,
         bind_mounts: false,
         rootfs_integrity: false,
+    }
+}
+
+#[test]
+fn mode_default_permission_root_requires_the_matching_host_and_guest_owner() {
+    use session::jsonl::SessionMode;
+    let temp = tempfile::tempdir().unwrap();
+    let dirs =
+        crate::mobile::mobile_user_directories(temp.path().join("runtime").display().to_string())
+            .unwrap();
+    dirs.prepare().unwrap();
+    let mut cfg = crate::mobile::test_support::test_config(std::path::Path::new(&dirs.chat_cwd));
+    cfg.lingxi_home = std::path::Path::new(&dirs.config_home)
+        .canonicalize()
+        .unwrap();
+    cfg.logical_cwd = Some(dirs.chat_guest_cwd.clone().into());
+    cfg.session_mode = SessionMode::Chat;
+    assert!(super::assembly::is_bound_mode_default_cwd(&cfg, &cfg.cwd));
+    cfg.session_mode = SessionMode::Code;
+    assert!(!super::assembly::is_bound_mode_default_cwd(&cfg, &cfg.cwd));
+    cfg.session_mode = SessionMode::Chat;
+    cfg.logical_cwd = Some(dirs.code_guest_cwd.clone().into());
+    assert!(!super::assembly::is_bound_mode_default_cwd(&cfg, &cfg.cwd));
+    cfg.logical_cwd = Some(dirs.chat_guest_cwd.clone().into());
+    cfg.app_agent_host = true;
+    assert!(!super::assembly::is_bound_mode_default_cwd(&cfg, &cfg.cwd));
+}
+
+#[tokio::test]
+async fn mode_default_boot_policy_and_deny_globs_use_its_owner_cwd() {
+    use crate::mobile::test_support::{
+        test_config, CollectingPermissionSink, FakeListener, HostFakePlatform, MountTableRuntime,
+    };
+    use mobile_linux_api::{MobileLinuxRuntime, MountPurpose, MountSpec};
+    use session::jsonl::SessionMode;
+
+    for (mode, component, scheduler) in [
+        (SessionMode::Chat, "chat", false),
+        (SessionMode::Code, "code", false),
+        (SessionMode::Code, "scheduled", true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = crate::mobile::mobile_user_directories(
+            temp.path().join("runtime").display().to_string(),
+        )
+        .unwrap();
+        dirs.prepare().unwrap();
+        let cwd = std::path::Path::new(&dirs.config_home).join(component);
+        let guest = std::path::Path::new(&dirs.config_guest_path).join(component);
+        let settings = cwd.join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(
+            settings.join("settings.json"),
+            r#"{"permissions":{"deny":["Read(/private/**)"]}}"#,
+        )
+        .unwrap();
+
+        let linux = Arc::new(MountTableRuntime::default());
+        linux
+            .configure_mounts(vec![
+                MountSpec {
+                    host_path: dirs.projects.clone().into(),
+                    guest_path: dirs.projects_guest_path.clone(),
+                    read_only: false,
+                    purpose: MountPurpose::Workspace,
+                },
+                MountSpec {
+                    host_path: dirs.home.clone().into(),
+                    guest_path: dirs.guest_home.clone(),
+                    read_only: false,
+                    purpose: MountPurpose::External,
+                },
+            ])
+            .await
+            .unwrap();
+        let platform: Arc<dyn Platform> =
+            Arc::new(HostFakePlatform::new(temp.path().to_path_buf()).with_mobile_linux(linux));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let sink: Arc<dyn PermissionRequestSink> = Arc::new(CollectingPermissionSink::default());
+        let mut cfg = test_config(&cwd);
+        cfg.lingxi_home = dirs.config_home.clone().into();
+        cfg.logical_cwd = Some(guest);
+        cfg.session_mode = mode;
+        cfg.scheduler_controller = scheduler;
+        let runtime = build_mobile(cfg, platform, listener, sink).await.unwrap();
+        let context = &runtime.mcp_tool_context;
+        let expected_cwd = cwd.canonicalize().unwrap();
+        assert_eq!(
+            context.permission_policy.roots.as_ref().unwrap().cwd,
+            expected_cwd
+        );
+        assert_eq!(
+            context.read_deny_exclude_globs,
+            vec!["/private/**".to_string()]
+        );
+        let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"file_path": expected_cwd.join("private/secret.txt").display().to_string()}),
+        ).unwrap();
+        assert!(matches!(
+            context.permission_policy.authorize("Read", &input),
+            permission::PermissionResult::Deny { .. }
+        ));
     }
 }
 

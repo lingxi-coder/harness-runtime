@@ -1464,16 +1464,18 @@ fn malformed_configuration_cannot_replace_a_saved_task() {
 async fn no_project_cron_allocates_brand_workspace_without_moving_its_claim_ledger() {
     use crate::mobile::test_support::{test_config, HostFakePlatform};
     let root = tempfile::tempdir().unwrap();
-    let controller = root.path().join("atlas/scheduled");
+    let controller = root.path().join(".atlas/scheduled");
     std::fs::create_dir_all(&controller).unwrap();
     let mut cfg = test_config(&controller);
     cfg.brand_runtime_profile =
         mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_user", ".atlas");
     cfg.lingxi_home = root.path().join(".atlas");
+    cfg.scheduler_controller = true;
     std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
     let platform: Arc<dyn Platform> = Arc::new(HostFakePlatform::new(root.path().to_path_buf()));
     let fs = platform.filesystem();
     let mut saved = task("active");
+    saved.automation.as_mut().unwrap().session_scope_key = Some("scheduled".into());
     saved.automation.as_mut().unwrap().reasoning =
         serde_json::json!({"type":"invalid-test-reasoning"});
     let mut document = cron::ScheduledTasks::default();
@@ -1508,6 +1510,12 @@ async fn no_project_cron_allocates_brand_workspace_without_moving_its_claim_ledg
         .unwrap_err();
     assert!(error.starts_with("paused:"), "{error}");
     let stored = read_cron_tasks(fs.as_ref(), &controller).await;
+    assert_eq!(
+        stored.tasks[0].automation.as_ref().unwrap().runs[0]
+            .session_scope_key
+            .as_deref(),
+        Some("scheduled")
+    );
     let id = stored.tasks[0].automation.as_ref().unwrap().runs[0]
         .session_id
         .clone()
@@ -1535,6 +1543,122 @@ async fn no_project_cron_allocates_brand_workspace_without_moving_its_claim_ledg
         !cron::scheduled_tasks_path(&workspace.host).exists(),
         "execution directory must not get a duplicate schedule"
     );
+}
+
+#[tokio::test]
+async fn project_scope_at_scheduled_cwd_never_receives_scheduled_workspace() {
+    use crate::mobile::test_support::{test_config, HostFakePlatform};
+    use session::jsonl::SessionMode;
+    use sha2::Digest;
+
+    for run_mode in [
+        cron::RunMode::NewSession,
+        cron::RunMode::TaskSession,
+        cron::RunMode::SelectedSession,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let controller = root.path().join(".atlas/scheduled");
+        std::fs::create_dir_all(&controller).unwrap();
+        let controller = controller.canonicalize().unwrap();
+        let mut cfg = test_config(&controller);
+        cfg.brand_runtime_profile =
+            mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_user", ".atlas");
+        cfg.lingxi_home = controller.parent().unwrap().to_path_buf();
+        cfg.scheduler_controller = true;
+        let platform: Arc<dyn Platform> =
+            Arc::new(HostFakePlatform::new(root.path().to_path_buf()));
+        let fs = platform.filesystem();
+        let mut saved = task("active");
+        let automation = saved.automation.as_mut().unwrap();
+        automation.run_mode = run_mode;
+        automation.reasoning = serde_json::json!({"type":"invalid-test-reasoning"});
+        let selected_source = if run_mode == cron::RunMode::SelectedSession {
+            let id = uuid::Uuid::new_v4();
+            let path = session::jsonl::session_path(
+                &cfg.lingxi_home,
+                &controller.to_string_lossy(),
+                &id.to_string(),
+            );
+            let writer = session::jsonl::JsonlWriter::new(path.clone(), fs.clone());
+            writer
+                .initialize_fixed_session_mode(&id.to_string(), SessionMode::Code, 0)
+                .await
+                .unwrap();
+            writer
+                .append_mobile_empty_session(
+                    &id.to_string(),
+                    "Project session",
+                    &controller.to_string_lossy(),
+                )
+                .await
+                .unwrap();
+            automation.target_session_id = Some(id.to_string());
+            automation.target_session_transcript_path = Some(path.to_string_lossy().into_owned());
+            automation.target_session_mode = Some("code".into());
+            automation.target_session_scope_key = Some("project.test".into());
+            Some(path)
+        } else {
+            None
+        };
+        let mut document = cron::ScheduledTasks::default();
+        document.tasks.push(saved);
+        cron::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            &controller,
+            &cron::serialize_tasks(&document),
+        )
+        .await
+        .unwrap();
+        let request = cron::claim_automation_run_now(
+            fs.as_ref(),
+            &controller,
+            "d12345678",
+            std::time::SystemTime::now(),
+        )
+        .await
+        .unwrap();
+        let firer = MobileTurnFirer {
+            cfg: cfg.clone(),
+            platform,
+        };
+        let error = firer
+            .fire_session_with_admission(
+                "task prompt".into(),
+                request.task.automation.as_ref(),
+                Some(&request),
+                Some(super::automation::allow_cron_owner()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("paused:"), "{run_mode:?}: {error}");
+        let stored = read_cron_tasks(fs.as_ref(), &controller).await;
+        let run = &stored.tasks[0].automation.as_ref().unwrap().runs[0];
+        assert_eq!(
+            run.session_scope_key.as_deref(),
+            Some("project.test"),
+            "{run_mode:?}"
+        );
+        let source = std::path::PathBuf::from(
+            run.session_transcript_path
+                .as_deref()
+                .expect("session source bound"),
+        );
+        if let Some(selected) = selected_source {
+            assert_eq!(source, selected, "selected source must be retained");
+        }
+        let content = std::fs::read_to_string(source).unwrap();
+        assert!(content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|value| value.get("cwd").and_then(|value| value.as_str()) == controller.to_str()));
+        assert!(!cfg.lingxi_home.join("workspaces").exists());
+        let memory = cfg
+            .lingxi_home
+            .join("automations")
+            .join(format!("{:x}", sha2::Sha256::digest(b"d12345678")))
+            .join("memory.md");
+        assert!(!memory.exists());
+    }
 }
 
 #[tokio::test]

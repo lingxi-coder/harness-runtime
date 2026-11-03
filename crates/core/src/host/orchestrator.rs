@@ -680,6 +680,9 @@ impl GoalStatusAttachment {
 pub struct DeferredToolReplay {
     /// Original tool-use id from the persisted hook attachment.
     pub tool_use_id: String,
+    /// Original assistant row, only when also present in the retained source.
+    #[serde(default)]
+    pub assistant_message_id: Option<MessageId>,
     /// Tool registry name to dispatch after resume.
     pub tool_name: String,
     /// Hook-updated tool input to replay.

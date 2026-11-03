@@ -2329,6 +2329,8 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             messages,
             tool_use_id: None,
             assistant_message_id: None,
+            trusted_session_profile: Some(self.conversation_profile().await),
+            durable_tool_origins: None,
             assistant_message: None,
             same_turn_tool_uses: Vec::new(),
             agent_id: None,
@@ -3883,6 +3885,11 @@ pub(crate) async fn streaming_tool_context_base(
         messages,
         tool_use_id: None,
         assistant_message_id: None,
+            trusted_session_profile: Some(orch.conversation_profile().await),
+        durable_tool_origins: orch.transcript.jsonl_writer.as_ref().map(|_| tool_api::context::DurableToolOrigins {
+            sources: orch.transcript.tool_persisted_origins.clone(),
+            changed: orch.transcript.tool_source_assistant_notify.clone(),
+        }),
         assistant_message: None,
         same_turn_tool_uses: Vec::new(),
         agent_id: if orch.side_chat {
@@ -5541,7 +5548,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     .modified_input
                     .clone()
                     .unwrap_or_else(|| input.clone());
-                let attachment = hooks::deferred_tool_attachment(
+                let mut attachment = hooks::deferred_tool_attachment(
                     tool_use_id.as_str(),
                     name,
                     &deferred_input,
@@ -5552,6 +5559,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         .as_ref()
                         .map(|context| context.traceparent.as_str()),
                 );
+                if let Some(assistant) = ctx.assistant_message_id {
+                    attachment.set_field("assistantMessageId", source_from_value(&serde_json::json!(assistant.as_uuid().to_string())))
+                        .expect("deferred attachment is a host-generated object");
+                }
                 let persistence = orch.persist_hook_attachment_to_jsonl(attachment);
                 if let Some(fence) = publication_fence.as_deref() {
                     fence.commit_if_current(Box::pin(persistence)).await;

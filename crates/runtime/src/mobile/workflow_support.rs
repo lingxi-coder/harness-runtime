@@ -768,6 +768,10 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    fn durable_origin_state(&self) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
+        self.inner.get().and_then(|invoker| invoker.durable_origin_state())
+    }
+
     async fn cleanup_computer_inputs(
         &self,
         agent_id: lingxi_core::types::AgentId,

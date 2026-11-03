@@ -847,23 +847,24 @@ async fn bootstrap_main_transcript_identity_if_nonempty(
     Ok(true)
 }
 
-/// Publish a scheduled draft only after its fixed header and writer lease exist.
-pub(super) async fn ensure_scheduled_durable_anchor(
+/// Publish an owned draft only after its fixed header and writer lease exist.
+pub(super) async fn ensure_durable_draft_anchor(
     writer: &Arc<session::jsonl::JsonlWriter>,
     transcript_path: &std::path::Path,
     cwd: &std::path::Path,
     session_id: &str,
     mode: lingxi_core::host::session_context::ConversationMode,
+    title: &str,
 ) -> Result<bool, String> {
     let session = lingxi_core::types::SessionId::parse_prefixed(session_id)
-        .ok_or("invalid scheduled session UUID")?;
+        .ok_or("invalid draft session UUID")?;
     if writer.active_path().as_path() != transcript_path
         || writer.session_target_path(session).as_deref() != Some(transcript_path)
     {
-        return Err("scheduled session writer changed target".into());
+        return Err("draft session writer changed target".into());
     }
     writer
-        .ensure_scheduled_anchor(session, mode, cwd)
+        .ensure_draft_anchor(session, mode, cwd, title)
         .await
         .map_err(|error| error.to_string())
 }
@@ -958,8 +959,14 @@ pub async fn build_with_credential_stack(
     let initial_conversation_mode = cfg.initial_conversation_mode.take();
     // This admission option belongs only to this construction, not to the
     // cloned scheduler/settings configurations derived below.
-    let scheduled_durable_anchor = std::mem::take(&mut cfg.scheduled_durable_anchor);
-    if scheduled_durable_anchor {
+    let durable_draft_title = std::mem::take(&mut cfg.durable_draft_title);
+    let durable_draft_anchor = durable_draft_title.is_some();
+    if let Some(title) = durable_draft_title.as_deref() {
+        if title.trim().is_empty() || title.contains('\0') {
+            return Err(BuildError::Orchestrator(
+                "draft title must not be empty".into(),
+            ));
+        }
         let id = cfg
             .session_id_override
             .as_deref()
@@ -977,20 +984,20 @@ pub async fn build_with_credential_stack(
             || cfg.team_invocation.is_some()
         {
             return Err(BuildError::Orchestrator(
-                "scheduled anchor requires an explicit persistent draft owner".into(),
+                "draft anchor requires an explicit persistent owner".into(),
             ));
         }
         if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
             if uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != id {
                 return Err(BuildError::Orchestrator(
-                    "scheduled resume has a different session UUID".into(),
+                    "draft resume has a different session UUID".into(),
                 ));
             }
         }
         if let Some(lease) = cfg.session_writer_lease.as_ref() {
             if lease.canonical_session_id().map(|value| value.as_uuid()) != id {
                 return Err(BuildError::Orchestrator(
-                    "scheduled writer lease has a different session UUID".into(),
+                    "draft writer lease has a different session UUID".into(),
                 ));
             }
         }
@@ -1026,9 +1033,9 @@ pub async fn build_with_credential_stack(
     )
     .await?;
     let is_app_chat = app_chat_mount.is_some();
-    if scheduled_durable_anchor && is_app_chat {
+    if durable_draft_anchor && is_app_chat {
         return Err(BuildError::Orchestrator(
-            "scheduled anchor requires an ordinary session".into(),
+            "draft anchor requires an ordinary session".into(),
         ));
     }
     // App-owned Chat has a separate transcript and lifecycle. Its captured
@@ -1336,16 +1343,16 @@ pub async fn build_with_credential_stack(
             "persistent resume requires captured transcript authority".into(),
         ));
     }
-    if scheduled_durable_anchor
+    if durable_draft_anchor
         && main_transcript_path
             != session::jsonl::session_path(
                 &cfg.lingxi_home,
-                cfg.cwd.to_str().expect("validated scheduled cwd"),
+                cfg.cwd.to_str().expect("validated draft cwd"),
                 &main_session_uuid,
             )
     {
         return Err(BuildError::Orchestrator(
-            "scheduled transcript does not match its workspace owner".into(),
+            "draft transcript does not match its workspace owner".into(),
         ));
     }
     // Create the one ordinary transcript writer before durable session setup.
@@ -6057,7 +6064,7 @@ pub async fn build_with_credential_stack(
     // restoration. Same shared-`Arc` file target, so the record lands in the SAME
     // `<uuid>.jsonl` the orchestrator appends messages to.
     let main_agent_setting_writer = main_jsonl_writer.clone();
-    let scheduled_anchor_writer = scheduled_durable_anchor.then(|| main_jsonl_writer.clone());
+    let draft_anchor_writer = durable_draft_anchor.then(|| main_jsonl_writer.clone());
     let goal_hooks_restricted = if cfg.restricted {
         effective_settings
             .settings
@@ -6551,21 +6558,24 @@ pub async fn build_with_credential_stack(
             .await
             .map_err(|error| BuildError::Orchestrator(error.to_string()))?;
     }
-    if let Some(writer) = scheduled_anchor_writer {
+    if let Some(writer) = draft_anchor_writer {
         if session_cwd.cwd() != cwd {
             return Err(BuildError::Orchestrator(
-                "scheduled session cwd changed before anchor creation".into(),
+                "draft session cwd changed before anchor creation".into(),
             ));
         }
-        ensure_scheduled_durable_anchor(
+        ensure_durable_draft_anchor(
             &writer,
             &main_transcript_path,
             &cwd,
             &main_session_uuid,
             construction_mode,
+            durable_draft_title
+                .as_deref()
+                .expect("draft title validated"),
         )
         .await
-        .map_err(|error| BuildError::Orchestrator(format!("scheduled session anchor: {error}")))?;
+        .map_err(|error| BuildError::Orchestrator(format!("draft session anchor: {error}")))?;
     }
     orch.enable_goal_retries();
     orch.attach_owned_session_switches();
@@ -6848,7 +6858,9 @@ pub async fn build_with_credential_stack(
             "Bash",
         );
     }
-    if cfg.local_apps {
+    if cfg.local_apps
+        && construction_mode == lingxi_core::host::session_context::ConversationMode::Code
+    {
         crate::local_apps::register_skill(
             &mut reg,
             &[local_app::TOOL_NAME.to_string(), "Bash".to_string()],

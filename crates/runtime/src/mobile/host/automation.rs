@@ -1080,8 +1080,18 @@ impl MobileTurnFirer {
         };
         let task_id = request.map(|r| r.task.id.as_str()).unwrap_or("scheduled");
         let title = automation.and_then(|a| a.name.as_deref()).unwrap_or("task");
+        let selected_session =
+            automation.is_some_and(|a| a.run_mode == cron::RunMode::SelectedSession);
+        let scheduled_owner = scope == Some("scheduled");
+        let scheduled_controller =
+            super::scheduled_workspaces::is_scheduled_controller_cwd(&self.cfg);
+        if scheduled_owner && !selected_session && !scheduled_controller {
+            return Err("paused: Scheduled owner requires its scheduler controller".into());
+        }
         let workspace = match (automation, captured_initial.as_ref()) {
-            (Some(a), Some(source)) if a.run_mode == cron::RunMode::SelectedSession => {
+            (Some(_), Some(source))
+                if scheduled_owner && scheduled_controller && selected_session =>
+            {
                 super::scheduled_workspaces::ScheduledWorkspace::prepare_selected(
                     &self.cfg,
                     task_id,
@@ -1091,12 +1101,14 @@ impl MobileTurnFirer {
                     &source.replayed.transcript_path,
                 )
             }
-            (Some(_), _) => super::scheduled_workspaces::ScheduledWorkspace::prepare(
-                &self.cfg,
-                task_id,
-                title,
-                target_uuid,
-            ),
+            (Some(_), _) if scheduled_owner && scheduled_controller => {
+                super::scheduled_workspaces::ScheduledWorkspace::prepare(
+                    &self.cfg,
+                    task_id,
+                    title,
+                    target_uuid,
+                )
+            }
             _ => Ok(None),
         }
         .map_err(|error| format!("paused: {error}"))?;

@@ -169,7 +169,9 @@ pub(crate) struct TranscriptStore {
     /// writer `insertMessageChain` (BIN off **237862200**) then derives
     /// `parentUuid` FROM this field, which is why the two are equal on all
     /// 96 794 real 2.1.220 lines that carry it.
-    pub(crate) tool_source_assistant_uuids: Mutex<std::collections::HashMap<String, String>>,
+    pub(crate) tool_source_assistant_uuids: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    pub(crate) tool_persisted_origins: Arc<Mutex<std::collections::HashMap<(String, String), Result<String, String>>>>,
+    pub(crate) tool_source_assistant_notify: Arc<tokio::sync::Notify>,
     /// `tool_use_id` → hook `attachment` PAYLOADS produced while dispatching
     /// that tool, awaiting persistence.
     ///
@@ -251,7 +253,9 @@ impl TranscriptStore {
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
             tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
             pending_tool_result_turn_end: Mutex::new(std::collections::HashMap::new()),
-            tool_source_assistant_uuids: Mutex::new(std::collections::HashMap::new()),
+            tool_source_assistant_uuids: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            tool_persisted_origins: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            tool_source_assistant_notify: Arc::new(tokio::sync::Notify::new()),
             pending_hook_attachments: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
             post_compact_skill_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -272,6 +276,7 @@ impl TranscriptStore {
         self.tool_use_mcp_meta.lock().await.clear();
         self.pending_tool_result_turn_end.lock().await.clear();
         self.tool_source_assistant_uuids.lock().await.clear();
+        self.tool_persisted_origins.lock().await.clear();
         self.pending_hook_attachments.lock().await.clear();
         *self.git_branch_cache.lock().await = None;
         self.post_compact_skill_attachments

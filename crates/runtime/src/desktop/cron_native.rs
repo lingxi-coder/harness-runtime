@@ -489,7 +489,14 @@ impl NativeCronFirer {
         cfg.session_resume_cost = None;
         cfg.defer_session_start = false;
         cfg.restore_draft = !source.existing;
-        cfg.scheduled_durable_anchor = !source.existing;
+        cfg.durable_draft_title = (!source.existing).then(|| {
+            automation
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("Scheduled task")
+                .to_owned()
+        });
         let fs = super::platform::DesktopFileSystem::new(scheduler_config.cwd.clone());
         if let Some(captured) = captured {
             cfg.session_transcript_path = Some(captured.path.clone());

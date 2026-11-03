@@ -11,21 +11,364 @@ fn service() -> (tempfile::TempDir, Arc<MobileLocalAppServiceHandle>) {
     (dir, service)
 }
 
+async fn native(service: &Arc<MobileLocalAppServiceHandle>, request: Value) -> Value {
+    serde_json::from_str(&service.clone().agent_host_json(request.to_string()).await).unwrap()
+}
+
+fn market_remix_fixture(service: &MobileLocalAppServiceHandle) -> (Value, Vec<u8>) {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = service
+        .config_home
+        .join("local-app-imports")
+        .join(format!("market-{id}"))
+        .join("source.zip");
+    let manifest = json!({"schema":2,"name":"Market fixture","dataSchema":null,
+        "entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"}],
+        "remix":{"allowed":true,"license":"MIT"}});
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let html = b"<!doctype html><html>market fixture</html>";
+    let gitignore = b"build/\n";
+    let well_known = b"Contact: security@example.test\n";
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().unix_permissions(0o600);
+    zip.start_file("lingxi-app.json", options).unwrap();
+    zip.write_all(&manifest_bytes).unwrap();
+    zip.start_file("index.html", options).unwrap();
+    zip.write_all(html).unwrap();
+    zip.start_file(".gitignore", options).unwrap();
+    zip.write_all(gitignore).unwrap();
+    zip.start_file(".well-known/security.txt", options).unwrap();
+    zip.write_all(well_known).unwrap();
+    let bytes = zip.finish().unwrap().into_inner();
+    let files = json!([
+        {"path":"lingxi-app.json","sizeBytes":manifest_bytes.len(),"sha256":hash(&manifest_bytes),"executable":false},
+        {"path":"index.html","sizeBytes":html.len(),"sha256":hash(html),"executable":false},
+        {"path":".gitignore","sizeBytes":gitignore.len(),"sha256":hash(gitignore),"executable":false},
+        {"path":".well-known/security.txt","sizeBytes":well_known.len(),"sha256":hash(well_known),"executable":false}
+    ]);
+    let dependencies = json!([]);
+    let archive_sha = hash(&bytes);
+    let digest =
+        local_app::v2::market_release_digest(&archive_sha, &manifest, &files, &dependencies)
+            .unwrap();
+    (
+        json!({"op":"importRemixSource","requestId":id,"archivePath":path,"archiveSha256":archive_sha,
+        "archiveBytes":bytes.len(),"manifest":manifest,"files":files,"dependencies":dependencies,
+        "marketOrigin":{"appId":"market-app","releaseId":"v1","digest":digest}}),
+        bytes,
+    )
+}
+
+#[tokio::test]
+async fn native_authoring_wire_fixture_uses_actual_handlers() {
+    let (_dir, service) = service();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let create = json!({"op":"createAuthoring","requestId":request_id,"name":"Contract fixture"});
+    let created = native(&service, create.clone()).await;
+    assert_eq!(created["ok"], true, "{created}");
+    let source_id = created["value"]["sourceId"].as_str().unwrap();
+    let source = created["value"]["sourceDirectory"].as_str().unwrap();
+    let source_path = created["value"]["sourcePath"].as_str().unwrap();
+    let proof_request =
+        json!({"op":"prepareAuthoringSource","sourceId":source_id,"sourceDirectory":source});
+    let proof = native(&service, proof_request.clone()).await;
+    let project = uuid::Uuid::new_v4().to_string();
+    let workspace = uuid::Uuid::new_v4().to_string();
+    let session = uuid::Uuid::new_v4().to_string();
+    let authoring = json!({"sourceDirectory":source,"workspaceId":workspace,
+        "projectRef":{"kind":"mobileProject","projectId":project},"authoringSessionId":session});
+    let register_request = json!({"op":"registerAuthoring","requestId":request_id,"sourceId":source_id,
+        "sessionMode":"code","setCurrent":true,"authoring":authoring});
+    let registered = native(&service, register_request.clone()).await;
+    assert_eq!(registered["ok"], true, "{registered}");
+    assert_eq!(registered["value"]["sourceId"], source_id);
+    let lookup_request = json!({"op":"getAuthoringGrant","sourceDirectory":source,"projectId":project,
+        "authoringSessionId":session,"sessionMode":"code"});
+    let lookup = native(&service, lookup_request.clone()).await;
+    assert_eq!(lookup["value"]["sessionMode"], "code");
+    assert_eq!(lookup["value"]["sourceId"], source_id);
+    let published = service
+        .publish_from_trusted_source(
+            source_path,
+            Some(source_path),
+            None,
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            session.clone(),
+            Arc::new(Mutex::new(session.clone())),
+        )
+        .await
+        .unwrap();
+    let app_id = published["record"]["appId"].as_str().unwrap();
+    let prepare_request = json!({"op":"prepareAuthoring","appId":app_id,"sessionBindings":{
+        (session.clone()): {"workspaceId":workspace,"sourceDirectory":source,
+            "projectRef":{"kind":"mobileProject","projectId":project},"mode":"code"}}});
+    let prepare: Value = serde_json::from_str(
+        &service
+            .clone()
+            .request_json(prepare_request.to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(prepare["value"]["sourceId"], source_id);
+    let moved = Path::new(source_path).with_extension("fixture-saved");
+    std::fs::rename(source_path, moved).unwrap();
+    let missing: Value = serde_json::from_str(
+        &service
+            .clone()
+            .request_json(prepare_request.to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(missing["value"]["action"], "sourceMissing");
+    assert!(missing["value"].get("sourceId").is_none());
+    let remix_source = _dir.path().join("remix-original");
+    std::fs::create_dir(&remix_source).unwrap();
+    std::fs::write(remix_source.join("index.html"), "source").unwrap();
+    std::fs::write(remix_source.join("lingxi-app.json"), json!({"schema":2,"name":"Original",
+        "entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"}],
+        "remix":{"allowed":true,"license":"MIT"}}).to_string()).unwrap();
+    let remix_original = service
+        .request_value(json!({"op":"publish","expectedRevision":0,"sourcePath":remix_source}))
+        .await
+        .unwrap();
+    let remix_request = json!({"op":"remixAuthoringSource","requestId":uuid::Uuid::new_v4().to_string(),
+        "appId":remix_original["record"]["appId"],"revision":1});
+    let remix = native(&service, remix_request.clone()).await;
+    assert_eq!(remix["ok"], true, "{remix}");
+    assert_eq!(
+        remix["value"]["record"]["appId"],
+        remix["value"]["release"]["appId"]
+    );
+    let (market_request, market_archive) = market_remix_fixture(&service);
+    let market_missing = native(&service, market_request.clone()).await;
+    assert_eq!(market_missing["error"]["code"], "archiveMissing");
+    let market_path = Path::new(market_request["archivePath"].as_str().unwrap());
+    std::fs::create_dir_all(market_path.parent().unwrap()).unwrap();
+    std::fs::write(market_path, market_archive).unwrap();
+    let market_import = native(&service, market_request.clone()).await;
+    assert_eq!(market_import["ok"], true, "{market_import}");
+    std::fs::remove_file(market_path).unwrap();
+    let market_replay = native(&service, market_request.clone()).await;
+    assert_eq!(market_replay, market_import);
+    let fixture = json!({"schema":1,"create":{"request":create,"response":created},
+        "sourceProof":{"request":proof_request,"response":proof},
+        "register":{"request":register_request,"response":registered},
+        "get":{"request":lookup_request,"response":lookup},
+        "prepare":{"request":prepare_request,"response":prepare},
+        "sourceMissing":{"request":prepare_request,"response":missing},
+        "installedRemix":{"request":remix_request,"response":remix},
+        "marketMissing":{"request":market_request,"response":market_missing},
+        "marketImport":{"request":market_request,"response":market_import},
+        "marketReplay":{"request":market_request,"response":market_replay}});
+    if let Some(path) = std::env::var_os("LINGXI_AUTHORING_FIXTURE_OUT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_authoring_long_unicode_name_keeps_display_and_reuses_source() {
+    let (_dir, service) = service();
+    let name = "𐐀".repeat(64);
+    let request =
+        json!({"op":"createAuthoring","requestId":uuid::Uuid::new_v4().to_string(),"name":name});
+    let first = native(&service, request.clone()).await;
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(native(&service, request).await, first);
+    let path = Path::new(first["value"]["sourcePath"].as_str().unwrap());
+    assert!(path.file_name().unwrap().to_string_lossy().len() < 255);
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(path.join("lingxi-app.json")).unwrap()).unwrap();
+    assert_eq!(manifest["name"], name);
+}
+
+#[tokio::test]
+async fn native_installed_remix_creates_a_new_owned_source_and_replays() {
+    let (dir, service) = service();
+    let source = dir.path().join("original");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("index.html"), "source").unwrap();
+    std::fs::write(source.join("lingxi-app.json"), json!({"schema":2,"name":"Original",
+        "entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"}],
+        "remix":{"allowed":true,"license":"MIT"}}).to_string()).unwrap();
+    let original = service
+        .library
+        .publish(PublishRequest {
+            app_id: None,
+            expected_revision: 0,
+            source_path: source.to_string_lossy().into_owned(),
+            authoring: None,
+            market_origin: None,
+        })
+        .unwrap();
+    let request = json!({"op":"remixAuthoringSource","requestId":uuid::Uuid::new_v4().to_string(),
+        "appId":original.record.app_id,"revision":1,"name":"My copy"});
+    let first = native(&service, request.clone()).await;
+    assert_eq!(first["ok"], true, "{first}");
+    let value = &first["value"];
+    assert_ne!(value["record"]["appId"], original.record.app_id);
+    assert_eq!(value["record"]["authoringSourceIds"][0], value["sourceId"]);
+    assert_eq!(value["record"]["name"], "My copy");
+    assert!(service.request_value(request.clone()).await.is_err());
+    std::fs::remove_dir_all(value["sourcePath"].as_str().unwrap()).unwrap();
+    assert_eq!(native(&service, request).await, first);
+    assert_eq!(
+        service
+            .library
+            .get(&original.record.app_id)
+            .unwrap()
+            .latest_revision,
+        1
+    );
+}
+
+#[tokio::test]
+async fn native_market_remix_verifies_archive_and_replays_without_it() {
+    let (_dir, service) = service();
+    let (request, bytes) = market_remix_fixture(&service);
+    let missing = native(&service, request.clone()).await;
+    assert_eq!(missing["ok"], false);
+    assert_eq!(missing["error"]["code"], "archiveMissing");
+    let path = Path::new(request["archivePath"].as_str().unwrap());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+    let first = native(&service, request.clone()).await;
+    assert_eq!(first["ok"], true, "{first}");
+    let value = &first["value"];
+    assert_eq!(value["record"]["appId"], value["release"]["appId"]);
+    assert_eq!(value["record"]["authoringSourceIds"][0], value["sourceId"]);
+    assert_eq!(value["record"]["marketOrigin"]["remixedFrom"], "market-app");
+    let imported = Path::new(value["sourcePath"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read(imported.join(".gitignore")).unwrap(),
+        b"build/\n"
+    );
+    assert_eq!(
+        std::fs::read(imported.join(".well-known/security.txt")).unwrap(),
+        b"Contact: security@example.test\n"
+    );
+    let session = uuid::Uuid::new_v4().to_string();
+    let project = uuid::Uuid::new_v4().to_string();
+    let registration = json!({"op":"registerAuthoring","requestId":request["requestId"],
+        "sourceId":value["sourceId"],"sessionMode":"code","setCurrent":false,"authoring":{
+            "sourceDirectory":value["sourceDirectory"],"workspaceId":uuid::Uuid::new_v4().to_string(),
+            "projectRef":{"kind":"mobileProject","projectId":project},"authoringSessionId":session,
+            "appId":value["record"]["appId"]}});
+    let registered = native(&service, registration).await;
+    assert_eq!(registered["ok"], true, "{registered}");
+    assert_eq!(registered["value"]["sourceId"], value["sourceId"]);
+    assert!(service
+        .library
+        .get(value["record"]["appId"].as_str().unwrap())
+        .unwrap()
+        .authoring
+        .is_none());
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(native(&service, request.clone()).await, first);
+    let mut changed = request;
+    changed["marketOrigin"]["releaseId"] = json!("other");
+    assert_eq!(native(&service, changed).await["ok"], false);
+}
+
+#[tokio::test]
+async fn native_market_remix_rejects_signed_zip_traversal_without_publication() {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    let (dir, service) = service();
+    let (mut request, original) = market_remix_fixture(&service);
+    let mut input = zip::ZipArchive::new(std::io::Cursor::new(original)).unwrap();
+    let mut output = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().unix_permissions(0o600);
+    for index in 0..input.len() {
+        let mut entry = input.by_index(index).unwrap();
+        let name = std::str::from_utf8(entry.name_raw()).unwrap().to_owned();
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content).unwrap();
+        output.start_file(name, options).unwrap();
+        output.write_all(&content).unwrap();
+    }
+    output.start_file("../escape", options).unwrap();
+    output.write_all(b"bad").unwrap();
+    let archive = output.finish().unwrap().into_inner();
+    let hash = format!("{:x}", Sha256::digest(&archive));
+    request["archiveSha256"] = json!(hash);
+    request["archiveBytes"] = json!(archive.len());
+    request["marketOrigin"]["digest"] = json!(local_app::v2::market_release_digest(
+        request["archiveSha256"].as_str().unwrap(),
+        &request["manifest"],
+        &request["files"],
+        &request["dependencies"]
+    )
+    .unwrap());
+    let path = Path::new(request["archivePath"].as_str().unwrap());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, archive).unwrap();
+    let rejected = native(&service, request).await;
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert!(!dir.path().join("escape").exists());
+    assert!(service.library.list().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn trusted_authoring_registration_binds_first_publish_and_prepares_the_same_code_session() {
     let (_dir, service) = service();
-    let created = service
-        .request_value(json!({"op":"createAuthoring","name":"First publish"}))
-        .await
-        .unwrap();
+    let creation_id = uuid::Uuid::new_v4().to_string();
+    let created = native(
+        &service,
+        json!({"op":"createAuthoring","name":"First publish","requestId":creation_id}),
+    )
+    .await["value"]
+        .clone();
+    let retried = native(
+        &service,
+        json!({"op":"createAuthoring","name":"First publish","requestId":creation_id}),
+    )
+    .await["value"]
+        .clone();
+    assert_eq!(created, retried);
+    assert_eq!(
+        native(
+            &service,
+            json!({"op":"createAuthoring","name":"Different","requestId":creation_id})
+        )
+        .await["ok"],
+        false
+    );
     let source_directory = created["sourceDirectory"].as_str().unwrap().to_owned();
     let source_path = created["sourcePath"].as_str().unwrap().to_owned();
+    let source_id = created["sourceId"].as_str().unwrap().to_owned();
+    let prepare = json!({"op":"prepareAuthoringSource","sourceId":source_id,"sourceDirectory":source_directory});
+    let proof: Value =
+        serde_json::from_str(&service.clone().agent_host_json(prepare.to_string()).await).unwrap();
+    assert_eq!(proof["ok"], true);
+    assert_eq!(proof["value"]["sourceId"], source_id);
+    let mut wrong_proof = prepare.clone();
+    wrong_proof["sourceId"] = json!(uuid::Uuid::new_v4().to_string());
+    let rejected: Value = serde_json::from_str(
+        &service
+            .clone()
+            .agent_host_json(wrong_proof.to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(rejected["ok"], false);
+    assert!(service.request_value(prepare).await.is_err());
     let workspace_id = uuid::Uuid::new_v4().to_string();
     let project_id = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
+    let lookup = json!({"op":"getAuthoringGrant", "sessionMode":"code", "sourceDirectory":source_directory,
+        "projectId":project_id, "authoringSessionId":session_id});
+    let missing: Value =
+        serde_json::from_str(&service.clone().agent_host_json(lookup.to_string()).await).unwrap();
+    assert_eq!(missing["error"]["code"], "notFound");
+    // The lookup is private to agentHostJson, not the ordinary app/page route.
+    assert!(service.request_value(lookup.clone()).await.is_err());
 
     let incomplete = json!({
-        "op":"registerAuthoring",
+        "op":"registerAuthoring", "sourceId":source_id, "requestId":creation_id, "sessionMode":"code", "setCurrent":true,
         "authoring": {
             "sourceDirectory":source_directory,
             "workspaceId":workspace_id,
@@ -49,7 +392,7 @@ async fn trusted_authoring_registration_binds_first_publish_and_prepares_the_sam
     std::fs::create_dir_all(&outside).unwrap();
     let outside_guest = service.guest_path(&outside).unwrap();
     let bad_source = json!({
-        "op":"registerAuthoring",
+        "op":"registerAuthoring", "sourceId":source_id, "requestId":creation_id, "sessionMode":"code", "setCurrent":true,
         "authoring": {
             "sourceDirectory":outside_guest,
             "workspaceId":workspace_id,
@@ -91,7 +434,7 @@ async fn trusted_authoring_registration_binds_first_publish_and_prepares_the_sam
     let registered: Value = serde_json::from_str(
         &service
             .clone()
-            .agent_host_json(json!({"op":"registerAuthoring","authoring":binding}).to_string())
+            .agent_host_json(json!({"op":"registerAuthoring","sourceId":source_id,"requestId":creation_id,"sessionMode":"code","setCurrent":true,"authoring":binding}).to_string())
             .await,
     )
     .unwrap();
@@ -101,17 +444,41 @@ async fn trusted_authoring_registration_binds_first_publish_and_prepares_the_sam
     assert_eq!(registered["value"]["authoringSessionId"], session_id);
     assert!(registered["value"].get("appId").is_none());
     assert!(service.agent.lock().unwrap().is_none());
+    let resolved: Value =
+        serde_json::from_str(&service.clone().agent_host_json(lookup.to_string()).await).unwrap();
+    assert_eq!(resolved["ok"], true);
+    assert_eq!(resolved["value"]["workspaceId"], workspace_id);
+    assert_eq!(resolved["value"]["projectRef"]["projectId"], project_id);
+    let mut wrong_owner = lookup.clone();
+    wrong_owner["authoringSessionId"] = json!(uuid::Uuid::new_v4().to_string());
+    let wrong: Value = serde_json::from_str(
+        &service
+            .clone()
+            .agent_host_json(wrong_owner.to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(wrong["error"]["code"], "notFound");
 
     let published = service
-        .request_value(json!({
-            "op":"publish",
-            "expectedRevision":0,
-            "sourcePath":source_path
-        }))
+        .publish_from_trusted_source(
+            &source_path,
+            Some(&source_path),
+            None,
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            session_id.clone(),
+            Arc::new(Mutex::new(session_id.clone())),
+        )
         .await
         .unwrap();
     let app_id = published["record"]["appId"].as_str().unwrap();
     assert_eq!(published["record"]["authoring"]["appId"], app_id);
+    let resolved_published: Value =
+        serde_json::from_str(&service.clone().agent_host_json(lookup.to_string()).await).unwrap();
+    assert_eq!(resolved_published["ok"], true);
+    assert!(resolved_published["value"].get("appId").is_none());
+    assert_eq!(resolved_published["value"]["workspaceId"], workspace_id);
     assert_eq!(
         published["record"]["authoring"]["sourceDirectory"],
         source_directory
@@ -138,6 +505,142 @@ async fn trusted_authoring_registration_binds_first_publish_and_prepares_the_sam
     assert_eq!(prepared["action"], "resumeSession");
     assert_eq!(prepared["authoringSessionId"], session_id);
     assert_eq!(prepared["authoring"]["appId"], app_id);
+    assert_eq!(prepared["sourceId"], source_id);
+    let new_session = uuid::Uuid::new_v4().to_string();
+    let rebound = json!({"sourceDirectory":source_directory,"workspaceId":workspace_id,
+        "projectRef":{"kind":"mobileProject","projectId":project_id},
+        "authoringSessionId":new_session,"appId":app_id});
+    assert!(service
+        .request_value(json!({"op":"bindAuthoring","appId":app_id,"authoring":rebound}))
+        .await
+        .is_err());
+    let rebind_id = uuid::Uuid::new_v4().to_string();
+    let binding_intent = native(&service, json!({"op":"bindAuthoringSource","requestId":rebind_id,"sourceId":source_id,"sourceDirectory":source_directory,"targetAppId":app_id})).await;
+    assert_eq!(binding_intent["ok"], true);
+    let registered_rebind: Value = serde_json::from_str(
+        &service
+            .clone()
+            .agent_host_json(json!({"op":"registerAuthoring","sourceId":source_id,"requestId":rebind_id,"sessionMode":"code","setCurrent":true,"authoring":rebound}).to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(registered_rebind["ok"], true);
+    let old: Value =
+        serde_json::from_str(&service.clone().agent_host_json(lookup.to_string()).await).unwrap();
+    assert_eq!(old["ok"], true);
+    let new_lookup = json!({"op":"getAuthoringGrant","sessionMode":"code","sourceDirectory":source_directory,
+        "projectId":project_id,"authoringSessionId":new_session});
+    let new: Value = serde_json::from_str(
+        &service
+            .clone()
+            .agent_host_json(new_lookup.to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(new["ok"], true);
+}
+
+#[tokio::test]
+async fn native_restore_reuses_request_and_does_not_rebind_current_owner() {
+    let (dir, service) = service();
+    let published = publish(&service, dir.path(), "restore-source").await;
+    let app_id = published["record"]["appId"].as_str().unwrap();
+    let original = service.library.get(app_id).unwrap();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request =
+        json!({"op":"restoreAuthoringSource","requestId":request_id,"appId":app_id,"revision":1});
+    let restored = native(&service, request.clone()).await;
+    assert_eq!(restored["ok"], true, "{restored}");
+    let retry = native(&service, request.clone()).await;
+    assert_eq!(restored, retry);
+    assert_eq!(
+        service.library.get(app_id).unwrap().authoring,
+        original.authoring
+    );
+    let value = &restored["value"];
+    let proof = native(&service, json!({"op":"prepareAuthoringSource","sourceId":value["sourceId"],"sourceDirectory":value["sourceDirectory"]})).await;
+    assert_eq!(proof["ok"], true);
+    let binding = json!({"sourceDirectory":value["sourceDirectory"],"workspaceId":uuid::Uuid::new_v4().to_string(),
+        "projectRef":{"kind":"mobileProject","projectId":uuid::Uuid::new_v4().to_string()},
+        "authoringSessionId":uuid::Uuid::new_v4().to_string(),"appId":app_id});
+    let admitted = native(
+        &service,
+        json!({"op":"registerAuthoring","sourceId":value["sourceId"],"requestId":request_id,
+        "sessionMode":"code","setCurrent":false,"authoring":binding}),
+    )
+    .await;
+    assert_eq!(admitted["ok"], true, "{admitted}");
+    assert_eq!(
+        service.library.get(app_id).unwrap().authoring,
+        original.authoring
+    );
+    let conflict = native(
+        &service,
+        json!({"op":"restoreAuthoringSource","requestId":request_id,"appId":app_id,"revision":2}),
+    )
+    .await;
+    assert_eq!(conflict["ok"], false);
+    assert!(service.request_value(request).await.is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn trusted_authoring_grants_preserve_rebound_owner_and_reject_replaced_source() {
+    use std::os::unix::fs::symlink;
+    let (_dir, service) = service();
+    let creation_id = uuid::Uuid::new_v4().to_string();
+    let created = native(
+        &service,
+        json!({"op":"createAuthoring","name":"Owner","requestId":creation_id}),
+    )
+    .await["value"]
+        .clone();
+    let source = created["sourceDirectory"].as_str().unwrap();
+    let source_id = created["sourceId"].as_str().unwrap();
+    let source_path = PathBuf::from(created["sourcePath"].as_str().unwrap());
+    let first_project = uuid::Uuid::new_v4().to_string();
+    let first_session = uuid::Uuid::new_v4().to_string();
+    let new_project = uuid::Uuid::new_v4().to_string();
+    let new_session = uuid::Uuid::new_v4().to_string();
+    let workspace = uuid::Uuid::new_v4().to_string();
+    for (project, session) in [
+        (&first_project, &first_session),
+        (&new_project, &new_session),
+    ] {
+        let request = json!({"op":"registerAuthoring", "sourceId":source_id,"requestId":creation_id,"sessionMode":"code","setCurrent":true,"authoring":{
+            "sourceDirectory":source,"workspaceId":workspace,
+            "projectRef":{"kind":"mobileProject","projectId":project},"authoringSessionId":session}});
+        let result: Value =
+            serde_json::from_str(&service.clone().agent_host_json(request.to_string()).await)
+                .unwrap();
+        assert_eq!(result["ok"], true);
+    }
+    let old = json!({"op":"getAuthoringGrant","sessionMode":"code","sourceDirectory":source,"projectId":first_project,"authoringSessionId":first_session});
+    let old_result: Value =
+        serde_json::from_str(&service.clone().agent_host_json(old.to_string()).await).unwrap();
+    assert_eq!(old_result["ok"], true);
+    let new = json!({"op":"getAuthoringGrant","sessionMode":"code","sourceDirectory":source,"projectId":new_project,"authoringSessionId":new_session});
+    let saved = source_path.with_extension("saved");
+    std::fs::rename(&source_path, &saved).unwrap();
+    std::fs::create_dir(&source_path).unwrap();
+    let rejected_publish = service
+        .publish_from_trusted_source(
+            source_path.to_str().unwrap(),
+            Some(source_path.to_str().unwrap()),
+            None,
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            new_session.clone(),
+            Arc::new(Mutex::new(new_session.clone())),
+        )
+        .await;
+    assert!(rejected_publish.is_err());
+    assert!(service.library.list().unwrap().is_empty());
+    std::fs::remove_dir(&source_path).unwrap();
+    symlink(&saved, &source_path).unwrap();
+    let rejected: Value =
+        serde_json::from_str(&service.clone().agent_host_json(new.to_string()).await).unwrap();
+    assert_eq!(rejected["ok"], false);
 }
 
 async fn publish(service: &Arc<MobileLocalAppServiceHandle>, dir: &Path, name: &str) -> Value {

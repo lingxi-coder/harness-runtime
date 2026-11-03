@@ -1467,7 +1467,23 @@ impl ConversationOrchestrator {
             .tool_source_assistant_uuids
             .lock()
             .await
-            .insert(id.to_string(), assistant_line_uuid);
+            .insert(id.to_string(), assistant_line_uuid.clone());
+    }
+
+    pub(crate) async fn record_durable_tool_origin(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        assistant_id: &str,
+        result: Result<String, String>,
+    ) {
+        self.transcript
+            .tool_persisted_origins
+            .lock()
+            .await
+            .insert((id.to_string(), assistant_id.to_owned()), result);
+        self.transcript
+            .tool_source_assistant_notify
+            .notify_waiters();
     }
 
     /// Remove and return the payloads queued for `id`, in production order.

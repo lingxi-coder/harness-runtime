@@ -764,13 +764,20 @@ async fn append_live_stream_rows(
     let mut accepted_skill_events = Vec::new();
     for message in ordered_rows {
         let row_id = message.id();
+        let precommitted =
+            transcript.and_then(|writer| writer.take_precommitted_stream_row(row_id));
+        if matches!(&precommitted, Some(None)) {
+            continue;
+        }
         if assistant_row_ids.contains(&row_id) {
             if let message @ ConversationMessage::Assistant { .. } = message {
                 let history_message = if let Some(row) = assistant_rows
                     .iter_mut()
                     .find(|row| row.accepted.id() == row_id)
                 {
-                    if let Some(writer) = transcript {
+                    if let Some(Some(stored)) = &precommitted {
+                        row.accepted = stored.clone();
+                    } else if let Some(writer) = transcript {
                         if let Err(error) = writer.persist_assistant_block(row, stop_reason).await {
                             tracing::warn!(%error, "could not persist completed assistant block");
                         }
@@ -791,40 +798,74 @@ async fn append_live_stream_rows(
                 assistant_history.push(history_message);
             }
         } else {
-            let mut stored = message.clone();
-            let is_skill = lingxi_core::host::invoked_skills::is_individual_skill_activation(&stored);
-            if is_skill && (!je_row_ids.contains(&row_id) || !agent_skill_is_current(&stored, ctx)) { continue; }
+            let was_precommitted = precommitted.is_some();
+            let mut stored = precommitted.flatten().unwrap_or_else(|| message.clone());
+            let is_skill =
+                lingxi_core::host::invoked_skills::is_individual_skill_activation(&stored);
+            if is_skill
+                && !was_precommitted
+                && (!je_row_ids.contains(&row_id) || !agent_skill_is_current(&stored, ctx))
+            {
+                continue;
+            }
             let mut durable = true;
             let mut publication_permit = None;
-            if let Some(writer) = transcript {
+            if was_precommitted {
+                // Its append and any skill activation already happened while
+                // preparing the ordered prefix before the tool could run.
+            } else if let Some(writer) = transcript {
                 let result = if is_skill {
-                    writer.record_retained_if(&mut stored, &append_history,
-                        Some(ctx.preload_lifecycle.skill_publication_gate()),
-                        |row| agent_skill_is_current(row, ctx)).await
+                    writer
+                        .record_retained_if(
+                            &mut stored,
+                            &append_history,
+                            Some(ctx.preload_lifecycle.skill_publication_gate()),
+                            |row| agent_skill_is_current(row, ctx),
+                        )
+                        .await
                 } else {
-                    writer.record_retained(&mut stored, &append_history).await.map(|_| (true, None))
+                    writer
+                        .record_retained(&mut stored, &append_history)
+                        .await
+                        .map(|_| (true, None))
                 };
                 match result {
-                    Ok((accepted, permit)) => { durable = accepted; publication_permit = permit; },
+                    Ok((accepted, permit)) => {
+                        durable = accepted;
+                        publication_permit = permit;
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "could not persist streamed executor message row");
                         durable = false;
                     }
                 }
             } else if is_skill {
-                publication_permit = Some(ctx.preload_lifecycle.skill_publication_gate().lock_owned().await);
-                if !agent_skill_is_current(&stored, ctx) { continue; }
+                publication_permit = Some(
+                    ctx.preload_lifecycle
+                        .skill_publication_gate()
+                        .lock_owned()
+                        .await,
+                );
+                if !agent_skill_is_current(&stored, ctx) {
+                    continue;
+                }
             }
-            if is_skill && !durable { continue; }
+            if is_skill && !durable {
+                continue;
+            }
             if je_row_ids.contains(&row_id) {
                 let accepted = if is_skill { stored } else { message };
                 if is_skill {
                     // No await lies between the accepted write, live row and
                     // activation, so cancellation cannot publish half of it.
                     history.push(accepted.clone());
-                    register_agent_skill(&accepted, ctx);
+                    if !was_precommitted {
+                        register_agent_skill(&accepted, ctx);
+                    }
                     accepted_skill_ids.insert(row_id);
-                    accepted_skill_events.push(accepted.clone());
+                    if !was_precommitted {
+                        accepted_skill_events.push(accepted.clone());
+                    }
                     drop(publication_permit);
                 }
                 append_history.push(accepted.clone());
@@ -841,22 +882,137 @@ async fn append_live_stream_rows(
     }
 }
 
+/// Persist the source row and all preceding streamed rows before permitting a
+/// LocalApp side effect. The ordinary finalizer consumes the marked prefix and
+/// writes only later rows. A failed or ambiguous append never grants admission.
+async fn precommit_local_app_prefix(
+    ordered_rows: &[ConversationMessage],
+    je_rows: &[ConversationMessage],
+    assistant_rows: &mut [crate::transcript::StagedAssistantRow],
+    writer: &crate::transcript::AgentTranscriptWriter,
+    expected_origins: &[(String, String)],
+    prior_history: &[ConversationMessage],
+    stop_reason: Option<&str>,
+    ctx: &SubagentContext,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+) -> Result<(), String> {
+    let stop_reason = stop_reason.ok_or("assistant row has no durable terminal state")?;
+    let source_ids = assistant_rows.iter().filter(|row| row.source_tool_uses.iter().any(|block| {
+        matches!(block, lingxi_core::types::ContentBlock::ToolUse { name, .. } if name == "LocalApp")
+    })).map(|row| row.accepted.id()).collect::<std::collections::HashSet<_>>();
+    let Some(last) = ordered_rows
+        .iter()
+        .rposition(|row| source_ids.contains(&row.id()))
+    else {
+        return Ok(());
+    };
+    let je_ids = je_rows
+        .iter()
+        .map(ConversationMessage::id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut append_history = prior_history.to_vec();
+    for message in &ordered_rows[..=last] {
+        let row_id = message.id();
+        if let Some(row) = assistant_rows
+            .iter_mut()
+            .find(|row| row.accepted.id() == row_id)
+        {
+            if let ConversationMessage::Assistant {
+                stop_reason: stored,
+                ..
+            } = &mut row.accepted
+            {
+                *stored = Some(stop_reason.to_owned());
+            }
+            // Mark before the syscall: an error may mean an append completed
+            // without a receipt and must never trigger a duplicate append.
+            writer.mark_precommitted_stream_row(row_id, Some(row.accepted.clone()));
+            if !writer
+                .persist_assistant_block(row, Some(stop_reason))
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                return Err("assistant source row was not persisted".into());
+            }
+            writer.mark_precommitted_stream_row(row_id, Some(row.accepted.clone()));
+            append_history.push(row.accepted.clone());
+            continue;
+        }
+        let mut stored = message.clone();
+        let is_skill = lingxi_core::host::invoked_skills::is_individual_skill_activation(&stored);
+        if is_skill && (!je_ids.contains(&row_id) || !agent_skill_is_current(&stored, ctx)) {
+            writer.mark_precommitted_stream_row(row_id, None);
+            continue;
+        }
+        writer.mark_precommitted_stream_row(
+            row_id,
+            if is_skill {
+                None
+            } else {
+                Some(message.clone())
+            },
+        );
+        let (accepted, permit) = if is_skill {
+            writer
+                .record_retained_if(
+                    &mut stored,
+                    &append_history,
+                    Some(ctx.preload_lifecycle.skill_publication_gate()),
+                    |row| agent_skill_is_current(row, ctx),
+                )
+                .await
+                .map_err(|e| e.to_string())?
+        } else {
+            writer
+                .record_retained(&mut stored, &append_history)
+                .await
+                .map_err(|e| e.to_string())?;
+            (true, None)
+        };
+        if !accepted {
+            continue;
+        }
+        let accepted_message = if is_skill { stored } else { message.clone() };
+        writer.mark_precommitted_stream_row(row_id, Some(accepted_message.clone()));
+        if je_ids.contains(&row_id) {
+            if is_skill {
+                register_agent_skill(&accepted_message, ctx);
+                drop(permit);
+                emit_message(out_tx, ctx.agent_id, &accepted_message).await;
+            }
+            append_history.push(accepted_message);
+        }
+    }
+    writer
+        .sync_stream_prefix(expected_origins)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn agent_skill_is_current(message: &ConversationMessage, ctx: &SubagentContext) -> bool {
-    let session_id = ctx.origin_session_id
+    let session_id = ctx
+        .origin_session_id
         .or_else(lingxi_core::host::session_flags::current_request_session_id)
         .map(|id| id.to_string());
     let agent_id = ctx.agent_id.to_string();
-    let scope = lingxi_core::host::invoked_skills::InvokedSkillScopeRef::new(session_id.as_deref(), Some(&agent_id));
+    let scope = lingxi_core::host::invoked_skills::InvokedSkillScopeRef::new(
+        session_id.as_deref(),
+        Some(&agent_id),
+    );
     !ctx.cancellation_token.is_cancelled()
         && lingxi_core::host::invoked_skills::is_current_individual_skill_activation(message, scope)
 }
 
 fn register_agent_skill(message: &ConversationMessage, ctx: &SubagentContext) {
-    let session_id = ctx.origin_session_id
+    let session_id = ctx
+        .origin_session_id
         .or_else(lingxi_core::host::session_flags::current_request_session_id)
         .map(|id| id.to_string());
     let agent_id = ctx.agent_id.to_string();
-    let scope = lingxi_core::host::invoked_skills::InvokedSkillScopeRef::new(session_id.as_deref(), Some(&agent_id));
+    let scope = lingxi_core::host::invoked_skills::InvokedSkillScopeRef::new(
+        session_id.as_deref(),
+        Some(&agent_id),
+    );
     lingxi_core::host::invoked_skills::register_accepted_skill_message(message, scope);
 }
 
@@ -1474,6 +1630,73 @@ async fn accumulate_agent_stream_live(
                 response_error = Some((partial, error));
                 break;
             }
+        }
+    }
+
+    // Child tools use their own transcript, not the parent's writer. Publish
+    // each actual child row identity only after the ordered prefix is synced.
+    // This happens before waiting for tools, because LocalApp itself waits for
+    // this acknowledgement before it can produce side effects.
+    let local_app_origins = assistant_rows
+        .iter()
+        .flat_map(|row| {
+            let assistant = row.accepted.id().as_uuid().to_string();
+            row.source_tool_uses
+                .iter()
+                .filter_map(move |block| match block {
+                    lingxi_core::types::ContentBlock::ToolUse { id, name, .. }
+                        if name == "LocalApp" =>
+                    {
+                        Some((id.to_string(), assistant.clone()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    if !local_app_origins.is_empty() {
+        let origins = ctx
+            .tool_invoker
+            .as_ref()
+            .and_then(|invoker| invoker.durable_origin_state())
+            .and_then(|state| {
+                state
+                    .downcast_arc::<tool_api::context::DurableToolOrigins>()
+                    .ok()
+            });
+        if let Some(origins) = origins {
+            // Do not borrow the non-Sync response stream across the await.
+            let terminal_stop = response
+                .as_ref()
+                .map(|(completed, _)| completed.stop_reason.clone());
+            let result = match (terminal_stop, transcript) {
+                (Some(stop_reason), Some(writer))
+                    if response_error.is_none() && declined_fallback.is_none() =>
+                {
+                    precommit_local_app_prefix(
+                        &ordered_rows,
+                        &je_rows,
+                        &mut assistant_rows,
+                        writer,
+                        &local_app_origins,
+                        &request_messages,
+                        stop_reason.as_deref(),
+                        ctx,
+                        out_tx,
+                    )
+                    .await
+                }
+                _ => Err("child assistant transcript was not durably completed".into()),
+            };
+            let mut sources = origins.sources.lock().await;
+            for (tool, assistant) in local_app_origins {
+                let value = result
+                    .as_ref()
+                    .map(|()| assistant.clone())
+                    .map_err(Clone::clone);
+                sources.insert((tool, assistant), value);
+            }
+            drop(sources);
+            origins.changed.notify_waiters();
         }
     }
 
@@ -5594,16 +5817,33 @@ async fn run_subagent_loop(
                     // rows: emit and flush each exactly once before the next
                     // provider snapshot.
                     for mut message in injected_tool_messages {
-                        let is_skill = lingxi_core::host::invoked_skills::is_individual_skill_activation(&message);
+                        let is_skill =
+                            lingxi_core::host::invoked_skills::is_individual_skill_activation(
+                                &message,
+                            );
                         if is_skill {
-                            if !agent_skill_is_current(&message, &ctx) { continue; }
+                            if !agent_skill_is_current(&message, &ctx) {
+                                continue;
+                            }
                             let publication_permit = if let Some(writer) = transcript.as_ref() {
-                                flush_transcript(Some(writer), history, &mut transcript_written).await;
-                                if transcript_written < history.len() { continue; }
-                                match writer.record_retained_if(&mut message, history,
-                                    Some(ctx.preload_lifecycle.skill_publication_gate()),
-                                    |row| agent_skill_is_current(row, &ctx)).await {
-                                    Ok((true, permit)) => { transcript_written += 1; permit },
+                                flush_transcript(Some(writer), history, &mut transcript_written)
+                                    .await;
+                                if transcript_written < history.len() {
+                                    continue;
+                                }
+                                match writer
+                                    .record_retained_if(
+                                        &mut message,
+                                        history,
+                                        Some(ctx.preload_lifecycle.skill_publication_gate()),
+                                        |row| agent_skill_is_current(row, &ctx),
+                                    )
+                                    .await
+                                {
+                                    Ok((true, permit)) => {
+                                        transcript_written += 1;
+                                        permit
+                                    }
                                     Ok((false, _)) => continue,
                                     Err(error) => {
                                         tracing::warn!(%error, "could not persist Skill executor message row");
@@ -5611,8 +5851,14 @@ async fn run_subagent_loop(
                                     }
                                 }
                             } else {
-                                let permit = ctx.preload_lifecycle.skill_publication_gate().lock_owned().await;
-                                if !agent_skill_is_current(&message, &ctx) { continue; }
+                                let permit = ctx
+                                    .preload_lifecycle
+                                    .skill_publication_gate()
+                                    .lock_owned()
+                                    .await;
+                                if !agent_skill_is_current(&message, &ctx) {
+                                    continue;
+                                }
                                 Some(permit)
                             };
                             history.push(message.clone());
@@ -5620,8 +5866,12 @@ async fn run_subagent_loop(
                             drop(publication_permit);
                         } else {
                             history.push(message);
-                            flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
-                            message = history.last().cloned().expect("a tool-injected message was just appended");
+                            flush_transcript(transcript.as_ref(), history, &mut transcript_written)
+                                .await;
+                            message = history
+                                .last()
+                                .cloned()
+                                .expect("a tool-injected message was just appended");
                         }
                         emit_message(&out_tx, agent_id, &message).await;
                     }

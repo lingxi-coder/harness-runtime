@@ -1517,12 +1517,17 @@ impl JsonlWriter {
     /// Validation and append share the writer mutex and the session's pinned
     /// durable transaction. Dropping the caller's future does not release the
     /// mutex while filesystem work is still running.
-    pub async fn ensure_scheduled_anchor(
+    pub async fn ensure_draft_anchor(
         self: &Arc<Self>,
         session_id: SessionId,
         mode: ConversationMode,
         expected_cwd: &Path,
+        title: &str,
     ) -> Result<bool, TranscriptWriterError> {
+        if title.trim().is_empty() || title.contains('\0') {
+            return Err(FsError::Io("draft title must not be empty".into()).into());
+        }
+        let title = title.to_owned();
         let writer = self.clone();
         let expected_cwd = expected_cwd.to_path_buf();
         tokio::spawn(async move {
@@ -1573,6 +1578,7 @@ impl JsonlWriter {
                         &captured.cwd,
                         session_id,
                         mode,
+                        &title,
                         captured.writer.transcript_authority().as_ref(),
                     )?;
                     captured
@@ -6259,18 +6265,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn code_draft_anchor_persists_the_explicit_title_and_owner() {
+        let (root, session, path, _, writer) = scheduled_anchor_fixture();
+        let header = format!(
+            "{}\n",
+            json!({
+                "type":"fixed-session-mode", "sessionId":session.as_uuid(),
+                "sessionMode":"code", "instructionEpoch":0
+            })
+        );
+        std::fs::write(&path, &header).unwrap();
+        assert!(writer
+            .ensure_draft_anchor(session, ConversationMode::Code, root.path(), "  ")
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), header);
+        assert!(writer
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Code,
+                root.path(),
+                "Local App editor"
+            )
+            .await
+            .unwrap());
+        let source = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<serde_json::Value> = source
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows[0]["sessionMode"], "code");
+        let marker = rows
+            .iter()
+            .find(|row| row["mobileEmptySession"] == 1)
+            .unwrap();
+        assert_eq!(marker["customTitle"], "Local App editor");
+        assert_eq!(marker["sessionId"], session.as_uuid().to_string());
+        assert_eq!(marker["cwd"].as_str(), root.path().to_str());
+        assert_eq!(
+            crate::jsonl::scheduled_anchor::validated_empty_draft_cwd(
+                &source,
+                &session.as_uuid().to_string()
+            ),
+            Some(root.path().to_owned())
+        );
+        assert!(!writer
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Code,
+                root.path(),
+                "Local App editor"
+            )
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[tokio::test]
     async fn scheduled_anchor_validates_complete_owner_and_is_idempotent() {
         let (root, session, path, _, writer) = scheduled_anchor_fixture();
         // A missing transcript is rejected without creating it.
         assert!(writer
-            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert!(!path.exists());
 
         std::fs::write(&path, scheduled_header(session)).unwrap();
         assert!(writer
-            .ensure_scheduled_anchor(session, ConversationMode::Chat, &root.path().join("other"))
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Chat,
+                &root.path().join("other"),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert_eq!(
@@ -6297,7 +6370,12 @@ mod tests {
             let source = format!("{}{suffix}", scheduled_header(session));
             std::fs::write(&path, &source).unwrap();
             assert!(writer
-                .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+                .ensure_draft_anchor(
+                    session,
+                    ConversationMode::Chat,
+                    root.path(),
+                    "Scheduled task"
+                )
                 .await
                 .is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
@@ -6312,17 +6390,32 @@ mod tests {
         );
         std::fs::write(&path, &source).unwrap();
         assert!(writer
-            .ensure_scheduled_anchor(session, ConversationMode::Code, root.path())
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Code,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert!(writer
-            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .unwrap());
         let retained = std::fs::read_to_string(&path).unwrap();
         assert!(retained.contains("\"mobileEmptySession\":1"));
         assert!(!writer
-            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), retained);
@@ -6333,7 +6426,12 @@ mod tests {
         );
         std::fs::write(&path, &invalid_after_marker).unwrap();
         assert!(writer
-            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert_eq!(
@@ -6353,7 +6451,12 @@ mod tests {
         );
         std::fs::write(&path, &source).unwrap();
         assert!(!writer
-            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
@@ -6368,7 +6471,12 @@ mod tests {
         let other = root.path().join("other.jsonl");
         std::fs::hard_link(&path, &other).unwrap();
         assert!(writer
-            .ensure_scheduled_anchor(session, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
@@ -6393,7 +6501,7 @@ mod tests {
             let cwd = root.path().to_path_buf();
             async move {
                 writer
-                    .ensure_scheduled_anchor(session_a, ConversationMode::Chat, &cwd)
+                    .ensure_draft_anchor(session_a, ConversationMode::Chat, &cwd, "Scheduled task")
                     .await
             }
         });
@@ -6429,7 +6537,12 @@ mod tests {
         let redirected = root.path().join("redirected.jsonl");
         writer.retarget(redirected.clone()).await;
         assert!(writer
-            .ensure_scheduled_anchor(session_a, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session_a,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert!(!redirected.exists());
@@ -6439,7 +6552,12 @@ mod tests {
         std::fs::rename(&state, &original).unwrap();
         std::fs::create_dir(&state).unwrap();
         assert!(writer
-            .ensure_scheduled_anchor(session_a, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session_a,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert_eq!(
@@ -6458,7 +6576,12 @@ mod tests {
             authority_b,
         );
         assert!(writer
-            .ensure_scheduled_anchor(session_a, ConversationMode::Chat, root.path())
+            .ensure_draft_anchor(
+                session_a,
+                ConversationMode::Chat,
+                root.path(),
+                "Scheduled task"
+            )
             .await
             .is_err());
         assert_eq!(
@@ -6477,7 +6600,12 @@ mod tests {
             let writer = writer.clone();
             async move {
                 writer
-                    .ensure_scheduled_anchor(session, ConversationMode::Chat, &expected_cwd)
+                    .ensure_draft_anchor(
+                        session,
+                        ConversationMode::Chat,
+                        &expected_cwd,
+                        "Scheduled task",
+                    )
                     .await
             }
         });

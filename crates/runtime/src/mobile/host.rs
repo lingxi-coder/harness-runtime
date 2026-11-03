@@ -730,7 +730,7 @@ fn mobile_skill_listing_provider(
 
 fn mobile_skill_listing_provider_with_settings(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
-    _session_mode: session::jsonl::SessionMode,
+    session_mode: session::jsonl::SessionMode,
     read_file_state: Option<tool_api::read_file_state::ReadFileStateMap>,
     include_code_review_suggestion: Arc<
         dyn Fn() -> Result<bool, lingxi_core::settings::SettingsError> + Send + Sync,
@@ -770,6 +770,11 @@ fn mobile_skill_listing_provider_with_settings(
                     // Native `Sge`/`sso` visibility gates run before both
                     // full-catalog alias resolution and prompt listing.
                     .filter(|command| command.is_enabled)
+                    .filter(|command| {
+                        session_mode != session::jsonl::SessionMode::Chat
+                            || command.loaded_from.as_deref()
+                                != Some(crate::local_apps::SKILL_LOADED_FROM)
+                    })
                     .map(
                         |command| orchestrator::prompt::skill_listing::SkillListingCatalogName {
                             name: command.name.clone(),
@@ -789,6 +794,11 @@ fn mobile_skill_listing_provider_with_settings(
                     .model_invocable_commands() // !disable_model_invocation (registry.rs)
                     .into_iter()
                     .filter(|c| c.is_enabled)
+                    .filter(|c| {
+                        session_mode != session::jsonl::SessionMode::Chat
+                            || c.loaded_from.as_deref()
+                                != Some(crate::local_apps::SKILL_LOADED_FROM)
+                    })
                     // Native `cmd.type === 'prompt'`; dispatch kind alone does
                     // not classify prompt commands, and builtin prompts use
                     // the separate `Xwr` bundled-skill gate below.

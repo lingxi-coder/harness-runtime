@@ -2321,8 +2321,40 @@ pub fn deferred_tool_replays_from_messages(
         let Some(tool_input) = attachment.subprojection("/toolInput").ok() else {
             continue;
         };
+        let assistant_message_id = attachment
+            .string_at("/assistantMessageId")
+            .and_then(MessageId::parse_prefixed)
+            .and_then(|id| {
+                let logical = id.as_uuid().to_string();
+                let mut rows = messages.iter().filter(|row| {
+                    if row.message_type != "assistant"
+                        || row.session_id != message.session_id
+                        || (row.uuid != logical
+                            && row.message.string_at("/id") != Some(logical.as_str()))
+                    {
+                        return false;
+                    }
+                    let Some(content) = row.message.at_pointer("/content") else {
+                        return false;
+                    };
+                    (0..content.array_len().unwrap_or(0)).any(|index| {
+                        content.get_index(index).is_some_and(|block| {
+                            block.get_property("type").and_then(JsonValueView::as_str)
+                                == Some("tool_use")
+                                && block.get_property("id").and_then(JsonValueView::as_str)
+                                    == Some(tool_use_id)
+                        })
+                    })
+                });
+                let row = rows.next()?;
+                if rows.next().is_some() {
+                    return None;
+                }
+                MessageId::parse_prefixed(&row.uuid)
+            });
         deferred.push(lingxi_core::host::DeferredToolReplay {
             tool_use_id: tool_use_id.to_string(),
+            assistant_message_id,
             tool_name: tool_name.to_string(),
             tool_input,
             permission_mode: attachment.string_at("/permissionMode").map(str::to_string),
@@ -2345,6 +2377,21 @@ async fn replay_deferred_tool_after_resume(
     deferred: lingxi_core::host::DeferredToolReplay,
 ) -> Result<DeferredReplayOutcome, crate::OrchestratorError> {
     let tool_use_id = ToolUseId::from(deferred.tool_use_id);
+    let assistant_message_id = deferred.assistant_message_id;
+    if let Some(assistant) = assistant_message_id {
+        // The loader only retains this ID after matching the captured durable
+        // assistant row and its exact tool-use block in the same session.
+        orch.record_source_tool_assistant_uuid(&tool_use_id, assistant.as_uuid().to_string())
+            .await;
+        if deferred.tool_name == "LocalApp" {
+            orch.record_durable_tool_origin(
+                &tool_use_id,
+                &assistant.as_uuid().to_string(),
+                Ok(assistant.as_uuid().to_string()),
+            )
+            .await;
+        }
+    }
     let trace_context = deferred.traceparent.as_deref().map(|traceparent| {
         telemetry::otel::SerializedTraceContext {
             traceparent: traceparent.to_string(),
@@ -2385,8 +2432,17 @@ async fn replay_deferred_tool_after_resume(
         crate::turn_loop::boxed_turn_future(|| {
             telemetry::otel::with_trace_context_future(
                 trace_context.as_ref(),
-                crate::turn_loop::boxed_turn_future(|| {
-                    crate::turn_loop::dispatch_tool_uses_tracked(orch, &tool_uses, None)
+                crate::turn_loop::boxed_turn_future(|| async {
+                    let dispatched =
+                        crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred(
+                            orch,
+                            &tool_uses,
+                            None,
+                            assistant_message_id,
+                        )
+                        .await?;
+                    crate::turn_loop::tool_dispatch::finish_direct_tool_dispatch(orch, dispatched)
+                        .await
                 }),
             )
         })

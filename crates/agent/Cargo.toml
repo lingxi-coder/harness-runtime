@@ -41,6 +41,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 tool-api = { path = "../tool-api", features = ["test-support"] }
+tool-ui = { path = "../tools/ui" }
 test-harness = { path = "../test-harness" }
 tempfile = "3"
 platform-posix = { path = "../platforms/posix" }
