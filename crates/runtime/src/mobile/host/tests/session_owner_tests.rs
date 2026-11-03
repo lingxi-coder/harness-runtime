@@ -3,6 +3,422 @@ use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::SessionId;
 use std::time::{Duration, Instant};
 
+struct RejectBeforeCronClaim {
+    begins: Arc<AtomicUsize>,
+}
+
+struct PausedRejectBeforeCronClaim {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl super::super::MobileCronOwnerAdmission for PausedRejectBeforeCronClaim {
+    async fn begin_owner(&self, _: super::super::CronOwnerCandidateDto) -> bool {
+        self.started.notify_one();
+        self.release.notified().await;
+        false
+    }
+
+    async fn confirm_owner(&self, _: super::super::CronOwnerReservationDto) -> bool {
+        panic!("a rejected candidate must never be confirmed")
+    }
+}
+
+#[async_trait::async_trait]
+impl super::super::MobileCronOwnerAdmission for RejectBeforeCronClaim {
+    async fn begin_owner(&self, candidate: super::super::CronOwnerCandidateDto) -> bool {
+        assert_eq!(candidate.session_mode, "code");
+        assert_eq!(candidate.session_scope_key, "project.test");
+        assert!(candidate.session_transcript_path.is_none());
+        self.begins.fetch_add(1, Ordering::SeqCst);
+        false
+    }
+
+    async fn confirm_owner(&self, _: super::super::CronOwnerReservationDto) -> bool {
+        panic!("a rejected candidate must never be confirmed")
+    }
+}
+
+#[test]
+fn cron_owner_rejection_is_retryable_before_all_three_entrypoint_claims() {
+    fn snapshot_jsonl(root: &Path, files: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                snapshot_jsonl(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+                files.push((path.clone(), std::fs::read(path).unwrap()));
+            }
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle_with_config(test_config(tmp.path()), tmp.path());
+    handle.runtime().block_on(async {
+        let cwd = std::path::PathBuf::from(handle.session_cwd());
+        let task = serde_json::json!({
+            "id":"d12345678", "cron":"0 9 * * *", "prompt":"brief", "createdAt":1,
+            "recurring":true, "automation":{
+                "version":2, "status":"active", "model":"provider/model",
+                "reasoning":{"type":"automatic"}, "runMode":"new_session",
+                "sessionMode":"code", "sessionScopeKey":"project.test", "notificationPolicy":"all"
+            }
+        });
+        let body = serde_json::json!({"tasks":[task]}).to_string();
+        cron::tasks_file::write_automation_tasks_body(handle.fs.as_ref(), &cwd, &body)
+            .await
+            .unwrap();
+        let stored = cron::tasks_file::parse_automation_tasks_strict(&body).unwrap();
+        let now = handle.firer_platform.clock().now();
+        let due_at = cron::next_fire_epoch_ms_for_persisted_task(&stored.tasks[0], now).unwrap();
+        assert!(
+            due_at
+                <= now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+        );
+        let task_file = cron::scheduled_tasks_path(&cwd);
+        let before_tasks = std::fs::read(&task_file).unwrap();
+        let mut before_jsonl = Vec::new();
+        snapshot_jsonl(tmp.path(), &mut before_jsonl);
+        before_jsonl.sort_by(|a, b| a.0.cmp(&b.0));
+        let begins = Arc::new(AtomicUsize::new(0));
+
+        for entrypoint in 0..3 {
+            let admission =
+                super::super::MobileCronAdmission::new(Box::new(RejectBeforeCronClaim {
+                    begins: begins.clone(),
+                }));
+            let result = match entrypoint {
+                0 => {
+                    handle
+                        .run_cron_task_if_due("d12345678".into(), due_at, admission.clone())
+                        .await
+                }
+                1 => {
+                    handle
+                        .run_cron_task_now_at("d12345678".into(), 1, admission.clone())
+                        .await
+                }
+                _ => {
+                    handle
+                        .run_cron_task_now("d12345678".into(), admission.clone())
+                        .await
+                }
+            }
+            .expect("rejected owner must produce a result");
+            admission.cancel_and_wait().await;
+            assert!(result.retryable, "entrypoint {entrypoint}");
+            assert!(
+                matches!(result.status, super::super::CronFireStatusDto::Failed { ref message }
+                if message == "busy: Scheduled session owner could not be reserved")
+            );
+            assert_eq!(begins.load(Ordering::SeqCst), entrypoint + 1);
+            assert_eq!(std::fs::read(&task_file).unwrap(), before_tasks);
+            assert!(
+                cron::list_owner_reservations_strict(handle.fs.as_ref(), &cwd)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let mut after_jsonl = Vec::new();
+            snapshot_jsonl(tmp.path(), &mut after_jsonl);
+            after_jsonl.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(after_jsonl, before_jsonl);
+        }
+
+        // Re-delivery of the same terminal, interrupted or still-running
+        // occurrence is not a fresh pre-claim rejection. The callback can
+        // still refuse, but the public API must preserve claim's None result.
+        let mut calls = 3;
+        for entrypoint in 0..2 {
+            for status in [
+                cron::AutomationRunStatus::Succeeded,
+                cron::AutomationRunStatus::Interrupted,
+                cron::AutomationRunStatus::Running,
+                cron::AutomationRunStatus::Queued,
+            ] {
+                let at = if entrypoint == 0 { due_at } else { 123 };
+                let mut duplicate = stored.tasks[0].clone();
+                duplicate
+                    .automation
+                    .as_mut()
+                    .unwrap()
+                    .runs
+                    .push(cron::AutomationRun {
+                        id: if entrypoint == 0 {
+                            format!("d12345678-{at}")
+                        } else {
+                            format!("d12345678-manual-at-{at}")
+                        },
+                        task_id: "d12345678".into(),
+                        owner_pid: None,
+                        claim_generation: Some(1),
+                        manual_occurrence_at: (entrypoint == 1).then_some(at),
+                        scheduled_at: at,
+                        started_at: None,
+                        finished_at: None,
+                        status,
+                        model: "provider/model".into(),
+                        reasoning: serde_json::json!({"type":"automatic"}),
+                        session_id: None,
+                        session_transcript_path: None,
+                        session_mode: None,
+                        session_scope_key: None,
+                        summary: None,
+                        error: None,
+                    });
+                let document = cron::ScheduledTasks {
+                    tasks: vec![duplicate],
+                    ..Default::default()
+                };
+                cron::tasks_file::write_automation_tasks_body(
+                    handle.fs.as_ref(),
+                    &cwd,
+                    &cron::serialize_tasks(&document),
+                )
+                .await
+                .unwrap();
+                let unchanged = std::fs::read(&task_file).unwrap();
+                let admission =
+                    super::super::MobileCronAdmission::new(Box::new(RejectBeforeCronClaim {
+                        begins: begins.clone(),
+                    }));
+                let result = if entrypoint == 0 {
+                    handle
+                        .run_cron_task_if_due("d12345678".into(), at, admission.clone())
+                        .await
+                } else {
+                    handle
+                        .run_cron_task_now_at("d12345678".into(), at, admission.clone())
+                        .await
+                };
+                admission.cancel_and_wait().await;
+                calls += 1;
+                if status == cron::AutomationRunStatus::Queued {
+                    assert!(
+                        result.is_some_and(|result| result.retryable),
+                        "queued {entrypoint}"
+                    );
+                } else {
+                    assert!(result.is_none(), "duplicate {entrypoint} {status:?}");
+                }
+                assert_eq!(begins.load(Ordering::SeqCst), calls);
+                assert_eq!(std::fs::read(&task_file).unwrap(), unchanged);
+
+                // The pre-existing transition-busy path must use the same
+                // occurrence check and must not call owner admission.
+                let transition = handle.loop_transition.lock().await;
+                let admission =
+                    super::super::MobileCronAdmission::new(Box::new(RejectBeforeCronClaim {
+                        begins: begins.clone(),
+                    }));
+                let result = if entrypoint == 0 {
+                    handle
+                        .run_cron_task_if_due("d12345678".into(), at, admission.clone())
+                        .await
+                } else {
+                    handle
+                        .run_cron_task_now_at("d12345678".into(), at, admission.clone())
+                        .await
+                };
+                admission.cancel_and_wait().await;
+                drop(transition);
+                if status == cron::AutomationRunStatus::Queued {
+                    assert!(
+                        result.is_some_and(|result| result.retryable),
+                        "transition queued {entrypoint}"
+                    );
+                } else {
+                    assert!(
+                        result.is_none(),
+                        "transition duplicate {entrypoint} {status:?}"
+                    );
+                }
+                assert_eq!(begins.load(Ordering::SeqCst), calls);
+                assert_eq!(std::fs::read(&task_file).unwrap(), unchanged);
+            }
+        }
+        cron::tasks_file::write_automation_tasks_body(handle.fs.as_ref(), &cwd, &body)
+            .await
+            .unwrap();
+        let admission = super::super::MobileCronAdmission::new(Box::new(RejectBeforeCronClaim {
+            begins: begins.clone(),
+        }));
+        assert!(handle
+            .run_cron_task_if_due("d12345678".into(), due_at + 1, admission.clone())
+            .await
+            .is_none());
+        admission.cancel_and_wait().await;
+        calls += 1;
+
+        // Invalid source remains a permanent pre-admission failure, and must
+        // not call the callback or consume an occurrence either.
+        let mut invalid: serde_json::Value = serde_json::from_slice(&before_tasks).unwrap();
+        invalid["tasks"][0]["automation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sessionMode");
+        cron::tasks_file::write_automation_tasks_body(
+            handle.fs.as_ref(),
+            &cwd,
+            &invalid.to_string(),
+        )
+        .await
+        .unwrap();
+        let invalid_tasks = std::fs::read(&task_file).unwrap();
+        let admission = super::super::MobileCronAdmission::new(Box::new(RejectBeforeCronClaim {
+            begins: begins.clone(),
+        }));
+        let result = handle
+            .run_cron_task_now("d12345678".into(), admission.clone())
+            .await
+            .unwrap();
+        admission.cancel_and_wait().await;
+        assert!(!result.retryable);
+        assert!(
+            matches!(result.status, super::super::CronFireStatusDto::Failed { ref message }
+            if message.starts_with("paused:"))
+        );
+        assert_eq!(begins.load(Ordering::SeqCst), calls);
+        assert_eq!(std::fs::read(&task_file).unwrap(), invalid_tasks);
+    });
+}
+
+#[test]
+fn cron_owner_rejection_after_cancellation_does_not_retry_or_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle_with_config(test_config(tmp.path()), tmp.path());
+    handle.runtime().block_on(async {
+        let cwd = std::path::PathBuf::from(handle.session_cwd());
+        let body = serde_json::json!({"tasks":[{
+            "id":"d12345678", "cron":"0 9 * * *", "prompt":"brief", "createdAt":1,
+            "recurring":true, "automation":{
+                "version":2, "status":"active", "model":"provider/model",
+                "reasoning":{"type":"automatic"}, "runMode":"new_session",
+                "sessionMode":"code", "sessionScopeKey":"project.test", "notificationPolicy":"all"
+            }
+        }]})
+        .to_string();
+        cron::tasks_file::write_automation_tasks_body(handle.fs.as_ref(), &cwd, &body)
+            .await
+            .unwrap();
+        let task_path = cron::scheduled_tasks_path(&cwd);
+        let before = std::fs::read(&task_path).unwrap();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let admission =
+            super::super::MobileCronAdmission::new(Box::new(PausedRejectBeforeCronClaim {
+                started: started.clone(),
+                release: release.clone(),
+            }));
+        let child_handle = handle.clone();
+        let child_admission = admission.clone();
+        let fire = tokio::spawn(async move {
+            child_handle
+                .run_cron_task_now("d12345678".into(), child_admission)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        let cancel = admission.cancel_and_wait();
+        tokio::pin!(cancel);
+        assert!(matches!(
+            futures::poll!(&mut cancel),
+            std::task::Poll::Pending
+        ));
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), fire)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), &mut cancel)
+            .await
+            .unwrap();
+        assert!(!result.retryable);
+        assert!(
+            matches!(result.status, super::super::CronFireStatusDto::Failed { ref message }
+            if message.starts_with("cancelled:"))
+        );
+        assert_eq!(std::fs::read(&task_path).unwrap(), before);
+        assert!(
+            cron::list_owner_reservations_strict(handle.fs.as_ref(), &cwd)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    });
+}
+
+#[test]
+fn cron_owner_rejection_rechecks_scope_configuration_and_concurrent_claim() {
+    for scenario in ["removed", "replaced", "edited", "malformed", "claimed"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (handle, _) = build_submit_handle_with_config(test_config(tmp.path()), tmp.path());
+        handle.runtime().block_on(async {
+            let cwd = std::path::PathBuf::from(handle.session_cwd());
+            let body = serde_json::json!({"tasks":[{
+                "id":"d12345678", "cron":"0 9 * * *", "prompt":"brief", "createdAt":1,
+                "recurring":true, "automation":{
+                    "version":2, "status":"active", "model":"provider/model",
+                    "reasoning":{"type":"automatic"}, "runMode":"new_session",
+                    "sessionMode":"code", "sessionScopeKey":"project.test", "notificationPolicy":"all"
+                }
+            }]}).to_string();
+            cron::tasks_file::write_automation_tasks_body(handle.fs.as_ref(), &cwd, &body).await.unwrap();
+            let task_path = cron::scheduled_tasks_path(&cwd);
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let admission = super::super::MobileCronAdmission::new(Box::new(PausedRejectBeforeCronClaim {
+                started: started.clone(), release: release.clone(),
+            }));
+            let child_handle = handle.clone();
+            let child_admission = admission.clone();
+            let fire = tokio::spawn(async move {
+                child_handle.run_cron_task_now_at("d12345678".into(), 123, child_admission).await
+            });
+            tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+            match scenario {
+                "removed" => std::fs::remove_file(&task_path).unwrap(),
+                "replaced" => {
+                    let state_root = task_path.parent().unwrap();
+                    std::fs::rename(state_root, cwd.join("prior-state")).unwrap();
+                    std::fs::create_dir(state_root).unwrap();
+                    std::fs::write(&task_path, &body).unwrap();
+                }
+                "edited" => {
+                    let mut edited: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    edited["tasks"][0]["automation"]["sessionScopeKey"] = "project.other".into();
+                    std::fs::write(&task_path, edited.to_string()).unwrap();
+                }
+                "malformed" => std::fs::write(&task_path, b"invalid document").unwrap(),
+                "claimed" => {
+                    assert!(cron::claim_automation_run_now_at(handle.fs.as_ref(), &cwd, "d12345678",
+                        handle.firer_platform.clock().now(), 123).await.is_some());
+                }
+                _ => unreachable!(),
+            }
+            let after_change = std::fs::read(&task_path).ok();
+            release.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(5), fire).await.unwrap().unwrap();
+            admission.cancel_and_wait().await;
+            if scenario == "claimed" {
+                assert!(result.is_none(), "concurrent claim must not be retried");
+            } else {
+                let result = result.expect("unverifiable source must be reported");
+                assert!(!result.retryable, "{scenario}");
+                assert!(matches!(result.status, super::super::CronFireStatusDto::OutcomeUnknown { .. }), "{scenario}");
+            }
+            assert_eq!(std::fs::read(&task_path).ok(), after_change, "{scenario}");
+            assert!(cron::list_owner_reservations_strict(handle.fs.as_ref(), &cwd).await.unwrap().is_empty());
+        });
+    }
+}
+
 pub(super) fn wait_for_session_release(home: &Path, id: &str) {
     let session_id = SessionId::from_uuid(uuid::Uuid::parse_str(id).unwrap());
     let canonical = std::path::PathBuf::from(super::super::canonical_cwd_string(home));

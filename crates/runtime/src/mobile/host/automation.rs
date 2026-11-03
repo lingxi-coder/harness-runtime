@@ -196,6 +196,9 @@ pub(super) struct MobileCronAdmissionLease(
     Option<MobileCronSourceKey>,
 );
 
+pub(super) const CRON_OWNER_RESERVATION_BUSY: &str =
+    "busy: Scheduled session owner could not be reserved";
+
 /// Reserve the UUID before waiting for the task claim lock. This owned task
 /// outlives a cancelled FFI future, so its callback is covered by the barrier.
 pub(super) async fn reserve_mobile_cron_owner(
@@ -242,11 +245,12 @@ pub(super) async fn reserve_mobile_cron_owner(
             if lease.0.cancelled.is_cancelled() {
                 return Err("cancelled: Scheduled owner admission was cancelled".into());
             }
-            if !lease.0.owner.begin_owner(candidate).await {
-                return Err("busy: Scheduled session owner could not be reserved".into());
-            }
+            let accepted = lease.0.owner.begin_owner(candidate).await;
             if lease.0.cancelled.is_cancelled() {
                 return Err("cancelled: Scheduled owner admission was cancelled".into());
+            }
+            if !accepted {
+                return Err(CRON_OWNER_RESERVATION_BUSY.into());
             }
             lease.1 = Some(id);
             lease.2 = Some(source_key);
@@ -2243,6 +2247,166 @@ pub(super) fn fired_cron_dto(
             status: CronFireStatusDto::Failed { message },
         },
     }
+}
+
+pub(super) struct CronAdmissionSnapshot {
+    pub(super) task: cron::CronTask,
+    root_identity: Option<lingxi_core::host::rooted_fs::RootIdentity>,
+    state_identity: Option<lingxi_core::host::rooted_fs::RootIdentity>,
+    claimable: Option<bool>,
+}
+
+/// Read a task under the same process and file locks used by claim. Pin both
+/// roots so an identical replacement cannot become an occurrence receipt.
+pub(super) async fn cron_admission_snapshot(
+    fs: &dyn FileSystem,
+    cwd: &std::path::Path,
+    id: &str,
+    occurrence: Option<(CronAdmissionOccurrence, std::time::SystemTime)>,
+) -> Result<Option<CronAdmissionSnapshot>, String> {
+    let _process_guard = cron::lock_cron_file().await;
+    let root_identity = fs
+        .root_identity_no_follow(cwd)
+        .await
+        .map_err(|e| e.to_string())?;
+    let task_path = cron::scheduled_tasks_path(cwd);
+    let state_root = task_path.parent().ok_or("invalid scheduler state root")?;
+    let state_identity = match fs.root_identity_no_follow(state_root).await {
+        Ok(identity) => identity,
+        Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let lock =
+        cron::tasks_file::lock_automation_tasks_pinned(fs, state_root, state_identity.as_ref())
+            .await
+            .map_err(|e| e.to_string())?;
+    lock.validate_current().map_err(|e| e.to_string())?;
+    let body = match cron::tasks_file::read_automation_tasks_body_pinned(
+        fs,
+        state_root,
+        state_identity.as_ref(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let document = cron::tasks_file::parse_automation_tasks_strict(&body)?;
+    if !document.unmodeled.is_empty() {
+        return Err("scheduled task record is invalid".into());
+    }
+    lock.validate_current().map_err(|e| e.to_string())?;
+    if fs
+        .root_identity_no_follow(cwd)
+        .await
+        .map_err(|e| e.to_string())?
+        != root_identity
+        || fs
+            .root_identity_no_follow(state_root)
+            .await
+            .map_err(|e| e.to_string())?
+            != state_identity
+    {
+        return Err("scheduler scope changed during admission".into());
+    }
+    let mut tasks = document.tasks.into_iter().filter(|task| task.id == id);
+    let task = tasks.next();
+    if tasks.next().is_some() {
+        return Err("duplicate scheduled task identity".into());
+    }
+    Ok(task.map(|task| {
+        let claimable = occurrence.map(|(occurrence, now)| match occurrence {
+            CronAdmissionOccurrence::Due(at) => {
+                cron::can_claim_automation_run(&task, now, Some(at))
+            }
+            CronAdmissionOccurrence::ManualAt(at) => {
+                cron::can_claim_automation_run_now(&task, now, Some(at))
+            }
+            CronAdmissionOccurrence::Manual => cron::can_claim_automation_run_now(&task, now, None),
+        });
+        CronAdmissionSnapshot {
+            task,
+            root_identity,
+            state_identity,
+            claimable,
+        }
+    }))
+}
+
+pub(super) enum CronAdmissionOccurrence {
+    Due(u64),
+    ManualAt(u64),
+    Manual,
+}
+
+/// A rejected callback has not claimed a run itself. Recheck that this exact
+/// occurrence was not claimed by another caller while the callback ran.
+pub(super) async fn cron_owner_reservation_failure_dto(
+    fs: &dyn FileSystem,
+    cwd: &std::path::Path,
+    snapshot: &CronAdmissionSnapshot,
+    occurrence: CronAdmissionOccurrence,
+    now: std::time::SystemTime,
+    admission: &MobileCronAdmission,
+    error: String,
+) -> Option<FiredCronJobDto> {
+    if error != CRON_OWNER_RESERVATION_BUSY {
+        return Some(fired_cron_dto(&snapshot.task, Err(error)));
+    }
+    if admission.cancelled.is_cancelled() {
+        return Some(fired_cron_dto(
+            &snapshot.task,
+            Err("cancelled: Scheduled owner admission was cancelled".into()),
+        ));
+    }
+    let current =
+        match cron_admission_snapshot(fs, cwd, &snapshot.task.id, Some((occurrence, now))).await {
+            Ok(Some(current)) => current,
+            Ok(None) => return Some(cron_admission_unknown_dto(snapshot.task.id.clone())),
+            Err(_) => return Some(cron_admission_unknown_dto(snapshot.task.id.clone())),
+        };
+    if current.root_identity != snapshot.root_identity
+        || current.state_identity != snapshot.state_identity
+    {
+        return Some(cron_admission_unknown_dto(snapshot.task.id.clone()));
+    }
+    if current.claimable != Some(true) {
+        return None;
+    }
+    let mut initial = snapshot.task.clone();
+    let mut latest = current.task;
+    initial.last_fired_at = None;
+    latest.last_fired_at = None;
+    if let Some(config) = initial.automation.as_mut() {
+        config.runs.clear();
+    }
+    if let Some(config) = latest.automation.as_mut() {
+        config.runs.clear();
+    }
+    if initial != latest {
+        return Some(cron_admission_unknown_dto(snapshot.task.id.clone()));
+    }
+    if admission.cancelled.is_cancelled() {
+        return Some(fired_cron_dto(
+            &snapshot.task,
+            Err("cancelled: Scheduled owner admission was cancelled".into()),
+        ));
+    }
+    let mut dto = fired_cron_dto(&snapshot.task, Err(error));
+    dto.retryable = true;
+    Some(dto)
+}
+
+/// The persisted occurrence cannot be verified; it may already have run.
+pub(super) fn cron_admission_unknown_dto(id: String) -> FiredCronJobDto {
+    let mut dto = busy_cron_dto(id);
+    dto.status = CronFireStatusDto::OutcomeUnknown {
+        message: "Scheduled occurrence could not be verified; do not replay it automatically"
+            .into(),
+    };
+    dto.retryable = false;
+    dto
 }
 
 /// No occurrence was claimed when the host transition was busy. The native

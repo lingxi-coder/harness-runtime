@@ -1303,13 +1303,22 @@ mod tests {
         .unwrap();
         handle.runtime().block_on(async {
             let before = handle.workspace_state().await;
+            let store = handle.cron_store().await.unwrap();
+            let task = store.create_configured(
+                "0 9 * * *".into(), "busy task".into(), true, cron_automation(),
+            ).await.unwrap();
             let lease = handle.loop_transition.lock().await;
             let busy = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                handle.run_cron_task_now("busy-task".into(), super::super::automation::allow_cron_owner()),
+                handle.run_cron_task_now(task.id, super::super::automation::allow_cron_owner()),
             ).await.unwrap().expect("busy must remain retryable");
             assert!(busy.retryable);
             assert!(matches!(busy.status, super::super::CronFireStatusDto::Failed { ref message } if message.starts_with("busy:")));
+            let absent = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.run_cron_task_now("absent-task".into(), super::super::automation::allow_cron_owner()),
+            ).await.unwrap();
+            assert!(absent.is_none());
             assert!(tokio::time::timeout(
                 std::time::Duration::from_millis(10),
                 handle.workspace_state()

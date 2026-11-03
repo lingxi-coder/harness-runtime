@@ -474,6 +474,90 @@ pub async fn run_due_automations(
     .await;
     fired
 }
+/// Check a due occurrence without changing the task. Callers requiring a
+/// current answer must hold the same locks as `claim_automation_run`.
+#[must_use]
+pub fn can_claim_automation_run(
+    task: &CronTask,
+    now: SystemTime,
+    expected_scheduled_at: Option<u64>,
+) -> bool {
+    let Some(config) = task.automation.as_ref() else {
+        return false;
+    };
+    let now_ms = epoch(now);
+    if config.status != AutomationStatus::Active || task.expires_at.is_some_and(|e| e <= now_ms) {
+        return false;
+    }
+    let Some(next) = crate::next_fire_epoch_ms_for_persisted_task(task, now) else {
+        return false;
+    };
+    let running = config
+        .runs
+        .iter()
+        .any(|r| r.status == AutomationRunStatus::Running);
+    let queued = config
+        .runs
+        .iter()
+        .find(|r| r.status == AutomationRunStatus::Queued);
+    if !running {
+        if let Some(run) = queued {
+            return expected_scheduled_at.is_none_or(|expected| expected == run.scheduled_at)
+                && run.claim_generation.unwrap_or(0).checked_add(1).is_some();
+        }
+    }
+    next <= now_ms
+        && expected_scheduled_at.is_none_or(|expected| expected == next)
+        && !(running && (!task.recurring.unwrap_or(false) || queued.is_some()))
+        && !config
+            .runs
+            .iter()
+            .any(|r| r.id == format!("{}-{next}", task.id))
+}
+
+/// Check a manual occurrence without changing the task. The caller must hold
+/// the scheduler locks if it needs a current answer.
+#[must_use]
+pub fn can_claim_automation_run_now(
+    task: &CronTask,
+    now: SystemTime,
+    scheduled_at: Option<u64>,
+) -> bool {
+    let Some(config) = task.automation.as_ref() else {
+        return false;
+    };
+    if config.status != AutomationStatus::Active
+        || task.expires_at.is_some_and(|expiry| expiry <= epoch(now))
+        || config
+            .runs
+            .iter()
+            .any(|run| run.status == AutomationRunStatus::Running)
+    {
+        return false;
+    }
+    if let Some(at) = scheduled_at {
+        let stable_id = format!("{}-manual-at-{at}", task.id);
+        if config.runs.iter().any(|run| {
+            (run.id == stable_id || run.manual_occurrence_at == Some(at))
+                && run.status.is_terminal()
+        }) {
+            return false;
+        }
+    }
+    match config
+        .runs
+        .iter()
+        .find(|run| run.status == AutomationRunStatus::Queued)
+    {
+        Some(run) => {
+            run.id.starts_with(&format!("{}-manual-", task.id))
+                && scheduled_at.is_none_or(|at| run.manual_occurrence_at == Some(at))
+                && run.claim_generation.unwrap_or(0).checked_add(1).is_some()
+        }
+        None => true,
+    }
+}
+
 /// Atomically claim a due occurrence, optionally matching a delayed worker token.
 pub async fn claim_automation_run(
     fs: &dyn FileSystem,
@@ -494,6 +578,7 @@ pub async fn claim_automation_run(
     .ok()?;
     let task = doc.tasks.iter_mut().find(|t| t.id == id)?;
     let next = crate::next_fire_epoch_ms_for_persisted_task(task, now);
+    let claimable = can_claim_automation_run(task, now, expected_scheduled_at);
     let config = task.automation.as_mut()?;
     if config.status == AutomationStatus::Completed {
         return None;
@@ -510,7 +595,7 @@ pub async fn claim_automation_run(
             .ok()?;
         return None;
     }
-    if config.status != AutomationStatus::Active {
+    if !claimable {
         return None;
     }
     let next = next?;
@@ -525,9 +610,6 @@ pub async fn claim_automation_run(
     let run_id;
     if !running && queued.is_some() {
         let run = &mut config.runs[queued?];
-        if expected_scheduled_at.is_some_and(|expected| expected != run.scheduled_at) {
-            return None;
-        }
         run.claim_generation = Some(run.claim_generation.unwrap_or(0).checked_add(1)?);
         run.status = AutomationRunStatus::Running;
         run.owner_pid = Some(std::process::id());
@@ -536,16 +618,7 @@ pub async fn claim_automation_run(
         run.reasoning.clone_from(&config.reasoning);
         run_id = run.id.clone();
     } else {
-        if next > now_ms || expected_scheduled_at.is_some_and(|expected| expected != next) {
-            return None;
-        }
-        if running && (!task.recurring.unwrap_or(false) || queued.is_some()) {
-            return None;
-        }
         run_id = format!("{}-{next}", task.id);
-        if config.runs.iter().any(|r| r.id == run_id) {
-            return None;
-        }
         config.runs.push(AutomationRun {
             id: run_id.clone(),
             task_id: id.into(),
@@ -903,6 +976,195 @@ pub async fn interrupt_orphaned_automation_runs(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_eligibility_preserves_due_and_manual_occurrence_identity() {
+        let original: CronTask = serde_json::from_value(serde_json::json!({
+            "id":"task", "cron":"0 9 * * *", "prompt":"brief", "createdAt":1,
+            "recurring":true, "automation":{"version":2, "status":"active", "model":"provider/model",
+                "runMode":"new_session", "sessionMode":"code", "sessionScopeKey":"project.test"}
+        })).unwrap();
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000_000);
+        let due = crate::next_fire_epoch_ms_for_persisted_task(&original, now).unwrap();
+        assert!(due <= epoch(now));
+        let run =
+            |id: String, status: AutomationRunStatus, at: u64, manual: Option<u64>| AutomationRun {
+                id,
+                task_id: "task".into(),
+                owner_pid: None,
+                claim_generation: Some(1),
+                manual_occurrence_at: manual,
+                scheduled_at: at,
+                started_at: None,
+                finished_at: None,
+                status,
+                model: "provider/model".into(),
+                reasoning: serde_json::Value::Null,
+                session_id: None,
+                session_transcript_path: None,
+                session_mode: None,
+                session_scope_key: None,
+                summary: None,
+                error: None,
+            };
+        let with_run = |value: AutomationRun| {
+            let mut task = original.clone();
+            task.automation.as_mut().unwrap().runs.push(value);
+            task
+        };
+        let cases = [
+            ("fresh due", original.clone(), Some(due), true),
+            ("stale due", original.clone(), Some(due + 1), false),
+            (
+                "completed due",
+                with_run(run(
+                    format!("task-{due}"),
+                    AutomationRunStatus::Succeeded,
+                    due,
+                    None,
+                )),
+                Some(due),
+                false,
+            ),
+            (
+                "running due",
+                with_run(run(
+                    format!("task-{due}"),
+                    AutomationRunStatus::Running,
+                    due,
+                    None,
+                )),
+                Some(due),
+                false,
+            ),
+            (
+                "queued due",
+                with_run(run(
+                    format!("task-{due}"),
+                    AutomationRunStatus::Queued,
+                    due,
+                    None,
+                )),
+                Some(due),
+                true,
+            ),
+            (
+                "queued different due",
+                with_run(run(
+                    "task-older".into(),
+                    AutomationRunStatus::Queued,
+                    due - 1,
+                    None,
+                )),
+                Some(due),
+                false,
+            ),
+            (
+                "different running occurrence",
+                with_run(run(
+                    "task-older".into(),
+                    AutomationRunStatus::Running,
+                    due - 1,
+                    None,
+                )),
+                Some(due),
+                true,
+            ),
+        ];
+        for (label, task, token, expected) in cases {
+            assert_eq!(
+                can_claim_automation_run(&task, now, token),
+                expected,
+                "{label}"
+            );
+        }
+
+        let token = 123;
+        let cases = [
+            ("fresh manual", original.clone(), Some(token), true),
+            (
+                "completed manual",
+                with_run(run(
+                    format!("task-manual-at-{token}"),
+                    AutomationRunStatus::Succeeded,
+                    token,
+                    Some(token),
+                )),
+                Some(token),
+                false,
+            ),
+            (
+                "unknown manual",
+                with_run(run(
+                    format!("task-manual-at-{token}"),
+                    AutomationRunStatus::Interrupted,
+                    token,
+                    Some(token),
+                )),
+                Some(token),
+                false,
+            ),
+            (
+                "running manual",
+                with_run(run(
+                    format!("task-manual-at-{token}"),
+                    AutomationRunStatus::Running,
+                    token,
+                    Some(token),
+                )),
+                Some(token),
+                false,
+            ),
+            (
+                "queued manual",
+                with_run(run(
+                    format!("task-manual-at-{token}"),
+                    AutomationRunStatus::Queued,
+                    token,
+                    Some(token),
+                )),
+                Some(token),
+                true,
+            ),
+            (
+                "different manual",
+                with_run(run(
+                    "task-manual-at-122".into(),
+                    AutomationRunStatus::Queued,
+                    token - 1,
+                    Some(token - 1),
+                )),
+                Some(token),
+                false,
+            ),
+            (
+                "queued automatic",
+                with_run(run(
+                    format!("task-{due}"),
+                    AutomationRunStatus::Queued,
+                    due,
+                    None,
+                )),
+                Some(token),
+                false,
+            ),
+        ];
+        for (label, task, token, expected) in cases {
+            assert_eq!(
+                can_claim_automation_run_now(&task, now, token),
+                expected,
+                "{label}"
+            );
+        }
+        let mut expired = original.clone();
+        expired.expires_at = Some(epoch(now));
+        assert!(!can_claim_automation_run(&expired, now, Some(due)));
+        assert!(!can_claim_automation_run_now(&expired, now, Some(token)));
+        let mut paused = original;
+        paused.automation.as_mut().unwrap().status = AutomationStatus::Paused;
+        assert!(!can_claim_automation_run(&paused, now, Some(due)));
+        assert!(!can_claim_automation_run_now(&paused, now, Some(token)));
+    }
 
     #[test]
     fn history_limits_keep_all_nonterminal_records() {
@@ -1326,25 +1588,13 @@ async fn claim_manual_run(
     )
     .ok()?;
     let task = doc.tasks.iter_mut().find(|task| task.id == id)?;
+    let claimable = can_claim_automation_run_now(task, now, scheduled_at);
     let config = task.automation.as_mut()?;
     let now_ms = epoch(now);
-    if config.status != AutomationStatus::Active
-        || task.expires_at.is_some_and(|expiry| expiry <= now_ms)
-        || config
-            .runs
-            .iter()
-            .any(|run| run.status == AutomationRunStatus::Running)
-    {
+    if !claimable {
         return None;
     }
     let stable_id = scheduled_at.map(|at| format!("{id}-manual-at-{at}"));
-    if stable_id.as_ref().is_some_and(|id| {
-        config.runs.iter().any(|run| {
-            (run.id == *id || run.manual_occurrence_at == scheduled_at) && run.status.is_terminal()
-        })
-    }) {
-        return None;
-    }
     let run_id = if let Some(run) = config
         .runs
         .iter_mut()
@@ -1352,16 +1602,6 @@ async fn claim_manual_run(
     {
         // Native hosts retry explicit Run now requests through this endpoint.
         // Preserve that occurrence instead of treating its queued retry as busy.
-        if !run.id.starts_with(&format!("{id}-manual-")) {
-            return None;
-        }
-        if let Some(at) = scheduled_at {
-            match run.manual_occurrence_at {
-                Some(bound) if bound != at => return None,
-                Some(_) => {}
-                None => return None,
-            }
-        }
         run.claim_generation = Some(run.claim_generation.unwrap_or(0).checked_add(1)?);
         run.status = AutomationRunStatus::Running;
         run.owner_pid = Some(std::process::id());

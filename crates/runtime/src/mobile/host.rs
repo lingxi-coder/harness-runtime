@@ -55,10 +55,12 @@ pub use assembly::{
 #[cfg(test)]
 use automation::supervise_mobile_automation;
 use automation::{
-    busy_cron_dto, cron_task_active, finalize_cron_occurrence, fired_cron_dto,
+    busy_cron_dto, cron_admission_snapshot, cron_admission_unknown_dto,
+    cron_owner_reservation_failure_dto, cron_task_active, finalize_cron_occurrence, fired_cron_dto,
     mobile_automation_runtime, mobile_cron_schedule_error, mobile_cron_session_gate,
     read_cron_tasks, read_cron_tasks_for_mutation, reserve_mobile_cron_owner,
     supervise_mobile_automation_with_cancel, try_mobile_automation_runtime,
+    CronAdmissionOccurrence, CRON_OWNER_RESERVATION_BUSY,
 };
 pub use automation::{
     CronDueOccurrenceDto, CronFireStatusDto, CronOwnerCandidateDto, CronOwnerReservationDto,
@@ -4551,6 +4553,67 @@ impl MobileEngineHandle {
             self.fs.clone(),
             self.firer_platform.clock(),
         )))
+    }
+
+    /// Check the occurrence without waiting on the active transition or
+    /// claiming work; a changing scope is not a safe basis for retry.
+    async fn cron_busy_during_transition(
+        &self,
+        task_id: String,
+        occurrence: CronAdmissionOccurrence,
+        admission: Arc<MobileCronAdmission>,
+    ) -> Option<FiredCronJobDto> {
+        let cfg = match self.current_mobile_config() {
+            Ok(cfg) => cfg,
+            Err(_) => return Some(cron_admission_unknown_dto(task_id)),
+        };
+        let cwd = cfg.logical_cwd.unwrap_or(cfg.cwd);
+        let snapshot = match cron_admission_snapshot(self.fs.as_ref(), &cwd, &task_id, None).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return None,
+            Err(_) => return Some(cron_admission_unknown_dto(task_id)),
+        };
+        let Some(automation) = snapshot.task.automation.as_ref() else {
+            return Some(fired_cron_dto(
+                &snapshot.task,
+                Err("paused: Complete automation settings are required".into()),
+            ));
+        };
+        if let Err(error) = cron::validate_automation_source(automation) {
+            return Some(fired_cron_dto(
+                &snapshot.task,
+                Err(format!("paused: {error}")),
+            ));
+        }
+        if mobile_cron_schedule_error(
+            &snapshot.task.cron,
+            snapshot.task.recurring.unwrap_or(false),
+        )
+        .is_some()
+        {
+            return None;
+        }
+        let result = cron_owner_reservation_failure_dto(
+            self.fs.as_ref(),
+            &cwd,
+            &snapshot,
+            occurrence,
+            self.firer_platform.clock().now(),
+            admission.as_ref(),
+            CRON_OWNER_RESERVATION_BUSY.into(),
+        )
+        .await;
+        let current = self
+            .current_mobile_config()
+            .ok()
+            .map(|cfg| cfg.logical_cwd.unwrap_or(cfg.cwd));
+        if current.as_ref() != Some(&cwd) {
+            return Some(cron_admission_unknown_dto(task_id));
+        }
+        match result {
+            Some(result) if result.retryable => Some(busy_cron_dto(task_id)),
+            other => other,
+        }
     }
 
     async fn fire_automation_task(
@@ -10210,19 +10273,28 @@ impl MobileEngineHandle {
         let owner_admission = owner_admission.begin()?;
         let transition = match self.loop_transition.try_lock() {
             Ok(transition) => transition,
-            Err(_) => return Some(busy_cron_dto(task_id)),
+            Err(_) => {
+                return self
+                    .cron_busy_during_transition(
+                        task_id,
+                        CronAdmissionOccurrence::Due(scheduled_at_ms),
+                        owner_admission.admission(),
+                    )
+                    .await
+            }
         };
         let cfg = self.current_mobile_config().ok()?;
         let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let fs = self.fs.clone();
-        let existing = read_cron_tasks(fs.as_ref(), &cwd)
-            .await
-            .tasks
-            .into_iter()
-            .find(|task| task.id == task_id)?;
+        let snapshot = match cron_admission_snapshot(fs.as_ref(), &cwd, &task_id, None).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return None,
+            Err(_) => return Some(cron_admission_unknown_dto(task_id)),
+        };
+        let existing = &snapshot.task;
         if existing.automation.is_none() {
             return Some(fired_cron_dto(
-                &existing,
+                existing,
                 Err("paused: Complete automation settings are required".into()),
             ));
         }
@@ -10231,6 +10303,7 @@ impl MobileEngineHandle {
             return None;
         }
         drop(transition);
+        let admission = owner_admission.admission();
         let owner_admission = match reserve_mobile_cron_owner(
             owner_admission,
             existing.automation.as_ref().expect("checked automation"),
@@ -10238,7 +10311,18 @@ impl MobileEngineHandle {
         .await
         {
             Ok(admission) => admission,
-            Err(error) => return Some(fired_cron_dto(&existing, Err(error))),
+            Err(error) => {
+                return cron_owner_reservation_failure_dto(
+                    fs.as_ref(),
+                    &cwd,
+                    &snapshot,
+                    CronAdmissionOccurrence::Due(scheduled_at_ms),
+                    self.firer_platform.clock().now(),
+                    admission.as_ref(),
+                    error,
+                )
+                .await
+            }
         };
         self.fire_automation_task(cfg, task_id, Some(scheduled_at_ms), None, owner_admission)
             .await
@@ -10297,20 +10381,29 @@ impl MobileEngineHandle {
         let owner_admission = owner_admission.begin()?;
         let transition = match self.loop_transition.try_lock() {
             Ok(transition) => transition,
-            Err(_) => return Some(busy_cron_dto(task_id)),
+            Err(_) => {
+                return self
+                    .cron_busy_during_transition(
+                        task_id,
+                        CronAdmissionOccurrence::ManualAt(scheduled_at_ms),
+                        owner_admission.admission(),
+                    )
+                    .await
+            }
         };
         let cfg = self.current_mobile_config().ok()?;
         let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let fs = self.fs.clone();
-        let task = read_cron_tasks(fs.as_ref(), &cwd)
-            .await
-            .tasks
-            .into_iter()
-            .find(|task| task.id == task_id)?;
+        let snapshot = match cron_admission_snapshot(fs.as_ref(), &cwd, &task_id, None).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return None,
+            Err(_) => return Some(cron_admission_unknown_dto(task_id)),
+        };
+        let task = &snapshot.task;
         // Stable manual occurrence identities require the versioned run ledger.
         if task.automation.is_none() {
             return Some(fired_cron_dto(
-                &task,
+                task,
                 Err("paused: Complete automation settings are required".into()),
             ));
         }
@@ -10318,6 +10411,7 @@ impl MobileEngineHandle {
             return None;
         }
         drop(transition);
+        let admission = owner_admission.admission();
         let owner_admission = match reserve_mobile_cron_owner(
             owner_admission,
             task.automation.as_ref().expect("checked automation"),
@@ -10325,7 +10419,18 @@ impl MobileEngineHandle {
         .await
         {
             Ok(admission) => admission,
-            Err(error) => return Some(fired_cron_dto(&task, Err(error))),
+            Err(error) => {
+                return cron_owner_reservation_failure_dto(
+                    fs.as_ref(),
+                    &cwd,
+                    &snapshot,
+                    CronAdmissionOccurrence::ManualAt(scheduled_at_ms),
+                    self.firer_platform.clock().now(),
+                    admission.as_ref(),
+                    error,
+                )
+                .await
+            }
         };
         self.fire_automation_task(cfg, task_id, None, Some(scheduled_at_ms), owner_admission)
             .await
@@ -10340,19 +10445,28 @@ impl MobileEngineHandle {
         let owner_admission = owner_admission.begin()?;
         let transition = match self.loop_transition.try_lock() {
             Ok(transition) => transition,
-            Err(_) => return Some(busy_cron_dto(task_id)),
+            Err(_) => {
+                return self
+                    .cron_busy_during_transition(
+                        task_id,
+                        CronAdmissionOccurrence::Manual,
+                        owner_admission.admission(),
+                    )
+                    .await
+            }
         };
         let cfg = self.current_mobile_config().ok()?;
         let cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cfg.cwd.clone());
         let fs = self.fs.clone();
-        let existing = read_cron_tasks(fs.as_ref(), &cwd)
-            .await
-            .tasks
-            .into_iter()
-            .find(|task| task.id == task_id)?;
+        let snapshot = match cron_admission_snapshot(fs.as_ref(), &cwd, &task_id, None).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return None,
+            Err(_) => return Some(cron_admission_unknown_dto(task_id)),
+        };
+        let existing = &snapshot.task;
         if existing.automation.is_none() {
             return Some(fired_cron_dto(
-                &existing,
+                existing,
                 Err("paused: Complete automation settings are required".into()),
             ));
         }
@@ -10361,6 +10475,7 @@ impl MobileEngineHandle {
             return None;
         }
         drop(transition);
+        let admission = owner_admission.admission();
         let owner_admission = match reserve_mobile_cron_owner(
             owner_admission,
             existing.automation.as_ref().expect("checked automation"),
@@ -10368,7 +10483,18 @@ impl MobileEngineHandle {
         .await
         {
             Ok(admission) => admission,
-            Err(error) => return Some(fired_cron_dto(&existing, Err(error))),
+            Err(error) => {
+                return cron_owner_reservation_failure_dto(
+                    fs.as_ref(),
+                    &cwd,
+                    &snapshot,
+                    CronAdmissionOccurrence::Manual,
+                    self.firer_platform.clock().now(),
+                    admission.as_ref(),
+                    error,
+                )
+                .await
+            }
         };
         self.fire_automation_task(cfg, task_id, None, None, owner_admission)
             .await
