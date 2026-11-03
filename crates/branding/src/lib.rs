@@ -99,7 +99,7 @@ impl BrandRuntimeProfile {
     /// Brand-scoped workspace root within the guest home.
     #[must_use]
     pub fn workspace_root_guest_path(self) -> PathBuf {
-        self.guest_home().join(self.brand_id)
+        self.config_guest_path()
     }
 
     /// Guest config directory within the user's home.
@@ -437,6 +437,26 @@ pub fn render_namespace_template(template: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_and_config_share_the_hidden_brand_root() {
+        for profile in [
+            BrandRuntimeProfile::LINGXI,
+            BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas"),
+        ] {
+            assert_eq!(
+                profile.workspace_root_guest_path(),
+                profile.config_guest_path()
+            );
+            assert_eq!(
+                profile.projects_guest_path(),
+                profile.config_guest_path().join("projects")
+            );
+        }
+        assert_eq!(
+            BrandRuntimeProfile::LINGXI.workspace_root_guest_path(),
+            Path::new("/home/lingxi/.lingxi")
+        );
+    }
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;

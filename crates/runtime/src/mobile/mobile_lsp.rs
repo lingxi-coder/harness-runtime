@@ -126,10 +126,9 @@ impl MobileLinuxGuestLspPathMapper {
         host_root.hash(&mut hasher);
         let mapping = WorkspaceMapping {
             host_root,
-            guest_root: PathBuf::from(format!(
-                "/home/lingxi/lingxi/lingxi-lsp-{:016x}",
-                hasher.finish()
-            )),
+            guest_root: branding::LINGXI_RUNTIME_PROFILE
+                .workspace_root_guest_path()
+                .join(format!("lingxi-lsp-{:016x}", hasher.finish())),
             purpose: MountPurpose::External,
         };
         self.register_workspace_root(

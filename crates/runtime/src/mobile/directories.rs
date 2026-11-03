@@ -58,7 +58,7 @@ fn mobile_user_directories_for_profile(
     let guest_home = profile.guest_home();
     let config = home.join(profile.config_dir_name);
     let config_guest_path = profile.config_guest_path();
-    let cwd = home.join(profile.brand_id);
+    let cwd = config.clone();
     let guest_cwd = profile.workspace_root_guest_path();
     let projects = cwd.join("projects");
     let projects_guest_path = profile.projects_guest_path();
@@ -201,6 +201,8 @@ mod tests {
         let dirs =
             mobile_user_directories(root.path().join("runtime").display().to_string()).unwrap();
         let profile = LINGXI_RUNTIME_PROFILE;
+        assert_eq!(dirs.default_cwd, dirs.config_home);
+        assert_eq!(dirs.default_guest_cwd, dirs.config_guest_path);
         assert_eq!(dirs.brand_id, profile.brand_id);
         assert_eq!(dirs.linux_user, profile.linux_user);
         assert_eq!(dirs.config_dir_name, profile.config_dir_name);
@@ -261,8 +263,11 @@ mod tests {
                 .to_string()
         );
         assert_eq!(dirs.config_guest_path, "/home/atlas_guest/.atlas");
-        assert_eq!(dirs.default_guest_cwd, "/home/atlas_guest/atlas");
-        assert_eq!(dirs.projects_guest_path, "/home/atlas_guest/atlas/projects");
+        assert_eq!(dirs.default_guest_cwd, "/home/atlas_guest/.atlas");
+        assert_eq!(
+            dirs.projects_guest_path,
+            "/home/atlas_guest/.atlas/projects"
+        );
         assert_eq!(dirs.apps_guest_path, "/home/atlas_guest/.atlas/.apps");
 
         dirs.prepare().unwrap();
