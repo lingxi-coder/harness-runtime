@@ -47,6 +47,8 @@ use tokio::sync::Mutex;
 use tool_api::registry::ToolRegistry;
 use uuid::Uuid;
 
+#[cfg(test)]
+mod deferred_authority_tests;
 mod file_state;
 #[cfg(test)]
 mod file_state_tests;
@@ -2409,6 +2411,7 @@ pub async fn replay_deferred_tools_after_resume(
     orch: &ConversationOrchestrator,
     deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
 ) -> Result<(), crate::OrchestratorError> {
+    let session_id = orch.session.lock().await.session_id;
     // ONE user message carrying EVERY replayed result, exactly as the normal
     // dispatch path batches a turn's results. Emitting one message per tool
     // would be a wire-shape bug, not a cosmetic one: `ensure_tool_result_pairing`
@@ -2421,6 +2424,16 @@ pub async fn replay_deferred_tools_after_resume(
     let mut tool_results: Vec<ContentBlock> = Vec::new();
     let mut injected_messages: Vec<(ConversationMessage, ToolUseId)> = Vec::new();
     for deferred in deferred_tools {
+        if let Some(writer) = &orch.transcript.jsonl_writer {
+            writer
+                .verify_active_replay_source(session_id)
+                .await
+                .map_err(|error| {
+                    crate::OrchestratorError::Internal(format!(
+                        "deferred replay transcript authority: {error}"
+                    ))
+                })?;
+        }
         let outcome = crate::turn_loop::boxed_turn_future(|| {
             replay_deferred_tool_after_resume(orch, deferred)
         })

@@ -1250,6 +1250,91 @@ impl JsonlWriter {
         Ok(())
     }
 
+    /// Check the current writer-owned source before replaying a deferred tool.
+    ///
+    /// Durable targets are checked under their transaction so a writer-owned
+    /// compaction may replace the file and publish its new authority. The
+    /// guard is released before the caller can ask for permission or run a
+    /// tool. Writers without a physical durable owner retain their existing
+    /// in-memory/virtual-filesystem behavior.
+    pub async fn verify_active_replay_source(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), WriterError> {
+        if self.persistent_chat.is_some() {
+            let owner = self.persistent_chat.clone();
+            let path = self.active_path();
+            let expected_session = session_id.as_uuid().to_string();
+            if Self::metadata_session_id_from_path(&path).as_deref()
+                != Some(expected_session.as_str())
+            {
+                return Err(FsError::Io("active replay session changed".into()).into());
+            }
+            return tokio::task::spawn_blocking(move || -> Result<(), WriterError> {
+                let _guard = persistent_chat::identity_io_guard(&owner, &path)?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| WriterError::Fs(FsError::Io(error.to_string())))?;
+        }
+
+        let Some(target) = self.active_durable_target() else {
+            return if self.durable_transcript_enabled() {
+                Err(FsError::Io("active replay transcript is unavailable".into()).into())
+            } else {
+                Ok(())
+            };
+        };
+        let active_targets = self.active_durable_target.clone();
+        let session_targets = self.session_targets.clone();
+        let active_path = self.active_path.clone();
+        let durable = target.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            durable.with_transaction(|_| {
+                let active_guard = active_targets
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let active = active_guard
+                    .as_ref()
+                    .ok_or_else(|| FsError::Io("active replay transcript is unavailable".into()))?;
+                let current_path = active_path
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let sessions = session_targets
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if active.incarnation != target.incarnation
+                    || active.path != target.path
+                    || *current_path != active.path
+                    || !Arc::ptr_eq(&active.writer, &durable)
+                    || !sessions.get(&session_id).is_some_and(|session| {
+                        session.incarnation == active.incarnation
+                            && session.path == active.path
+                            && Arc::ptr_eq(&session.writer, &active.writer)
+                    })
+                {
+                    return Err(FsError::Io("active replay session changed".into()).into());
+                }
+                if durable.rewrite_is_uncertain() {
+                    return Err(FsError::Io("active transcript rewrite is uncertain".into()).into());
+                }
+                let authority = durable.transcript_authority().ok_or_else(|| {
+                    FsError::Io("active replay transcript authority is unavailable".into())
+                })?;
+                if authority.path() != active.path {
+                    return Err(
+                        FsError::Io("active replay transcript source changed".into()).into(),
+                    );
+                }
+                authority.verify_current()?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|error| WriterError::Fs(FsError::Io(error.to_string())))??;
+        Ok(())
+    }
+
     /// Refuse another turn while a published rewrite has an uncertain result.
     pub fn ensure_rewrite_is_resolved(&self) -> Result<(), WriterError> {
         if self
@@ -5204,6 +5289,7 @@ mod tests {
         ));
         let compacted_authority = writer.active_transcript_authority().unwrap();
         assert_ne!(original, compacted_authority);
+        writer.verify_active_replay_source(id).await.unwrap();
         writer
             .update_active_session_metadata(
                 id,
