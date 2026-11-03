@@ -10,6 +10,68 @@ use lingxi_llm_client::replay::{
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+/// One bounded, conversation-local projection of the latest normalized history.
+/// Equality includes the complete source message; message count/IDs alone never
+/// authorize reuse. Computer receipt projection remains request-context dependent.
+#[derive(Default)]
+pub(crate) struct MessageProjectionCache {
+    protocol: Option<wire::ProtocolFamily>,
+    entries: Vec<(Message, Vec<(usize, wire::ContentBlock)>, usize)>,
+    bytes: usize,
+    pub(crate) hits: usize,
+    pub(crate) misses: usize,
+}
+impl MessageProjectionCache {
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_MESSAGES: usize = 1024;
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn project(
+        &mut self,
+        index: usize,
+        message: &Message,
+        protocol: wire::ProtocolFamily,
+    ) -> Result<Vec<(usize, wire::ContentBlock)>, LlmError> {
+        if self.protocol != Some(protocol) {
+            self.entries.clear();
+            self.bytes = 0;
+            self.protocol = Some(protocol);
+        }
+        if let Some((source, projected, _)) = self.entries.get(index) {
+            if source == message {
+                self.hits += 1;
+                return Ok(projected.clone());
+            }
+        }
+        self.misses += 1;
+        // An edit/compaction invalidates the entire suffix, including shifted rows.
+        while self.entries.len() > index {
+            self.bytes -= self.entries.pop().expect("cached row").2;
+        }
+        let projected = project_message(
+            message,
+            protocol,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            index,
+            true,
+        )?;
+        if index == self.entries.len() && index < Self::MAX_MESSAGES {
+            let bytes = serde_json::to_vec(message).map_err(invalid)?.len()
+                + serde_json::to_vec(&projected).map_err(invalid)?.len();
+            if bytes <= Self::MAX_BYTES.saturating_sub(self.bytes) {
+                self.entries
+                    .push((message.clone(), projected.clone(), bytes));
+                self.bytes += bytes;
+            }
+        }
+        Ok(projected)
+    }
+}
+
 fn computer_marker(block: &ContentBlock) -> Option<(&str, &wire::JsonPayload, &str)> {
     let ContentBlock::ProviderContent { protocol, value } = block else {
         return None;
@@ -661,7 +723,7 @@ pub fn history_input(
     protocol: wire::ProtocolFamily,
 ) -> Result<(wire::ChatRequest, BTreeMap<String, Vec<u16>>), LlmError> {
     let (request, overrides, _) =
-        history_input_inner(model, messages, None, system, tools, protocol)?;
+        history_input_inner(model, messages, None, system, tools, protocol, None)?;
     Ok((request, overrides))
 }
 
@@ -684,6 +746,33 @@ pub(crate) fn history_input_with_sources(
     ),
     LlmError,
 > {
+    history_input_with_cached_sources(
+        model,
+        messages,
+        source_block_ids,
+        system,
+        tools,
+        protocol,
+        None,
+    )
+}
+
+pub(crate) fn history_input_with_cached_sources(
+    model: &str,
+    messages: &[Message],
+    source_block_ids: &[Vec<HashSet<lingxi_core::types::MessageId>>],
+    system: &[SystemBlock],
+    tools: &[ToolDeclaration],
+    protocol: wire::ProtocolFamily,
+    cache: Option<&mut MessageProjectionCache>,
+) -> Result<
+    (
+        wire::ChatRequest,
+        BTreeMap<String, Vec<u16>>,
+        Vec<Vec<HashSet<lingxi_core::types::MessageId>>>,
+    ),
+    LlmError,
+> {
     let (request, overrides, source_rows) = history_input_inner(
         model,
         messages,
@@ -691,6 +780,7 @@ pub(crate) fn history_input_with_sources(
         system,
         tools,
         protocol,
+        cache,
     )?;
     Ok((request, overrides, source_rows.unwrap_or_default()))
 }
@@ -702,6 +792,7 @@ fn history_input_inner(
     system: &[SystemBlock],
     tools: &[ToolDeclaration],
     protocol: wire::ProtocolFamily,
+    mut projection_cache: Option<&mut MessageProjectionCache>,
 ) -> Result<
     (
         wire::ChatRequest,
@@ -717,19 +808,41 @@ fn history_input_inner(
     let acknowledged_receipts = acknowledged_computer_receipts(messages)?;
     let abandoned_calls = abandoned_computer_calls(messages)?;
     let continuation_boundary = computer_continuation_boundary(messages, protocol)?;
+    if continuation_boundary.is_some()
+        || messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| computer_marker(block).is_some())
+    {
+        if let Some(cache) = projection_cache.as_deref_mut() {
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+        projection_cache = None;
+    }
+    if let Some(cache) = projection_cache.as_deref_mut() {
+        while cache.entries.len() > messages.len() {
+            cache.bytes -= cache.entries.pop().expect("cached row").2;
+        }
+    }
+
     for (message_index, message) in messages.iter().enumerate() {
         if continuation_boundary.is_some_and(|boundary| message_index < boundary) {
             continue;
         }
-        let mut projected = project_message(
-            message,
-            protocol,
-            &computer_ids,
-            &acknowledged_receipts,
-            &abandoned_calls,
-            message_index,
-            true,
-        )?;
+        let mut projected = if let Some(cache) = projection_cache.as_deref_mut() {
+            cache.project(message_index, message, protocol)?
+        } else {
+            project_message(
+                message,
+                protocol,
+                &computer_ids,
+                &acknowledged_receipts,
+                &abandoned_calls,
+                message_index,
+                true,
+            )?
+        };
         if continuation_boundary == Some(message_index) {
             // The provider already stores this turn. Gemini needs ordinary
             // call metadata to name new receipts; its codec excludes assistant
@@ -2188,3 +2301,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "history_cache_tests.rs"]
+mod cache_tests;

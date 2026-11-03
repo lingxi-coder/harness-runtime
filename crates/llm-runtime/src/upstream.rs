@@ -56,7 +56,7 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
         "regions":profile.regions,"connection":profile.connection,
         "supports_websockets":profile.supports_websockets,
         "websocket_connect_timeout_ms":profile.websocket_connect_timeout_ms,
-        "extra":{"supports_previous_response_id":true},
+        "extra":{},
         "models":profile.models.iter().map(|model| {
             let caps=model.capabilities;
             let support=|enabled| if enabled {"supported"} else {"unsupported"};

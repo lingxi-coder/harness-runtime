@@ -32,7 +32,7 @@ use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use crate::{
     CostEstimator, HistoryEvent, HistoryResponse, LlmError, LlmRequest, MediaRoute, ModelRuntime,
-    PromptCacheQuerySource, ResponsesSession, Transport,
+    PromptCacheQuerySource, Transport,
 };
 
 const NATIVE_ANTHROPIC_FIRST_PARTY_BASE_URL: &str = "https://api.anthropic.com";
@@ -1194,9 +1194,8 @@ struct StreamState {
     /// disables it (`LINGXI_ENABLE_STREAM_WATCHDOG=0`). The deadline resets on
     /// every received event because a fresh timeout wraps each frame fetch.
     idle_timeout: Option<Duration>,
-    /// Pooled WebSocket session of a side stream. Last, so it returns to the
-    /// pool only after `frames` has released its socket.
-    side_ws_lease: Option<SideWsLease>,
+    /// Last so the conversation lease returns only after frames release the socket.
+    side_ws_lease: Option<ConversationLease>,
 }
 
 fn frozen_stream_quote(
@@ -1792,18 +1791,13 @@ pub struct ApiService {
     /// Test-only override for the connect-phase first-byte watchdog. `None`
     /// resolves the provider/body-aware timeout from the process environment.
     stream_first_byte_timeout_override: Option<Duration>,
-    /// Conversation-session scoped OpenAI Responses WebSocket connection/cache.
-    ///
-    /// The adapter is used by one conversation runtime; mobile already enforces
-    /// one in-flight turn. The underlying `llm-runtime` session still only sends
-    /// `previous_response_id` when the new request is a strict compatible
-    /// extension of the previous completed request.
-    responses_ws_session: tokio::sync::Mutex<ResponsesSession>,
-    /// Idle Responses WebSocket sessions for streams outside the main
-    /// conversation (auto-mode classifier, subagents, scheduled tasks). As
-    /// with Codex's Guardian pool, they never share the conversation's
-    /// socket, which stays busy while its own response streams.
-    side_ws_sessions: Arc<Mutex<Vec<ResponsesSession>>>,
+    /// Main-conversation continuation and transport state. Checked out without
+    /// holding a lock across preparation, admission, dispatch or streaming.
+    responses_ws_session: Arc<Mutex<ConversationSlot>>,
+    /// Bounded projection cache for this conversation; sidequeries bypass it.
+    history_projection_cache: Mutex<crate::convert::input_projection::MessageProjectionCache>,
+    /// Idle connections only. Every checkout starts without conversation state.
+    side_sessions: Arc<Mutex<Vec<lingxi_llm_client::ConversationSession>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1981,45 +1975,80 @@ fn native_foundry_feature_name(name: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
-/// A pooled session held for one stream. Dropping it, when the stream ends
-/// or is abandoned, returns the session for the next side stream.
-struct SideWsLease {
-    session: Option<ResponsesSession>,
-    pool: Arc<Mutex<Vec<ResponsesSession>>>,
+#[derive(Default)]
+struct ConversationSlot {
+    generation: u64,
+    session: Option<lingxi_llm_client::ConversationSession>,
 }
 
-impl SideWsLease {
-    /// Codex opens at most four Guardian sockets at once.
-    const MAX_IDLE: usize = 4;
-
-    fn checkout(pool: &Arc<Mutex<Vec<ResponsesSession>>>) -> Self {
-        let session = pool
+/// Only the owner lease can return a session. Reset/compaction advances the
+/// generation so an old stream cannot reinstall retired state on drop.
+struct ConversationLease {
+    session: lingxi_llm_client::ConversationSession,
+    slot: Option<Arc<Mutex<ConversationSlot>>>,
+    generation: u64,
+    pool: Option<Arc<Mutex<Vec<lingxi_llm_client::ConversationSession>>>>,
+}
+impl ConversationLease {
+    fn checkout(slot: &Arc<Mutex<ConversationSlot>>) -> Self {
+        let mut state = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.session.take() {
+            Some(session) => Self {
+                session,
+                slot: Some(slot.clone()),
+                generation: state.generation,
+                pool: None,
+            },
+            None => Self::independent(),
+        }
+    }
+    fn independent() -> Self {
+        Self {
+            session: Default::default(),
+            slot: None,
+            generation: 0,
+            pool: None,
+        }
+    }
+    fn auxiliary(pool: &Arc<Mutex<Vec<lingxi_llm_client::ConversationSession>>>) -> Self {
+        let mut session = pool
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop()
             .unwrap_or_default();
+        session.clear_history_preserving_transport();
         Self {
-            session: Some(session),
-            pool: Arc::clone(pool),
+            session,
+            slot: None,
+            generation: 0,
+            pool: Some(pool.clone()),
         }
     }
-
-    fn session(&mut self) -> &mut ResponsesSession {
-        self.session.as_mut().expect("leased session")
+    fn session(&mut self) -> &mut lingxi_llm_client::ConversationSession {
+        &mut self.session
     }
 }
-
-impl Drop for SideWsLease {
+impl Drop for ConversationLease {
     fn drop(&mut self) {
-        let Some(session) = self.session.take() else {
-            return;
-        };
-        let mut pool = self
-            .pool
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pool.len() < Self::MAX_IDLE {
-            pool.push(session);
+        if let Some(pool) = &self.pool {
+            self.session.clear_history_preserving_transport();
+            let mut pool = pool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pool.len() < 4 {
+                pool.push(std::mem::take(&mut self.session));
+            }
+        }
+
+        if let Some(slot) = &self.slot {
+            let mut state = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.generation == self.generation {
+                state.session = Some(std::mem::take(&mut self.session));
+            }
         }
     }
 }
@@ -2547,6 +2576,7 @@ impl ApiService {
         mut request: LlmRequest,
     ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
+        request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         let control = resolve_retry_control_with_settings(
             &request.input.model,
@@ -2566,6 +2596,7 @@ impl ApiService {
         max_retries: u32,
     ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
+        request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         let mut control = resolve_retry_control_with_settings(
             &request.input.model,
@@ -3610,8 +3641,12 @@ impl ApiService {
             foundry_capabilities: Mutex::new(Default::default()),
             stream_idle_timeout_override: None,
             stream_first_byte_timeout_override: None,
-            responses_ws_session: tokio::sync::Mutex::new(ResponsesSession::new()),
-            side_ws_sessions: Arc::default(),
+            responses_ws_session: Arc::new(Mutex::new(ConversationSlot {
+                generation: 0,
+                session: Some(Default::default()),
+            })),
+            history_projection_cache: Mutex::default(),
+            side_sessions: Arc::default(),
         }
     }
 
@@ -8272,6 +8307,16 @@ impl ApiService {
             NonStreamDrivePolicy::ModelValidation => None,
         };
         let mut timeout_retries = crate::model::request_timeout::TimeoutRetryCount::default();
+        let mut conversation_lease = if policy == NonStreamDrivePolicy::Standard
+            && !req.execution.isolated_query
+            && request_query_source_category(&req) == Some(QuerySourceCategory::Main)
+        {
+            ConversationLease::checkout(&self.responses_ws_session)
+        } else {
+            ConversationLease::auxiliary(&self.side_sessions)
+        };
+        let mut continuation_recovered = false;
+
         loop {
             if let Some(coordinator) = account_coordinator.as_mut() {
                 if coordinator.active_scope().is_none() {
@@ -8333,7 +8378,9 @@ impl ApiService {
                 Self::log_deepseek_prepared_request(&req.input.model, &prepared, false);
                 let (dispatch_attempt, server_fallback_parameter_added) =
                     self.inject_headers(&mut prepared, dispatch)?;
-                request_client.seal_prepared(&mut prepared).await?;
+                request_client
+                    .seal_prepared_with_session(&mut prepared, Some(conversation_lease.session()))
+                    .await?;
                 self.validate_scope_output(&prepared)?;
                 Ok((prepared, dispatch_attempt, server_fallback_parameter_added))
             };
@@ -8418,8 +8465,9 @@ impl ApiService {
                 }
                 prepared.before_computer_submit().await?;
                 let mut api_attempt_reservation = None;
-                let received = call
-                    .dispatch_once_with(|| {
+                let received = conversation_lease
+                    .session()
+                    .dispatch(call, || {
                         if admission
                             .as_ref()
                             .is_some_and(|admission| !admission.is_admitted())
@@ -8805,8 +8853,15 @@ impl ApiService {
                             attempt.observe(&response.usage, completeness);
                         }
                     }
+                    let recover_continuation = !continuation_recovered
+                        && allow_replay
+                        && conversation_lease.session().recover(collected.response());
                     attempt.finish().await?;
                     collected.finish().await;
+                    if recover_continuation {
+                        continuation_recovered = true;
+                        continue;
+                    }
                     match decoded {
                         Ok(mut response) => {
                             if let Some(binding) = prepared.computer_binding.as_ref() {
@@ -9527,7 +9582,10 @@ impl ApiService {
         }
         let dispatch = match class {
             NonStreamingRequestClass::Main => DispatchHeaderState::default(),
-            NonStreamingRequestClass::Auxiliary => DispatchHeaderState::AUXILIARY,
+            NonStreamingRequestClass::Auxiliary => {
+                request.execution.isolated_query = true;
+                DispatchHeaderState::AUXILIARY
+            }
         };
         self.drive_non_stream_seeded_with_chain(
             request,
@@ -10062,9 +10120,14 @@ impl ApiService {
         let mut request = LlmRequest::new(model);
         request.profile = profile.map(str::to_string);
         request.stream = true;
-        let mut session = self.responses_ws_session.lock().await;
+        let mut lease = ConversationLease::checkout(&self.responses_ws_session);
+        let session = lease.session();
         self.client()
-            .preconnect_websocket(&request, self.transport.clone(), &mut session)
+            .preconnect_websocket(
+                &request,
+                self.transport.clone(),
+                session.responses_transport_mut(),
+            )
             .await
     }
 
@@ -10135,9 +10198,14 @@ impl ApiService {
         // Responses-WebSocket prewarm only — never a first-party Anthropic
         // route, so the dispatch gate is inert here.
         self.inject_stream_headers(&mut prepared, DispatchHeaderState::default())?;
-        let mut session = self.responses_ws_session.lock().await;
+        let mut lease = ConversationLease::checkout(&self.responses_ws_session);
+        let session = lease.session();
         request_client
-            .prewarm_prepared_websocket(prepared, self.transport.clone(), &mut session)
+            .prewarm_prepared_websocket(
+                prepared,
+                self.transport.clone(),
+                session.responses_transport_mut(),
+            )
             .await
     }
 
@@ -10145,8 +10213,27 @@ impl ApiService {
     /// the `OrchestratorApiClient::close_responses_websocket_session` trait
     /// override.
     pub async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
-        let mut session = self.responses_ws_session.lock().await;
+        let mut session = self.retire_conversation_context();
         session.close().await.map_err(crate::upstream::error)
+    }
+
+    fn retire_conversation_context(&self) -> lingxi_llm_client::ConversationSession {
+        *self
+            .history_projection_cache
+            .lock()
+            .expect("history projection cache") = Default::default();
+        let mut slot = self
+            .responses_ws_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.session.replace(Default::default()).unwrap_or_default()
+    }
+
+    /// Invalidate derived history and remote continuation at a committed history
+    /// rewrite. In-flight leases cannot repopulate the new generation.
+    pub fn reset_conversation_context(&self) {
+        drop(self.retire_conversation_context());
     }
 
     // ── Stream drive (Step 2) ─────────────────────────────────────────────────
@@ -10334,7 +10421,14 @@ impl ApiService {
                 .as_ref()
                 .and_then(|cache| cache.policy.query_source.as_deref())
         });
-        let main_conversation = query_source_category(source) == Some(QuerySourceCategory::Main);
+        let main_conversation = !req.execution.isolated_query
+            && query_source_category(source) == Some(QuerySourceCategory::Main);
+        let mut conversation_lease = Some(if main_conversation {
+            ConversationLease::checkout(&self.responses_ws_session)
+        } else {
+            ConversationLease::auxiliary(&self.side_sessions)
+        });
+        let mut continuation_recovered = false;
 
         loop {
             if let Some(coordinator) = account_coordinator.as_mut() {
@@ -10429,29 +10523,8 @@ impl ApiService {
             // attempt takes the same path: the opener marks dispatch
             // immediately before whichever transport call carries it, so a
             // WebSocket send is metered exactly like an HTTP one.
-            let websocket = matches!(
-                prepared.provider_request.stream_transport,
-                crate::ProviderStreamTransport::ResponsesWebSocket
-            );
-            let mut side_ws_lease = (websocket && !main_conversation)
-                .then(|| SideWsLease::checkout(&self.side_ws_sessions));
             let opened = async {
-                // HTTP attempts have no shared connection state. Never hold
-                // the WebSocket mutex while an HTTP admission waits for a
-                // durable intent: a concurrent revoked call must reject without
-                // waiting for the first intent's acknowledgement.
-                let mut http_session = ResponsesSession::new();
-                let mut shared_session = if websocket && side_ws_lease.is_none() {
-                    Some(self.responses_ws_session.lock().await)
-                } else {
-                    None
-                };
-                let responses_ws_session =
-                    match (shared_session.as_deref_mut(), side_ws_lease.as_mut()) {
-                        (Some(session), _) => session,
-                        (None, Some(lease)) => lease.session(),
-                        (None, None) => &mut http_session,
-                    };
+                let responses_ws_session = conversation_lease.as_mut().expect("conversation lease").session();
                 let preparing = tokio::time::Instant::now();
                 let prepared = crate::execution::first_byte_bound(
                     first_byte_timeout,
@@ -10682,7 +10755,7 @@ impl ApiService {
                         _ => return Err(transport_err),
                     }
                 }
-                Ok((mut prepared, streaming)) => {
+                Ok((mut prepared, streaming, continuation_rejection)) => {
                     let outgoing_client_request_id =
                         streaming.client_request_id().map(str::to_owned);
                     let response_headers: std::collections::BTreeMap<String, String> = streaming
@@ -10696,7 +10769,7 @@ impl ApiService {
                         status = streaming.status()
                     );
                     // Connect-phase status ≥ 400: drain and decode as error.
-                    if streaming.status() >= 400 {
+                    if streaming.status() >= 400 || continuation_rejection.is_some() {
                         let response_status = streaming.status();
                         // Error responses do not enter the event watchdog below.
                         // Bound their body collection too, respecting the host's
@@ -10749,8 +10822,23 @@ impl ApiService {
                         Self::classify_native_invalid_request_413(&mut decode_err);
                         self.observe_native_thinking_resumption_refusal(&decode_err);
                         safety.error(&decode_err);
+                        let recover_continuation = !continuation_recovered
+                            && allow_replay
+                            && conversation_lease
+                                .as_mut()
+                                .expect("conversation lease")
+                                .session()
+                                .recover(
+                                    continuation_rejection
+                                        .as_ref()
+                                        .unwrap_or(collected.response()),
+                                );
                         collected.finish().await;
                         attempt.finish().await?;
+                        if recover_continuation {
+                            continuation_recovered = true;
+                            continue;
+                        }
                         // Native streaming Kie handles an AFK-only refusal
                         // before context-1m and TBC recovery. Keep this ahead
                         // of both so an overlapping error removes AFK first.
@@ -11463,7 +11551,7 @@ impl ApiService {
                         request_id: stream_request_id,
                         started: stream_started,
                         idle_timeout: stream_idle_timeout,
-                        side_ws_lease: side_ws_lease.take(),
+                        side_ws_lease: conversation_lease.take(),
                     };
 
                     let boxed: BoxStream<'static, Result<HistoryEvent, LlmError>> = Box::pin(
@@ -12528,6 +12616,7 @@ impl ApiService {
             }
         }
         let mut req = LlmRequest::new(model);
+        req.execution.isolated_query = crate::computer::uses_auxiliary_history_projection();
         if let Some(thinking) = main_thinking_config {
             req.execution.native_thinking_request_type_disabled =
                 crate::model::thinking_binding_controls::native_request_type_disabled(thinking);
@@ -12606,15 +12695,31 @@ impl ApiService {
             }
         }
 
+        let cache_enabled = !crate::computer::uses_auxiliary_history_projection()
+            && matches!(query_source, PromptCacheQuerySource::Named(source)
+                if query_source_category(Some(source)) == Some(QuerySourceCategory::Main));
+        let mut projection_cache = cache_enabled.then(|| {
+            self.history_projection_cache
+                .lock()
+                .expect("history projection cache")
+        });
+        let projection_started = Instant::now();
         let (input, overrides, request_content_source_ids) =
-            crate::convert::input_projection::history_input_with_sources(
+            crate::convert::input_projection::history_input_with_cached_sources(
                 model,
                 &messages,
                 &request_content_source_ids,
                 &[],
                 &tools,
                 family,
+                projection_cache.as_mut().map(|cache| &mut **cache),
             )?;
+        if let Some(cache) = &projection_cache {
+            tracing::debug!(target: "llm_runtime::history_cache", messages = messages.len(), hits = cache.hits,
+                misses = cache.misses, retained_bytes = cache.retained_bytes(),
+                projection_us = projection_started.elapsed().as_micros() as u64);
+        }
+        drop(projection_cache);
         req.input = input;
         req.execution.request_content_source_ids = request_content_source_ids;
         req.execution.input_protocol = Some(family);

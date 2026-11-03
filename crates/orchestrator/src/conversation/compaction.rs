@@ -2906,6 +2906,7 @@ impl ConversationOrchestrator {
         if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return None;
         }
+        self.api.reset_conversation_context();
         // Query auto/PTL success (`DCr(..., u4(w))`, 2.1.286) rolls the
         // complete last-assistant usage before replacing the model context.
         // Manual compact and selector summaries do not call that producer.
