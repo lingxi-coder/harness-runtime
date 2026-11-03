@@ -256,8 +256,16 @@ impl MobileEngineHandle {
         command: ClientCommand,
     ) -> Result<(), ClientError> {
         let manager = self.side_chats.clone();
+        #[cfg(test)]
+        let test_gate = self
+            .submit_test_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         self.runtime()
             .spawn(async move {
+                #[cfg(test)]
+                super::wait_for_submit_test_gate(test_gate, &command).await;
                 manager
                     .submit(&side_id, uuid::Uuid::new_v4().to_string(), command)
                     .await

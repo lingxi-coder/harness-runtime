@@ -4578,6 +4578,17 @@ fn build_mobile_engine_on_worker(
         event_sink,
         connection_sink,
         active_cancel,
+        turn_admission: Default::default(),
+        #[cfg(test)]
+        submit_test_gate: Default::default(),
+        #[cfg(test)]
+        reserve_test_gate: Default::default(),
+        #[cfg(test)]
+        queue_test_gate: Default::default(),
+        #[cfg(test)]
+        initial_event_test_gate: Default::default(),
+        #[cfg(test)]
+        slash_running_test_gate: Default::default(),
         message_queue,
         loop_transition,
         cancel_reason,

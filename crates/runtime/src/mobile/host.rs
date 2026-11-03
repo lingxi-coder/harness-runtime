@@ -44,6 +44,45 @@ mod provider_services;
 mod restoration;
 mod scheduled_workspaces;
 mod side_chat;
+mod turn_admission;
+
+#[cfg(test)]
+struct SubmitPollGate {
+    turn_id: u64,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+async fn wait_for_submit_test_gate(gate: Option<Arc<SubmitPollGate>>, command: &ClientCommand) {
+    if let (
+        Some(gate),
+        ClientCommand::SendPrompt {
+            turn_id: Some(turn_id),
+            ..
+        }
+        | ClientCommand::RunSlashCommand {
+            turn_id: Some(turn_id),
+            ..
+        },
+    ) = (gate, command)
+    {
+        if *turn_id == gate.turn_id {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+}
+
+#[cfg(test)]
+async fn wait_for_turn_test_gate(gate: Option<Arc<SubmitPollGate>>, turn_id: Option<u64>) {
+    if let (Some(gate), Some(turn_id)) = (gate, turn_id) {
+        if turn_id == gate.turn_id {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+}
 
 pub use audio_context::MediaSessionContext;
 pub use audio_realtime_owner::MediaAgentHandoffRequest;
@@ -1536,6 +1575,18 @@ pub struct MobileEngineHandle {
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
     active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
+    /// Explicit IDs remain fenced after cancel until this handle is dropped.
+    turn_admission: turn_admission::TurnAdmission,
+    #[cfg(test)]
+    submit_test_gate: std::sync::Mutex<Option<Arc<SubmitPollGate>>>,
+    #[cfg(test)]
+    reserve_test_gate: std::sync::Mutex<Option<Arc<SubmitPollGate>>>,
+    #[cfg(test)]
+    queue_test_gate: std::sync::Mutex<Option<Arc<SubmitPollGate>>>,
+    #[cfg(test)]
+    initial_event_test_gate: std::sync::Mutex<Option<Arc<SubmitPollGate>>>,
+    #[cfg(test)]
+    slash_running_test_gate: std::sync::Mutex<Option<Arc<SubmitPollGate>>>,
     /// The same priority-aware message queue used by desktop/CLI. Running
     /// prompts enter at `Next` and are consumed inside the existing turn loop.
     message_queue: Arc<msgqueue::MessageQueueManager>,
@@ -3011,6 +3062,9 @@ struct ActiveTurn {
     session_id: String,
     permission_owner_id: Option<u64>,
     cancel: CancellationToken,
+    explicit_cancel: AtomicBool,
+    /// Orders only initial lifecycle publication against this owner's cancel.
+    initial_event_gate: Mutex<()>,
     task: StdMutex<Option<MobileTurnTask>>,
     completed: AtomicBool,
     /// Set before asking the orchestrator to unwind for a platform pause.
@@ -3757,6 +3811,8 @@ impl ActiveTurn {
             session_id: String::new(),
             permission_owner_id: None,
             cancel: CancellationToken::new(),
+            explicit_cancel: AtomicBool::new(false),
+            initial_event_gate: Mutex::new(()),
             task: StdMutex::new(None),
             completed: AtomicBool::new(false),
             quiescing: AtomicBool::new(false),
@@ -5507,13 +5563,14 @@ impl MobileEngineHandle {
 
     /// Reserve the connection's single turn slot without replacing its owner.
     async fn reserve_turn(&self, turn_id: Option<u64>) -> Result<Arc<ActiveTurn>, ClientError> {
-        self.reserve_turn_for_session(turn_id, None).await
+        self.reserve_turn_for_session(turn_id, None, turn_id).await
     }
 
     async fn reserve_turn_for_session(
         &self,
         turn_id: Option<u64>,
         expected_session_id: Option<&str>,
+        client_turn_id: Option<u64>,
     ) -> Result<Arc<ActiveTurn>, ClientError> {
         let mut active = self.active_cancel.lock().await;
         if active.is_some() {
@@ -5532,17 +5589,20 @@ impl MobileEngineHandle {
                 message: "queued mobile slash belongs to a session that is no longer active".into(),
             });
         }
-        let permission_owner_id = self
-            .inner
-            .permission_gate
-            .begin_main_turn(Some(session_id.clone()), turn_id);
-        let turn = Arc::new(ActiveTurn::new_owned(
-            turn_id,
-            session_id,
-            permission_owner_id,
-        ));
-        *active = Some(turn.clone());
-        Ok(turn)
+        self.turn_admission
+            .with_allowed(&session_id, client_turn_id, || {
+                let permission_owner_id = self
+                    .inner
+                    .permission_gate
+                    .begin_main_turn(Some(session_id.clone()), turn_id);
+                let turn = Arc::new(ActiveTurn::new_owned(
+                    turn_id,
+                    session_id.clone(),
+                    permission_owner_id,
+                ));
+                *active = Some(turn.clone());
+                Ok(turn)
+            })
     }
 
     /// Cooperatively cancel exactly the requested turn and wait until every
@@ -5551,29 +5611,46 @@ impl MobileEngineHandle {
     /// safety contract. A stale specific id is a no-op and cannot drain or
     /// otherwise disturb the current turn.
     async fn cancel_active_turn(&self, requested_turn_id: Option<u64>) -> Result<(), ClientError> {
-        let active = self.active_cancel.lock().await.clone();
-        let Some(turn) = active else {
-            if requested_turn_id.is_none() {
-                if let Some(scheduler) = self.inner.wakeup_scheduler.get() {
-                    tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
-                }
-            }
+        let session_id = self.active_session_id();
+        if let Some(turn_id) = requested_turn_id {
+            self.turn_admission.cancel(&session_id, turn_id);
+        }
+        self.cancel_active_turn_for_session(
+            requested_turn_id,
+            requested_turn_id.map(|_| session_id.as_str()),
+        )
+        .await
+    }
 
+    async fn cancel_active_turn_for_session(
+        &self,
+        requested_turn_id: Option<u64>,
+        source_session: Option<&str>,
+    ) -> Result<(), ClientError> {
+        let active_guard = self.active_cancel.lock().await;
+        let active = active_guard
+            .as_ref()
+            .filter(|turn| source_session.is_none_or(|session_id| turn.session_id == session_id))
+            .cloned();
+        drop(active_guard);
+        let Some(turn) = active else {
             // A paused / waiting turn has no executor owner, but its durable
-            // checkpoint remains cancellable. Re-check the owner slot while
-            // holding the lock so a newly reserved turn cannot be confused
-            // with this inactive request. Cancel(None) deliberately remains a
-            // no-op when there is no live executor.
-            if let Some(turn_id) = requested_turn_id {
-                let active_guard = self.active_cancel.lock().await;
-                if active_guard.is_some() {
-                    tracing::debug!(
-                        requested_turn_id = turn_id,
-                        "mobile: ignored inactive cancel raced by a new active turn"
-                    );
-                    return Ok(());
-                }
-                let session_id = self.active_session_id();
+            // checkpoint remains cancellable. The explicit admission fence
+            // prevents a matching late send from reserving after this snapshot.
+            let snapshot = if let Some(turn_id) = requested_turn_id {
+                let session_id = source_session
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.active_session_id());
+                let was_slash_claim = self
+                    .durable_turns
+                    .load(&session_id, turn_id)
+                    .ok()
+                    .is_some_and(|checkpoint| {
+                        checkpoint.queue_operation
+                            == crate::mobile::turn_durability::QueueOperationKind::Slash
+                            && checkpoint.state.is_none()
+                            && checkpoint.queue_delivery == QueueDeliveryState::SlashClaimed
+                    });
                 let snapshot = match self.durable_turns.cancel_pending(&session_id, turn_id) {
                     Ok(Some(member_ids)) => {
                         remove_mobile_prompt_dispatches(
@@ -5608,12 +5685,27 @@ impl MobileEngineHandle {
                         None
                     }
                 };
-                drop(active_guard);
-                if let Some(snapshot) = snapshot {
-                    self.event_sink
-                        .emit(ClientEvent::TurnRecoveryState { snapshot })
-                        .await;
+                if snapshot.is_none() && was_slash_claim {
+                    Some(
+                        self.durable_turns
+                            .cancel_unstarted_initial(&session_id, turn_id)
+                            .map_err(Self::map_durable_turn_error)?,
+                    )
+                } else {
+                    snapshot
                 }
+            } else {
+                None
+            };
+            if requested_turn_id.is_none() {
+                if let Some(scheduler) = self.inner.wakeup_scheduler.get() {
+                    tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
+                }
+            }
+            if let Some(snapshot) = snapshot {
+                self.event_sink
+                    .emit(ClientEvent::TurnRecoveryState { snapshot })
+                    .await;
             }
             tracing::debug!(
                 requested_turn_id,
@@ -5667,6 +5759,11 @@ impl MobileEngineHandle {
             return Ok(());
         }
 
+        // Trigger the owner immediately, before any foreign event callback,
+        // transition, permission drain, or lifecycle-event ordering wait.
+        turn.explicit_cancel.store(true, Ordering::Release);
+        turn.cancel.cancel();
+        let initial_event_guard = turn.initial_event_gate.lock().await;
         let finalize_claimed_bash_cancel = if let Some(turn_id) = turn.turn_id {
             self.durable_turns
                 .load(&turn.session_id, turn_id)
@@ -5683,6 +5780,7 @@ impl MobileEngineHandle {
         } else {
             false
         };
+        let mut cancelled_members = None;
         if let Some(turn_id) = turn.turn_id {
             let queued_member_ids = self
                 .durable_turns
@@ -5703,26 +5801,21 @@ impl MobileEngineHandle {
                     self.event_sink
                         .emit(ClientEvent::TurnRecoveryState { snapshot })
                         .await;
-                    remove_mobile_prompt_dispatches(
-                        &self.message_queue,
-                        &turn.session_id,
-                        &queued_member_ids,
-                    )
-                    .await;
+                    cancelled_members = Some(queued_member_ids);
                 }
                 Ok(None) => {
-                    remove_mobile_prompt_dispatches(
-                        &self.message_queue,
-                        &turn.session_id,
-                        &queued_member_ids,
-                    )
-                    .await;
+                    cancelled_members = Some(queued_member_ids);
                 }
                 Err(DurableTurnStoreError::NotFound { .. }) => {}
                 Err(error) => {
                     tracing::warn!(%error, turn_id, "mobile: failed to persist explicit cancel");
                 }
             }
+        }
+        drop(initial_event_guard);
+        if let Some(member_ids) = cancelled_members {
+            remove_mobile_prompt_dispatches(&self.message_queue, &turn.session_id, &member_ids)
+                .await;
         }
 
         let cancelled_permissions = if let Some(owner_id) = turn.permission_owner_id {
@@ -5740,8 +5833,26 @@ impl MobileEngineHandle {
                 )
                 .await;
         }
-        turn.cancel.cancel();
         self.wait_for_turn_release(&turn, true).await;
+        // A claimed slash has a real durable input but no public Running
+        // state yet. If cancellation withdrew that private claim, publish its
+        // terminal only after the owner has stopped executing it.
+        if let Some(turn_id) = turn.turn_id {
+            let cancelled_claim = self
+                .durable_turns
+                .load(&turn.session_id, turn_id)
+                .ok()
+                .is_some_and(|checkpoint| {
+                    checkpoint.queue_operation
+                        == crate::mobile::turn_durability::QueueOperationKind::Slash
+                        && checkpoint.state.is_none()
+                        && checkpoint.queue_delivery == QueueDeliveryState::Cancelled
+                });
+            if cancelled_claim {
+                self.settle_cancelled_unstarted_initial(&turn.session_id, turn_id)
+                    .await?;
+            }
+        }
         if finalize_claimed_bash_cancel {
             if let Some(turn_id) = turn.turn_id {
                 match self.durable_turns.cancel(&turn.session_id, turn_id) {
@@ -5889,6 +6000,7 @@ impl MobileEngineHandle {
         images: Vec<ImageRefDto>,
         client_turn_id: Option<u64>,
         transition: OwnedMutexGuard<()>,
+        scheduled_guard: OwnedMutexGuard<()>,
     ) -> Result<(), ClientError> {
         if let Ok(raw_text) = String::from_utf16(&raw.code_units) {
             let _ = self
@@ -5968,6 +6080,11 @@ impl MobileEngineHandle {
 
         let owner = match self.reserve_turn(client_turn_id).await {
             Ok(owner) => owner,
+            Err(ClientError::Rejected { message })
+                if message == crate::side_chat::TURN_CANCELLED_BEFORE_ADMISSION =>
+            {
+                return Err(ClientError::Rejected { message });
+            }
             Err(ClientError::Rejected { .. }) => {
                 if let Some(active) = self.active_cancel.lock().await.clone() {
                     self.persist_and_enqueue_mobile_slash(
@@ -5985,34 +6102,122 @@ impl MobileEngineHandle {
             }
             Err(error) => return Err(error),
         };
-        let checkpoint = match self.durable_turns.admit_queued_slash(
-            &owner.session_id,
-            client_turn_id,
-            client_turn_id,
-            raw_source.clone(),
-            images.clone(),
-        ) {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                self.release_unspawned_turn(&owner).await;
-                return Err(Self::map_durable_turn_error(error));
-            }
-        };
-        let claimed = match self
-            .durable_turns
-            .claim_queued_slash(&owner.session_id, checkpoint.turn_id)
+        #[cfg(test)]
         {
+            let gate = self
+                .reserve_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, client_turn_id).await;
+        }
+        let initial_event_guard = owner.initial_event_gate.lock().await;
+        let checkpoint =
+            match self
+                .turn_admission
+                .with_allowed(&owner.session_id, client_turn_id, || {
+                    self.durable_turns
+                        .admit_queued_slash(
+                            &owner.session_id,
+                            client_turn_id,
+                            client_turn_id,
+                            raw_source.clone(),
+                            images.clone(),
+                        )
+                        .map_err(Self::map_durable_turn_error)
+                }) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    if matches!(&error, ClientError::Rejected { message }
+                        if message == crate::side_chat::TURN_CANCELLED_BEFORE_ADMISSION)
+                    {
+                        // The owner was reserved before cancellation won. The
+                        // actual slash input is available, so persist and
+                        // settle it instead of claiming it was never admitted.
+                        let result = match self.durable_turns.admit_queued_slash(
+                            &owner.session_id,
+                            client_turn_id,
+                            client_turn_id,
+                            raw_source.clone(),
+                            images.clone(),
+                        ) {
+                            Ok(checkpoint) => {
+                                self.settle_cancelled_unstarted_initial(
+                                    &owner.session_id,
+                                    checkpoint.turn_id,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(Self::map_durable_turn_error(error)),
+                        };
+                        drop(initial_event_guard);
+                        self.release_unspawned_turn(&owner).await;
+                        return result;
+                    }
+                    drop(initial_event_guard);
+                    self.release_unspawned_turn(&owner).await;
+                    return Err(error);
+                }
+            };
+        #[cfg(test)]
+        {
+            let gate = self
+                .queue_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, client_turn_id).await;
+        }
+        let claim_result = if owner.cancel.is_cancelled() {
+            Err(ClientError::Rejected {
+                message: crate::side_chat::TURN_CANCELLED_BEFORE_ADMISSION.into(),
+            })
+        } else {
+            self.turn_admission
+                .with_allowed(&owner.session_id, client_turn_id, || {
+                    self.durable_turns
+                        .claim_queued_slash(&owner.session_id, checkpoint.turn_id)
+                        .map_err(Self::map_durable_turn_error)
+                })
+        };
+        let claimed = match claim_result {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
+                if matches!(&error, ClientError::Rejected { message }
+                    if message == crate::side_chat::TURN_CANCELLED_BEFORE_ADMISSION)
+                {
+                    let result = self
+                        .settle_cancelled_unstarted_initial(&owner.session_id, checkpoint.turn_id)
+                        .await;
+                    drop(initial_event_guard);
+                    self.release_unspawned_turn(&owner).await;
+                    return result;
+                }
+                drop(initial_event_guard);
                 self.release_unspawned_turn(&owner).await;
-                return Err(Self::map_durable_turn_error(error));
+                return Err(error);
             }
         };
+        drop(initial_event_guard);
         self.cancel_reason.reset();
         self.message_queue
             .register_active_turn(owner.cancel.clone())
             .await;
+        // Admission and durable claim are complete. As for an ordinary
+        // SendPrompt, Cron may inspect this session again, where the active
+        // owner makes a concurrent scheduled turn report busy. Do not keep
+        // the startup gate while an arbitrary slash dispatcher is executing.
+        drop(scheduled_guard);
         drop(transition);
+        #[cfg(test)]
+        {
+            let gate = self
+                .initial_event_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, client_turn_id).await;
+        }
         let execution_images = claimed.images.clone();
         self.execute_claimed_slash(raw_source, client_turn_id, owner, claimed, execution_images)
             .await
@@ -6025,40 +6230,44 @@ impl MobileEngineHandle {
         raw: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
     ) -> Result<(), ClientError> {
-        let checkpoint = match self.durable_turns.admit_queued_slash(
-            session_id,
-            client_turn_id,
-            client_turn_id,
-            raw.clone(),
-            images.clone(),
-        ) {
-            Ok(checkpoint) => checkpoint,
-            Err(DurableTurnStoreError::AlreadyExists { .. }) => {
-                let Some(turn_id) = client_turn_id else {
-                    return Err(ClientError::Internal {
+        let checkpoint =
+            self.turn_admission
+                .with_allowed(session_id, client_turn_id, || {
+                    match self.durable_turns.admit_queued_slash(
+                        session_id,
+                        client_turn_id,
+                        client_turn_id,
+                        raw.clone(),
+                        images.clone(),
+                    ) {
+                        Ok(checkpoint) => Ok(checkpoint),
+                        Err(DurableTurnStoreError::AlreadyExists { .. }) => {
+                            let Some(turn_id) = client_turn_id else {
+                                return Err(ClientError::Internal {
                         message: "mobile slash operation id collided without a client turn id"
                             .into(),
                     });
-                };
-                let existing = self
-                    .durable_turns
-                    .load(session_id, turn_id)
-                    .map_err(Self::map_durable_turn_error)?;
-                if existing.queue_operation != QueueOperationKind::Slash
-                    || existing.prompt != raw
-                    || existing.images != images
-                    || existing.original_client_turn_id != client_turn_id
-                {
-                    return Err(ClientError::Internal {
-                        message: format!(
+                            };
+                            let existing = self
+                                .durable_turns
+                                .load(session_id, turn_id)
+                                .map_err(Self::map_durable_turn_error)?;
+                            if existing.queue_operation != QueueOperationKind::Slash
+                                || existing.prompt != raw
+                                || existing.images != images
+                                || existing.original_client_turn_id != client_turn_id
+                            {
+                                return Err(ClientError::Internal {
+                                    message: format!(
                             "mobile slash turn id {turn_id} was reused for different input"
                         ),
-                    });
-                }
-                existing
-            }
-            Err(error) => return Err(Self::map_durable_turn_error(error)),
-        };
+                                });
+                            }
+                            Ok(existing)
+                        }
+                        Err(error) => Err(Self::map_durable_turn_error(error)),
+                    }
+                })?;
         if checkpoint.queue_delivery == QueueDeliveryState::Pending && checkpoint.state.is_none() {
             enqueue_mobile_slash_dispatch(&self.message_queue, session_id, &checkpoint).await;
         }
@@ -6088,7 +6297,11 @@ impl MobileEngineHandle {
             Err(error) => return Err(Self::map_durable_turn_error(error)),
         };
         let owner = match self
-            .reserve_turn_for_session(Some(turn_id), Some(session_id))
+            .reserve_turn_for_session(
+                Some(turn_id),
+                Some(session_id),
+                checkpoint.original_client_turn_id,
+            )
             .await
         {
             Ok(owner) => owner,
@@ -6121,6 +6334,15 @@ impl MobileEngineHandle {
             .register_active_turn(owner.cancel.clone())
             .await;
         drop(transition);
+        #[cfg(test)]
+        {
+            let gate = self
+                .initial_event_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, checkpoint.original_client_turn_id).await;
+        }
         let execution_images = claimed.images.clone();
         self.execute_claimed_slash(
             checkpoint.prompt,
@@ -6149,7 +6371,11 @@ impl MobileEngineHandle {
             Err(error) => return Err(Self::map_durable_turn_error(error)),
         };
         let owner = match self
-            .reserve_turn_for_session(Some(turn_id), Some(session_id))
+            .reserve_turn_for_session(
+                Some(turn_id),
+                Some(session_id),
+                checkpoint.original_client_turn_id,
+            )
             .await
         {
             Ok(owner) => owner,
@@ -6209,13 +6435,11 @@ impl MobileEngineHandle {
         images: Vec<ImageRefDto>,
     ) -> Result<(), ClientError> {
         if owner.cancel.is_cancelled() {
-            let _ = self.durable_turns.complete_claimed_slash(
-                &owner.session_id,
-                checkpoint.turn_id,
-                Some("explicit_cancel".into()),
-            );
+            let result = self
+                .settle_interrupted_slash_owner(&owner, checkpoint.turn_id)
+                .await;
             self.release_unspawned_turn(&owner).await;
-            return Ok(());
+            return result;
         }
         let before = self.capture_slash_authority().await;
         let builtin_model =
@@ -6302,16 +6526,23 @@ impl MobileEngineHandle {
             .dispatch(raw.clone(), owner.cancel.clone())
             .await;
         if owner.cancel.is_cancelled() {
-            let _ = self.durable_turns.complete_claimed_slash(
-                &owner.session_id,
-                checkpoint.turn_id,
-                Some("explicit_cancel".into()),
-            );
+            let result = self
+                .settle_interrupted_slash_owner(&owner, checkpoint.turn_id)
+                .await;
             self.release_unspawned_turn(&owner).await;
-            return Ok(());
+            return result;
         }
         match result {
             lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
+                let initial_event_guard = owner.initial_event_gate.lock().await;
+                if owner.cancel.is_cancelled() {
+                    let result = self
+                        .settle_interrupted_slash_owner(&owner, checkpoint.turn_id)
+                        .await;
+                    drop(initial_event_guard);
+                    self.release_unspawned_turn(&owner).await;
+                    return result;
+                }
                 let checkpoint = match self.durable_turns.prepare_claimed_slash_turn(
                     &owner.session_id,
                     checkpoint.turn_id,
@@ -6320,15 +6551,19 @@ impl MobileEngineHandle {
                 ) {
                     Ok(checkpoint) => checkpoint,
                     Err(error) => {
+                        drop(initial_event_guard);
                         self.release_unspawned_turn(&owner).await;
                         return Err(Self::map_durable_turn_error(error));
                     }
                 };
-                self.event_sink
-                    .emit(ClientEvent::TurnRecoveryState {
-                        snapshot: checkpoint.snapshot(),
-                    })
+                let published = self
+                    .publish_initial_slash_running(&owner, &checkpoint)
                     .await;
+                drop(initial_event_guard);
+                if !matches!(published, Ok(true)) {
+                    self.release_unspawned_turn(&owner).await;
+                    return published.map(|_| ());
+                }
                 let after = self.capture_slash_authority().await;
                 if let Err(error) = self.emit_slash_authority_changes(&before, &after).await {
                     self.release_unspawned_turn(&owner).await;
@@ -6363,6 +6598,15 @@ impl MobileEngineHandle {
             } => {
                 let skill_prompt =
                     DurableSkillPrompt::new(command.clone(), body, hook_messages, skill);
+                let initial_event_guard = owner.initial_event_gate.lock().await;
+                if owner.cancel.is_cancelled() {
+                    let result = self
+                        .settle_interrupted_slash_owner(&owner, checkpoint.turn_id)
+                        .await;
+                    drop(initial_event_guard);
+                    self.release_unspawned_turn(&owner).await;
+                    return result;
+                }
                 let checkpoint = match self.durable_turns.prepare_claimed_slash_turn(
                     &owner.session_id,
                     checkpoint.turn_id,
@@ -6371,15 +6615,19 @@ impl MobileEngineHandle {
                 ) {
                     Ok(checkpoint) => checkpoint,
                     Err(error) => {
+                        drop(initial_event_guard);
                         self.release_unspawned_turn(&owner).await;
                         return Err(Self::map_durable_turn_error(error));
                     }
                 };
-                self.event_sink
-                    .emit(ClientEvent::TurnRecoveryState {
-                        snapshot: checkpoint.snapshot(),
-                    })
+                let published = self
+                    .publish_initial_slash_running(&owner, &checkpoint)
                     .await;
+                drop(initial_event_guard);
+                if !matches!(published, Ok(true)) {
+                    self.release_unspawned_turn(&owner).await;
+                    return published.map(|_| ());
+                }
                 let after = self.capture_slash_authority().await;
                 if let Err(error) = self.emit_slash_authority_changes(&before, &after).await {
                     self.release_unspawned_turn(&owner).await;
@@ -6476,6 +6724,47 @@ impl MobileEngineHandle {
         }
     }
 
+    /// The caller holds this owner's initial-event gate through the checkpoint
+    /// transition and publication; no model or tool execution is held by it.
+    async fn publish_initial_slash_running(
+        &self,
+        owner: &Arc<ActiveTurn>,
+        checkpoint: &crate::mobile::turn_durability::DurableTurnCheckpoint,
+    ) -> Result<bool, ClientError> {
+        #[cfg(test)]
+        {
+            let gate = self
+                .slash_running_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, checkpoint.original_client_turn_id).await;
+        }
+        if owner.cancel.is_cancelled() {
+            if owner.is_quiescing() && !owner.explicit_cancel.load(Ordering::Acquire) {
+                // A pause owns this cancellation token. Keep the real Running
+                // checkpoint recoverable for pause_active_turn to transition.
+                return Ok(false);
+            }
+            if let Some(snapshot) = self
+                .durable_turns
+                .cancel(&owner.session_id, checkpoint.turn_id)
+                .map_err(Self::map_durable_turn_error)?
+            {
+                self.event_sink
+                    .emit(ClientEvent::TurnRecoveryState { snapshot })
+                    .await;
+            }
+            return Ok(false);
+        }
+        self.event_sink
+            .emit(ClientEvent::TurnRecoveryState {
+                snapshot: checkpoint.snapshot(),
+            })
+            .await;
+        Ok(true)
+    }
+
     async fn finish_local_slash(
         &self,
         owner: &Arc<ActiveTurn>,
@@ -6484,14 +6773,16 @@ impl MobileEngineHandle {
     ) -> Result<(), ClientError> {
         let after = self.capture_slash_authority().await;
         let authority_result = self.emit_slash_authority_changes(before, &after).await;
-        let reason = owner
-            .cancel
-            .is_cancelled()
-            .then(|| "explicit_cancel".to_string());
-        let completion_result = self
-            .durable_turns
-            .complete_claimed_slash(&owner.session_id, checkpoint_turn_id, reason)
-            .map_err(Self::map_durable_turn_error);
+        let initial_event_guard = owner.initial_event_gate.lock().await;
+        let completion_result = if owner.cancel.is_cancelled() {
+            self.settle_interrupted_slash_owner(owner, checkpoint_turn_id)
+                .await
+        } else {
+            self.durable_turns
+                .complete_claimed_slash(&owner.session_id, checkpoint_turn_id, None)
+                .map_err(Self::map_durable_turn_error)
+        };
+        drop(initial_event_guard);
         self.release_unspawned_turn(owner).await;
         authority_result?;
         completion_result
@@ -6513,6 +6804,36 @@ impl MobileEngineHandle {
         }
         self.message_queue.clear_active_turn().await;
         owner.mark_completed();
+    }
+
+    async fn settle_cancelled_unstarted_initial(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<(), ClientError> {
+        let snapshot = self
+            .durable_turns
+            .cancel_unstarted_initial(session_id, turn_id)
+            .map_err(Self::map_durable_turn_error)?;
+        self.event_sink
+            .emit(ClientEvent::TurnRecoveryState { snapshot })
+            .await;
+        Ok(())
+    }
+
+    async fn settle_interrupted_slash_owner(
+        &self,
+        owner: &Arc<ActiveTurn>,
+        turn_id: u64,
+    ) -> Result<(), ClientError> {
+        if owner.is_quiescing() && !owner.explicit_cancel.load(Ordering::Acquire) {
+            // A pre-Running claimed slash cannot be cold resumed by the
+            // existing pause contract. Preserve the real claim and let Pause
+            // report that state instead of inventing an explicit Stop.
+            return Ok(());
+        }
+        self.settle_cancelled_unstarted_initial(&owner.session_id, turn_id)
+            .await
     }
 
     /// Start one streamed turn and release its slot on every normal return path
@@ -6583,22 +6904,45 @@ impl MobileEngineHandle {
         }
 
         let admitted = self
-            .durable_turns
-            .admit_queued_prompt(
-                &session_id,
-                client_turn_id,
-                client_turn_id,
-                command,
-                Some(PromptModeDto::Bash),
-                images,
-            )
-            .map_err(Self::map_durable_turn_error)?;
+            .turn_admission
+            .with_allowed(&session_id, client_turn_id, || {
+                self.durable_turns
+                    .admit_queued_prompt(
+                        &session_id,
+                        client_turn_id,
+                        client_turn_id,
+                        command,
+                        Some(PromptModeDto::Bash),
+                        images,
+                    )
+                    .map_err(Self::map_durable_turn_error)
+            })?;
+        #[cfg(test)]
+        {
+            let gate = self
+                .queue_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, client_turn_id).await;
+        }
         let owner = match self
-            .reserve_turn_for_session(Some(admitted.turn_id), Some(&session_id))
+            .reserve_turn_for_session(Some(admitted.turn_id), Some(&session_id), client_turn_id)
             .await
         {
             Ok(owner) => owner,
             Err(error) => {
+                if self
+                    .turn_admission
+                    .with_allowed(&session_id, client_turn_id, || Ok(()))
+                    .is_err()
+                {
+                    // This Bash input was already durably admitted before the
+                    // cancellation; it is not a no-admission rejection.
+                    return self
+                        .settle_cancelled_unstarted_initial(&session_id, admitted.turn_id)
+                        .await;
+                }
                 if let Some(active) = self.active_cancel.lock().await.clone() {
                     if active.session_id == session_id {
                         enqueue_mobile_prompt_dispatch(&self.message_queue, &session_id, &admitted)
@@ -6624,17 +6968,29 @@ impl MobileEngineHandle {
             return Err(error);
         }
         let should_query = self.mobile_bash_respond_to_command();
-        let claimed = match self.durable_turns.claim_queued_bash(
-            &owner.session_id,
-            admitted.turn_id,
-            should_query,
-        ) {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                self.release_unspawned_turn(&owner).await;
-                return Err(Self::map_durable_turn_error(error));
-            }
-        };
+        let claimed =
+            match self
+                .turn_admission
+                .with_allowed(&owner.session_id, client_turn_id, || {
+                    self.durable_turns
+                        .claim_queued_bash(&owner.session_id, admitted.turn_id, should_query)
+                        .map_err(Self::map_durable_turn_error)
+                }) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    if matches!(&error, ClientError::Rejected { message }
+                    if message == crate::side_chat::TURN_CANCELLED_BEFORE_ADMISSION)
+                    {
+                        let result = self
+                            .settle_cancelled_unstarted_initial(&owner.session_id, admitted.turn_id)
+                            .await;
+                        self.release_unspawned_turn(&owner).await;
+                        return result;
+                    }
+                    self.release_unspawned_turn(&owner).await;
+                    return Err(error);
+                }
+            };
         self.prepare_mobile_bash_owner(&owner, &claimed).await;
         drop(transition);
         self.spawn_mobile_bash_turn(owner, claimed);
@@ -6674,6 +7030,21 @@ impl MobileEngineHandle {
             .register_active_turn(owner.cancel.clone())
             .await;
         self.inner.message_output.reset_message_buffer().await;
+        #[cfg(test)]
+        {
+            let gate = self
+                .initial_event_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, checkpoint.original_client_turn_id).await;
+        }
+        let _initial_event_guard = owner.initial_event_gate.lock().await;
+        if owner.cancel.is_cancelled() {
+            // The claimed Bash task is still spawned below so its established
+            // cancellation path can settle the real interrupted checkpoint.
+            return;
+        }
         self.event_sink
             .emit(ClientEvent::TurnRecoveryState {
                 snapshot: checkpoint.snapshot(),
@@ -6892,7 +7263,10 @@ impl MobileEngineHandle {
             }
             turn
         } else {
-            match self.reserve_turn(turn_id).await {
+            match self
+                .reserve_turn_for_session(turn_id, None, original_client_turn_id)
+                .await
+            {
                 Ok(turn) => turn,
                 Err(ClientError::Rejected { .. }) if queue_if_busy && queued_inputs.is_none() => {
                     let session_id = self.active_session_id();
@@ -6917,6 +7291,15 @@ impl MobileEngineHandle {
                 }
             }
         };
+        #[cfg(test)]
+        {
+            let gate = self
+                .reserve_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, original_client_turn_id).await;
+        }
         // Pending prompt rows append through the same Host-only identity ledger
         // as ordinary durable rows. Import an existing Native transcript before
         // checkpointing or starting the producer; session retargets do this at
@@ -6975,6 +7358,7 @@ impl MobileEngineHandle {
                 Vec::new()
             };
 
+        let mut initial_snapshot = None;
         if create_checkpoint {
             let checkpoint_result = if let Some(admitted) = direct_queued_checkpoint.as_ref() {
                 Some(
@@ -6984,17 +7368,23 @@ impl MobileEngineHandle {
                 )
             } else {
                 turn_id.map(|turn_id| {
-                    self.durable_turns
-                        .begin_direct_with_skill_prompt(
-                            &turn.session_id,
-                            turn_id,
-                            original_client_turn_id,
-                            text.clone(),
-                            prompt_mode,
-                            images,
-                            skill_prompt.clone(),
-                        )
-                        .map_err(Self::map_durable_turn_error)
+                    self.turn_admission.with_allowed(
+                        &turn.session_id,
+                        original_client_turn_id,
+                        || {
+                            self.durable_turns
+                                .begin_direct_with_skill_prompt(
+                                    &turn.session_id,
+                                    turn_id,
+                                    original_client_turn_id,
+                                    text.clone(),
+                                    prompt_mode,
+                                    images.clone(),
+                                    skill_prompt.clone(),
+                                )
+                                .map_err(Self::map_durable_turn_error)
+                        },
+                    )
                 })
             };
             if let Some(checkpoint) = checkpoint_result {
@@ -7018,34 +7408,101 @@ impl MobileEngineHandle {
                             checkpoint_revision = checkpoint.revision,
                             "mobile: durable turn checkpoint created"
                         );
-                        self.event_sink
-                            .emit(ClientEvent::TurnRecoveryState {
-                                snapshot: checkpoint.snapshot(),
-                            })
-                            .await;
+                        initial_snapshot = Some(checkpoint.snapshot());
                     }
                     Err(error) => {
-                        let mut active = self.active_cancel.lock().await;
-                        if active
-                            .as_ref()
-                            .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+                        if matches!(&error, ClientError::Rejected { message }
+                            if message == crate::side_chat::TURN_CANCELLED_BEFORE_ADMISSION)
+                            && direct_queued_checkpoint.is_none()
                         {
-                            *active = None;
+                            // A live owner already exists. Record the real
+                            // prompt and settle it before releasing that owner;
+                            // the no-admission code would be false here.
+                            let result = match turn_id {
+                                Some(id) => match self.durable_turns.begin_direct_with_skill_prompt(
+                                    &turn.session_id,
+                                    id,
+                                    original_client_turn_id,
+                                    text.clone(),
+                                    prompt_mode,
+                                    images.clone(),
+                                    skill_prompt.clone(),
+                                ) {
+                                    Ok(_) => match self.durable_turns.cancel(&turn.session_id, id) {
+                                        Ok(Some(snapshot)) => Ok(snapshot),
+                                        Err(DurableTurnStoreError::Terminal { .. }) => self
+                                            .durable_turns
+                                            .load(&turn.session_id, id)
+                                            .map(|checkpoint| checkpoint.snapshot())
+                                            .map_err(Self::map_durable_turn_error),
+                                        Ok(None) => Err(ClientError::Internal {
+                                            message:
+                                                "cancelled direct prompt has no terminal snapshot"
+                                                    .into(),
+                                        }),
+                                        Err(error) => Err(Self::map_durable_turn_error(error)),
+                                    },
+                                    Err(error) => Err(Self::map_durable_turn_error(error)),
+                                },
+                                None => Err(error),
+                            };
+                            if let Ok(snapshot) = &result {
+                                self.event_sink
+                                    .emit(ClientEvent::TurnRecoveryState {
+                                        snapshot: snapshot.clone(),
+                                    })
+                                    .await;
+                            }
+                            self.release_unspawned_turn(&turn).await;
+                            return result.map(|_| ());
                         }
-                        drop(active);
-                        if let Some(owner_id) = turn.permission_owner_id {
-                            self.inner.permission_gate.end_main_turn(owner_id);
-                        }
-                        turn.mark_completed();
+                        self.release_unspawned_turn(&turn).await;
                         return Err(error);
                     }
                 }
             }
         }
 
-        let wrapper = TurnEventEmitter::new(self.event_sink.clone());
         self.inner.message_output.reset_message_buffer().await;
-        wrapper.emit_turn_started(turn_id).await;
+        #[cfg(test)]
+        {
+            let gate = self
+                .initial_event_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, original_client_turn_id).await;
+        }
+        let initial_event_guard = turn.initial_event_gate.lock().await;
+        // Cancel can finish its durable update while this sender was awaiting
+        // identity or publication. Never forward an older Running snapshot
+        // after a terminal snapshot, or launch a producer for that owner.
+        let terminal = if let Some(snapshot) = initial_snapshot.as_ref() {
+            self.durable_turns
+                .load(&turn.session_id, snapshot.turn_id)
+                .map_err(Self::map_durable_turn_error)
+                .map(|checkpoint| checkpoint.state.is_some_and(|state| state.is_terminal()))
+        } else {
+            Ok(false)
+        };
+        if turn.cancel.is_cancelled() || !matches!(terminal, Ok(false)) {
+            drop(initial_event_guard);
+            self.release_unspawned_turn(&turn).await;
+            return terminal.map(|_| ());
+        }
+        if let Some(snapshot) = initial_snapshot {
+            self.event_sink
+                .emit(ClientEvent::TurnRecoveryState { snapshot })
+                .await;
+        }
+        TurnEventEmitter::new(self.event_sink.clone())
+            .emit_turn_started(turn_id)
+            .await;
+        drop(initial_event_guard);
+        if turn.cancel.is_cancelled() {
+            self.release_unspawned_turn(&turn).await;
+            return Ok(());
+        }
 
         let orch = self.inner.orchestrator.clone();
         let sink = self.event_sink.clone();
@@ -7202,17 +7659,29 @@ impl MobileEngineHandle {
         prompt_mode: Option<PromptModeDto>,
         images: Vec<ImageRefDto>,
     ) -> Result<(), ClientError> {
-        let checkpoint = self
-            .durable_turns
-            .admit_queued_prompt(
-                session_id,
-                requested_turn_id,
-                original_client_turn_id,
-                text,
-                prompt_mode,
-                images,
-            )
-            .map_err(Self::map_durable_turn_error)?;
+        let checkpoint =
+            self.turn_admission
+                .with_allowed(session_id, original_client_turn_id, || {
+                    self.durable_turns
+                        .admit_queued_prompt(
+                            session_id,
+                            requested_turn_id,
+                            original_client_turn_id,
+                            text,
+                            prompt_mode,
+                            images,
+                        )
+                        .map_err(Self::map_durable_turn_error)
+                })?;
+        #[cfg(test)]
+        {
+            let gate = self
+                .queue_test_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            wait_for_turn_test_gate(gate, original_client_turn_id).await;
+        }
         enqueue_mobile_prompt_dispatch(&self.message_queue, session_id, &checkpoint).await;
         tracing::debug!(
             %session_id,
@@ -7479,15 +7948,45 @@ impl MobileEngineHandle {
         if matches!(&command, ClientCommand::ForkSession { .. }) {
             return self.submit_owned_transition(command).await;
         }
+        // Capture the originating session before a foreign executor can race
+        // the owned-runtime worker or a session transition. A specific cancel
+        // fences the same identity even if the send has not been polled yet.
+        let source_session = match &command {
+            ClientCommand::SendPrompt {
+                turn_id: Some(_), ..
+            }
+            | ClientCommand::RunSlashCommand {
+                turn_id: Some(_), ..
+            }
+            | ClientCommand::Cancel { turn_id: Some(_) } => Some(self.active_session_id()),
+            _ => None,
+        };
+        if let (
+            ClientCommand::Cancel {
+                turn_id: Some(turn_id),
+            },
+            Some(session_id),
+        ) = (&command, source_session.as_deref())
+        {
+            self.turn_admission.cancel(session_id, *turn_id);
+        }
         let handle = self
             .self_weak
             .upgrade()
             .ok_or_else(|| ClientError::Internal {
                 message: "mobile engine is shutting down".into(),
             })?;
-        let task = self
-            .runtime()
-            .spawn(async move { handle.submit_on_runtime(command).await });
+        #[cfg(test)]
+        let test_gate = self
+            .submit_test_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let task = self.runtime().spawn(async move {
+            #[cfg(test)]
+            wait_for_submit_test_gate(test_gate, &command).await;
+            handle.submit_on_runtime(command, source_session).await
+        });
         // Preserve cancellation when a foreign caller drops its Rust future.
         struct AbortCommand(tokio::task::AbortHandle);
         impl Drop for AbortCommand {
@@ -7523,7 +8022,11 @@ impl MobileEngineHandle {
         Ok(())
     }
 
-    async fn submit_impl(&self, command: ClientCommand) -> Result<(), ClientError> {
+    async fn submit_impl(
+        &self,
+        command: ClientCommand,
+        source_session: Option<String>,
+    ) -> Result<(), ClientError> {
         if self.firer_cfg.scheduler_controller {
             return Err(ClientError::Rejected {
                 message: "scheduler controller does not own a conversation".into(),
@@ -7539,6 +8042,25 @@ impl MobileEngineHandle {
             return self.submit_owned_transition(command).await;
         }
         let transition = self.loop_transition.clone().lock_owned().await;
+        if source_session
+            .as_deref()
+            .is_some_and(|source| source != self.active_session_id())
+        {
+            return Err(ClientError::Rejected {
+                message: "the session changed before turn admission".into(),
+            });
+        }
+        if let (
+            ClientCommand::SendPrompt {
+                turn_id: Some(turn_id),
+                ..
+            },
+            Some(session_id),
+        ) = (&command, source_session.as_deref())
+        {
+            self.turn_admission
+                .with_allowed(session_id, Some(*turn_id), || Ok(()))?;
+        }
         self.submit_impl_with_transition(command, transition).await
     }
 }
@@ -7674,7 +8196,7 @@ impl MobileEngineHandle {
             _ => current_id.clone(),
         };
         let gate = mobile_cron_session_gate(&self.session_cwd(), &gate_id);
-        let _scheduled_guard = gate.lock().await;
+        let _scheduled_guard = gate.lock_owned().await;
         // Only reload while idle. `resume_session_impl` hard-rejects with a turn
         // in flight, and this block runs before the command `match` — so failing
         // here would reject EVERY command (`Cancel` included) for the life of
@@ -8275,7 +8797,7 @@ impl MobileEngineHandle {
                 images,
                 turn_id,
             } => {
-                self.submit_slash_command(raw, images, turn_id, _transition)
+                self.submit_slash_command(raw, images, turn_id, _transition, _scheduled_guard)
                     .await
             }
 
@@ -9055,14 +9577,18 @@ impl MobileEngineHandle {
 }
 
 impl MobileEngineHandle {
-    async fn submit_on_runtime(&self, command: ClientCommand) -> Result<(), ClientError> {
+    async fn submit_on_runtime(
+        &self,
+        command: ClientCommand,
+        source_session: Option<String>,
+    ) -> Result<(), ClientError> {
         // A questionnaire parks work that can itself be holding the transition
         // lock (for example, a long-running workflow). Its answer is
         // connection-scoped and only resolves the broker's oneshot, so waiting
         // behind that lock turns the native sheet's submit spinner into a
         // deadlock. Resolve these commands before serializing session state.
         match command {
-            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
+            ClientCommand::Cancel { turn_id } => self.cancel_active_turn_for_session(turn_id, source_session.as_deref()).await,
             ClientCommand::PrepareSessionHandoff { request_id, target_mode } => {
                 let sink = self.connection_sink.clone();
                 self.handoffs
@@ -9239,7 +9765,7 @@ impl MobileEngineHandle {
             | ClientCommand::MediaControlResponse { .. } => Err(ClientError::Rejected {
                 message: "host-private media transport is not accepted by the mobile session command path".into(),
             }),
-            command => Box::pin(self.submit_impl(command)).await,
+            command => Box::pin(self.submit_impl(command, source_session)).await,
         }
     }
 

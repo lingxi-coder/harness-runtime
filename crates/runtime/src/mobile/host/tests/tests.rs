@@ -9,6 +9,8 @@ mod session_owner_tests;
 include!("../reasoning_preference_tests.rs");
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
+#[path = "cancel_admission_tests.rs"]
+mod cancel_admission_tests;
 #[path = "device_tools_tests.rs"]
 mod device_tools_tests;
 #[path = "prompt_suggestion_tests.rs"]
@@ -8516,9 +8518,28 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 })
             })
             .collect::<Vec<_>>();
-        assert_eq!(body_rows.len(), 2);
-        assert_ne!(body_rows[0].id, body_rows[1].id);
-        assert_ne!(body_rows[1].id, body_message_id);
+        assert_eq!(
+            body_rows.len(),
+            1,
+            "reinvocation projects only the current skill body; original {body_message_id}; bounded rows:\n{}",
+            bounded_request_rows_diagnostic(&calls[1].messages)
+        );
+        let new_body = body_rows[0];
+        assert_ne!(new_body.id, body_message_id);
+        assert!(new_body.is_meta);
+        assert_eq!(new_body.turn_companion, Some(Some(true)));
+        assert_eq!(new_body.text_utf16.as_deref(), Some(source_body_units.as_slice()));
+        assert!(!second_user_rows.iter().any(|row| row.id == body_message_id));
+        // Skill reinvocation excludes only the retired body from model context,
+        // not from the durable transcript; both distinct sources survive.
+        for body_id in [body_message_id, new_body.id] {
+            let uuid = body_id.as_uuid().to_string();
+            assert_eq!(transcript_uuid_count(&resumed_transcript, &uuid), 1);
+            assert_eq!(
+                transcript_user_text_units(&resumed_transcript, &uuid).as_deref(),
+                Some(source_body_units.as_slice())
+            );
+        }
         let second_old_upe_row = second_user_rows
             .iter()
             .find(|row| row.id == upe_message_id)
@@ -8572,7 +8593,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             "a new same-text send appends a fresh UPE row instead of deduplicating by text"
         );
         assert_eq!(
-            transcript_uuid_count(&resumed_transcript, &body_rows[1].id.as_uuid().to_string()),
+            transcript_uuid_count(&resumed_transcript, &new_body.id.as_uuid().to_string()),
             1
         );
     });
