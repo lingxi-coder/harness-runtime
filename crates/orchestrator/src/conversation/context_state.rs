@@ -8,8 +8,34 @@ use lingxi_core::host::orchestrator::{HandleError, OrchestratorHandle};
 use lingxi_core::host::session_context::{
     ContextBlockKind, ContextBlockManifest, ContextManifest, ConversationMode, SessionModeSnapshot,
 };
-use lingxi_core::types::ConversationMessage;
+use lingxi_core::types::{ConversationMessage, MessageId};
 use sha2::{Digest, Sha256};
+
+/// Identify a host Skill activation that belongs to another instruction epoch.
+/// User/tool text is never classified as an instruction from its contents.
+pub(crate) fn obsolete_skill_activation(
+    message: &ConversationMessage,
+    epoch: u64,
+) -> Option<MessageId> {
+    match message {
+        ConversationMessage::User {
+            id,
+            origin: Some(origin),
+            ..
+        } if origin.string_at("/type") == Some("skill_activation") => {
+            let marker = origin
+                .to_json_string()
+                .ok()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
+            let previous_epoch = marker
+                .as_ref()
+                .and_then(|value| value.get("context_epoch"))
+                .and_then(serde_json::Value::as_u64);
+            (previous_epoch != Some(epoch)).then_some(*id)
+        }
+        _ => None,
+    }
+}
 
 /// A query and its detached profile-admission transaction jointly own this
 /// lease. Dropping the caller cannot release the turn gate before admission
@@ -517,24 +543,7 @@ impl ConversationOrchestrator {
             let obsolete = session
                 .history
                 .iter()
-                .filter_map(|message| match message {
-                    ConversationMessage::User {
-                        id,
-                        origin: Some(origin),
-                        ..
-                    } if origin.string_at("/type") == Some("skill_activation") => {
-                        let marker = origin
-                            .to_json_string()
-                            .ok()
-                            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
-                        let previous_epoch = marker
-                            .as_ref()
-                            .and_then(|value| value.get("context_epoch"))
-                            .and_then(serde_json::Value::as_u64);
-                        (previous_epoch != Some(epoch)).then_some(*id)
-                    }
-                    _ => None,
-                })
+                .filter_map(|message| obsolete_skill_activation(message, epoch))
                 .collect::<Vec<_>>();
             session.model_context_excluded_messages.extend(obsolete);
         }

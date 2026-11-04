@@ -143,6 +143,7 @@ async fn dispatch_test_orchestrator(
         root.to_path_buf(),
     )
     .with_session_id(session_id)
+    .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
     .with_jsonl_writer(writer)
     .with_persistent_app_chat()
     .with_persistent_chat_context(orchestrator::PersistentChatContextConfig {
@@ -158,6 +159,7 @@ async fn dispatch_test_orchestrator(
     })
     .unwrap();
     let orch = ConversationOrchestrator::into_shared(orch);
+    orch.initialize_conversation_mode().await.unwrap();
     *control.chat_orchestrator.lock().unwrap() = Some(orch.clone());
     host.active
         .lock()

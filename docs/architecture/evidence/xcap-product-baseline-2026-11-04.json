@@ -1,0 +1,51 @@
+{
+  "product_commit": "17d987cdd1ad05a4072a3e445f6b3c020a28758f",
+  "harness_revision": "ae5a65b1f4816cd26a06d462573ebc9841f14f96",
+  "command": "cargo metadata --format-version 1 --all-features --locked --frozen",
+  "raw_sha256": "6a77b416f67387d7fb385648e754237bb13fdc2e0f9ff84aca4445515102e811",
+  "package_count": 1052,
+  "xcap": {
+    "name": "xcap",
+    "version": "0.5.2",
+    "id": "registry+https://github.com/rust-lang/crates.io-index#xcap@0.5.2",
+    "source": "registry+https://github.com/rust-lang/crates.io-index"
+  },
+  "xcap_parents": [
+    {
+      "package": "platform-macos-computer-control",
+      "version": "0.12.0",
+      "package_id": "git+https://github.com/lingxi-coder/harness-runtime.git?rev=ae5a65b1f4816cd26a06d462573ebc9841f14f96#platform-macos-computer-control@0.12.0",
+      "dependency": {
+        "name": "xcap",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#xcap@0.5.2",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": "cfg(target_os = \"macos\")"
+          }
+        ]
+      }
+    }
+  ],
+  "xcap_zbus_edges": [
+    {
+      "name": "zbus",
+      "pkg": "registry+https://github.com/rust-lang/crates.io-index#zbus@5.18.0",
+      "dep_kinds": [
+        {
+          "kind": null,
+          "target": "cfg(target_os = \"linux\")"
+        }
+      ]
+    }
+  ],
+  "note": "This is a reduced extract of the all-target Product graph. Target conditions are on edges; their intersection is empty.",
+  "current_product_repeat": {
+    "product_commit": "5ce972b8c1a547f54808114681327cb731155fcf",
+    "cwd": "/Users/luolingfeng/lingxi/worktrees/media-round5-crypto-audit-20261104",
+    "command": "cargo metadata --format-version 1 --all-features --locked --frozen",
+    "raw_metadata_path": "/private/tmp/round5-crypto-metadata-5ce972.json",
+    "raw_sha256": "6a77b416f67387d7fb385648e754237bb13fdc2e0f9ff84aca4445515102e811",
+    "result": "1052 packages; byte-identical to the 17d987 metadata output"
+  }
+}
