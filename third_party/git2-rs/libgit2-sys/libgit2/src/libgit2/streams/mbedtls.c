@@ -432,6 +432,7 @@ int git_mbedtls_stream_new(
 	const char *port)
 {
 	git_stream *stream;
+	git_error *last_error = NULL;
 	int error;
 
 	GIT_ASSERT_ARG(out);
@@ -442,8 +443,14 @@ int git_mbedtls_stream_new(
 		return error;
 
 	if ((error = mbedtls_stream_wrap(out, stream, host, 1)) < 0) {
+		if (git_error_exists())
+			git_error_save(&last_error);
 		git_stream_close(stream);
 		git_stream_free(stream);
+		if (last_error)
+			git_error_restore(last_error);
+		else
+			git_error_clear();
 	}
 
 	return error;

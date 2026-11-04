@@ -56,20 +56,31 @@ struct git_stream {
 #define GIT_ERROR_SSL 1
 #define GIT_ASSERT_ARG(x) assert(x)
 #define GIT_ERROR_CHECK_ALLOC(x) do { if (!(x)) return -1; } while (0)
-#define git_error_set(...) ((void)0)
+#define git_error_set(klass, ...) do { if (emit_failure_diagnostic) set_diagnostic(klass, "TLS setup"); } while (0)
 static int attempts, fail_at, outstanding, closes, frees, setup_failure, socket_failure;
-static int teardown_failure, close_failure;
+static int teardown_failure, close_failure, free_overwrites, emit_failure_diagnostic;
+static bool diagnostic_present;
 static git_error diagnostic, saved_error;
 static void set_diagnostic(int klass, const char *message) {
- diagnostic.klass = klass; diagnostic.message = message;
+ diagnostic.klass = klass; diagnostic.message = message; diagnostic_present = true;
 }
 static int git_error_save(git_error **out) {
+ assert(diagnostic_present);
  saved_error = diagnostic; *out = &saved_error; return 0;
 }
-static int git_error_restore(git_error *error) { diagnostic = *error; return 0; }
+static int git_error_restore(git_error *error) {
+ diagnostic = *error; diagnostic_present = true; return 0;
+}
+static bool git_error_exists(void) { return diagnostic_present; }
+static void git_error_clear(void) {
+ diagnostic.klass = 0; diagnostic.message = NULL; diagnostic_present = false;
+}
 static int mbedtls_config;
 static void *allocate(size_t n) {
- if (++attempts == fail_at) return NULL;
+ if (++attempts == fail_at) {
+  if (emit_failure_diagnostic) set_diagnostic(3, "allocation");
+  return NULL;
+ }
  void *p = calloc(1, n);
  assert(p); ++outstanding; return p;
 }
@@ -90,7 +101,11 @@ static int socket_close(git_stream *s) {
  if (close_failure) set_diagnostic(2, "socket close");
  return close_failure;
 }
-static void socket_free(git_stream *s) { assert(s); ++frees; free(s); }
+static void socket_free(git_stream *s) {
+ assert(s); ++frees;
+ if (free_overwrites) set_diagnostic(4, "socket free");
+ free(s);
+}
 static int git_stream_close(git_stream *s) { return s->close(s); }
 static void git_stream_free(git_stream *s) { if (s) s->free(s); }
 static git_stream *socket_create(void) {
@@ -123,8 +138,8 @@ CASES = r'''
 static void reset(int allocation, int setup) {
  assert(outstanding == 0);
  attempts = closes = frees = socket_failure = 0;
- teardown_failure = close_failure = 0;
- diagnostic.klass = 0; diagnostic.message = NULL;
+ teardown_failure = close_failure = free_overwrites = 0;
+ emit_failure_diagnostic = 1; git_error_clear();
  fail_at = allocation; setup_failure = setup;
 }
 int main(void) {
@@ -159,6 +174,20 @@ int main(void) {
  reset(0, 0); socket_failure = 1; out = &sentinel;
  assert(git_mbedtls_stream_new(&out, "example.test", "443") == -7);
  assert(out == &sentinel && closes == 0 && frees == 0 && outstanding == 0);
+ /* Failure cleanup may invoke a registered socket that changes the error. */
+ for (int mode = 0; mode <= 2; ++mode) {
+  reset(mode == 2 ? 0 : 3, mode == 2); out = &sentinel;
+  emit_failure_diagnostic = mode != 1;
+  close_failure = -7; free_overwrites = 1;
+  assert(git_mbedtls_stream_new(&out, "example.test", "443") == -1);
+  assert(out == &sentinel && closes == 1 && frees == 1 && outstanding == 0);
+  if (mode == 1) {
+   assert(!diagnostic_present);
+  } else {
+   assert(diagnostic_present && diagnostic.klass == (mode == 2 ? GIT_ERROR_SSL : 3));
+   assert(strcmp(diagnostic.message, mode == 2 ? "TLS setup" : "allocation") == 0);
+  }
+ }
  /* TLS shutdown failure must still release an owned socket. Preserve the
     TLS error when the socket's close reports a second error. */
  for (int owned = 0; owned <= 1; ++owned) {
