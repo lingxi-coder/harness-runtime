@@ -31,7 +31,8 @@ from pathlib import Path
 SUMMARY_PREFIX = "CRITICAL: Respond with TEXT ONLY."
 FOCUS = "Preserve PRIORITY_MARKER_42 and the protocol event fields."
 EMPTY_ERROR = "Error during compaction: summarization produced empty response"
-SCENARIOS = ("success", "empty", "too-few", "no-messages", "whitespace", "prompt-too-long", "multiple-text-blocks", "summary-reask")
+SCENARIOS = ("success", "empty", "too-few", "no-messages", "whitespace", "prompt-too-long")
+LATEST_SCENARIOS = ("multiple-text-blocks", "summary-reask")
 
 
 def dump(path: Path, value: object) -> None:
@@ -163,7 +164,7 @@ def check_capture(scenario: str, events: list[dict], requests: list[dict], expec
     statuses = [event for event in events if event.get("subtype") == "status"]
     boundaries = [event for event in events if event.get("subtype") == "compact_boundary"]
     errors = [event["compact_error"] for event in statuses if "compact_error" in event]
-    short_history_compacts = scenario == "too-few" and expected_version == "2.1.286"
+    short_history_compacts = scenario == "too-few" and expected_version in ("2.1.286", "2.1.318")
     if scenario in ("success", "prompt-too-long", "multiple-text-blocks", "summary-reask") or short_history_compacts:
         assert len(boundaries) == 1, "Expected one successful compact boundary"
         assert any(event.get("compact_result") == "success" for event in statuses)
@@ -306,7 +307,7 @@ def main() -> None:
     parser.add_argument("binary", type=Path)
     parser.add_argument("--output", required=True, type=Path, help="New output directory (usually under /tmp)")
     parser.add_argument("--expected-version", choices=("2.1.261", "2.1.286", "2.1.318"), default="2.1.261")
-    parser.add_argument("--scenario", choices=("all",) + SCENARIOS, default="all")
+    parser.add_argument("--scenario", choices=("all",) + SCENARIOS + LATEST_SCENARIOS, default="all")
     parser.add_argument("--timeout", type=float, default=45, help="Seconds per scenario")
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -322,7 +323,9 @@ def main() -> None:
     ).stdout.strip()
     if not re.match(rf"^{re.escape(args.expected_version)}(?:\s|$)", version):
         raise RuntimeError(f"Expected Claude Code {args.expected_version}; got {version!r}")
-    scenarios = SCENARIOS if args.scenario == "all" else (args.scenario,)
+    if args.scenario in LATEST_SCENARIOS and args.expected_version != "2.1.318":
+        parser.error("The selected scenario requires Claude Code 2.1.318")
+    scenarios = SCENARIOS + (LATEST_SCENARIOS if args.expected_version == "2.1.318" else ()) if args.scenario == "all" else (args.scenario,)
     with binary.open("rb") as source:
         binary_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
     reports = []

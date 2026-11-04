@@ -2677,6 +2677,8 @@ mod tests {
                     text: "must not execute".into(),
                     images: Vec::new(),
                     turn_id: Some(42),
+                    prompt_mode: None,
+                    visualization_context: None,
                 },
             )
             .await;

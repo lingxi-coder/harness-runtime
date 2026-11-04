@@ -1321,7 +1321,7 @@ mod tests {
         );
     }
     #[test]
-    fn compact_prompt_and_summary_format_match_official_318_bytes() {
+    fn compact_prompt_matches_official_318_bytes_plus_explicit_host_provenance() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../tests/fixtures/claude_2_1_318_compact.json"
         ))
@@ -1332,9 +1332,13 @@ mod tests {
             fixture["basePrompt"].as_str().unwrap().as_bytes()
         );
         for case in fixture["prompts"].as_array().unwrap() {
+            let native = case["expected"].as_str().unwrap();
+            let native_body = native.strip_suffix(NO_TOOLS_TRAILER).unwrap();
+            let expected =
+                format!("{native_body}{COMPACT_SUMMARY_PROVENANCE_GUIDANCE}{NO_TOOLS_TRAILER}");
             assert_eq!(
                 get_compact_prompt(case["custom"].as_str()).as_bytes(),
-                case["expected"].as_str().unwrap().as_bytes()
+                expected.as_bytes()
             );
         }
         for case in fixture["summaries"].as_array().unwrap() {
