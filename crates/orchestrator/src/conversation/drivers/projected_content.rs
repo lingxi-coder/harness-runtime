@@ -411,9 +411,11 @@ mod tests {
                 root.path().to_path_buf(),
             )
             .with_session_id(session_id)
+            .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
             .with_jsonl_writer(writer.clone())
             .with_persistent_app_chat();
             let orch = crate::ConversationOrchestrator::into_shared(orch);
+            orch.initialize_conversation_mode().await.unwrap();
             assert!(!orch.config.bare);
             if streaming {
                 orch.run_turn_streaming_with_cancel(

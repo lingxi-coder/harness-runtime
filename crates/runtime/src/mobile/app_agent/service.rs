@@ -6942,6 +6942,14 @@ mod progress_tests {
                 .await
                 .unwrap(),
         );
+        writer
+            .initialize_fixed_session_mode(
+                &session_id.to_string(),
+                lingxi_core::host::session_context::ConversationMode::Chat,
+                0,
+            )
+            .await
+            .unwrap();
         let orchestrator = Arc::new(
             ConversationOrchestrator::new_side_chat(
                 OrchestratorConfig::default(),
@@ -6955,6 +6963,7 @@ mod progress_tests {
                 root.path().to_path_buf(),
             )
             .with_session_id(SessionId::from_uuid(session_id))
+            .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
             .with_jsonl_writer(writer.clone())
             .with_persistent_app_chat(),
         );
@@ -7734,6 +7743,14 @@ mod accepted_projection_tests {
                     .await
                     .unwrap(),
             );
+            writer
+                .initialize_fixed_session_mode(
+                    &session_id.as_uuid().to_string(),
+                    lingxi_core::host::session_context::ConversationMode::Chat,
+                    0,
+                )
+                .await
+                .unwrap();
             let api = Arc::new(MockApiClient::new(Vec::new()));
             let orchestrator = Arc::new(
                 ConversationOrchestrator::new_side_chat(
@@ -7748,6 +7765,7 @@ mod accepted_projection_tests {
                     root.path().to_path_buf(),
                 )
                 .with_session_id(session_id)
+                .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
                 .with_jsonl_writer(writer.clone())
                 .with_persistent_app_chat(),
             );

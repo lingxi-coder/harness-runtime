@@ -236,8 +236,10 @@ mod tests {
             root.path().to_path_buf(),
         )
         .with_session_id(session_id)
+        .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
         .with_persistent_app_chat()
         .with_jsonl_writer(writer.clone());
+        orch.initialize_conversation_mode().await.unwrap();
         (root, Arc::new(orch), writer)
     }
 
@@ -390,6 +392,7 @@ mod tests {
             root.path().to_path_buf(),
         )
         .with_session_id(SessionId::from_uuid(captured.session_id()))
+        .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
         .with_jsonl_writer(reopened)
         .with_persistent_app_chat();
         let restored = ConversationOrchestrator::into_shared(restored);
@@ -547,6 +550,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strict_replay_rejects_invalid_or_repeated_fixed_mode_headers() {
+        for case in ["missing", "late", "duplicate", "wrong-owner", "extra-field"] {
+            let (_root, orch, writer) = fixture().await;
+            orch.append_external_history_message(ConversationMessage::user(
+                MessageId::new(),
+                "question".into(),
+            ))
+            .await;
+            // Inject before the first checkpoint, so this exercises replay of
+            // untrusted bytes instead of the committed-prefix fence.
+            let source = std::fs::read_to_string(writer.active_path()).unwrap();
+            let (header, messages) = source.split_once('\n').unwrap();
+            let invalid = match case {
+                "missing" => messages.to_owned(),
+                "late" => format!("{messages}{header}\n"),
+                "duplicate" => format!("{source}{header}\n"),
+                "wrong-owner" => format!(
+                    "{}\n{messages}",
+                    serde_json::json!({
+                        "type": "fixed-session-mode", "sessionId": uuid::Uuid::new_v4(),
+                        "sessionMode": "chat", "instructionEpoch": 0,
+                    })
+                ),
+                "extra-field" => format!(
+                    "{}\n{messages}",
+                    serde_json::json!({
+                        "type": "fixed-session-mode", "sessionId": orch.current_session_id().await.as_uuid(),
+                        "sessionMode": "chat", "instructionEpoch": 0, "extra": true,
+                    })
+                ),
+                _ => unreachable!(),
+            };
+            // Keep the pinned inode while injecting an untrusted transcript.
+            std::fs::write(writer.active_path(), invalid).unwrap();
+            let captured = writer.capture_persistent_chat_snapshot(true).await.unwrap();
+            assert!(
+                ConversationOrchestrator::replay_persistent_chat_snapshot(&captured).is_err(),
+                "accepted invalid fixed mode: {case}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn checkpoint_waits_for_the_turn_boundary() {
         let (_root, orch, _writer) = fixture().await;
         orch.append_external_history_message(ConversationMessage::user(
@@ -662,6 +708,10 @@ impl ConversationOrchestrator {
             return Err(UNAVAILABLE.into());
         }
         let session_id = captured.session_id().to_string();
+        // A current App Chat has exactly one closed-schema fixed profile as its
+        // first record. Validate it before admitting the metadata type below.
+        session::JsonlWriter::fixed_session_profile_from_source(source, &session_id)
+            .map_err(|_| UNAVAILABLE)?;
         let loaded = session::jsonl::route_lines(source);
         if loaded.malformed_line_count != 0 || loaded.messages_in_order.is_empty() {
             return Err(UNAVAILABLE.into());
@@ -678,6 +728,7 @@ impl ConversationOrchestrator {
                         "user"
                             | "assistant"
                             | "attachment"
+                            | "fixed-session-mode"
                             | "custom-title"
                             | "ai-title"
                             | "last-prompt"
