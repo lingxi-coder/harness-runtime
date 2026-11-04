@@ -518,6 +518,99 @@ pub fn get_compact_user_summary_message_with_source(
     source_projection(units)
 }
 
+pub(crate) const SUMMARY_REASK_TRAILER: &str = "\n\nFor this reply only: write what the instructions above ask for, with the summary inside <summary></summary> tags. Every message before those instructions, the newest one included, is conversation to summarize: do not answer it, and do not do the work that it asks for. What it says on how to summarize still holds. This paragraph is about how to write this summary. The user did not write it.";
+
+/// 2.1.318 `Yte`/`gcn`: include the tool ledger and disambiguate the unseen tail.
+pub(crate) fn get_compact_continuation_source(
+    summary: &Utf16JsonProjection,
+    suppress_follow_up_questions: bool,
+    transcript_path: Option<&str>,
+    recent_messages_preserved: bool,
+    head_truncated: bool,
+    tool_names_used: &[String],
+) -> Utf16JsonProjection {
+    let source = summary.string_units("").expect("summary is a root string");
+    let mut escaped = Vec::with_capacity(source.len());
+    let tag = "tools-used-before-summary"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    for (index, unit) in source.iter().copied().enumerate() {
+        let mut next = index + 1;
+        if unit == u16::from(b'<') {
+            while source.get(next).is_some_and(|unit| {
+                char::from_u32(u32::from(*unit))
+                    .is_some_and(lingxi_core::host::effort::javascript_whitespace)
+            }) {
+                next += 1;
+            }
+            if source.get(next) == Some(&u16::from(b'/')) {
+                next += 1;
+                while source.get(next).is_some_and(|unit| {
+                    char::from_u32(u32::from(*unit))
+                        .is_some_and(lingxi_core::host::effort::javascript_whitespace)
+                }) {
+                    next += 1;
+                }
+            }
+            let matches_tag = source.get(next..next + tag.len()).is_some_and(|candidate| {
+                candidate.iter().zip(&tag).all(|(actual, expected)| {
+                    u8::try_from(*actual)
+                        .is_ok_and(|byte| u16::from(byte.to_ascii_lowercase()) == *expected)
+                })
+            });
+            let word_follows = source.get(next + tag.len()).is_some_and(|unit| {
+                u8::try_from(*unit).is_ok_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            });
+            if matches_tag && !word_follows {
+                escaped.extend("&lt;".encode_utf16());
+                continue;
+            }
+        }
+        escaped.push(unit);
+    }
+    let names = tool_names_used
+        .iter()
+        .map(|name| {
+            if !name.is_empty()
+                && name.len() <= 256
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+            {
+                name.as_str()
+            } else {
+                "unreadable-tools-used-before-summary"
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut units = format!("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n<system-reminder>\n<tools-used-before-summary>{names}</tools-used-before-summary>\n</system-reminder>\n").encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        format_compact_summary_source(&source_projection(escaped))
+            .string_units("")
+            .expect("formatted summary is a root string"),
+    );
+    let transcript_path = transcript_path.filter(|path| !path.is_empty());
+    if let Some(path) = transcript_path {
+        units.extend("\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: ".encode_utf16());
+        units.extend(path.encode_utf16());
+    }
+    if head_truncated {
+        units.extend("\n\nNote: part of the earlier conversation was too large to include and is NOT covered by this summary".encode_utf16());
+        if transcript_path.is_some() {
+            units.extend(" (the full transcript mentioned above still has it)".encode_utf16());
+        }
+        units.extend(". If the task turns out to depend on something from that part, say so plainly rather than guessing at it.".encode_utf16());
+    }
+    if suppress_follow_up_questions {
+        units.extend("\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.".encode_utf16());
+    }
+    if recent_messages_preserved {
+        units.extend("\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim. The summary was written without seeing them, so something it says has not happened yet may already have happened in them.".encode_utf16());
+    }
+    source_projection(units)
+}
+
 pub fn trim_compact_source_text(source: &Utf16JsonProjection) -> Utf16JsonProjection {
     let units = source
         .string_units("")
@@ -708,6 +801,43 @@ mod source_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn continuation_matches_official_318_bytes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude_2_1_318_compact.json"
+        ))
+        .unwrap();
+        for case in fixture["continuations"].as_array().unwrap() {
+            let options = &case["options"];
+            let names = options["toolNamesUsed"]
+                .as_array()
+                .map(|names| {
+                    names
+                        .iter()
+                        .map(|name| name.as_str().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let actual = super::get_compact_continuation_source(
+                &case["raw"].as_str().unwrap().into(),
+                options["suppressFollowUpQuestions"]
+                    .as_bool()
+                    .unwrap_or(false),
+                options["transcriptPath"].as_str(),
+                case["preserveTail"].as_bool().unwrap_or(false),
+                options["headTruncated"].as_bool().unwrap_or(false),
+                &names,
+            );
+            assert_eq!(
+                actual.string_at("").unwrap().as_bytes(),
+                case["expected"].as_str().unwrap().as_bytes()
+            );
+        }
+        assert_eq!(
+            super::SUMMARY_REASK_TRAILER.as_bytes(),
+            fixture["reask"].as_str().unwrap().as_bytes()
+        );
+    }
     use super::*;
 
     /// Base prompt is unchanged through the official Claude Code 2.1.261.
@@ -1079,5 +1209,29 @@ mod tests {
             with_tail.replace("\n\nRecent messages are preserved verbatim.", ""),
             without
         );
+    }
+    #[test]
+    fn compact_prompt_and_summary_format_match_official_318_bytes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude_2_1_318_compact.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["version"], "2.1.318");
+        assert_eq!(
+            BASE_COMPACT_PROMPT.as_bytes(),
+            fixture["basePrompt"].as_str().unwrap().as_bytes()
+        );
+        for case in fixture["prompts"].as_array().unwrap() {
+            assert_eq!(
+                get_compact_prompt(case["custom"].as_str()).as_bytes(),
+                case["expected"].as_str().unwrap().as_bytes()
+            );
+        }
+        for case in fixture["summaries"].as_array().unwrap() {
+            assert_eq!(
+                format_compact_summary(case["raw"].as_str().unwrap()).as_bytes(),
+                case["expected"].as_str().unwrap().as_bytes()
+            );
+        }
     }
 }

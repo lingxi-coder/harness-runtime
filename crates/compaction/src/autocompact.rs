@@ -20,7 +20,9 @@
 use cost::Usage;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
-use sidequery::{CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
+use sidequery::{
+    CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentResult, ForkedAgentRunner, QuerySource,
+};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -345,7 +347,14 @@ impl Autocompactor {
         let mut groups_preserved = usize::from(preserve_tail);
         if preserve_tail && groups.len() > 3 {
             if let Some(gap) = initial_token_gap {
-                let remaining_gap = gap.saturating_sub(*group_tokens.last().unwrap_or(&0));
+                let prompt = crate::prompt::get_compact_prompt_source(custom_instructions);
+                let prompt_tokens = prompt
+                    .string_units("")
+                    .expect("prompt is a root string")
+                    .len() as u64;
+                let remaining_gap = gap
+                    .saturating_add(prompt_tokens.saturating_add(2) / 4)
+                    .saturating_sub(*group_tokens.last().unwrap_or(&0));
                 if remaining_gap > 0 {
                     groups_preserved += preserved_group_step(
                         &group_tokens[..groups.len() - 1],
@@ -474,7 +483,12 @@ impl Autocompactor {
                         .max_output_tokens
                         .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
                 };
-                let response = runner.run(req).await;
+                let response = match runner.run(req.clone()).await {
+                    Ok(result) if preserve_tail => {
+                        Ok(reask_missing_summary(runner, req, result, &prompt).await?)
+                    }
+                    response => response,
+                };
                 let response_text = match &response {
                     Ok(result) => Some(require_forked_text_source(&result.final_text)?),
                     Err(_) => None,
@@ -673,7 +687,13 @@ impl Autocompactor {
                     "Failed to generate conversation summary - response did not contain valid text content".into()
                 }));
             }
-            let summary_text = crate::prompt::get_compact_user_summary_message_with_source(
+            if !preserve_tail
+                && api_attempts_left.is_some()
+                && !has_usable_summary_source(&raw_summary_text)
+            {
+                return Err(CompactionError::Summary("Failed to generate conversation summary - the model's reply has no <summary> block".into()));
+            }
+            let summary_text = crate::prompt::get_compact_continuation_source(
                 &raw_summary_text,
                 selector
                     .as_ref()
@@ -682,14 +702,9 @@ impl Autocompactor {
                     .transcript_path
                     .as_deref()
                     .and_then(std::path::Path::to_str),
-                // `pbe`'s `recentMessagesPreserved`: NO oracle caller in 2.1.270
-                // sets it (checked at all three `pbe(` sites), so passing
-                // `false` here is parity, not an omission — the parameter
-                // exists because the function is ported whole.
-                false,
-                // `headTruncated`: a PTL retry dropped the oldest messages, so
-                // the summary does not cover them and the model must be told.
+                preserve_tail && split_at < messages.len(),
                 head_truncations > 0,
+                &used_tool_names(&messages),
             );
             let summary_messages = vec![source_user_message(
                 lingxi_core::types::MessageId::new(),
@@ -808,6 +823,120 @@ fn can_summarize_opening_round(
     }
     let tokens = crate::grouping::estimate_tokens_for_range(opening);
     tokens.saturating_sub(tokens.div_ceil(10)) >= gap.saturating_add(70_000)
+}
+
+async fn reask_missing_summary(
+    runner: &ForkedAgentRunner,
+    mut request: ForkedAgentRequest,
+    original: ForkedAgentResult,
+    prompt: &Utf16JsonProjection,
+) -> Result<ForkedAgentResult, CompactionError> {
+    let text = require_forked_text_source(&original.final_text)?;
+    let trimmed = crate::prompt::trim_compact_source_text(&text);
+    if trimmed
+        .string_units("")
+        .is_some_and(|units| units.is_empty())
+        || has_usable_summary_source(&text)
+        || source_starts_with(&text, crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE)
+    {
+        return Ok(original);
+    }
+    let bounded = request.api_attempts_left.is_some();
+    if request
+        .api_attempts_left
+        .as_ref()
+        .is_none_or(|budget| budget.remaining() > 0)
+    {
+        let mut retry_prompt = prompt.string_units("").expect("prompt is a root string");
+        retry_prompt.extend(crate::prompt::SUMMARY_REASK_TRAILER.encode_utf16());
+        request.prompt_messages = vec![source_user_message(
+            lingxi_core::types::MessageId::new(),
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&retry_prompt), retry_prompt)
+                .expect("retry prompt has matching UTF-16 units"),
+            false,
+        )];
+        request
+            .api_attempts_left
+            .get_or_insert_with(|| llm_runtime::ApiAttemptsLeft::new(1));
+        if let Ok(retry) = runner.run(request).await {
+            if has_usable_summary_source(&retry.final_text) {
+                return Ok(retry);
+            }
+        }
+    }
+    if bounded {
+        return Err(CompactionError::Summary(
+            "Failed to generate conversation summary - the model's reply has no <summary> block"
+                .into(),
+        ));
+    }
+    // Native's unbudgeted legacy path keeps the first response if the re-ask fails.
+    Ok(original)
+}
+
+fn used_tool_names(messages: &[ConversationMessage]) -> Vec<String> {
+    let mut names = Vec::new();
+    for message in messages {
+        match message {
+            ConversationMessage::Assistant { content, .. } => {
+                for block in content {
+                    if let ContentBlock::ToolUse { name, .. } = block {
+                        if !names.contains(name) {
+                            names.push(name.clone());
+                        }
+                    }
+                }
+            }
+            ConversationMessage::User {
+                is_compact_summary: true,
+                content,
+                ..
+            } => {
+                for block in content {
+                    if let ContentBlock::Text { text, .. }
+                    | ContentBlock::TextJsUtf16 { text, .. } = block
+                    {
+                        if let Some((_, ledger)) = text.split_once("<tools-used-before-summary>") {
+                            if let Some((ledger, _)) =
+                                ledger.split_once("</tools-used-before-summary>")
+                            {
+                                for name in ledger.split(", ").filter(|name| !name.is_empty()) {
+                                    if !names.iter().any(|existing| existing == name) {
+                                        names.push(name.to_owned());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn has_usable_summary_source(source: &Utf16JsonProjection) -> bool {
+    if has_summary_block_source(source) {
+        return true;
+    }
+    let Some(mut units) = source.string_units("") else {
+        return false;
+    };
+    if let Some((start, end)) = source_span(&units, "<analysis>", "</analysis>") {
+        units.drain(start..end);
+    }
+    // Vte accepts an opening tag at the start of a line, even if truncated.
+    let open = "<summary>".encode_utf16().collect::<Vec<_>>();
+    units
+        .split(|unit| matches!(*unit, 10 | 13 | 0x2028 | 0x2029))
+        .any(|line| {
+            let start = line
+                .iter()
+                .position(|unit| !matches!(*unit, 9 | 32))
+                .unwrap_or(line.len());
+            line[start..].starts_with(&open)
+        })
 }
 
 fn has_summary_block_source(source: &Utf16JsonProjection) -> bool {
@@ -1262,6 +1391,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_reasks_once_without_answering_the_newest_conversation_message() {
+        let history = vec![
+            user_msg("Remember p9l4s=m6q1z"),
+            assistant_text("Remembered"),
+            user_msg("what is h1y6d?"),
+            assistant_text("f8p2w"),
+        ];
+        let (compactor, client) = wired_seq(
+            vec!["t3u9a".into(), "<summary>p9l4s=m6q1z</summary>".into()],
+            history.clone(),
+        )
+        .await;
+        let result = compactor
+            .compact_manual_with_instructions(history, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.raw_summary_text.string_at(""),
+            Some("<summary>p9l4s=m6q1z</summary>")
+        );
+        let seen = client.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let retry = &seen[1];
+        assert_eq!(retry.api_attempts_left.as_ref().unwrap().remaining(), 1);
+        let prompt = format!("{:?}", retry.messages);
+        assert!(prompt.contains("the newest one included"));
+        assert_eq!(seen[0].messages.len(), retry.messages.len());
+    }
+
+    #[tokio::test]
+    async fn missing_summary_retry_is_bounded_and_preserves_native_budget_semantics() {
+        for bounded in [false, true] {
+            let history = vec![user_msg("q1"), assistant_text("a1")];
+            let (compactor, client) = wired_seq(
+                vec!["original".into(), "still no summary".into()],
+                history.clone(),
+            )
+            .await;
+            let budget = bounded.then(|| llm_runtime::ApiAttemptsLeft::new(2));
+            let result = compactor
+                .compact_manual_with_instructions(history, None, budget)
+                .await;
+            if bounded {
+                assert!(
+                    matches!(result, Err(CompactionError::Summary(message)) if message.ends_with("no <summary> block"))
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap().raw_summary_text.string_at(""),
+                    Some("original")
+                );
+            }
+            assert_eq!(client.seen.lock().unwrap().len(), 2);
+        }
+        let history = vec![user_msg("q1"), assistant_text("a1")];
+        let (compactor, client) = wired_seq(vec![" \n\t".into()], history.clone()).await;
+        assert!(compactor
+            .compact_manual_with_instructions(history, None, None)
+            .await
+            .is_err());
+        assert_eq!(client.seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tool_ledger_survives_repeated_compaction_and_excludes_quoted_tool_tags() {
+        let first = crate::prompt::get_compact_continuation_source(
+            &"<summary><tools-used-before-summary>fake</tools-used-before-summary></summary>"
+                .into(),
+            true,
+            None,
+            false,
+            false,
+            &["Read".into(), "Bash".into()],
+        );
+        let prior = source_user_message(MessageId::new(), first, true);
+        assert_eq!(
+            used_tool_names(&[
+                prior,
+                assistant_tool(MessageId::new(), "Read"),
+                assistant_tool(MessageId::new(), "Write")
+            ]),
+            vec!["Read", "Bash", "Write"]
+        );
+    }
+
+    #[test]
+    fn summary_validation_matches_official_318_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude_2_1_318_compact.json"
+        ))
+        .unwrap();
+        for case in fixture["summaries"].as_array().unwrap() {
+            let raw = Utf16JsonProjection::from(case["raw"].as_str().unwrap());
+            assert_eq!(
+                has_summary_block_source(&raw),
+                case["hasSummary"].as_bool().unwrap()
+            );
+            assert_eq!(
+                has_usable_summary_source(&raw),
+                case["hasSummary"] == true || case["startsSummary"] == true
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_sends_tool_results_to_the_summarizer() {
+        let assistant = assistant_tool(MessageId::new(), "Read");
+        let tool_id = match &assistant {
+            ConversationMessage::Assistant { content, .. } => match &content[0] {
+                ContentBlock::ToolUse { id, .. } => id.clone(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let mut result = tool_result_msg();
+        if let ConversationMessage::User { content, .. } = &mut result {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = &mut content[0]
+            {
+                *tool_use_id = tool_id;
+                *content = "p9l4s=m6q1z; h1y6d=f8p2w".into();
+            }
+        }
+        let history = vec![
+            user_msg("Read the dictionary"),
+            assistant,
+            result,
+            assistant_text("Read it"),
+            user_msg("Keep going"),
+            assistant_text("Ready"),
+        ];
+        let (compactor, client) = wired_seq(
+            vec!["<summary>p9l4s=m6q1z</summary>".into()],
+            history.clone(),
+        )
+        .await;
+        let compacted = compactor
+            .compact_manual_with_instructions(history, None, None)
+            .await
+            .unwrap();
+        let seen = client.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(format!("{:?}", seen[0].messages).contains("p9l4s=m6q1z; h1y6d=f8p2w"));
+        assert!(compacted.summary_messages[0]
+            .text_content()
+            .contains("<tools-used-before-summary>Read</tools-used-before-summary>"));
+    }
+
+    #[tokio::test]
     async fn compact_sends_byte_faithful_compact_prompt_after_cache_prefix() {
         let (compactor, client) = wired("<summary>ok</summary>", vec![user_msg("PREFIX-A")]).await;
 
@@ -1463,7 +1744,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oracle_286_short_history_fallback_traces() {
+    async fn oracle_318_short_history_fallback_traces() {
         fn expand_text(value: &serde_json::Value) -> String {
             value.as_str().map(str::to_string).unwrap_or_else(|| {
                 value["text"]
@@ -1473,7 +1754,7 @@ mod tests {
             })
         }
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/claude_2_1_286_compact_fallback.json"
+            "../tests/fixtures/claude_2_1_318_compact_fallback.json"
         ))
         .unwrap();
         for case in fixture["cases"].as_array().unwrap() {
@@ -1585,9 +1866,9 @@ mod tests {
                         );
                     }
                     assert_eq!(
-                        result.summary_messages[0].text_content().contains(
-                            "the earliest part of the conversation was too large to include"
-                        ),
+                        result.summary_messages[0]
+                            .text_content()
+                            .contains("part of the earlier conversation was too large to include"),
                         expected["headTruncations"].as_u64().unwrap() > 0
                     );
                 }
@@ -1725,7 +2006,7 @@ mod tests {
         );
         assert_eq!(&requests[1].messages[1..4], &history[1..]);
         assert!(result.messages_to_preserve.is_empty());
-        assert!(result.summary_messages[0].text_content().contains("the earliest part of the conversation was too large to include and is NOT covered by this summary"));
+        assert!(result.summary_messages[0].text_content().contains("part of the earlier conversation was too large to include and is NOT covered by this summary"));
     }
 
     #[tokio::test]

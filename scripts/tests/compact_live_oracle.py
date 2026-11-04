@@ -31,7 +31,7 @@ from pathlib import Path
 SUMMARY_PREFIX = "CRITICAL: Respond with TEXT ONLY."
 FOCUS = "Preserve PRIORITY_MARKER_42 and the protocol event fields."
 EMPTY_ERROR = "Error during compaction: summarization produced empty response"
-SCENARIOS = ("success", "empty", "too-few", "no-messages", "whitespace", "prompt-too-long")
+SCENARIOS = ("success", "empty", "too-few", "no-messages", "whitespace", "prompt-too-long", "multiple-text-blocks", "summary-reask")
 
 
 def dump(path: Path, value: object) -> None:
@@ -110,6 +110,11 @@ def make_handler(root: Path, scenario: str, requests: list[dict]):
             )
             if summary and scenario in ("empty", "whitespace"):
                 text = "" if scenario == "empty" else "\ufeff \n\t"
+            if summary and scenario == "summary-reask" and attempt == 1:
+                text = "t3u9a"
+            parts = [text]
+            if summary and scenario == "multiple-text-blocks":
+                parts = ["t3u9a", text, "later commentary"]
             message = {
                 "id": f"msg_mock_{len(requests)}", "type": "message", "role": "assistant",
                 "model": body["model"], "content": [], "stop_reason": None,
@@ -119,21 +124,24 @@ def make_handler(root: Path, scenario: str, requests: list[dict]):
                 },
             }
             if not body.get("stream"):
-                message.update(content=[{"type": "text", "text": text}], stop_reason="end_turn")
+                message.update(content=[{"type": "text", "text": part} for part in parts], stop_reason="end_turn")
                 message["usage"]["output_tokens"] = 35
                 self.respond_json(200, message)
                 return
-            events = [
-                {"type": "message_start", "message": message},
-                {"type": "content_block_start", "index": 0,
-                 "content_block": {"type": "text", "text": ""}},
-                {"type": "content_block_delta", "index": 0,
-                 "delta": {"type": "text_delta", "text": text}},
-                {"type": "content_block_stop", "index": 0},
+            events = [{"type": "message_start", "message": message}]
+            for index, part in enumerate(parts):
+                events.extend([
+                    {"type": "content_block_start", "index": index,
+                     "content_block": {"type": "text", "text": ""}},
+                    {"type": "content_block_delta", "index": index,
+                     "delta": {"type": "text_delta", "text": part}},
+                    {"type": "content_block_stop", "index": index},
+                ])
+            events.extend([
                 {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
                  "usage": {"output_tokens": 35}},
                 {"type": "message_stop"},
-            ]
+            ])
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -156,7 +164,7 @@ def check_capture(scenario: str, events: list[dict], requests: list[dict], expec
     boundaries = [event for event in events if event.get("subtype") == "compact_boundary"]
     errors = [event["compact_error"] for event in statuses if "compact_error" in event]
     short_history_compacts = scenario == "too-few" and expected_version == "2.1.286"
-    if scenario in ("success", "prompt-too-long") or short_history_compacts:
+    if scenario in ("success", "prompt-too-long", "multiple-text-blocks", "summary-reask") or short_history_compacts:
         assert len(boundaries) == 1, "Expected one successful compact boundary"
         assert any(event.get("compact_result") == "success" for event in statuses)
         summary_index = next(i for i, request in enumerate(requests) if is_summary(request["body"]))
@@ -164,6 +172,13 @@ def check_capture(scenario: str, events: list[dict], requests: list[dict], expec
         for key in ("tools", "thinking", "max_tokens", "context_management", "output_config"):
             assert summaries[0].get(key) == parent.get(key), f"Parent {key} changed during compact"
         assert "PRIORITY_MARKER_42" in json.dumps(requests[-1]["body"]["messages"])
+        if scenario in ("multiple-text-blocks", "summary-reask"):
+            resumed = json.dumps(requests[-1]["body"]["messages"])
+            assert "MOCK_SUMMARY_PAYLOAD" in resumed
+            assert "t3u9a" not in resumed and "later commentary" not in resumed
+        if scenario == "summary-reask":
+            assert len(summaries) == 2, "Expected exactly one summary re-ask"
+            assert "For this reply only:" in json.dumps(summaries[1])
         if short_history_compacts:
             assert len(summaries) == 1 and not errors
         if scenario == "prompt-too-long":
@@ -290,7 +305,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("binary", type=Path)
     parser.add_argument("--output", required=True, type=Path, help="New output directory (usually under /tmp)")
-    parser.add_argument("--expected-version", choices=("2.1.261", "2.1.286"), default="2.1.261")
+    parser.add_argument("--expected-version", choices=("2.1.261", "2.1.286", "2.1.318"), default="2.1.261")
     parser.add_argument("--scenario", choices=("all",) + SCENARIOS, default="all")
     parser.add_argument("--timeout", type=float, default=45, help="Seconds per scenario")
     args = parser.parse_args()

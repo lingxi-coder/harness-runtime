@@ -409,6 +409,7 @@ fn decode_fork_response(
     want_structured: bool,
     first_text_only: bool,
     separate_text_blocks: bool,
+    compaction: bool,
 ) -> ForkedSideQueryResponse {
     let request_id = resp
         .provider_metadata
@@ -430,12 +431,49 @@ fn decode_fork_response(
     if single_assistant {
         candidates.truncate(1);
     }
+    // Claude Code 2.1.318 lRe/uRe selects the last assistant with a summary,
+    // falling back to the last text assistant. Streaming emits one such row
+    // per completed text block; a non-streaming fallback has a single row.
+    let compact_text = if compaction && !single_assistant {
+        let summary_open = "<summary>".encode_utf16().collect::<Vec<_>>();
+        candidates
+            .iter()
+            .rev()
+            .find(|source| {
+                source.string_units("").is_some_and(|units| {
+                    units
+                        .windows(summary_open.len())
+                        .any(|part| part == summary_open.as_slice())
+                })
+            })
+            .or_else(|| candidates.last())
+            .and_then(trim_compact_candidate)
+    } else {
+        None
+    };
+    let mut response =
+        decode_response(resp, want_structured, first_text_only, separate_text_blocks);
+    if compaction && !single_assistant {
+        response.text = compact_text;
+    }
     ForkedSideQueryResponse {
         request_id,
         assistant_content,
         candidates,
-        response: decode_response(resp, want_structured, first_text_only, separate_text_blocks),
+        response,
     }
+}
+
+fn trim_compact_candidate(source: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    let units = source.string_units("")?;
+    let whitespace = |unit: &u16| {
+        char::from_u32(u32::from(*unit))
+            .is_some_and(lingxi_core::host::effort::javascript_whitespace)
+    };
+    let start = units.iter().position(|unit| !whitespace(unit))?;
+    let end = units.iter().rposition(|unit| !whitespace(unit))? + 1;
+    let units = units[start..end].to_vec();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).ok()
 }
 
 fn source_text_candidate(block: &lingxi_core::types::ContentBlock) -> Option<Utf16JsonProjection> {
@@ -510,6 +548,7 @@ impl ProviderSideQueryClient {
     ) -> Result<ForkedSideQueryResponse, SideQueryError> {
         let prompt_suggestion =
             request.query_source == crate::purposes::QuerySource::PromptSuggestion;
+        let compaction = request.query_source == crate::purposes::QuerySource::Compaction;
         let first_text_only = prompt_suggestion
             || request.query_source == crate::purposes::QuerySource::Compaction
             || request.query_source.as_str() == "agent_classifier";
@@ -588,10 +627,17 @@ impl ProviderSideQueryClient {
                     query_source,
                 )?;
             }
-            let resp = if prompt_suggestion {
+            let streaming_compaction = compaction
+                && service
+                    .resolve_media_route(&canonical.input.model, canonical.profile.as_deref())?
+                    .main
+                    .capabilities
+                    .streaming;
+            let resp = if prompt_suggestion || streaming_compaction {
                 // Native I -> runForkedAgent -> query uses the main streaming
                 // request policy, with auxiliary ownership and no transcript writes.
                 canonical.execution.anthropic_request_kind = Default::default(); // Main
+                canonical.execution.isolated_query = true;
                 collect_completed_response(service.stream_request(canonical).await?).await?
             } else {
                 service.execute_side_query_request(canonical).await?
@@ -601,6 +647,7 @@ impl ProviderSideQueryClient {
                 wants_structured,
                 first_text_only,
                 separate_text_blocks,
+                compaction,
             ));
         }
 
@@ -690,6 +737,7 @@ impl ProviderSideQueryClient {
             request.output_format.is_some(),
             first_text_only,
             separate_text_blocks,
+            compaction,
         ))
     }
 }
@@ -2890,5 +2938,136 @@ mod tests {
              must never receive an explicit temperature override: {}",
             received[0]
         );
+    }
+    pub(super) fn mock_anthropic_stream(response: &serde_json::Value) -> Vec<u8> {
+        let mut message = response.clone();
+        message["content"] = serde_json::json!([]);
+        message["stop_reason"] = serde_json::Value::Null;
+        let mut events = vec![serde_json::json!({"type":"message_start","message":message})];
+        for (index, block) in response["content"].as_array().unwrap().iter().enumerate() {
+            events.push(serde_json::json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}));
+            events.push(serde_json::json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":block["text"]}}));
+            events.push(serde_json::json!({"type":"content_block_stop","index":index}));
+        }
+        events.push(serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}));
+        events.push(serde_json::json!({"type":"message_stop"}));
+        events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {}\n\n",
+                    event["type"].as_str().unwrap(),
+                    event
+                )
+            })
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    #[test]
+    fn compact_stream_selects_last_summary_assistant_instead_of_a_short_earlier_answer() {
+        let response = llm_runtime::HistoryResponse {
+            id: "response".into(),
+            model: "gpt-6-luna".into(),
+            content: [
+                "t3u9a",
+                "<summary>p9l4s=m6q1z; h1y6d=f8p2w</summary>",
+                "later commentary",
+            ]
+            .into_iter()
+            .map(|text| llm_runtime::ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+                cache_control: None,
+            })
+            .collect(),
+            stop_reason: Some("end_turn".into()),
+            stop_details: None,
+            usage: Default::default(),
+            cost: None,
+            provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
+            resumable: None,
+        };
+        let decoded = decode_fork_response(response, false, true, false, true);
+        assert_eq!(
+            decoded
+                .response
+                .text
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("<summary>p9l4s=m6q1z; h1y6d=f8p2w</summary>")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_compaction_stream_collects_the_summary_after_an_earlier_answer() {
+        let mut transport = StreamStubTransport::text_response("t3u9a");
+        let mut extra = Vec::new();
+        for (index, text) in [
+            (1, "<summary>p9l4s=m6q1z; h1y6d=f8p2w</summary>"),
+            (2, "later commentary"),
+        ] {
+            extra.extend([
+                serde_json::json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}).to_string(),
+                serde_json::json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":text}}).to_string(),
+                serde_json::json!({"type":"content_block_stop","index":index}).to_string(),
+            ]);
+        }
+        transport.frames.splice(4..4, extra);
+        let transport = Arc::new(transport);
+        let client = structured_session_client(transport.clone(), None);
+        let mut request = req(None);
+        request.model = "claude-sonnet-4-20250514".into();
+        request.query_source = QuerySource::Compaction;
+        let response = client.query(request).await.unwrap();
+        assert_eq!(
+            response.text.unwrap().string_at(""),
+            Some("<summary>p9l4s=m6q1z; h1y6d=f8p2w</summary>")
+        );
+        let bodies = transport.received_bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["stream"], true);
+    }
+    #[test]
+    fn compact_response_selection_matches_official_318_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../compaction/tests/fixtures/claude_2_1_318_compact.json"
+        ))
+        .unwrap();
+        for case in fixture["responseSelection"].as_array().unwrap() {
+            let parts = case["parts"].as_array().unwrap();
+            let response = llm_runtime::HistoryResponse {
+                id: "response".into(),
+                model: "gpt-6-luna".into(),
+                content: parts
+                    .iter()
+                    .map(|text| llm_runtime::ContentBlock::Text {
+                        text: text.as_str().unwrap().into(),
+                        citations: None,
+                        cache_control: None,
+                    })
+                    .collect(),
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                usage: Default::default(),
+                cost: None,
+                provider_metadata: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
+                resumable: None,
+            };
+            let selected = case["selected"]
+                .as_u64()
+                .and_then(|index| parts[index as usize].as_str())
+                .map(lingxi_core::host::effort::trim_js_whitespace)
+                .filter(|text| !text.is_empty());
+            let decoded = decode_fork_response(response, false, true, false, true);
+            assert_eq!(
+                decoded
+                    .response
+                    .text
+                    .as_ref()
+                    .and_then(|source| source.string_at("")),
+                selected
+            );
+        }
     }
 }

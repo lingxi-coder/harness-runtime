@@ -76,7 +76,14 @@ impl Transport for GatedTransport {
         Ok(lingxi_llm_client::HttpResponse {
             status: if retry { 503 } else { 200 },
             headers: vec![],
-            body: body.to_string().into_bytes().into(),
+            body: if !retry
+                && serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["stream"]
+                    == true
+            {
+                super::tests::mock_anthropic_stream(&body).into()
+            } else {
+                body.to_string().into_bytes().into()
+            },
         }
         .into())
     }

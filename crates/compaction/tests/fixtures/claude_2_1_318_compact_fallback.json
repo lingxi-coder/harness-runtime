@@ -1,0 +1,1023 @@
+{
+  "version": "2.1.318",
+  "sha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d",
+  "ranges": [
+    {
+      "name": "zRt",
+      "offset": 269668038,
+      "bytes": 268
+    },
+    {
+      "name": "VRt",
+      "offset": 269668306,
+      "bytes": 75
+    },
+    {
+      "name": "_cn",
+      "offset": 269686567,
+      "bytes": 567
+    },
+    {
+      "name": "lRe",
+      "offset": 269690290,
+      "bytes": 236
+    },
+    {
+      "name": "uRe",
+      "offset": 269690526,
+      "bytes": 93
+    },
+    {
+      "name": "vcn",
+      "offset": 269691649,
+      "bytes": 3449
+    },
+    {
+      "name": "gZe",
+      "offset": 269695098,
+      "bytes": 135
+    },
+    {
+      "name": "Zur",
+      "offset": 269695233,
+      "bytes": 77
+    },
+    {
+      "name": "gcr",
+      "offset": 269695310,
+      "bytes": 114
+    },
+    {
+      "name": "Ccn",
+      "offset": 269695424,
+      "bytes": 38
+    },
+    {
+      "name": "bZe",
+      "offset": 269695475,
+      "bytes": 144
+    },
+    {
+      "name": "hZe",
+      "offset": 269695619,
+      "bytes": 59
+    },
+    {
+      "name": "wcn",
+      "offset": 269695678,
+      "bytes": 144
+    },
+    {
+      "name": "_cr",
+      "offset": 269695822,
+      "bytes": 281
+    },
+    {
+      "name": "bcr",
+      "offset": 269696103,
+      "bytes": 153
+    },
+    {
+      "name": "pZe",
+      "offset": 269696256,
+      "bytes": 651
+    },
+    {
+      "name": "Tcn",
+      "offset": 269696921,
+      "bytes": 51
+    },
+    {
+      "name": "Ecn",
+      "offset": 269696972,
+      "bytes": 56
+    },
+    {
+      "name": "mRe",
+      "offset": 269697028,
+      "bytes": 96
+    },
+    {
+      "name": "yRe",
+      "offset": 269697124,
+      "bytes": 7184
+    },
+    {
+      "name": "mZe",
+      "offset": 269704308,
+      "bytes": 115
+    },
+    {
+      "name": "hRe",
+      "offset": 269992362,
+      "bytes": 408
+    },
+    {
+      "name": "PZe",
+      "offset": 269995369,
+      "bytes": 84
+    },
+    {
+      "name": "Jte",
+      "offset": 269995453,
+      "bytes": 119
+    },
+    {
+      "name": "MZe",
+      "offset": 269995572,
+      "bytes": 84
+    },
+    {
+      "name": "EBe",
+      "offset": 272553978,
+      "bytes": 184
+    }
+  ],
+  "scope": "Plain-text split, PTL, opening-round and summary-reask traces. Synthetic model and UTF-16 token estimate; default feature flags, no experimental omission, no media/attachments or provider/UI.",
+  "cases": [
+    {
+      "name": "one-exchange",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "only reply"
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            "q1",
+            "only reply"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "pending-last-user",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "answer"
+        },
+        {
+          "role": "user",
+          "text": "queued one"
+        },
+        {
+          "role": "user",
+          "text": "queued two"
+        },
+        {
+          "role": "user",
+          "text": "meta context",
+          "meta": true
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            "q1",
+            "answer",
+            "queued one"
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          "queued two",
+          "meta context"
+        ],
+        "splitKind": "summarize_all",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "round-ladder-exhausted",
+      "messages": [
+        {
+          "role": "user",
+          "text": "oldest"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        },
+        {
+          "role": "user",
+          "text": "q2"
+        },
+        {
+          "role": "assistant",
+          "text": "a2"
+        }
+      ],
+      "responses": [
+        "prompt_too_long"
+      ],
+      "expected": {
+        "requests": [
+          [
+            "oldest",
+            "a1",
+            "q2"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a1",
+            "q2",
+            "a2"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "synthetic-marker-retry-bound",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        }
+      ],
+      "responses": [
+        "prompt_too_long",
+        "prompt_too_long"
+      ],
+      "expected": {
+        "requests": [
+          [
+            "q1",
+            "a1"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a1"
+          ]
+        ],
+        "ok": false,
+        "reason": "exhausted"
+      }
+    },
+    {
+      "name": "empty",
+      "messages": [],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "unanswered",
+      "messages": [
+        {
+          "role": "user",
+          "text": "unanswered"
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "explicit-opt-out",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        }
+      ],
+      "responses": [],
+      "allowFallback": false,
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "interruption-only",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "[Request interrupted by user]"
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "pending-user-cannot-validate-fresh-summary",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q"
+        },
+        {
+          "role": "assistant",
+          "text": "[Request interrupted by user]"
+        },
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 5000
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "opening-round-before-initial-head-drop",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "initialTokenGap": 10000,
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-after-full-overflow",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-untagged-response",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "summary": "plain response without a summary block"
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-analysis-only-summary",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "summary": "<analysis><summary>not a real summary</summary></analysis>"
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-error",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "reason": "error",
+          "errorKind": "test-error"
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-repeated-media-error",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        "media_too_large",
+        "media_too_large"
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-second-overflow",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 4000
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-threshold-inclusive",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "initialTokenGap": 20000,
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-threshold-exceeded",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "initialTokenGap": 20001,
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "latest-round-gap-replaces-old-gap",
+      "messages": [
+        {
+          "role": "user",
+          "text": "oldest"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        },
+        {
+          "role": "user",
+          "text": "q2"
+        },
+        {
+          "role": "assistant",
+          "text": "a2"
+        },
+        {
+          "role": "user",
+          "text": "q3"
+        },
+        {
+          "role": "assistant",
+          "text": "a3"
+        },
+        {
+          "role": "user",
+          "text": "q4"
+        },
+        {
+          "role": "assistant",
+          "text": "a4"
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 1000
+        },
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 1
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            "oldest",
+            "a1",
+            "q2",
+            "a2",
+            "q3",
+            "a3",
+            "q4"
+          ],
+          [
+            "oldest",
+            "a1",
+            "q2"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a3",
+            "q4",
+            "a4"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "unknown-round-gap-replaces-old-gap",
+      "messages": [
+        {
+          "role": "user",
+          "text": "oldest"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        },
+        {
+          "role": "user",
+          "text": "q2"
+        },
+        {
+          "role": "assistant",
+          "text": "a2"
+        },
+        {
+          "role": "user",
+          "text": "q3"
+        },
+        {
+          "role": "assistant",
+          "text": "a3"
+        },
+        {
+          "role": "user",
+          "text": "q4"
+        },
+        {
+          "role": "assistant",
+          "text": "a4"
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 1000
+        },
+        "prompt_too_long"
+      ],
+      "expected": {
+        "requests": [
+          [
+            "oldest",
+            "a1",
+            "q2",
+            "a2",
+            "q3",
+            "a3",
+            "q4"
+          ],
+          [
+            "oldest",
+            "a1",
+            "q2"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a1",
+            "q2",
+            "a2",
+            "q3",
+            "a3",
+            "q4",
+            "a4"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "initial-gap-includes-summary-prompt",
+      "messages": [
+        {
+          "role": "user",
+          "text": "oldest"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        },
+        {
+          "role": "user",
+          "text": "q2"
+        },
+        {
+          "role": "assistant",
+          "text": "a2"
+        },
+        {
+          "role": "user",
+          "text": "q3"
+        },
+        {
+          "role": "assistant",
+          "text": "a3"
+        },
+        {
+          "role": "user",
+          "text": "q4"
+        },
+        {
+          "role": "assistant",
+          "text": "a4"
+        }
+      ],
+      "responses": [],
+      "initialTokenGap": 1,
+      "expected": {
+        "requests": [
+          [
+            "oldest",
+            "a1",
+            "q2"
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          "a2",
+          "q3",
+          "a3",
+          "q4",
+          "a4"
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    }
+  ]
+}

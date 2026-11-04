@@ -24,10 +24,17 @@ impl Transport for Capture {
             .push(serde_json::from_slice(&request.body).unwrap());
         if self.summary {
             use futures_util::StreamExt;
-            let body = serde_json::to_vec(&json!({"id":"summary-response","model":"model",
+            let response = json!({"id":"summary-response","model":"model",
                 "content":[{"type":"text","text":"summary"}],"stop_reason":"end_turn",
-                "usage":{"input_tokens":2,"output_tokens":1}}))
-            .unwrap();
+                "usage":{"input_tokens":2,"output_tokens":1}});
+            let body = if serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()
+                ["stream"]
+                == true
+            {
+                super::tests::mock_anthropic_stream(&response)
+            } else {
+                serde_json::to_vec(&response).unwrap()
+            };
             return Ok(wire_sdk::StreamResponse {
                 status: 200,
                 headers: vec![],
