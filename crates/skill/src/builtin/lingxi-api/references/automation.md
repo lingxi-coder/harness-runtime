@@ -30,3 +30,12 @@ the list of active subagents is not a replacement for durable task state.
 Source anchors: Harness `crates/tools/cron`, `crates/workflow`,
 `crates/runtime/src/desktop/background_agent.rs`; Bot-capable product scheduler
 and `apps/electron/src/main/bots/service.ts`.
+
+Native task-center schedules and session Cron are independent contracts. The
+native task center uses {{config_dir}}/scheduled_tasks.json (schema 2 automation);
+CronCreate durable jobs use {{config_dir}}/session-cron/scheduled_tasks.json, with
+separate leader/mutation locks. Session-only jobs remain in memory. Opening an
+empty project does not create scheduler files. loop.md lives under {{config_dir}} or
+in the current directory. Persistence alone does not guarantee an active host.
+Old paths and task formats are not read, migrated or imported. Only the current
+store contracts are accepted. Do not run old tasks as part of an upgrade.

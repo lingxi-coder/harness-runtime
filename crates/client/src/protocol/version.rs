@@ -180,4 +180,4 @@
 /// Version 30 adds attachment-scoped media/audio owners and requires an opaque
 /// operation incarnation in media references, responses, and cancellation.
 /// Native bindings and bridge peers must be regenerated together.
-pub const CLIENT_PROTOCOL_VERSION: &str = "30.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "31.0.0";

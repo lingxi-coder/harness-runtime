@@ -128,6 +128,15 @@ impl DurableHarness {
         output_limit: u64,
         dynamic: bool,
     ) -> Self {
+        Self::with_account_fixture(complete, session_limit, output_limit, dynamic, false).await
+    }
+    async fn with_account_fixture(
+        complete: bool,
+        session_limit: u64,
+        output_limit: u64,
+        dynamic: bool,
+        pooled: bool,
+    ) -> Self {
         // Put the peak window twelve hours away so this call has a stable
         // off-peak quote while admission must retain the higher published rate.
         let hour = std::time::SystemTime::now()
@@ -144,48 +153,88 @@ impl DurableHarness {
             "models":[{"display_model":"display","request_model":"wire","billing_model":"test",
                 "pricing":{"input_per_million":0.002,"output_per_million":0.002,"cache_read_per_million":0.002}}]
         })).unwrap());
-        let client = Arc::new(
-            llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
-                providers: vec![llm_runtime::ProviderProfile {
-                    wire_profile,
-                    regions: llm_runtime::Region::all(),
-                    provider_id: llm_runtime::ProviderId::OpenAI,
-                    profile_name: "profile".into(),
-                    base_url: "https://unused.invalid/v1".into(),
-                    protocol: ProtocolFamily::OpenAiChat,
-                    auth: llm_runtime::AuthStrategy::None,
-                    credential: llm_runtime::CredentialConfig::None,
-                    models: vec![llm_runtime::ModelProfile {
-                        display_model: "display".into(),
-                        request_model: "wire".into(),
-                        billing_model: "test".into(),
-                        aliases: vec![],
-                        description: None,
-                        metadata: Default::default(),
-                        capabilities: llm_runtime::Capabilities {
-                            streaming: true,
-                            ..Default::default()
-                        },
-                    }],
-                    pricing: llm_runtime::PricingConfig {
-                        billing_mode: if dynamic {
-                            Some(lingxi_core::host::ModelBillingMode::PerToken)
-                        } else {
-                            None
-                        },
+        let mut runtime = llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+            providers: vec![llm_runtime::ProviderProfile {
+                wire_profile,
+                regions: llm_runtime::Region::all(),
+                provider_id: llm_runtime::ProviderId::OpenAI,
+                profile_name: "profile".into(),
+                base_url: "https://unused.invalid/v1".into(),
+                protocol: ProtocolFamily::OpenAiChat,
+                auth: llm_runtime::AuthStrategy::None,
+                credential: llm_runtime::CredentialConfig::None,
+                models: vec![llm_runtime::ModelProfile {
+                    display_model: "display".into(),
+                    request_model: "wire".into(),
+                    billing_model: "test".into(),
+                    aliases: vec![],
+                    description: None,
+                    metadata: Default::default(),
+                    capabilities: llm_runtime::Capabilities {
+                        streaming: true,
                         ..Default::default()
                     },
-                    signing: None,
-                    azure: None,
-                    supports_websockets: false,
-                    supports_websocket_compression: false,
-                    websocket_connect_timeout_ms: None,
-                    vision_delegate: None,
-                    connection: Default::default(),
                 }],
-            })
-            .unwrap(),
-        );
+                pricing: llm_runtime::PricingConfig {
+                    billing_mode: if dynamic {
+                        Some(lingxi_core::host::ModelBillingMode::PerToken)
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                },
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+                vision_delegate: None,
+                connection: Default::default(),
+            }],
+        })
+        .unwrap();
+        if pooled {
+            use lingxi_core::host::provider_accounts::{
+                AccountAuthKind, AccountMetadata, CredentialRef,
+            };
+            let mut config = runtime.configuration();
+            config.providers[0].connection.group = Some("profile".into());
+            let metadata = &mut config.providers[0].models[0].metadata;
+            metadata.context_window_tokens = Some(20_000);
+            metadata.max_input_tokens = Some(10_000);
+            metadata.max_output_tokens = Some(100);
+            let template = config.providers[0].clone();
+            let mut accounts = Vec::new();
+            for (priority, id) in ["a", "b"].into_iter().enumerate() {
+                let mut profile = template.clone();
+                profile.profile_name = format!("account.{id}");
+                profile.connection.connection_id = Some(id.into());
+                profile.connection.order = priority as u32;
+                config.providers.push(profile);
+                accounts.push(AccountMetadata {
+                    account_id: id.into(),
+                    provider_id: "profile".into(),
+                    display_name: id.into(),
+                    auth_kind: AccountAuthKind::ApiKey,
+                    execution_binding_id: "profile".into(),
+                    credential_ref: CredentialRef {
+                        store_scope: "test".into(),
+                        secret_ref: format!("acct.{id}"),
+                    },
+                    enabled: true,
+                    user_priority: priority as u32,
+                    config_revision: 1,
+                    identity_generation: 1,
+                });
+            }
+            runtime = llm_runtime::ModelRuntime::from_config(config)
+                .unwrap()
+                .with_account_pool(Arc::new(llm_runtime::accounts::AccountPool::new(
+                    accounts,
+                    Arc::new(llm_runtime::accounts::MemoryAccountPoolStore::default()),
+                )));
+        }
+        let client = Arc::new(runtime);
         let calls = Arc::new(AtomicUsize::new(0));
         let service = Arc::new(llm_runtime::ApiService::new(
             client,
@@ -280,7 +329,11 @@ impl DurableHarness {
             service.clone(),
             budget,
             tracker,
-            Arc::new(cost::PricingCatalog::empty()),
+            Arc::new(if pooled {
+                cost::PricingCatalog::empty().with_entry(route().pricing)
+            } else {
+                cost::PricingCatalog::empty()
+            }),
             outputs,
         );
         host.registry
@@ -1143,4 +1196,47 @@ async fn desktop_attempt_run_finalizer_drains_after_waiter_drop_without_registry
     .await
     .unwrap();
     assert!(registry.values().all(|entry| entry.upgrade().is_none()));
+}
+
+#[tokio::test]
+async fn account_selected_route_is_requoted_and_uses_actual_account_admission() {
+    for stream in [false, true] {
+        let mut harness =
+            DurableHarness::with_account_fixture(true, 100_000, 1_000, false, true).await;
+        let service = harness.service.clone();
+        let request = harness.request.clone();
+        let call = tokio::spawn(async move {
+            if stream {
+                let mut events = service.stream_request(request).await.unwrap();
+                while let Some(event) = events.next().await {
+                    event.unwrap();
+                }
+            } else {
+                service.execute_side_query_request(request).await.unwrap();
+            }
+        });
+        let intent = tokio::time::timeout(std::time::Duration::from_secs(2), harness.queue.recv())
+            .await
+            .expect("account rebind must reach fresh admission")
+            .unwrap();
+        let cost::AttemptPersistMutation::Intent(saved) = &intent.mutation else {
+            panic!("intent")
+        };
+        assert_eq!(saved.profile_id, "account.a");
+        assert_eq!(saved.model.model, "test");
+        assert!(saved.authorized_nano_usd > 0);
+        assert_eq!(
+            harness.authority.profiles.lock().unwrap()["account.a"].available_permits(),
+            3
+        );
+        harness.acknowledge(intent);
+        let receipt = harness.queue.recv().await.unwrap();
+        harness.acknowledge(receipt);
+        call.await.unwrap();
+        assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.authority.profiles.lock().unwrap()["account.a"].available_permits(),
+            4
+        );
+    }
 }

@@ -474,11 +474,18 @@ impl AppAgentFactory {
             .protocol_for_model(&model.model_id, Some(&model.provider_id))
             .ok();
         if chat.is_none() && app_supports_deferred_tool_search(protocol) {
-            tool_meta::register_all(&mut tools, context.clone());
+            tool_meta::register_all_with_settings_path(
+                &mut tools,
+                context.clone(),
+                self.config_home.join("settings.json"),
+            );
         } else {
             let deferral = Arc::new(tool_api::DeferralState::disabled());
             tools.set_deferral(deferral.clone());
-            tools.register_builtin(Arc::new(tool_meta::ConfigTool::new(context.clone())));
+            tools.register_builtin(Arc::new(tool_meta::ConfigTool::with_settings_path(
+                context.clone(),
+                self.config_home.join("settings.json"),
+            )));
             tools.register_builtin(Arc::new(tool_meta::ToolSearchTool::with_view_and_deferral(
                 context.clone(),
                 tools.tool_search_view(),

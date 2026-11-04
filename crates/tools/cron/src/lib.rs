@@ -49,7 +49,7 @@ pub use cron::{
 };
 pub use cron_delete::CronDeleteTool;
 pub use cron_list::CronListTool;
-pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
+pub use remote_trigger::{ClaudeAiAuthProvider, ClaudeAiCredentials, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
 mod runtime_wakeup;
 pub use cron::scheduler::{
@@ -70,7 +70,7 @@ pub use wakeup::{
 /// `tengu_kairos_cron` gate defaults true and has no backend here.
 #[must_use]
 pub fn cron_tools_enabled() -> bool {
-    !std::env::var("CLAUDE_CODE_DISABLE_CRON").is_ok_and(|value| !value.is_empty())
+    !std::env::var(branding::DISABLE_CRON_ENV).is_ok_and(|value| !value.is_empty())
         && telemetry::flag_bool("tengu_kairos_cron", true)
 }
 
@@ -135,14 +135,14 @@ mod local_env_tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_clear_flag("tengu_kairos_cron");
-        std::env::remove_var("CLAUDE_CODE_DISABLE_CRON");
+        std::env::remove_var(branding::DISABLE_CRON_ENV);
         assert!(super::cron_tools_enabled());
         for value in ["0", "false", " ", "1"] {
-            std::env::set_var("CLAUDE_CODE_DISABLE_CRON", value);
+            std::env::set_var(branding::DISABLE_CRON_ENV, value);
             assert!(!super::cron_tools_enabled(), "nonempty {value:?} disables");
         }
-        std::env::set_var("CLAUDE_CODE_DISABLE_CRON", "");
+        std::env::set_var(branding::DISABLE_CRON_ENV, "");
         assert!(super::cron_tools_enabled());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_CRON");
+        std::env::remove_var(branding::DISABLE_CRON_ENV);
     }
 }

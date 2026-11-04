@@ -31,3 +31,8 @@ wrapper before writing code; Shell input parameters are not that SDK contract.
 Source anchors: mobile-linux-runtime `crates/mobile-linux-api`; Harness
 `crates/runtime/src/mobile/host/{linux_runtime,assembly}.rs`,
 `crates/tools/{shell-mobile,git-mobile}`.
+
+Use the host's readiness/rootfs/mount status before starting a guest process;
+probe, boot, handles and background leases belong to that host. The iOS simulator
+uses an unavailable stub; physical iOS and Android have different runtimes.
+PRoot/iSH provide execution compatibility, not a security isolation guarantee.

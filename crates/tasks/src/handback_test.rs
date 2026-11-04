@@ -741,3 +741,210 @@ async fn handback_gone_caller_rejects_foreground_and_retargets_only_background_r
         );
     }
 }
+
+#[tokio::test]
+async fn handback_delivered_report_does_not_enqueue_a_second_completion_query() {
+    use lingxi_core::host::task_delivery::TaskDeliveryPolicy;
+    let root = tempfile::tempdir().unwrap();
+    let scope = scope();
+    let (registry, main) = make_registry(root.path(), Arc::new(JournalFs::default()), scope);
+    let actor = AgentId::new();
+    add_local(&registry, "reported", actor).await;
+    let token = registry
+        .begin_handback_run(start(actor, scope, None))
+        .await
+        .unwrap();
+    let receipt = admitted(registry.try_deliver_handback(&token, report(actor)).await);
+    registry
+        .mark_task_rested_with_finalizing(
+            "reported",
+            Some(handback_pointer(false, "worker").into()),
+            None,
+            Some(actor),
+            None,
+            None,
+            Some(token.run()),
+            true,
+        )
+        .await;
+    assert!(
+        !registry.has_pending_task_notifications_for(None).await,
+        "an admitted report owns delivery; completion cannot wake the same parent again"
+    );
+    assert!(registry
+        .take_pending_task_notifications(TaskDeliveryPolicy::default())
+        .await
+        .is_empty());
+    assert_eq!(main.accepted.lock().unwrap().len(), 1);
+    assert_eq!(
+        registry.handback_state(&token).await.unwrap().receipt,
+        Some(receipt)
+    );
+    let state = registry.get("reported").await.unwrap();
+    assert!(state.base().notified);
+    assert!(state.is_parked(), "the agent must remain resumable");
+}
+
+#[tokio::test]
+async fn handback_completion_without_report_and_post_report_failures_still_notify() {
+    use lingxi_core::host::task_delivery::TaskDeliveryPolicy;
+    use lingxi_core::host::task_registry::AgentTerminalOutcome;
+    for kind in ["no_report", "error", "worktree", "turn_limit"] {
+        let root = tempfile::tempdir().unwrap();
+        let scope = scope();
+        let (registry, _main) = make_registry(root.path(), Arc::new(JournalFs::default()), scope);
+        let actor = AgentId::new();
+        add_local(&registry, "sender", actor).await;
+        let token = registry
+            .begin_handback_run(start(actor, scope, None))
+            .await
+            .unwrap();
+        if kind != "no_report" {
+            admitted(registry.try_deliver_handback(&token, report(actor)).await);
+        }
+        registry
+            .set_agent_outcome(
+                "sender",
+                AgentTerminalOutcome {
+                    error: (kind == "error").then(|| "failure after report".into()),
+                    worktree_path: (kind == "worktree").then(|| "/new/worktree".into()),
+                    max_turns_reached: (kind == "turn_limit").then_some(3),
+                    ..Default::default()
+                },
+            )
+            .await;
+        registry
+            .mark_task_rested(
+                "sender",
+                Some("completion".into()),
+                None,
+                Some(actor),
+                None,
+                None,
+                Some(token.run()),
+            )
+            .await;
+        assert!(
+            registry.has_pending_task_notifications_for(None).await,
+            "{kind} has new information"
+        );
+        assert_eq!(
+            registry
+                .take_pending_task_notifications(TaskDeliveryPolicy::default())
+                .await
+                .len(),
+            1,
+            "{kind}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn handback_reported_completion_retains_owned_work_until_it_is_consumed() {
+    let root = tempfile::tempdir().unwrap();
+    let scope = scope();
+    let (registry, _main) = make_registry(root.path(), Arc::new(JournalFs::default()), scope);
+    let actor = AgentId::new();
+    add_local(&registry, "sender", actor).await;
+    let token = registry
+        .begin_handback_run(start(actor, scope, None))
+        .await
+        .unwrap();
+    admitted(registry.try_deliver_handback(&token, report(actor)).await);
+    let mut child = local("owned", AgentId::new(), TaskStatus::Running);
+    child.base.creator_agent_id = Some(actor);
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(child))
+        .await;
+    registry
+        .mark_task_rested(
+            "sender",
+            Some("pointer".into()),
+            None,
+            Some(actor),
+            None,
+            None,
+            Some(token.run()),
+        )
+        .await;
+    assert!(!registry.has_pending_task_notifications_for(None).await);
+    assert!(!registry.get("sender").await.unwrap().base().notified);
+    registry
+        .set_status("owned", TaskStatus::Completed)
+        .await
+        .unwrap();
+    registry.mark_notified("owned").await.unwrap();
+    assert!(!registry.has_pending_task_notifications_for(None).await);
+    assert!(registry.get("sender").await.unwrap().base().notified);
+}
+
+#[tokio::test]
+async fn handback_completion_retargets_when_the_report_recipient_is_gone() {
+    use lingxi_core::host::task_delivery::TaskDeliveryPolicy;
+    let root = tempfile::tempdir().unwrap();
+    let scope = scope();
+    let (registry, _main) = make_registry(root.path(), Arc::new(JournalFs::default()), scope);
+    let caller = AgentId::new();
+    let actor = AgentId::new();
+    add_local(&registry, "caller", caller).await;
+    add_local(&registry, "sender", actor).await;
+    let token = registry
+        .begin_handback_run(start(actor, scope, Some(caller)))
+        .await
+        .unwrap();
+    admitted(registry.try_deliver_handback(&token, report(actor)).await);
+    registry
+        .mark_task_rested(
+            "sender",
+            Some("completed".into()),
+            None,
+            Some(actor),
+            None,
+            None,
+            Some(token.run()),
+        )
+        .await;
+    registry
+        .set_status("caller", TaskStatus::Killed)
+        .await
+        .unwrap();
+    let notes = registry
+        .take_pending_task_notifications(TaskDeliveryPolicy::default())
+        .await;
+    assert!(
+        notes.iter().any(|note| note.task_id == "sender"),
+        "the new fallback recipient still needs the completion"
+    );
+}
+
+#[tokio::test]
+async fn handback_in_turn_notification_drain_deduplicates_without_an_idle_poll() {
+    use lingxi_core::host::task_delivery::TaskDeliveryPolicy;
+    let root = tempfile::tempdir().unwrap();
+    let scope = scope();
+    let (registry, main) = make_registry(root.path(), Arc::new(JournalFs::default()), scope);
+    let actor = AgentId::new();
+    add_local(&registry, "sender", actor).await;
+    let token = registry
+        .begin_handback_run(start(actor, scope, None))
+        .await
+        .unwrap();
+    admitted(registry.try_deliver_handback(&token, report(actor)).await);
+    registry
+        .mark_task_rested(
+            "sender",
+            Some("report pointer".into()),
+            None,
+            Some(actor),
+            None,
+            None,
+            Some(token.run()),
+        )
+        .await;
+    assert!(registry
+        .take_pending_task_notifications(TaskDeliveryPolicy::default())
+        .await
+        .is_empty());
+    assert_eq!(main.accepted.lock().unwrap().len(), 1);
+    assert!(registry.get("sender").await.unwrap().is_parked());
+}

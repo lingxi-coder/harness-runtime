@@ -1,12 +1,9 @@
-use lingxi_core::host::{AuthHandle, CredentialStoragePolicy};
-use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
-use llm_runtime::auth::anthropic::handle::OAuthHandle;
-use llm_runtime::auth::anthropic::{OAuthCredentialProvider, RefreshDriver};
+use lingxi_core::host::CredentialStoragePolicy;
 use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{ModelRuntime, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
-use platform_posix::{PosixClock, PosixHttp, PosixRuntime};
+use platform_posix::{PosixClock, PosixHttp};
 #[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
 #[cfg(windows)]
@@ -15,77 +12,13 @@ use secret::CredentialManager;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) struct SubscriptionRefreshGeneration {
-    state: std::sync::Mutex<SubscriptionRefreshState>,
-}
-
-struct SubscriptionRefreshState {
-    epoch: u64,
-    slot: lingxi_core::host::subscription::SharedSubscription,
-}
-
-impl SubscriptionRefreshGeneration {
-    fn new(slot: lingxi_core::host::subscription::SharedSubscription) -> Self {
-        Self {
-            state: std::sync::Mutex::new(SubscriptionRefreshState { epoch: 0, slot }),
-        }
-    }
-
-    fn epoch(&self) -> u64 {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .epoch
-    }
-
-    fn is_current(&self, epoch: u64) -> bool {
-        self.epoch() == epoch
-    }
-
-    fn publish_if_current(
-        &self,
-        epoch: u64,
-        snapshot: lingxi_core::host::subscription::SubscriptionSnapshot,
-    ) -> bool {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.epoch != epoch {
-            return false;
-        }
-        let mut slot = state
-            .slot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some(snapshot);
-        true
-    }
-}
-
-impl lingxi_core::host::auth::AccountChangeObserver for SubscriptionRefreshGeneration {
-    fn account_changed(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.epoch = state.epoch.wrapping_add(1);
-        let mut slot = state
-            .slot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some(lingxi_core::host::subscription::SubscriptionSnapshot::default());
-    }
-}
-
 use super::{
-    anthropic_models_for, api_provider, connected_provider_fallback, desktop_fusion_catalog_row,
-    effective_model_source_for_config, filter_fusion_catalog, fusion_route_flag,
-    load_effective_settings_for_config, managed_model_policy_source,
-    managed_model_setting_for_config, model_provenance_for_config, provider_profile_label,
-    register_fusion_catalog_refresher, subscription_seed, subscription_snapshot_from, ApiProvider,
-    BuildError, DefaultModelFallbackNotice, DesktopConfig, FusionCatalogClearingAuth,
-    FusionCatalogModelSource, FusionCatalogRefresher, FusionCatalogRegistry,
+    anthropic_models_for, api_provider, desktop_fusion_catalog_row,
+    effective_model_source_for_config, filter_fusion_catalog, load_effective_settings_for_config,
+    managed_model_policy_source, managed_model_setting_for_config, model_provenance_for_config,
+    provider_profile_label, register_fusion_catalog_refresher, ApiProvider, BuildError,
+    DefaultModelFallbackNotice, DesktopConfig, FusionCatalogModelSource, FusionCatalogRefresher,
+    FusionCatalogRegistry,
 };
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -98,58 +31,79 @@ use super::{
 /// to the same keychain — is always reflected. Mirrors TS
 /// `checkAndRefreshOAuthTokenIfNeeded()` + `getClaudeAIOAuthTokens()`.
 ///
-/// The credential read is async; the trait surface is sync. Desktop runs on a
-/// multi-thread tokio runtime, so we bridge with
-/// `block_in_place` + `Handle::block_on` (safe only on `rt-multi-thread`,
-/// which the desktop binary uses).
-pub(super) struct CredentialStoreAuthProvider {
+pub(super) struct AccountClaudeAiAuthProvider {
     pub(super) credentials: Arc<CredentialManager>,
-    pub(super) base_api_url: String,
+    pub(super) data_root: std::path::PathBuf,
+    pub(super) store_scope: String,
 }
 
-impl CredentialStoreAuthProvider {
-    /// Snapshot the current persisted tokens (`None` when unauthenticated or the
-    /// keychain read fails / the bridge cannot run — e.g. off a multi-thread
-    /// runtime). Reading at call-time keeps the token fresh across refreshes.
-    pub(super) fn snapshot(&self) -> Option<secret::credential::OAuthTokens> {
-        let creds = self.credentials.clone();
-        let read = move || {
-            tokio::runtime::Handle::try_current()
-                .ok()
-                .and_then(|h| h.block_on(async { creds.get_oauth_tokens().await.ok().flatten() }))
-        };
-        // `block_on` inside an async task requires `block_in_place` (multi-thread
-        // runtime). If we're already off-runtime, call directly.
-        match tokio::runtime::Handle::try_current() {
-            Ok(_) => tokio::task::block_in_place(read),
-            Err(_) => None,
+#[async_trait::async_trait]
+impl tool_cron::ClaudeAiAuthProvider for AccountClaudeAiAuthProvider {
+    async fn credentials(&self) -> Option<tool_cron::ClaudeAiCredentials> {
+        let root = self.data_root.clone();
+        let scope = self.store_scope.clone();
+        let mut snapshot = tokio::task::spawn_blocking(move || {
+            crate::provider_accounts::load_account_snapshot(&root, &scope)
+        })
+        .await
+        .ok()?
+        .ok()?;
+        snapshot
+            .accounts
+            .sort_by_key(|account| account.user_priority);
+        for account in snapshot.accounts.into_iter().filter(|account| {
+            account.enabled
+                && account.provider_id == "anthropic"
+                && account.auth_kind == lingxi_core::host::provider_accounts::AccountAuthKind::OAuth
+        }) {
+            let mut grant = match self
+                .credentials
+                .get_account_credential(&account.credential_ref)
+                .await
+            {
+                Ok(Some(grant)) if grant.identity_generation == account.identity_generation => {
+                    grant
+                }
+                _ => continue,
+            };
+            if let secret::AccountCredentialKind::OAuth { expires_at, .. } = &grant.kind {
+                if *expires_at <= std::time::SystemTime::now() {
+                    grant = match self
+                        .credentials
+                        .refresh_account_credential(account.clone(), grant.credential_revision)
+                        .await
+                    {
+                        Ok(Some(grant))
+                            if grant.identity_generation == account.identity_generation =>
+                        {
+                            grant
+                        }
+                        _ => continue,
+                    };
+                }
+            }
+            if let secret::AccountCredentialKind::OAuth {
+                access_token,
+                organization_id,
+                ..
+            } = grant.kind
+            {
+                return Some(tool_cron::ClaudeAiCredentials {
+                    access_token: access_token.expose_secret().clone(),
+                    org_uuid: organization_id.unwrap_or_default(),
+                    base_api_url: tool_cron::remote_trigger::DEFAULT_BASE_API_URL.into(),
+                });
+            }
         }
-    }
-}
-
-impl tool_cron::ClaudeAiAuthProvider for CredentialStoreAuthProvider {
-    fn access_token(&self) -> Option<String> {
-        self.snapshot()
-            .map(|t| t.access_token.expose_secret().clone())
-    }
-    fn org_uuid(&self) -> Option<String> {
-        self.snapshot().map(|t| t.org_id).filter(|o| !o.is_empty())
-    }
-    fn base_api_url(&self) -> String {
-        self.base_api_url.clone()
+        None
     }
 }
 
 /// The resolved LLM stack: credentials, the assembled multi-provider config,
 /// and the routed [`ModelRuntime`] every model-facing surface needs.
 ///
-/// Extracted verbatim out of [`build`] so that headless one-shot commands
-/// (which must NOT boot a session, fire `SessionStart` hooks, or start MCP
-/// servers) reach the SAME credential-precedence and provider-assembly logic
-/// the interactive runtime uses. Duplicating that resolution is the failure
-/// mode this type exists to prevent: the API-key-beats-OAuth exclusion and the
-/// ChatGPT `PAT > external-tokens > OAuth login` precedence are security
-/// boundaries, and a second copy of them would drift silently.
+/// Shared by interactive sessions and headless commands so every model-facing
+/// surface uses the same account directory, credential authority and routing policy.
 pub struct LlmStack {
     /// Catalog notifications owned by this credential scope.
     pub catalog_registry: FusionCatalogRegistry,
@@ -164,18 +118,11 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `credentials`.
     pub credentials: Arc<CredentialManager>,
     /// See [`build`] for the resolution rules behind `auth`.
-    pub auth: Arc<dyn AuthHandle>,
     /// See [`build`] for the resolution rules behind `subscription`.
     pub subscription: lingxi_core::host::subscription::SharedSubscription,
-    /// Generation guard owned with the auth root while startup profile refresh
-    /// work is in flight. The API service keeps this observer alive.
-    pub(crate) subscription_refresh_generation: Arc<SubscriptionRefreshGeneration>,
-    /// See [`build`] for the resolution rules behind `resolved_anthropic_api_key`.
-    pub resolved_anthropic_api_key: Option<String>,
     /// See [`build`] for the resolution rules behind `is_subscriber`.
     pub is_subscriber: bool,
     /// See [`build`] for the resolution rules behind `openai_oauth_handle`.
-    pub openai_oauth_handle: Arc<openai_oauth::OpenAiOAuthHandle>,
     /// See [`build`] for the resolution rules behind `pricing`.
     pub pricing: cost::PricingCatalog,
     /// See [`build`] for the resolution rules behind `chains`.
@@ -256,6 +203,10 @@ pub struct LlmStack {
 /// and [`CredentialManager`] construction together prevents entrypoints from
 /// silently drifting to different stores.
 pub struct SharedCredentialStack {
+    /// Canonical account owner root, independent of a conversation/project config root.
+    pub provider_account_home: Option<PathBuf>,
+    /// Explicit host account registry snapshot, including Broker-owned accounts.
+    pub provider_accounts: Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
     /// Catalog notifications owned by this credential scope.
     pub catalog_registry: FusionCatalogRegistry,
     /// Platform HTTP transport used by the credential manager.
@@ -266,11 +217,6 @@ pub struct SharedCredentialStack {
     pub storage: Arc<dyn lingxi_core::host::SecureStorage>,
     /// Canonical provider/OAuth credential manager.
     pub credentials: Arc<CredentialManager>,
-    /// Set by a host that keeps the ChatGPT session fresh itself and serves
-    /// its engines only access tokens. The stack then serves ChatGPT only
-    /// from this session and never refreshes it: a session found in storage
-    /// at boot is ignored, because the host is its one refresher.
-    pub openai_host_session: Option<Arc<openai_oauth::HostSession>>,
 }
 
 /// Build the credential stack shared by every desktop-class entrypoint.
@@ -303,13 +249,8 @@ pub async fn build_shared_credential_stack(
 /// real user's saved credentials, and it writes native entries keyed to the OS
 /// user that a temporary home can never clean up again.
 ///
-/// So the storage choice keys off the credential ROOT, not only off the
-/// caller's `isolated_credential_storage` flag. This deliberately does NOT
-/// widen that flag: it also suppresses ambient provider credentials (see
-/// `compute_availability_with_isolation`) and pins the Fusion catalog
-/// refresher's isolation, and "the home is scratch" is no reason to stop
-/// honouring an `ANTHROPIC_API_KEY` the caller put in the environment on
-/// purpose.
+/// Storage selection follows the canonical credential root so test and sandbox
+/// account records never reach the user's native secure store.
 ///
 /// `/tmp` and `/private/tmp` are named alongside `temp_dir()` because macOS
 /// resolves one to the other through a symlink and a caller may hand us either
@@ -363,18 +304,39 @@ pub async fn build_shared_credential_stack_with_policy(
         http.clone(),
     ));
     Ok(SharedCredentialStack {
+        provider_account_home: None,
+        provider_accounts: None,
         catalog_registry: FusionCatalogRegistry::default(),
         http,
         clock,
         storage,
         credentials,
-        openai_host_session: None,
     })
 }
 
 pub(super) async fn build_shared_credential_stack_for_config(
     cfg: &DesktopConfig,
 ) -> Result<SharedCredentialStack, BuildError> {
+    if cfg.team_invocation.is_some() {
+        let http = Arc::new(PosixHttp::new());
+        let clock = Arc::new(PosixClock::new());
+        let storage: Arc<dyn lingxi_core::host::SecureStorage> =
+            Arc::new(lingxi_core::host::InMemorySecureStorage::new());
+        let credentials = Arc::new(CredentialManager::new(
+            storage.clone(),
+            clock.clone(),
+            http.clone(),
+        ));
+        return Ok(SharedCredentialStack {
+            provider_account_home: None,
+            provider_accounts: None,
+            catalog_registry: FusionCatalogRegistry::default(),
+            http,
+            clock,
+            storage,
+            credentials,
+        });
+    }
     build_shared_credential_stack_with_policy(
         &cfg.lingxi_home,
         cfg.isolated_credential_storage,
@@ -425,6 +387,16 @@ pub(super) fn current_credential_user() -> String {
 /// environment and the network (the availability probe), but creates no
 /// session, no transcript and no hooks.
 pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildError> {
+    // Headless callers must receive the same frozen authority as full assembly.
+    // Do this before opening storage or constructing credential helpers.
+    let mut scoped;
+    let cfg = if cfg.team_invocation.is_some() {
+        scoped = cfg.clone();
+        super::team_invocation::enforce_team_config(&mut scoped)?;
+        &scoped
+    } else {
+        cfg
+    };
     let shared = build_shared_credential_stack_for_config(cfg).await?;
     resolve_llm_stack_with_credentials(cfg, shared, None).await
 }
@@ -434,6 +406,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     shared: SharedCredentialStack,
     proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
 ) -> Result<LlmStack, BuildError> {
+    if cfg.team_invocation.is_some()
+        && (shared.storage.backend() != lingxi_core::host::SecureStorageBackend::MemorySession)
+    {
+        return Err(super::team_invocation::TeamInvocationError::Credentials.into());
+    }
     let _catalog_refresh = cfg.startup_catalog.as_ref().map(|source| source.prefetch());
     // Resolve the winning model setting from the canonical tier stack before
     // assembling provider profiles. Managed `settings.model` is the only
@@ -444,21 +421,25 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         load_effective_settings_for_config(cfg, Some(&managed_settings_for_model))?;
     let mut model_provenance =
         model_provenance_for_config(cfg, Some(&effective_settings_for_model));
-    let configured_model =
+    let configured_model = if cfg.team_invocation.is_some() {
+        cfg.default_model.clone()
+    } else {
         managed_model_setting_for_config(cfg, Some(&effective_settings_for_model))
-            .unwrap_or_else(|| cfg.default_model.clone());
+            .unwrap_or_else(|| cfg.default_model.clone())
+    };
     let main_model_source =
         effective_model_source_for_config(cfg, Some(&effective_settings_for_model));
     let main_model_setting = configured_model.clone();
     let main_model_setting_provenance = model_provenance;
     // (1) Platform-minimal façade shared byte-for-byte with CLI/TUI auth.
     let SharedCredentialStack {
+        provider_account_home,
+        provider_accounts,
         catalog_registry,
         http,
         clock,
         storage: mcp_oauth_storage,
         credentials,
-        openai_host_session,
     } = shared;
 
     // The packaged Electron parent owns durable plugin-secret persistence in
@@ -481,508 +462,29 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     }
     .map_err(|e| BuildError::ApiBase(e.to_string()))?;
     let llm_transport: Arc<dyn Transport> = Arc::new(provider_transport);
-    // Defer client construction to step 3.1 where we know whether OAuth is
-    // active (determines auth strategy + credential config). Placeholder: the
-    // resolved OAuth `AuthState` that step (2) bridges into the credential seam
-    // as an `oauth_delegate`. Status retains this source even when the model
-    // uses an API key.
-    let mut oauth_auth_state: Option<Arc<llm_runtime::auth::anthropic::refresh::AuthState>> = None;
-    let mut openai_oauth_state: Option<Arc<openai_oauth::AuthState>> = None;
-    // (3) Credential manager + OAuth client (used by /login, /logout).
-    //
-    // Task 4 (future-work batch 4): the shared subscription slot UI layers read
-    // at compose time. Seeded with the conservative default snapshot here; the
-    // `Ok(Some(tokens))` arm below re-seeds it with the resolved subscriber
-    // flag, and (for subscribers) a background profile+roles fetch overwrites
-    // it with the full snapshot once the endpoints respond.
     let subscription: lingxi_core::host::subscription::SharedSubscription =
-        std::sync::Arc::new(std::sync::RwLock::new(Some(
-            lingxi_core::host::subscription::SubscriptionSnapshot::default(),
-        )));
-    let subscription_refresh_generation =
-        Arc::new(SubscriptionRefreshGeneration::new(subscription.clone()));
-    // `mcp_oauth_storage` and `credentials` originate from the same shared
-    // stack, so provider keys and MCP OAuth never split across backends.
-    // (M13) Track WHERE the key came from — the auth resolver ranks an
-    // env/host-supplied key ABOVE stored OAuth but a keychain-stored key BELOW
-    // it, so the two sources must stay distinguishable.
-    let mut stored_anthropic_api_key = false;
-    let resolved_anthropic_api_key = if credentials
-        .provider_key_is_suppressed("anthropic-api-key")
-        .await
-    {
-        None
-    } else if cfg.api_key.is_empty() {
-        match credentials.get_anthropic_api_key().await {
-            Ok(Some(key)) => {
-                stored_anthropic_api_key = true;
-                Some(key.expose_secret().clone())
-            }
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(%error, "could not read Anthropic API key from secure storage");
-                None
-            }
-        }
-    } else {
-        Some(cfg.api_key.clone())
-    };
-    let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
-    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(
-        oauth_cfg.clone(),
-        llm_transport.clone(),
-        credentials.clone(),
-        clock.clone(),
-    ));
-    let subscription_observer: Arc<dyn lingxi_core::host::auth::AccountChangeObserver> =
-        subscription_refresh_generation.clone();
-    auth.register_account_change_observer(Arc::downgrade(&subscription_observer));
-
-    // (3.1) M5-13 / Task 10: build the OAuth refresh driver when the keychain
-    //        already holds a logged-in OAuth token.  `init_refresh_driver` spawns
-    //        the proactive-refresh task and returns the shared `AuthState`.  The
-    //        returned state is used BOTH for the old api-client hook path (removed
-    //        in Plan 3a Task 9) and to wire `OAuthCredentialProvider` into the
-    //        new `ModelRuntime` path.
-    //
-    //        (3.2) API.6: while we have the token in hand, resolve the Claude.ai
-    //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
-    let mut is_subscriber = false;
-    let mut persisted_subscription_type: Option<String> = None;
-    // Where the Anthropic credential came from, for the error copy that names
-    // WHICH setting to unset when a 403 says API-key auth is off. Accumulated
-    // beside `is_subscriber` because `auth_source` below is scoped to the match
-    // arm. Defaults keep the `/login` wording, which is right for a stored or
-    // OAuth credential.
-    let mut credential_origin = orchestrator::api_error_copy::CredentialOrigin::Other;
-    let mut has_oauth_token = false;
-    let environment_oauth =
-        llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::capture();
-    let environment_oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>>;
-    if let Some(environment) = environment_oauth.as_ref() {
-        let auth_source = llm_runtime::auth::anthropic::resolver::resolve(
-            &llm_runtime::auth::anthropic::resolver::ResolverContext {
-                managed_oauth_only: cfg.managed_oauth_only
-                    || llm_runtime::auth::anthropic::resolver::host_managed_oauth_only(),
-                env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
-                    .ok()
-                    .filter(|value| !value.is_empty()),
-                env_api_key: (!stored_anthropic_api_key)
-                    .then(|| resolved_anthropic_api_key.clone())
-                    .flatten(),
-                fd_present: cfg.anthropic_key_fd_present,
-                has_stored_oauth: true,
-                has_stored_api_key: stored_anthropic_api_key,
-                settings_api_key: None,
-                api_key_helper_script: cfg.api_key_helper.as_ref().map(std::path::PathBuf::from),
-                aws_present: false,
-            },
-        );
-        has_oauth_token = true;
-        credential_origin = match &auth_source {
-            llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
-                orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
-                    var: "ANTHROPIC_API_KEY".to_string(),
-                }
-            }
-            llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
-                orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
-            }
-            _ => orchestrator::api_error_copy::CredentialOrigin::Other,
-        };
-        let seed = subscription_seed(
-            &auth_source,
-            environment.scopes(),
-            environment.subscription_type.as_ref(),
-            environment.rate_limit_tier.as_ref(),
-        );
-        is_subscriber = seed.is_subscriber;
-        persisted_subscription_type.clone_from(&seed.subscription_type);
-        if let Ok(mut slot) = subscription.write() {
-            *slot = Some(seed);
-        }
-    }
-    // Native vK returns environmental material without consulting stored OAuth.
-    let stored_oauth = if environment_oauth.is_some() {
-        Ok(None)
-    } else {
-        credentials.get_oauth_tokens().await
-    };
-    environment_oauth_delegate = environment_oauth
-        .map(|provider| Arc::new(provider) as Arc<dyn llm_runtime::CredentialProvider>);
-    match stored_oauth {
-        Ok(Some(tokens)) => {
-            let captured_subscription_epoch = subscription_refresh_generation.epoch();
-            let subscription_account_org = tokens.org_id.clone();
-            let subscription_account_email = tokens.email.clone();
-            // (M13) Drive the documented auth-source resolver with the full
-            // context instead of a hand-rolled two-flag exclusion: HOST-forced
-            // OAuth makes the stored session the effective auth EVEN with an
-            // env key present, an FD-inherited key outranks the stored
-            // session, and a keychain-stored key ranks BELOW it. The
-            // below-OAuth sources (settings key / helper / Bedrock) cannot
-            // change the outcome once `has_stored_oauth` is true, so their
-            // slots stay conservative.
-            let auth_source = llm_runtime::auth::anthropic::resolver::resolve(
-                &llm_runtime::auth::anthropic::resolver::ResolverContext {
-                    // The ONLY thing that demotes an env key below the
-                    // stored session is `KWr()` (@228931361), read HERE —
-                    // the credential-resolution point, exactly where
-                    // `zb()` (@228933355) evaluates it — so EVERY
-                    // entrypoint agrees, including the ones that never
-                    // pass through the CLI's `build_runtime_from_config`
-                    // (`mcp serve`, `auto-mode-setup`, bridge-server).
-                    managed_oauth_only: cfg.managed_oauth_only
-                        || llm_runtime::auth::anthropic::resolver::host_managed_oauth_only(),
-                    env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
-                        .ok()
-                        .filter(|v| !v.is_empty()),
-                    env_api_key: (!stored_anthropic_api_key)
-                        .then(|| resolved_anthropic_api_key.clone())
-                        .flatten(),
-                    fd_present: cfg.anthropic_key_fd_present,
-                    has_stored_oauth: true,
-                    has_stored_api_key: stored_anthropic_api_key,
-                    settings_api_key: None,
-                    api_key_helper_script: cfg
-                        .api_key_helper
-                        .as_ref()
-                        .map(std::path::PathBuf::from),
-                    aws_present: false,
-                },
-            );
-            // (M13) The stored credential carries the tier persisted at login
-            // (claude-code keeps `subscriptionType`/`rateLimitTier` inside
-            // `claudeAiOauth`), so enterprise/tier-gated behaviour is correct
-            // from request #1 — no async profile-fetch window — but only while
-            // the stored session is the effective auth source (see
-            // [`subscription_seed`]).
-            // Oracle `e1().source`, narrowed to what the copy branches on.
-            // Only the two EXTERNAL sources map: `/login managed key` has no
-            // LingXi equivalent, and everything else takes the `/login` wording
-            // anyway.
-            if environment_oauth_delegate.is_none() {
-                credential_origin = match &auth_source {
-                    llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
-                        // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
-                        // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
-                        // naming the variable here is a fact, not a guess. Another
-                        // provider's resolver supplies its own `apiKeyEnv` name.
-                        orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
-                            var: "ANTHROPIC_API_KEY".to_string(),
-                        }
-                    }
-                    llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
-                        orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
-                    }
-                    _ => orchestrator::api_error_copy::CredentialOrigin::Other,
-                };
-            }
-            // Oracle `zv()` = `ms()?.accessToken != null` — reaching this arm
-            // means stored OAuth tokens were read.
-            has_oauth_token = true;
-            let seed = subscription_seed(
-                &auth_source,
-                &tokens.scopes,
-                tokens.subscription_type.as_ref(),
-                tokens.rate_limit_tier.as_ref(),
-            );
-            if environment_oauth_delegate.is_none() {
-                is_subscriber = seed.is_subscriber;
-                persisted_subscription_type.clone_from(&seed.subscription_type);
-            }
-            // Re-seed the shared slot with the resolved subscriber flag + the
-            // PERSISTED tier so readers see them even before (or without) the
-            // background profile+roles fetch landing. SECRECY: deliberately
-            // copy the access token (a `Secret<String>`, intentionally
-            // non-`Clone`) by exposing + re-wrapping — the audited copy
-            // pattern — BEFORE the original moves into `init_refresh_driver`;
-            // it is exposed again only inside the spawned fetch task.
-            if environment_oauth_delegate.is_none() {
-                if let Ok(mut guard) = subscription.write() {
-                    *guard = Some(seed);
-                }
-            }
-            let profile_token =
-                lingxi_core::types::Secret::new(tokens.access_token.expose_secret().clone());
-            match llm_runtime::auth::anthropic::login::init_refresh_driver(
-                oauth_cfg,
-                tokens.access_token,
-                tokens.refresh_token,
-                tokens.expires_at,
-                tokens.scopes,
-                llm_transport.clone(),
-                clock.clone(),
-                Some(Arc::new(telemetry::AnalyticsBus::new())),
-                Some(credentials.clone()),
-                Arc::new(PosixRuntime::new()),
-            )
-            .await
-            {
-                Ok(auth_state) => {
-                    // Keep the OAuth state available to independent status
-                    // queries. Subscriber admission below still controls the
-                    // model's OAuth strategy and profile background fetch.
-                    oauth_auth_state = Some(auth_state);
-                    if is_subscriber {
-                        // Task 4: background OAuth profile + roles fetch — the
-                        // FRESHENER over the persisted-tier seed above (closes
-                        // the RENDERING half of the profile-fetch PARITY-GAP
-                        // documented at `orchestrator/src/config.rs:134` —
-                        // tier/billing/role data for rate-limit copy — without
-                        // touching the build hot path). Both fetchers swallow
-                        // every error → `None` (matching the TS `logError` /
-                        // `return undefined` stance); (M13) a FAILED profile
-                        // fetch skips the write entirely so the seeded
-                        // persisted-tier snapshot is never clobbered with an
-                        // empty one (oracle preserves stored `subscriptionType`
-                        // when the refresh can't resolve a new value).
-                        //
-                        // SharedSubscription locking contract (std `RwLock`):
-                        // the guard must NEVER be held across an `.await` —
-                        // build the full snapshot FIRST, then write-and-drop.
-                        // Poisoned-lock stance: writer skips on poison
-                        // (`if let Ok(mut guard)`); readers degrade to the
-                        // default snapshot. SECRECY: the access token is
-                        // exposed (`expose_secret`) only into the two fetch
-                        // calls and never logged or formatted.
-                        {
-                            let refresh_generation = subscription_refresh_generation.clone();
-                            let captured_epoch = captured_subscription_epoch;
-                            let expected_org_id = subscription_account_org;
-                            let expected_email = subscription_account_email;
-                            let transport: Arc<dyn Transport> = llm_transport.clone();
-                            let creds = credentials.clone();
-                            // Move (not copy) the token into the task — its
-                            // only consumer.
-                            let token = profile_token;
-                            tokio::spawn(async move {
-                                let token = token.expose_secret();
-                                let Some(profile) =
-                                    lingxi_llm_client::auth::oauth::anthropic::fetch_profile_from_oauth_token(
-                                        token, transport.as_ref(),
-                                    )
-                                    .await
-                                else {
-                                    return;
-                                };
-                                let roles =
-                                    lingxi_llm_client::auth::oauth::anthropic::fetch_user_roles(
-                                        token,
-                                        transport.as_ref(),
-                                    )
-                                    .await;
-                                let snap = subscription_snapshot_from(
-                                    true,
-                                    Some(&profile),
-                                    roles.as_ref(),
-                                );
-                                if !refresh_generation.is_current(captured_epoch) {
-                                    return;
-                                }
-                                // (M13) Freshen the persisted tier too, so
-                                // pre-M13 logins self-heal and the NEXT boot
-                                // seeds from up-to-date values. `new ?? old`
-                                // merge — never clears a stored tier.
-                                match creds
-                                    .update_oauth_subscription_for_account(
-                                        &expected_org_id,
-                                        &expected_email,
-                                        snap.subscription_type.as_deref(),
-                                        snap.rate_limit_tier.as_deref(),
-                                    )
-                                    .await
-                                {
-                                    Ok(true) => {}
-                                    Ok(false) => return,
-                                    Err(error) => {
-                                        tracing::warn!(%error, "could not persist freshened subscription tier")
-                                    }
-                                }
-                                refresh_generation.publish_if_current(captured_epoch, snap);
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to attach OAuth refresh driver; 401 auto-refresh disabled");
-                }
-            }
-        }
-        Ok(None) => {
-            // No stored OAuth session — API-key path.
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "could not read OAuth tokens from keychain; skipping refresh-driver wiring");
-        }
-    }
-
-    // (3.2a) Wire the OpenAI ChatGPT OAuth refresh driver when the keychain
-    //        already holds a ChatGPT session. Mirrors the anthropic block above.
-    //        Returns `Arc<openai_oauth::AuthState>` for the credential delegate;
-    //        on Ok(None) / Err we leave `openai_oauth_state = None` (warn on Err).
-    //        No subscriber-flag / profile-fetch needed for OpenAI — minimal path.
-    let openai_oauth_cfg = lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default();
+        Arc::new(std::sync::RwLock::new(None));
+    let is_subscriber = false;
+    let persisted_subscription_type: Option<String> = None;
+    let credential_origin = orchestrator::api_error_copy::CredentialOrigin::Other;
+    let has_oauth_token = false;
+    let has_api_key = false;
+    let has_oauth = false;
     let openai_oauth_handle = Arc::new(
-        openai_oauth::OpenAiOAuthHandle::new(
-            openai_oauth_cfg.clone(),
+        openai_oauth::AccountOAuthClient::new(
+            lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default(),
             llm_transport.clone(),
-            credentials.clone(),
         )
         .with_clock(clock.clone()),
     );
 
-    // Other processes on this home (another CLI, say) store the same OAuth
-    // sessions; each refresh happens behind one lock file, and a session
-    // another process already rotated is adopted rather than refreshed again.
-    let oauth_refresh_lock: Arc<dyn llm_runtime::auth::token_manager::SharedRefreshLock> = Arc::new(
-        super::oauth_refresh_lock::OAuthRefreshLockFile::new(&cfg.lingxi_home),
-    );
-    if let Some(state) = &oauth_auth_state {
-        state.share_refresh_across_processes(oauth_refresh_lock.clone());
-    }
-
-    // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
-    // PAT env  >  external-tokens env  >  OAuth login session. First hit wins.
-    let mut openai_chatgpt_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = None;
-    if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
-        if !pat.trim().is_empty() {
-            match lingxi_llm_client::auth::oauth::openai::whoami(
-                llm_transport.as_ref(),
-                &openai_oauth_cfg,
-                &pat,
-            )
-            .await
-            {
-                Ok(md) => {
-                    openai_chatgpt_delegate =
-                        Some(Arc::new(openai_oauth::PatCredentialProvider::new(pat, md))
-                            as Arc<dyn llm_runtime::CredentialProvider>);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "OPENAI_PERSONAL_ACCESS_TOKEN whoami failed; ignoring PAT")
-                }
-            }
-        }
-    }
-    if openai_chatgpt_delegate.is_none() {
-        match (
-            std::env::var("OPENAI_CHATGPT_ACCESS_TOKEN")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
-            std::env::var("OPENAI_CHATGPT_ACCOUNT_ID")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
-        ) {
-            (Some(tok), Some(acc)) => {
-                openai_chatgpt_delegate = Some(Arc::new(
-                    openai_oauth::ExternalTokensCredentialProvider::from_supplied(tok, Some(acc)),
-                )
-                    as Arc<dyn llm_runtime::CredentialProvider>);
-            }
-            (Some(_), None) | (None, Some(_)) => tracing::warn!(
-                "incomplete external ChatGPT tokens: set BOTH OPENAI_CHATGPT_ACCESS_TOKEN and OPENAI_CHATGPT_ACCOUNT_ID"
-            ),
-            (None, None) => {}
-        }
-    }
-
-    // A host that refreshes the session itself serves only its access
-    // tokens, so a stored session is never refreshed here behind that host.
-    // PAT and external tokens still win.
-    let openai_host_session = openai_host_session.filter(|_| openai_chatgpt_delegate.is_none());
-
-    if openai_chatgpt_delegate.is_none() && openai_host_session.is_none() {
-        match credentials.get_openai_oauth_tokens().await {
-            Ok(Some(tokens)) => {
-                match openai_oauth::login::init_refresh_driver(
-                    openai_oauth_cfg.clone(),
-                    tokens.access_token,
-                    tokens.refresh_token,
-                    tokens.expires_at,
-                    tokens.account_id,
-                    tokens.fedramp,
-                    tokens.email,
-                    llm_transport.clone(),
-                    clock.clone(),
-                    Some(Arc::new(telemetry::AnalyticsBus::new())),
-                    Some(credentials.clone()),
-                    Arc::new(PosixRuntime::new()),
-                )
-                .await
-                {
-                    Ok(state) => {
-                        state.share_refresh_across_processes(oauth_refresh_lock.clone());
-                        openai_oauth_state = Some(state);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to attach OpenAI OAuth refresh driver; ChatGPT routing disabled");
-                    }
-                }
-            }
-            Ok(None) => {
-                // No stored ChatGPT OAuth session.
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "could not read OpenAI OAuth tokens from keychain; skipping chatgpt refresh-driver wiring");
-            }
-        }
-    }
-
-    // (3.3) Phase 2a §8: assemble the FULL multi-provider client config
-    //       (Anthropic + builtin catalog presets + settings `providers`) + chains
-    //       + credential sources + pricing catalog, instead of the single-Anthropic
-    //       config. `provider_config::assemble` owns the byte-equivalent Anthropic
-    //       profile + the catalog merge; the engine bridges OAuth in via a
-    //       pre-built delegate so provider-config stays free of an anthropic-oauth
-    //       dep. A bad settings entry only emits a warning — the engine still boots
-    //       with every well-formed profile (incl. the built-in Anthropic one).
-    let has_api_key = resolved_anthropic_api_key.is_some();
-    // Model OAuth is selected when the auth resolver made the stored session
-    // the effective source (M13). Independent status OAuth remains available
-    // even when a model API key wins. Effective subscriber OAuth outranks a
-    // keychain-stored key and — under HOST forcing (`KWr()` @228931361) — even
-    // an env key. `has_oauth` selects `AuthStrategy::OAuthBearer`, which
-    // is what injects the required `oauth-2025-04-20` beta on Anthropic routes;
-    // the assemble input below drops the key claim when OAuth is effective so
-    // the ApiKey strategy can't shadow it.
-    let has_oauth =
-        is_subscriber && (oauth_auth_state.is_some() || environment_oauth_delegate.is_some());
-    let stored_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> =
-        oauth_auth_state.clone().map(|state| {
-            let driver = Arc::new(RefreshDriver::new(state));
-            Arc::new(OAuthCredentialProvider::new(driver))
-                as Arc<dyn llm_runtime::CredentialProvider>
+    let provider_policy = managed_settings_for_model
+        .managed_overlay()?
+        .unwrap_or_else(|| {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty object is valid JSON")
         });
-    let oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = if let Some(lookup) = cfg
-        .oauth_environment_lookup
-        .as_ref()
-        .filter(|_| !cfg.customization_gates.bare)
-    {
-        Some(Arc::new(
-            llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::live(
-                lookup.clone(),
-                stored_delegate,
-            ),
-        ))
-    } else {
-        environment_oauth_delegate.or_else(|| {
-            oauth_auth_state.clone().map(|state| {
-                let driver = Arc::new(RefreshDriver::new(state));
-                Arc::new(OAuthCredentialProvider::new(driver))
-                    as Arc<dyn llm_runtime::CredentialProvider>
-            })
-        })
-    };
-
-    let provider_region = match effective_settings_for_model
-        .settings
-        .provider_region
-        .unwrap_or_default()
-    {
-        lingxi_core::settings::ProviderRegion::ChinaMainland => llm_runtime::Region::ChinaMainland,
-        lingxi_core::settings::ProviderRegion::International => llm_runtime::Region::International,
-    };
+    let provider_region = super::resolve_provider_region(cfg, &provider_policy)?;
     let official_catalog = match &cfg.startup_catalog {
         Some(source) => Some((*source.load().await).clone()),
         None => None,
@@ -996,7 +498,79 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
     };
-    let assembled = provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
+    let mut assembled =
+        provider_config::assemble_for_region(catalog_inputs.clone(), provider_region);
+    if let Some(model) = cfg
+        .team_invocation
+        .as_ref()
+        .and_then(|profile| profile.selected_model())
+    {
+        let envelope = model.account_credentials();
+        assembled.client_config.providers = envelope
+            .provider_account_profiles
+            .iter()
+            .map(|profile| {
+                let selected = profile
+                    .models
+                    .first()
+                    .ok_or(super::team_invocation::TeamInvocationError::Model)?;
+                super::team_process::TeamModelRoute::for_account(
+                    profile.clone(),
+                    &selected.request_model,
+                )
+                .and_then(|route| route.host_profile())
+                .map_err(|_| super::team_invocation::TeamInvocationError::Model)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assembled.credential_sources.clear();
+        assembled.chains = Default::default();
+        assembled.warnings.clear();
+    }
+    let account_home = provider_account_home.unwrap_or_else(|| cfg.lingxi_home.clone());
+    let external_account_authority = provider_accounts.is_some();
+    let account_snapshot = match provider_accounts {
+        Some(snapshot) => snapshot,
+        None => crate::account_pool_store::load_native_account_snapshot(
+            account_home.clone(),
+            credentials.clone(),
+        )
+        .await
+        .map_err(BuildError::ApiBase)?,
+    };
+    if !external_account_authority
+        && cfg.team_invocation.is_none()
+        && !credentials.has_account_credential_refresher()
+    {
+        let store = Arc::new(
+            crate::provider_accounts::ProviderAccountStore::new(
+                account_home.clone(),
+                account_snapshot.store_scope.clone(),
+                credentials.clone(),
+            )
+            .with_catalog(crate::provider_accounts::ProviderAccountCatalog::new(
+                catalog_inputs.clone(),
+                provider_region,
+                cfg.startup_catalog.clone(),
+                None,
+            )),
+        );
+        credentials.set_account_credential_refresher(Arc::new(
+            crate::provider_accounts::AccountOAuthCoordinator::new(
+                store,
+                openai_oauth_handle.clone(),
+            ),
+        ));
+    }
+    let account_metadata = account_snapshot.accounts.clone();
+    let account_pool = Some(
+        crate::account_pool_store::assemble_pool(
+            &mut assembled,
+            account_snapshot,
+            account_home.clone(),
+        )
+        .map_err(BuildError::ApiBase)?,
+    );
+    let account_directory = account_pool.as_ref().expect("account pool").directory();
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly");
     }
@@ -1006,7 +580,12 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // resolver below reports ambiguity instead of first/last-profile guessing.
     let mut model_provider_matches: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
-    for profile in &assembled.client_config.providers {
+    for profile in assembled
+        .client_config
+        .providers
+        .iter()
+        .filter(|p| !p.connection.hidden)
+    {
         let label = provider_profile_label(&profile.profile_name);
         for model in &profile.models {
             let matches = model_provider_matches
@@ -1026,6 +605,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .client_config
         .providers
         .iter()
+        .filter(|provider| !provider.connection.hidden)
         .flat_map(|provider| {
             // Keep absent mode distinct from an explicit Unknown override;
             // the Fusion projection only applies a subscription hint when a
@@ -1038,14 +618,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         })
         .collect::<Vec<_>>();
 
-    // Task-5 (TPM-C): resolve an optional `profile/model` qualifier in the
-    // configured default_model so a shared id routes deterministically on the
-    // first turn.  Must run while `assembled.client_config.providers` is still
-    // owned (before `from_config` moves it).
     let default_listings: Vec<lingxi_core::host::ModelListing> = assembled
         .client_config
         .providers
         .iter()
+        .filter(|profile| !profile.connection.hidden)
         .flat_map(|p| {
             let profile = p.profile_name.clone();
             let label = provider_profile_label(&p.profile_name);
@@ -1089,8 +666,6 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         })
         .collect();
     let model_resolution_client_config = assembled.client_config.clone();
-    let anthropic_dynamic_auth =
-        super::fusion_services::anthropic_dynamic_auth_profile(&assembled.client_config.providers);
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     if let Some(source) = &cfg.startup_catalog {
@@ -1114,158 +689,32 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     default_model_profile = selected_model_context.route.profile.clone();
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
     // oauth-delegate + every per-profile credential source).
-    let mut oauth_delegates: std::collections::BTreeMap<
-        String,
-        std::sync::Arc<dyn llm_runtime::CredentialProvider>,
-    > = std::collections::BTreeMap::new();
-    if let Some(d) = oauth_delegate {
-        oauth_delegates.insert("anthropic-oauth".to_string(), d);
-    }
-    // OAuth login fills the slot only if PAT/external didn't.
-    if openai_chatgpt_delegate.is_none() {
-        if let Some(state) = openai_oauth_state {
-            let driver = std::sync::Arc::new(openai_oauth::RefreshDriver::new(state));
-            openai_chatgpt_delegate = Some(std::sync::Arc::new(
-                openai_oauth::OpenAiOAuthCredentialProvider::new(driver),
-            )
-                as Arc<dyn llm_runtime::CredentialProvider>);
-        }
-    }
-    // A host's session counts as connected only while it serves a token.
-    let has_openai_chatgpt = match &openai_host_session {
-        Some(session) => session.is_active(),
-        None => openai_chatgpt_delegate.is_some(),
-    };
-    let openai_chatgpt_session_slot = openai_host_session.is_some();
-    if let Some(session) = openai_host_session {
-        openai_chatgpt_delegate = Some(session as Arc<dyn llm_runtime::CredentialProvider>);
-    }
-    if let Some(d) = openai_chatgpt_delegate {
-        oauth_delegates.insert("openai-chatgpt".to_string(), d);
-    }
-    let anthropic_oauth_delegate_slot = oauth_delegates.contains_key("anthropic-oauth");
-    // `has_oauth` above records which auth won during boot. An installed
-    // delegate may still have a valid session when an explicit API key won;
-    // request-local auth can use that session after the key is removed.
-    let anthropic_oauth_available = has_oauth_token && anthropic_oauth_delegate_slot;
 
-    // Phase 2a §6.2: per-profile availability from the assembled credential
-    // sources (each profile is "available" iff its keychain entry / env var
-    // resolves). Computed HERE — the earliest point all five inputs exist — so
-    // the connected-provider default-model fallback below can consult it; the
-    // same map later drives the `/model` picker's Connect badge via
-    // `DesktopRuntime.provider_availability`. Nothing between here and the
-    // runtime literal mutates credentials, so early == late computation.
-    let availability_probe = provider_config::compute_availability_with_isolation(
+    // Attribute-only account presence drives the initial picker catalog.
+    let availability_snapshot = account_pool
+        .as_ref()
+        .map(|pool| pool.snapshot())
+        .unwrap_or_else(|| provider_config::AccountRegistry::new("unmanaged".into()).snapshot());
+    let availability_probe = provider_config::compute_availability_with_accounts(
         &credentials,
         &assembled.credential_sources,
-        has_api_key,
-        anthropic_oauth_available,
-        has_openai_chatgpt,
-        // Isolated boots ignore ambient provider env vars too — see the
-        // `isolated_credential_storage` doc: the flag means "this boot inherits
-        // no machine credentials", and env is the other half of that.
-        cfg.isolated_credential_storage,
+        &availability_snapshot,
     );
-    // Finding [7]: distinguish "the probe ran and found nothing" from "the
-    // probe never completed" (a 5s timeout, e.g. a slow/contended macOS
-    // keychain). `provider_availability` is otherwise empty in BOTH cases,
-    // and `filter_fusion_catalog`'s `unwrap_or(false)` cannot tell them
-    // apart — on the timeout path every non-anthropic profile reads as
-    // "genuinely uncredentialed" and the whole Fusion catalog for that
-    // profile is dropped for the runtime's lifetime, even though the
-    // ordinary turn loop routes the same profile fine on the same
-    // credentials. `availability_probe_completed` lets the Fusion filter
-    // skip its availability half instead of fail-closing on a transient
-    // stall (mirrors the sibling `connected_provider_fallback` rule at
-    // line ~5898, which already treats an unknown provider as "don't
-    // reroute" rather than "disconnected").
-    let (availability_rows, availability_probe_completed) =
+    let availability_rows =
         match tokio::time::timeout(std::time::Duration::from_secs(5), availability_probe).await {
-            Ok(rows) => (rows, true),
+            Ok(rows) => rows,
             Err(_) => {
-                tracing::warn!("provider availability probe timed out; continuing engine startup");
-                (Vec::new(), false)
+                tracing::warn!(
+                    "account availability probe timed out; model catalog remains unavailable"
+                );
+                Vec::new()
             }
         };
-    let mut provider_availability: std::collections::BTreeMap<String, bool> = availability_rows
+    let provider_availability: std::collections::BTreeMap<String, bool> = availability_rows
         .into_iter()
         .map(|a| (a.profile_name, a.available))
         .collect();
-    if anthropic_dynamic_auth {
-        provider_availability.insert(
-            "anthropic".to_string(),
-            has_api_key || anthropic_oauth_available,
-        );
-    } else {
-        // Fixed/custom routes retain their explicit source's verdict.
-        provider_availability
-            .entry("anthropic".to_string())
-            .or_insert(has_api_key || has_oauth);
-    }
-
-    // The anthropic probe is DEFINITIVE only on the stock first-party API
-    // (`api_provider() == FirstParty`) with the default `api_base` and no
-    // gateway auth override. On an env-routed Bedrock/Vertex/Foundry install
-    // (`api_provider() != FirstParty`), a custom `api_base`
-    // (`LINGXI_API_BASE_URL` — an enterprise/auth-free gateway serving Claude
-    // with no local key), or an `ANTHROPIC_AUTH_TOKEN`, anthropic models are
-    // served WITHOUT a local key/OAuth, so the forced
-    // `availability["anthropic"] = false` above is probe-BLINDNESS, not
-    // disconnection — both the default-model fallback below and
-    // `filter_fusion_catalog` (F011 item 1) must not treat it as
-    // disconnection (the same probe-blindness `connected_model_rows` guards
-    // in the TUI picker).
-    let anthropic_probe_definitive = api_provider() == ApiProvider::FirstParty
-        && cfg.api_base == DesktopConfig::default().api_base
-        && std::env::var("ANTHROPIC_AUTH_TOKEN").map_or(true, |v| v.is_empty());
-
-    // ── Boot-time connected-provider default-model fallback ─────────────────
-    // (LingXi multi-provider divergence — upstream is Anthropic-only.) When the
-    // configured default model's provider is definitively disconnected and
-    // another provider IS connected, boot on the connected provider instead of
-    // into guaranteed first-turn auth failures. Skipped when the model was an
-    // EXPLICIT `--model` choice (the user asked for exactly that model), and on
-    // env-routed Bedrock/Vertex/Foundry installs (anthropic models are served
-    // WITHOUT anthropic key/oauth there, so "anthropic disconnected" is
-    // meaningless and the reroute would break a working setup).
-    let mut default_model_fallback: Option<DefaultModelFallbackNotice> = None;
-    // An `ANTHROPIC_MODEL` env pin (claude-code D4) is exempt from the reroute
-    // just like an explicit `--model`: the user pinned exactly that model, so a
-    // fallback would defeat the pin. `default_model_env_pinned` is kept separate
-    // from `default_model_explicit` (which stays `--model`-only for the `--agent`
-    // override gate); only the fallback treats an env pin as explicit.
-    if !cfg.default_model_explicit
-        && !cfg.default_model_env_pinned
-        && api_provider() == ApiProvider::FirstParty
-    {
-        if let Some(fb) = connected_provider_fallback(
-            &default_model_id,
-            default_model_profile.as_deref(),
-            anthropic_probe_definitive,
-            &model_providers,
-            &provider_availability,
-            &default_listings,
-            &cfg.recent_models,
-        ) {
-            let to = format!("{}/{}", fb.profile, fb.model);
-            tracing::warn!(
-                from = %configured_model,
-                to = %to,
-                "default model's provider is not connected; booting on a connected provider"
-            );
-            default_model_fallback = Some(DefaultModelFallbackNotice {
-                from: configured_model.clone(),
-                to,
-            });
-            // A disconnected-provider fallback is a catalog choice, not an
-            // administrator default, even when the displaced model came from
-            // a lower-priority settings source.
-            model_provenance = lingxi_core::host::ModelProvenance::ProviderCatalogTier;
-            default_model_id = fb.model;
-            default_model_profile = Some(fb.profile);
-        }
-    }
+    let default_model_fallback: Option<DefaultModelFallbackNotice> = None;
 
     // ── Managed availableModels / enforceAvailableModels constraint ─────────
     // (parity 2.1.207 H-BIN-08.) When a MANAGED (`policySettings`) tier owns an
@@ -1340,47 +789,13 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         }
     }
 
-    // Open exactly the credential the session is about to use. Provider
-    // availability above is intentionally attribute-only on macOS; loading the
-    // selected provider here makes authorization deterministic at session
-    // entry without decrypting every unrelated saved key. Anthropic's resolved
-    // auth was already loaded earlier in this build path.
+    // Resolving the default is metadata-only. Exact account credentials are
+    // loaded by the first business call after pool selection, so an empty
+    // account directory can still boot and expose account configuration.
     let selected_model_context = model_resolution_context_provider
         .context_for_route(&default_model_id, default_model_profile.as_deref())
         .map_err(|error| BuildError::ApiBase(format!("selected model route: {error}")))?;
     default_model_profile = selected_model_context.route.profile.clone();
-    let boot_profile = selected_model_context
-        .route
-        .profile
-        .clone()
-        .ok_or_else(|| BuildError::ApiBase("selected model route has no profile".into()))?;
-    if boot_profile != "anthropic" {
-        if let Some(source) = assembled
-            .credential_sources
-            .iter()
-            .find(|source| source.profile_name == boot_profile)
-        {
-            match credentials.has_provider_key(&source.credential_id).await {
-                Ok(true) => {
-                    if let Err(error) = credentials.get_provider_key(&source.credential_id).await {
-                        tracing::warn!(
-                            provider = %boot_profile,
-                            credential_id = %source.credential_id,
-                            %error,
-                            "failed to load the session provider credential during boot"
-                        );
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
-                    provider = %boot_profile,
-                    credential_id = %source.credential_id,
-                    %error,
-                    "failed to inspect the session provider credential during boot"
-                ),
-            }
-        }
-    }
 
     // The raw "user model setting" seam (the opusplan/haiku plan-mode swap
     // anchor threaded into subagent/teammate model resolution). When the
@@ -1410,7 +825,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         })?;
     let session_provider_first_party = selected_model_context.route.provider
         == Some(agent::model_resolution::ModelProviderKind::FirstParty);
-    let first_party_environment_provider = match api_provider() {
+    let first_party_environment_provider = match if cfg.team_invocation.is_some() {
+        ApiProvider::FirstParty
+    } else {
+        api_provider()
+    } {
         ApiProvider::FirstParty => "firstParty",
         ApiProvider::Bedrock => "anthropicAws",
         ApiProvider::Vertex => "vertex",
@@ -1425,21 +844,12 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         return Err(BuildError::InvalidCustomBetas);
     }
 
-    let composite = provider_config::MultiCredentialProvider::new(
-        credentials.clone(),
-        assembled.credential_sources.clone(),
-        // A key loaded from CredentialManager is mutable session state, not
-        // immutable config. Let MultiCredentialProvider read that shared store
-        // on every request so rotation/delete takes effect immediately and a
-        // removed key cannot survive in this boot snapshot. Host/env/FD keys
-        // remain static because they are outside the credential-write seams.
-        (!stored_anthropic_api_key)
-            .then(|| resolved_anthropic_api_key.clone())
-            .flatten(),
-        cfg.api_key_helper.clone(),
-        oauth_delegates,
-    )
-    .with_anthropic_api_key_source(cfg.api_key_source.clone());
+    let mut composite = provider_config::MultiCredentialProvider::new(credentials.clone())
+        .with_account_version_root(account_home.clone())
+        .with_accounts(account_metadata);
+    if let Some(pool) = account_pool.as_ref() {
+        composite = composite.with_account_directory(pool.directory());
+    }
     // GitHub Copilot needs a short-lived token minted from the raw OAuth token
     // (api.githubcopilot.com rejects the raw token). Wrap the composite so the
     // `github-copilot` credential is exchanged + cached; every other credential
@@ -1450,6 +860,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         "github-copilot",
     );
     client = client.with_credential_provider(Arc::new(copilot_creds));
+    if let Some(pool) = account_pool {
+        client = crate::account_pool_store::attach_account_runtime(client, pool, &catalog_registry);
+    }
     let llm_runtime = Arc::new(client);
 
     // 3c-T3: build the cost estimator from the assembled pricing catalog so
@@ -1463,14 +876,6 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         let llm_cat = llm_catalog_from_cost(&assembled.pricing);
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
-    // (M13) Enterprise state now comes from the PERSISTED credential tier
-    // (claude-code reads `subscriptionType` synchronously from the stored
-    // tokens), so the static build-time state is correct from request #1;
-    // the shared subscription slot freshens it per request. `Ger()`
-    // (@228959874) is `Aa() === "enterprise"`, so it inherits `Aa()`'s
-    // `isAnthropicAuthEnabled` gate — `persisted_subscription_type` is `None`
-    // whenever a non-OAuth source outranks the stored blob
-    // ([`subscription_seed`]).
     let subscriber_state = SubscriberState {
         is_subscriber,
         is_enterprise: persisted_subscription_type.as_deref() == Some("enterprise"),
@@ -1495,21 +900,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     let fusion_catalog_availability: Arc<
         std::sync::RwLock<std::collections::BTreeMap<String, bool>>,
     > = Arc::new(std::sync::RwLock::new(provider_availability.clone()));
-    // Round-7 finding [2]: the probe-completion flag is shared state, not a
-    // construction-time constant. A boot probe that TIMED OUT leaves it
-    // `false` (the availability half of `filter_fusion_catalog` fails open,
-    // finding [7]); the refresher below re-arms it the first time a
-    // mid-session re-probe genuinely completes, so the fail-open is
-    // transient like the stall that caused it instead of permanent.
-    let fusion_probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(
-        availability_probe_completed,
-    ));
     let fusion_catalog_mutation_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let fusion_catalog_source: Arc<dyn fusion::ModelSource> = Arc::new(FusionCatalogModelSource {
         unfiltered: fusion_catalog.clone(),
         availability: fusion_catalog_availability.clone(),
-        anthropic_probe_definitive,
-        availability_probe_completed: fusion_probe_completed.clone(),
+        account_directory: account_directory.clone(),
         mutation_epoch: fusion_catalog_mutation_epoch.clone(),
         session_model_restriction: session_model_restriction.clone(),
         reload_managed_model_restriction: true,
@@ -1517,22 +912,10 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     });
     let fusion_catalog_refresher = FusionCatalogRefresher {
         availability: fusion_catalog_availability,
-        availability_probe_completed: fusion_probe_completed,
         mutation_epoch: fusion_catalog_mutation_epoch,
-        credentials: credentials.clone(),
+        credentials: Arc::downgrade(&credentials),
         credential_sources: assembled.credential_sources.clone(),
-        anthropic_has_api_key: fusion_route_flag(has_api_key),
-        anthropic_has_oauth: fusion_route_flag(anthropic_oauth_available),
-        anthropic_dynamic_auth,
-        anthropic_oauth_delegate_slot,
-        openai_chatgpt_available: fusion_route_flag(has_openai_chatgpt),
-        openai_chatgpt_session_slot,
-        // Round-4 review finding: a refresh must reproduce the boot probe
-        // exactly, including the isolation boundary — otherwise an isolated
-        // boot's first `/connect` replaces the whole availability map with
-        // one that counts ambient machine env-var credentials the boot
-        // deliberately excluded.
-        isolated: cfg.isolated_credential_storage,
+        account_directory: account_directory.clone(),
     };
     // Finding [15]: publish this runtime's refresher so credential writes on
     // seams that never see a `FusionCatalogRefresher` handle (the TUI
@@ -1544,20 +927,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     let fusion_catalog = filter_fusion_catalog(
         fusion_catalog,
         &provider_availability,
-        anthropic_probe_definitive,
-        availability_probe_completed,
         session_model_restriction.as_ref(),
     );
-
-    // Round-12 finding [2], class sweep: `/logout` and the bridge-server's
-    // `ClientCommand::Logout` are credential REMOVALS, and the availability
-    // map's merge rule can never lower the `true` a sign-in published. Wrap
-    // the one shared handle here, after the refresher is registered, so every
-    // sign-out surface in this process clears Fusion's entry.
-    let auth: Arc<dyn AuthHandle> = Arc::new(FusionCatalogClearingAuth {
-        inner: auth,
-        catalog_registry: catalog_registry.clone(),
-    });
 
     Ok(LlmStack {
         catalog_registry,
@@ -1566,12 +937,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         clock,
         mcp_oauth_storage,
         credentials,
-        auth,
         subscription,
-        subscription_refresh_generation,
-        resolved_anthropic_api_key,
         is_subscriber,
-        openai_oauth_handle,
         pricing: assembled.pricing,
         chains: assembled.chains,
         model_providers,
@@ -1628,6 +995,14 @@ pub async fn build_api_service(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
 ) -> Result<Arc<llm_runtime::ApiService>, BuildError> {
+    let mut scoped;
+    let cfg = if cfg.team_invocation.is_some() {
+        scoped = cfg.clone();
+        super::team_invocation::enforce_team_config(&mut scoped)?;
+        &scoped
+    } else {
+        cfg
+    };
     let stack = resolve_llm_stack(cfg).await?;
     Ok(Arc::new(api_service_from_stack(cfg, cwd, stack)?))
 }
@@ -1643,6 +1018,14 @@ pub fn api_service_from_stack(
     cwd: &std::path::Path,
     stack: LlmStack,
 ) -> Result<llm_runtime::ApiService, BuildError> {
+    let mut scoped;
+    let cfg = if cfg.team_invocation.is_some() {
+        scoped = cfg.clone();
+        super::team_invocation::enforce_team_config(&mut scoped)?;
+        &scoped
+    } else {
+        cfg
+    };
     // Same CHAINS BRIDGE as `build`: the assembled per-model chain becomes the
     // adapter's `fallback_overrides`, keyed by model id.
     let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = stack
@@ -1664,7 +1047,11 @@ pub fn api_service_from_stack(
         stack.llm_runtime,
         stack.llm_transport,
         stack.subscriber_state,
-        UserAgentEnv::from_process_env(),
+        if cfg.team_invocation.is_some() {
+            UserAgentEnv::default()
+        } else {
+            UserAgentEnv::from_process_env()
+        },
         env!("CARGO_PKG_VERSION"),
         Some(analytics_bus.clone()),
         cfg.fallback_model.clone(),
@@ -1673,6 +1060,7 @@ pub fn api_service_from_stack(
         settings_max_retries,
         settings_backoff_ms,
     )
+    .with_scope_output_quota(cfg.scope_output_quota.clone())
     .with_subscription(stack.subscription)
     .with_custom_cli_betas(cfg.custom_betas.clone())
     .with_thinking(cfg.session_thinking)
@@ -1693,8 +1081,7 @@ pub fn api_service_from_stack(
     .with_prompt_cache_ttl_settings_source({
         let cache_cfg = cfg.clone();
         Arc::new(move || super::prompt_cache_ttl_settings_for_config(&cache_cfg))
-    })
-    .retain_account_change_observer(stack.subscription_refresh_generation.clone());
+    });
 
     let service = if let Some(metadata) = &cfg.anthropic_client_metadata {
         service
@@ -1722,6 +1109,9 @@ pub(super) fn aws_auth_refresher(
     cwd: &std::path::Path,
     analytics_bus: Arc<telemetry::AnalyticsBus>,
 ) -> Result<Option<Arc<llm_runtime::AwsAuthRefresher>>, lingxi_core::settings::SettingsError> {
+    if cfg.team_invocation.is_some() {
+        return Ok(None);
+    }
     let aws_settings = if cfg.restricted {
         let snapshot = crate::desktop::settings_watch::managed_settings_snapshot_sync(cfg).ok_or(
             lingxi_core::settings::SettingsError::SourceUnavailable("managed policy snapshot"),
@@ -1794,38 +1184,5 @@ pub(super) fn capture_legacy_opening_balance(
         Some((session_id, u64::MAX))
     } else {
         Some((session_id, nanos as u64))
-    }
-}
-
-#[cfg(test)]
-mod subscription_refresh_generation_tests {
-    use super::SubscriptionRefreshGeneration;
-    use lingxi_core::host::auth::AccountChangeObserver;
-    use lingxi_core::host::subscription::{SharedSubscription, SubscriptionSnapshot};
-    use std::sync::{Arc, RwLock};
-
-    #[test]
-    fn account_change_clears_slot_and_rejects_inflight_refresh() {
-        let slot: SharedSubscription = Arc::new(RwLock::new(Some(SubscriptionSnapshot::default())));
-        let generation = SubscriptionRefreshGeneration::new(slot.clone());
-        let captured = generation.epoch();
-
-        generation.account_changed();
-
-        let stale = SubscriptionSnapshot {
-            is_subscriber: true,
-            subscription_type: Some("enterprise".into()),
-            rate_limit_tier: Some("stale".into()),
-            ..SubscriptionSnapshot::default()
-        };
-        assert!(!generation.publish_if_current(captured, stale));
-        assert!(
-            !slot.read().unwrap().as_ref().unwrap().is_subscriber,
-            "an account switch must not fall back to the previous account's subscriber bit"
-        );
-
-        let current = generation.epoch();
-        assert!(generation.publish_if_current(current, SubscriptionSnapshot::default()));
-        assert!(slot.read().unwrap().is_some());
     }
 }

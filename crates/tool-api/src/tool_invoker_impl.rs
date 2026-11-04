@@ -2079,6 +2079,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supplied_instance_requires_a_gate_and_obeys_its_decision() {
+        let carrier = || {
+            Arc::new(SuppliedTool(Arc::new(TestEchoTool {
+                requires_user_interaction: false,
+            }))) as Arc<dyn std::any::Any + Send + Sync>
+        };
+        let invoker = RegistryToolInvoker::new(Arc::new(ToolRegistry::new()));
+        assert!(invoker
+            .invoke_supplied_detailed("TestEcho", json!({}), no_ctx(), carrier())
+            .await
+            .is_err());
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let denied = invoker.with_gate(Arc::new(FixedGate {
+            decision: GateDecision::Deny {
+                reason: "blocked".into(),
+            },
+            seen: seen.clone(),
+        }));
+        assert!(denied
+            .invoke_supplied_detailed("TestEcho", json!({}), no_ctx(), carrier())
+            .await
+            .is_err());
+        assert_eq!(seen.lock().unwrap().as_slice(), ["TestEcho"]);
+        let allowed = RegistryToolInvoker::new(Arc::new(ToolRegistry::new())).with_gate(Arc::new(
+            FixedGate {
+                decision: GateDecision::Allow,
+                seen,
+            },
+        ));
+        let result = allowed
+            .invoke_supplied_detailed("TestEcho", json!({"k":"v"}), no_ctx(), carrier())
+            .await
+            .unwrap();
+        assert_eq!(result.data, json!({"echo":{"k":"v"}}));
+        assert!(allowed
+            .invoke_supplied_detailed("WrongTool", json!({}), no_ctx(), carrier())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn gate_allow_dispatches_to_tool() {
         let gate = Arc::new(FixedGate {
             decision: GateDecision::Allow,

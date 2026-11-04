@@ -244,12 +244,11 @@ pub fn user_settings_path() -> Option<PathBuf> {
     config_home_dir().map(|h| h.join("settings.json"))
 }
 
-/// User config-home: `$branding::CONFIG_DIR_ENV` when set (`??`: an empty value
-/// is honored verbatim → cwd-relative), else `<home>/<branding::DOT_DIR>`.
+/// User config-home: `$branding::CONFIG_DIR_ENV` when non-empty, else `<home>/<branding::DOT_DIR>`.
 /// Returns `None` only when neither the env override nor `$HOME` resolves.
 #[must_use]
 fn config_home_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV).filter(|dir| !dir.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     home_dir().map(|h| branding::config_home(&h, None))

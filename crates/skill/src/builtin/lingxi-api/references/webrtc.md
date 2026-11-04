@@ -32,3 +32,8 @@ Source anchors: Harness `packages/webrtc/{core,media}`; product
 `packages/remote-control-client/src/{media,host_media}.rs`,
 `apps/electron/src/main/remoteControl` and
 `apps/cli/host/src/commands/remote_control.rs`.
+
+File transfer and the authenticated Local App gateway use their own resource
+and permission boundaries alongside control and media. A media peer does not
+publish an arbitrary filesystem. There is no implied model-callable PeerSession
+API. Teams membership does not grant same-account Remote Control access.

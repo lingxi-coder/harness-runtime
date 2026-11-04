@@ -39,3 +39,9 @@ actually exposed by that host. For App Agent input and permissions, read the
 Source anchors: Harness `crates/tools/media/skill/SKILL.md`,
 `crates/media-api`, `crates/runtime/src/media_skill.rs`; product
 `apps/audio-provider/src/media_host.rs` and `media_attachment.rs`.
+
+The current registry has media_sources, media_status, media_capture,
+media_record, media_transcribe, media_synthesize, media_play, media_speak,
+media_session_start, media_session_update, media_observe, media_wait and
+media_stop. Do not invent media_session_observe/media_session_wait.
+The live registry and filtered media skill determine which are exposed here.

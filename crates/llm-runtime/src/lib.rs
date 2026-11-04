@@ -38,6 +38,7 @@ mod attempt_pricing;
 mod codec_tests;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
+pub mod accounts;
 pub mod catalog;
 pub mod catalog_task;
 #[allow(missing_docs)]
@@ -52,6 +53,8 @@ mod dispatch_header;
 pub mod error;
 mod execution;
 mod execution_context;
+mod scope_output_quota;
+pub use scope_output_quota::ScopeOutputQuota;
 mod structured_output;
 pub use execution_context::{
     ApiAttemptsLeft, ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext,
@@ -100,6 +103,7 @@ pub use auth::external_aws::{
 pub use auth::provider::{
     AnthropicAuthSnapshot, CopilotExchangeCredentialProvider, Credential, CredentialProvider,
     CredentialScope, CredentialSource, EnvCredentialProvider, StaticCredentialProvider,
+    VersionedCredential, VersionedCredentialError,
 };
 pub use catalog::{builtin_presets, catalog_from_profiles, BuiltinCatalog};
 pub use client::{

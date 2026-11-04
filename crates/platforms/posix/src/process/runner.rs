@@ -910,6 +910,9 @@ impl PosixProcess {
                 if reason == HOOK_COMMAND_AUDIT_REASON
         );
         let mut tcmd = Command::new(&inner.command);
+        if cmd.clear_environment() {
+            tcmd.env_clear();
+        }
         tcmd.args(&inner.args);
         if let Some(cwd) = &inner.cwd {
             tcmd.current_dir(cwd);
@@ -1164,6 +1167,9 @@ impl ProcessRunner for PosixProcess {
     }
 
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        if super::team_guardian::enabled() {
+            return super::team_guardian::execute(cmd, None).await;
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -1230,6 +1236,16 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         sink: std::sync::Arc<dyn ProcessStreamSink>,
     ) -> Result<ProcessOutput, ProcessError> {
+        if super::team_guardian::enabled() {
+            let output = super::team_guardian::execute(cmd, None).await?;
+            for line in output.stdout.lines() {
+                sink.stdout_line(line.to_owned()).await?;
+            }
+            if !output.stderr.is_empty() {
+                sink.stderr_chunk(output.stderr.as_bytes().to_vec()).await?;
+            }
+            return Ok(output);
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -1357,6 +1373,13 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
     ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+        if super::team_guardian::enabled() {
+            let output = super::team_guardian::execute(cmd, max_output_bytes).await?;
+            return Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(output),
+                output_file: None,
+            });
+        }
         if super::supervisor::enabled(cmd) {
             return super::supervisor::execute(cmd, max_output_bytes, false).await;
         }
@@ -1389,6 +1412,9 @@ impl ProcessRunner for PosixProcess {
             .id()
             .ok_or_else(|| ProcessError::Io("spawned child has no pid".into()))?;
         let spawned_birth = lingxi_core::host::live_sessions::process_start_identity(spawned_pid);
+        let _private_group_guard = cmd
+            .clear_environment()
+            .then(|| StreamingProcessGroupGuard(Some(spawned_pid)));
         let child_registration = if print_mode_cleanup {
             active_children::register(spawned_pid);
             Some(ChildRegistration(spawned_pid))
@@ -1990,6 +2016,9 @@ impl ProcessRunner for PosixProcess {
         observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<HookRunOutcome, ProcessError> {
+        if super::team_guardian::enabled() {
+            return Err(ProcessError::Unsupported);
+        }
         if cancellation
             .as_ref()
             .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
@@ -2227,6 +2256,9 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
     ) -> Result<ProcessHandle, ProcessError> {
+        if super::team_guardian::enabled() {
+            return Err(ProcessError::Unsupported);
+        }
         if super::supervisor::enabled(cmd) {
             return match super::supervisor::execute(cmd, None, true).await?.outcome {
                 lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
@@ -2769,6 +2801,71 @@ mod async_hook_tests {
 
     fn sh(script: &str) -> SandboxedCommand {
         sh_with_timeout(script, Duration::from_secs(5))
+    }
+
+    async fn private_group_child_must_stop(cancel: bool) {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let pid_path = dir.path().join("pid");
+        let quote =
+            |p: &std::path::Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
+        // Redirect the grandchild's pipes so normal parent exit really returns
+        // before its 30-second child. The ready handshake proves it was alive.
+        let script = format!(
+            "(printf ready > {}; exec /bin/sleep 30) >/dev/null 2>&1 & printf '%s' $! > {}; while [ ! -f {} ]; do /bin/sleep 0.01; done; {}",
+            quote(&ready), quote(&pid_path), quote(&ready), if cancel { "wait" } else { "printf done" }
+        );
+        let command = sh(&script).with_clear_environment(true);
+        let task = tokio::spawn(async move { PosixProcess::new().run_foreground(&command).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ready.exists() || !pid_path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned grandchild starts");
+        let pid: i32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        struct Cleanup(Pid);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = kill(self.0, Signal::SIGKILL);
+            }
+        }
+        let _cleanup = Cleanup(Pid::from_raw(pid));
+        if cancel {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(matches!(
+                task.await.unwrap().unwrap(),
+                lingxi_core::host::ForegroundOutcome::Completed(_)
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    kill(Pid::from_raw(pid), None),
+                    Err(nix::errno::Errno::ESRCH)
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("private foreground drops kill same-group descendants");
+    }
+
+    #[tokio::test]
+    async fn private_foreground_success_kills_same_group_descendants() {
+        private_group_child_must_stop(false).await;
+    }
+
+    #[tokio::test]
+    async fn private_foreground_cancellation_kills_same_group_descendants() {
+        private_group_child_must_stop(true).await;
     }
 
     fn sh_with_timeout(script: &str, timeout: Duration) -> SandboxedCommand {

@@ -250,7 +250,7 @@ enum TasksFileSnapshot {
 pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> Utf16JsonProjection {
     let plural = missed.len() > 1;
     let head = format!(
-        "The following one-shot scheduled task{} missed while Claude was not running. {} already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute {} yet. First use the AskUserQuestion tool to ask whether to run {} now. Only execute if the user confirms.",
+        "The following one-shot scheduled task{} missed while Claude was not running. {} already been removed from .lingxi/session-cron/scheduled_tasks.json.\n\nDo NOT execute {} yet. First use the AskUserQuestion tool to ask whether to run {} now. Only execute if the user confirms.",
         if plural { "s were" } else { " was" },
         if plural { "They have" } else { "It has" },
         if plural {
@@ -885,6 +885,13 @@ impl CronScheduler {
         let Some(root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file) else {
             return;
         };
+        // Opening an empty project must not create scheduler state/locks.
+        if crate::tasks_file::read_tasks_body(self.fs.as_ref(), root)
+            .await
+            .is_err()
+        {
+            return;
+        }
         let leader = crate::lock::acquire_scheduler_lease(
             self.fs.as_ref(),
             root,
@@ -961,8 +968,6 @@ impl CronScheduler {
         if !self.session_cron_enabled {
             return;
         }
-        self.refresh_creator_process().await;
-        self.refresh_project_leader().await;
         let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file)
         else {
             tracing::error!(path = %tasks_file.display(), "cron: invalid tasks-file path");
@@ -972,6 +977,8 @@ impl CronScheduler {
         else {
             return; // file absent → nothing to load
         };
+        self.refresh_creator_process().await;
+        self.refresh_project_leader().await;
         let doc = match crate::tasks_file::parse_tasks_strict(&body) {
             Ok(doc) => doc,
             Err(error) => {
@@ -1503,6 +1510,16 @@ impl CronScheduler {
             // than read an unknown state as "unchanged".
             Err(_) => None,
         };
+        if matches!(seen, Some(TasksFileSnapshot::Absent)) {
+            let mut applied = self.applied_snapshot.lock().await;
+            if applied
+                .as_ref()
+                .is_none_or(|snapshot| matches!(snapshot, TasksFileSnapshot::Absent))
+            {
+                *applied = Some(TasksFileSnapshot::Absent);
+                return;
+            }
+        }
         if let Some(current) = seen.as_ref() {
             if self.applied_snapshot.lock().await.as_ref() == Some(current) {
                 return;
@@ -1947,6 +1964,9 @@ impl CronScheduler {
     ) -> Option<ClaimedCronJob> {
         let tasks_file = self.current_tasks_file();
         let local = { self.tasks.read().await.get(id).cloned()? };
+        if self.session_tasks.read().await.contains_key(id) {
+            return self.claim_in_memory_due_job(id, now).await;
+        }
 
         let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file)
         else {
@@ -2699,11 +2719,12 @@ mod scheduler_tick_tests {
     use tasks::TaskType;
 
     const NOW: u64 = 1_700_000_000;
-    const TASKS_PATH: &str = "/proj/.claude/scheduled_tasks.json";
+    const TASKS_PATH: &str = "/proj/.lingxi/session-cron/scheduled_tasks.json";
     const AUTOMATION_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
     const OUTPUT_DIR: &str = "/proj/task-output";
 
     struct MemFs {
+        locks: AtomicUsize,
         files: tokio::sync::Mutex<HashMap<String, String>>,
         fail_writes: AtomicUsize,
     }
@@ -2721,6 +2742,7 @@ mod scheduler_tick_tests {
             let mut files = HashMap::new();
             files.insert(path.to_string(), body.to_string());
             Arc::new(Self {
+                locks: AtomicUsize::new(0),
                 files: tokio::sync::Mutex::new(files),
                 fail_writes: AtomicUsize::new(0),
             })
@@ -2823,6 +2845,7 @@ mod scheduler_tick_tests {
             root: &Path,
             relative: &Path,
         ) -> Result<Box<dyn FlockGuard>, FsError> {
+            self.locks.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(MemFlockGuard(
                 root.join(relative).display().to_string(),
             )))
@@ -3091,6 +3114,19 @@ mod scheduler_tick_tests {
         )
         .with_test_registry_delivery()
         .with_recurring_max_age(Some(super::DEFAULT_RECURRING_MAX_AGE))
+    }
+
+    #[tokio::test]
+    async fn empty_project_start_tick_and_stop_never_take_a_disk_lock() {
+        let fs = MemFs::with("/unrelated", "keep");
+        let clock = Arc::new(FixedClock(SystemTime::UNIX_EPOCH));
+        let scheduler = scheduler(registry(fs.clone()), fs.clone(), clock);
+        scheduler.load_persisted().await;
+        scheduler.tick().await;
+        scheduler.stop().await.unwrap();
+        crate::lock::release_scheduler_lease(fs.as_ref(), Path::new("/proj"), "session").await;
+        assert_eq!(fs.locks.load(Ordering::SeqCst), 0);
+        assert_eq!(fs.files.lock().await.len(), 1);
     }
 
     struct RecordingDelivery {
@@ -3377,7 +3413,10 @@ mod scheduler_tick_tests {
         b.refresh_project_leader().await;
         assert!(a.project_leader.load(Ordering::SeqCst));
         assert!(!b.project_leader.load(Ordering::SeqCst));
-        let record = fs.get("/proj/.claude/scheduled_tasks.lock").await.unwrap();
+        let record = fs
+            .get("/proj/.lingxi/session-cron/scheduled_tasks.lock")
+            .await
+            .unwrap();
         let record: serde_json::Value = serde_json::from_str(&record).unwrap();
         assert_eq!(record["sessionId"], "owner");
         assert_eq!(record["acquiredAt"], NOW * 1000);
@@ -3696,7 +3735,7 @@ mod scheduler_tick_tests {
             "one confirmation prompt, not a fire"
         );
         let prompt = handler.prompts().remove(0);
-        assert!(prompt.starts_with("The following one-shot scheduled task was missed while Claude was not running. It has already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute this prompt yet. First use the AskUserQuestion tool to ask whether to run it now. Only execute if the user confirms.\n\n[Every minute, created "), "{prompt}");
+        assert!(prompt.starts_with("The following one-shot scheduled task was missed while Claude was not running. It has already been removed from .lingxi/session-cron/scheduled_tasks.json.\n\nDo NOT execute this prompt yet. First use the AskUserQuestion tool to ask whether to run it now. Only execute if the user confirms.\n\n[Every minute, created "), "{prompt}");
         assert!(prompt.ends_with("]\ndeploy it"), "{prompt}");
         assert!(!scheduler.tasks.read().await.contains_key("dmissed01"));
         assert!(scheduler.tasks.read().await.contains_key("dkeep0001"));
@@ -3764,7 +3803,7 @@ mod scheduler_tick_tests {
             },
         ]);
         let text = super::source_display(&text);
-        assert!(text.starts_with("The following one-shot scheduled tasks were missed while Claude was not running. They have already been removed from .claude/scheduled_tasks.json.\n\nDo NOT execute these prompts yet. First use the AskUserQuestion tool to ask whether to run each one now. Only execute if the user confirms.\n\n[Every minute, created "));
+        assert!(text.starts_with("The following one-shot scheduled tasks were missed while Claude was not running. They have already been removed from .lingxi/session-cron/scheduled_tasks.json.\n\nDo NOT execute these prompts yet. First use the AskUserQuestion tool to ask whether to run each one now. Only execute if the user confirms.\n\n[Every minute, created "));
         assert!(text.contains("]\na\n\n[Weekdays at 9:00 AM, created "));
         assert!(text.ends_with("]\nb"));
     }
@@ -4394,13 +4433,15 @@ mod scheduler_tick_tests {
             .unwrap();
         scheduler.clone().start().await.unwrap();
         scheduler
-            .set_tasks_file(PathBuf::from("/other/.claude/scheduled_tasks.json"))
+            .set_tasks_file(PathBuf::from(
+                "/other/.lingxi/session-cron/scheduled_tasks.json",
+            ))
             .await
             .unwrap();
         assert_eq!(scheduler.current_session_id().as_deref(), Some("owner"));
         assert_eq!(
             scheduler.current_tasks_file(),
-            PathBuf::from("/other/.claude/scheduled_tasks.json")
+            PathBuf::from("/other/.lingxi/session-cron/scheduled_tasks.json")
         );
         assert_eq!(scheduler.session_jobs().await, vec![task]);
         scheduler.stop().await.unwrap();
@@ -4874,88 +4915,29 @@ mod scheduler_tick_tests {
     }
 
     #[tokio::test]
-    async fn legacy_manual_pending_is_adopted_once_without_changing_its_run_id() {
-        // Equal clocks need a durable adoption marker too: a later different
-        // token must not look like another first adoption of the legacy ID.
-        for host_at in [123, NOW * 1000] {
-            let fs = review_automation_file();
-            let root = Path::new("/proj");
-            let now = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW);
-            let legacy = crate::claim_automation_run_now(fs.as_ref(), root, "review-task", now)
-                .await
-                .unwrap();
-            assert_eq!(
-                crate::finish_automation_run_checked(
-                    fs.as_ref(),
-                    root,
-                    &legacy,
-                    &Err("busy:target".into()),
-                    NOW * 1000
-                )
-                .await
-                .unwrap(),
-                crate::AutomationFinishDisposition::Queued,
-            );
-            let adopted =
-                crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, host_at)
-                    .await
-                    .unwrap();
-            assert_eq!(adopted.run_id, legacy.run_id);
-            let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
-            let run = &doc.tasks[0].automation.as_ref().unwrap().runs[0];
-            assert_eq!(run.scheduled_at, NOW * 1000);
-            assert_eq!(run.manual_occurrence_at, Some(host_at));
-            assert_eq!(
-                crate::finish_automation_run_checked(
-                    fs.as_ref(),
-                    root,
-                    &adopted,
-                    &Err("busy:target".into()),
-                    NOW * 1000
-                )
-                .await
-                .unwrap(),
-                crate::AutomationFinishDisposition::Queued,
-            );
-            assert!(crate::claim_automation_run_now_at(
-                fs.as_ref(),
-                root,
-                "review-task",
-                now,
-                host_at + 1
-            )
+    async fn manual_occurrences_without_a_token_are_not_adopted_by_token_requests() {
+        let fs = review_automation_file();
+        let root = Path::new("/proj");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW);
+        let request = crate::claim_automation_run_now(fs.as_ref(), root, "review-task", now)
             .await
-            .is_none());
-            let retry =
-                crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, host_at)
-                    .await
-                    .unwrap();
-            assert_eq!(retry.run_id, legacy.run_id);
-            assert_eq!(
-                crate::finish_automation_run_checked(
-                    fs.as_ref(),
-                    root,
-                    &retry,
-                    &Ok(crate::AutomationRunResult {
-                        session_id: "chat".into(),
-                        summary: "done".into()
-                    }),
-                    NOW * 1000
-                )
+            .unwrap();
+        crate::finish_automation_run_checked(
+            fs.as_ref(),
+            root,
+            &request,
+            &Err("busy:target".into()),
+            NOW * 1000,
+        )
+        .await
+        .unwrap();
+        let before = fs.get(AUTOMATION_PATH).await;
+        assert!(
+            crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 123)
                 .await
-                .unwrap(),
-                crate::AutomationFinishDisposition::Terminal,
-            );
-            assert!(crate::claim_automation_run_now_at(
-                fs.as_ref(),
-                root,
-                "review-task",
-                now,
-                host_at
-            )
-            .await
-            .is_none());
-        }
+                .is_none()
+        );
+        assert_eq!(fs.get(AUTOMATION_PATH).await, before);
     }
 
     struct CommitReviewFirer {

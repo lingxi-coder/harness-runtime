@@ -1,0 +1,6 @@
+{
+  "type": "provider_accounts",
+  "operation_id": 7,
+  "action": "list",
+  "request_json": "{}"
+}

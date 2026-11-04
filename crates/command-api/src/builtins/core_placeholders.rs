@@ -4,7 +4,7 @@
 //! `builtin::{clear, compact, exit, help, init, memory}`.
 //!
 //! M5-11 removed the remaining batch-2 placeholders; their real handlers
-//! ship under `builtin::{agents, config, doctor, hooks, login, logout,
+//! ship under `builtin::{agents, config, doctor, hooks,
 //! mcp, model, permissions, status, version}`.
 //!
 //! Until [`crate::registry::register_core_batch_1`] /

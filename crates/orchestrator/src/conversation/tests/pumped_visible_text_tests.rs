@@ -41,3 +41,49 @@ fn thinking_plus_real_text_is_visible() {
         text("answer")
     ]));
 }
+
+#[test]
+fn preserved_native_text_is_visible_but_opaque_non_text_and_blank_are_not() {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let block = |protocol: &str, kind: &str, text: &str| ContentBlock::ProviderContent {
+        protocol: protocol.into(),
+        value: Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "type":kind,"text":text,"provider_extra":{"preserved":true}
+        }))
+        .unwrap(),
+    };
+    assert!(pumped_has_visible_text(&[block(
+        "anthropic_messages",
+        "text",
+        "answer"
+    )]));
+    assert!(!pumped_has_visible_text(&[block(
+        "anthropic_messages",
+        "text",
+        "  \n"
+    )]));
+    assert!(!pumped_has_visible_text(&[block(
+        "anthropic_messages",
+        "thinking",
+        "private reasoning"
+    )]));
+    assert!(!pumped_has_visible_text(&[block(
+        "unknown_protocol",
+        "text",
+        "opaque data"
+    )]));
+}
+
+#[test]
+fn display_text_with_exact_js_utf16_is_visible() {
+    assert!(pumped_has_visible_text(&[ContentBlock::TextJsUtf16 {
+        text: "\u{fffd}".into(),
+        utf16_code_units: vec![0xd800],
+        citations: None,
+    }]));
+    assert!(!pumped_has_visible_text(&[ContentBlock::TextJsUtf16 {
+        text: " \t".into(),
+        utf16_code_units: vec![0x20, 0x9],
+        citations: None,
+    }]));
+}

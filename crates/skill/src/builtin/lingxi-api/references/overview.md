@@ -34,3 +34,7 @@ API declaration alone does not establish a running hosted Agent or cloud Bot.
 
 Source anchors: Harness `crates/runtime/src/{desktop,mobile}`,
 `crates/tool-api/src/registry.rs`; product host composition and Remote Control.
+
+Teams collaboration (see teams) and provider multi-account management (see
+accounts) are product features with separate identity and authorization. Teams
+membership is not a Remote Control device grant or a provider credential.

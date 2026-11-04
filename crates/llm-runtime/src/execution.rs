@@ -305,9 +305,18 @@ pub(crate) async fn prepare(
 }
 
 pub(crate) async fn seal(
+    draft: sdk::RequestDraft,
+    request: &ProviderRequest,
+    native_provider_id: Option<&crate::ProviderId>,
+) -> Result<sdk::PreparedCall, LlmError> {
+    seal_with_session(draft, request, native_provider_id, None).await
+}
+
+pub(crate) async fn seal_with_session(
     mut draft: sdk::RequestDraft,
     request: &ProviderRequest,
     native_provider_id: Option<&crate::ProviderId>,
+    session: Option<&mut sdk::ConversationSession>,
 ) -> Result<sdk::PreparedCall, LlmError> {
     // Preparation exposes an authenticated byte snapshot. When host policy
     // edits the paired semantic body or exact strings, that old snapshot is
@@ -352,6 +361,12 @@ pub(crate) async fn seal(
                 .set_native_traceparent(traceparent)
                 .map_err(crate::upstream::error)?;
         }
+    }
+    if let Some(session) = session {
+        session
+            .prepare(&mut draft)
+            .await
+            .map_err(crate::upstream::error)?;
     }
     Box::pin(draft.seal()).await.map_err(crate::upstream::error)
 }
@@ -442,6 +457,8 @@ pub(crate) fn decode(collected: &sdk::CollectedResponse) -> Result<wire::ChatRes
 pub(crate) struct RequestCredentialSnapshot {
     pub profile: String,
     pub credential: tokio::sync::OnceCell<Option<crate::Credential>>,
+    pub credential_revision: std::sync::OnceLock<Option<u64>>,
+    pub rejected_credential_revision: std::sync::Mutex<Option<u64>>,
 }
 
 pub(crate) struct HostAuthenticator {
@@ -474,6 +491,8 @@ impl HostAuthenticator {
             snapshot: Some(Arc::new(RequestCredentialSnapshot {
                 profile,
                 credential: tokio::sync::OnceCell::new(),
+                credential_revision: std::sync::OnceLock::new(),
+                rejected_credential_revision: std::sync::Mutex::new(None),
             })),
         }
     }

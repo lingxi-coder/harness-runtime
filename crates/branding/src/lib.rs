@@ -156,6 +156,8 @@ pub const DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS_ENV: &str =
     "LINGXI_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS";
 /// Disable nonessential background traffic.
 pub const DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str = "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC";
+/// Disable session Cron and native task scheduling.
+pub const DISABLE_CRON_ENV: &str = "LINGXI_DISABLE_CRON";
 /// Disable background task execution.
 pub const DISABLE_BACKGROUND_TASKS_ENV: &str = "LINGXI_DISABLE_BACKGROUND_TASKS";
 
@@ -230,11 +232,6 @@ pub const GLOBAL_CONFIG_FILE: &str = ".lingxi.json";
 pub const SESSION_MESSAGE_IDENTITY_LOG_SUFFIX: &str = ".lingxi-message-identities";
 /// Cross-process lock suffix guarding the session-message identity sidecar.
 pub const SESSION_MESSAGE_IDENTITY_LOCK_SUFFIX: &str = ".lingxi-message-identities.lock";
-
-/// Legacy global-config filename checked *inside* the config-home before
-/// [`GLOBAL_CONFIG_FILE`] (e.g. `<config-home>/.config.json`). The filename
-/// itself is not brand-specific; named here so the resolver has one source.
-pub const LEGACY_GLOBAL_CONFIG_FILE: &str = ".config.json";
 
 /// Environment variable that overrides the config-home directory.
 pub const CONFIG_DIR_ENV: &str = "LINGXI_CONFIG_DIR";
@@ -374,6 +371,7 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS_ENV,
     DISABLE_NONESSENTIAL_TRAFFIC_ENV,
     DISABLE_BACKGROUND_TASKS_ENV,
+    DISABLE_CRON_ENV,
     MAX_CONCURRENT_SUBAGENTS_ENV,
     WORKFLOW_MAX_CONCURRENT_AGENTS_ENV,
     MAX_SUBAGENT_SPAWN_DEPTH_ENV,
@@ -426,21 +424,25 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     REMOTE_ATTACHMENT_PREFIX,
 ];
 
-/// Resolve the user config-home: `$LINGXI_CONFIG_DIR` when the env value is
-/// supplied (honored verbatim, including an empty value — matching the upstream
-/// `??` semantics), else `home.join(DOT_DIR)`.
-///
-/// This is the pure core: the env value is injected so callers stay testable
-/// without mutating process env. Callers that historically treated an *empty*
-/// value as unset (the `||`-shaped resolvers, e.g. `migrations`) should filter
-/// the env value to `None` before calling and pass their own home, preserving
-/// that deliberate divergence.
+/// Resolve the injected non-empty config-home, otherwise the brand default.
+/// Empty overrides mean unset on every host.
 #[must_use]
 pub fn config_home(home: &Path, config_dir_env: Option<OsString>) -> PathBuf {
-    match config_dir_env {
+    match config_dir_env.filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => home.join(DOT_DIR),
     }
+}
+
+/// Render bundled documentation using the owning product namespace.
+#[must_use]
+pub fn render_namespace_template(template: &str) -> String {
+    template
+        .replace("{{config_dir}}", DOT_DIR)
+        .replace("{{global_config_file}}", GLOBAL_CONFIG_FILE)
+        .replace("{{config_dir_env}}", CONFIG_DIR_ENV)
+        .replace("{{memory_file}}", MEMORY_FILE)
+        .replace("{{memory_local_file}}", MEMORY_LOCAL_FILE)
 }
 
 #[cfg(test)]
@@ -456,12 +458,12 @@ mod tests {
     }
 
     #[test]
-    fn config_home_honors_env_verbatim_including_empty() {
-        // `??` semantics: a SET value wins verbatim, even when empty.
+    fn config_home_honors_nonempty_override() {
+        // A non-empty injected path wins; an empty one is unset.
         let got = config_home(Path::new("/home/u"), Some("/custom".into()));
         assert_eq!(got, Path::new("/custom"));
         let empty = config_home(Path::new("/home/u"), Some(OsString::from("")));
-        assert_eq!(empty, Path::new(""));
+        assert_eq!(empty, Path::new("/home/u").join(DOT_DIR));
     }
 
     #[test]

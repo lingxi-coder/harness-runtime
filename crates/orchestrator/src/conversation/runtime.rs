@@ -800,6 +800,9 @@ impl ConversationOrchestrator {
 }
 
 pub(crate) struct PromptRuntime {
+    /// Host-only, nonserialized boundary for private workspaces. Prompt and
+    /// transcript metadata must not execute commands against model-owned Git.
+    pub(crate) host_environment_probes_disabled: bool,
     pub(crate) turn_execution_metrics: std::sync::Mutex<TurnExecutionMetricsState>,
     pub(crate) suggestion_background:
         std::sync::Mutex<super::prompt_suggestion_background::state::BackgroundSuggestionState>,
@@ -1134,6 +1137,7 @@ impl PromptRuntime {
 
     pub(crate) fn new() -> Self {
         Self {
+            host_environment_probes_disabled: false,
             turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
             suggestion_background: std::sync::Mutex::new(Default::default()),
             suggestion_cancel: std::sync::Mutex::new(None),

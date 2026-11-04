@@ -32,7 +32,6 @@ pub mod commit;
 pub mod commit_push_pr;
 pub mod compact;
 pub mod config;
-pub mod connect;
 pub mod context;
 pub mod custom_commands;
 pub mod doctor;
@@ -52,8 +51,6 @@ pub mod insights;
 pub mod interactive_only;
 pub mod keybindings;
 pub mod list_agents;
-pub mod login;
-pub mod logout;
 pub mod mcp;
 pub mod memory;
 pub mod model;
@@ -93,10 +90,7 @@ pub use commit::CommitHandler;
 pub use commit_push_pr::CommitPushPrHandler;
 pub use compact::CompactHandler;
 pub use config::ConfigHandler;
-pub use connect::{
-    ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, ConnectHandler,
-    CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
-};
+
 pub use context::ContextHandler;
 pub use doctor::DoctorHandler;
 pub use effort::EffortHandler;
@@ -118,8 +112,6 @@ pub use insights::{
 };
 pub use interactive_only::InteractiveOnlyHandler;
 pub use keybindings::KeybindingsHandler;
-pub use login::{LoginHandler, LoginOrgPolicy};
-pub use logout::LogoutHandler;
 pub use mcp::McpHandler;
 pub use memory::MemoryHandler;
 pub use model::ModelHandler;
@@ -158,5 +150,5 @@ pub use custom_commands::{
 pub use register::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_3, register_core_batch_4, register_core_batch_5, register_core_batch_6,
-    register_core_batch_7, register_core_batch_8, register_core_connect, register_insights_command,
+    register_core_batch_7, register_core_batch_8, register_insights_command,
 };

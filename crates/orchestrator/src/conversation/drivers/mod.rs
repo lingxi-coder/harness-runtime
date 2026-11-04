@@ -348,6 +348,9 @@ pub(crate) struct TurnLoopState {
     pub(crate) refusal_reissue_pending: bool,
     malformed_tool_use_retried: bool,
     thinking_only_nudged: bool,
+    /// A notification may intentionally finish silently. Any newly accepted
+    /// non-meta user message restores the ordinary visible-answer requirement.
+    notification_user_boundary: Option<Option<MessageId>>,
     last_message_id: MessageId,
     selected_route: Option<crate::query_model::ModelRoute>,
     serving_route: Option<crate::query_model::ModelRoute>,
@@ -389,6 +392,7 @@ impl TurnLoopState {
             refusal_reissue_pending: false,
             malformed_tool_use_retried: false,
             thinking_only_nudged: false,
+            notification_user_boundary: None,
             last_message_id,
             selected_route: None,
             serving_route: None,
@@ -2326,6 +2330,31 @@ impl ConversationOrchestrator {
         Ok(true)
     }
 
+    async fn latest_response_request_user(&self) -> Option<MessageId> {
+        self.session
+            .lock()
+            .await
+            .history
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role() == lingxi_core::types::MessageRole::User
+                    && !message.is_meta()
+                    && !matches!(message, ConversationMessage::User { content, .. }
+                    if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. })))
+            })
+            .map(ConversationMessage::id)
+    }
+
+    async fn requires_visible_response(&self, loop_state: &mut TurnLoopState) -> bool {
+        if let Some(boundary) = loop_state.notification_user_boundary {
+            if self.latest_response_request_user().await != boundary {
+                loop_state.notification_user_boundary = None;
+            }
+        }
+        loop_state.notification_user_boundary.is_none()
+    }
+
     async fn decide_streaming_disposition(
         &self,
         loop_state: &mut TurnLoopState,
@@ -2338,6 +2367,7 @@ impl ConversationOrchestrator {
         pre_batch_mcp_tool_count: usize,
         refusal_tool_uses_settled: bool,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
+        let requires_visible_response = self.requires_visible_response(loop_state).await;
         let dispatch_guard = post_tool_batch_dispatch.publication_guard.clone();
         if dispatch_guard
             .as_ref()
@@ -2774,7 +2804,8 @@ impl ConversationOrchestrator {
                 // `!isApiErrorMessage` holds because API errors are caught as
                 // `Err(..)` upstream of this match. Once nudged, a still-empty
                 // continuation falls through to the normal end.
-                if !loop_state.thinking_only_nudged
+                if requires_visible_response
+                    && !loop_state.thinking_only_nudged
                     && !pumped_has_visible_text_for_profile(
                         &pumped.assistant_blocks,
                         self.is_persistent_app_chat(),
@@ -3017,7 +3048,8 @@ impl ConversationOrchestrator {
             // once-per-turn nudge before terminating. Intercepted ahead of
             // the generic terminal arm; once nudged it falls through.
             Some("stop_sequence")
-                if !loop_state.thinking_only_nudged
+                if requires_visible_response
+                    && !loop_state.thinking_only_nudged
                     && !pumped_has_visible_text_for_profile(
                         &pumped.assistant_blocks,
                         self.is_persistent_app_chat(),
@@ -3081,7 +3113,8 @@ impl ConversationOrchestrator {
                 // (claude-code `stop_reason ?? <default>`), so the
                 // thinking-only nudge applies here on the same terms and,
                 // like the `end_turn` arm, fires BEFORE the Stop hooks.
-                if !loop_state.thinking_only_nudged
+                if requires_visible_response
+                    && !loop_state.thinking_only_nudged
                     && !pumped_has_visible_text_for_profile(
                         &pumped.assistant_blocks,
                         self.is_persistent_app_chat(),
@@ -4365,11 +4398,19 @@ impl ConversationOrchestrator {
 /// ~202946760):
 /// `ie.some(msg => msg.content.some(b => b.type === "text" && b.text.trim().length > 0))`.
 ///
+/// A `false` return = a thinking-only (or otherwise text-empty) response. Only
+/// text blocks with a non-whitespace body count, including lossless UTF-16 and
+/// native text whose unknown fields are preserved. `Thinking`, `ToolUse`, etc.
+/// are not "visible output" for this gate. (Tool
+/// uses are indexed separately in `PumpedTurn::tool_uses`; recovered responses
+/// also keep their original tool blocks in `assistant_blocks`. This gate only
+/// fires on `end_turn`/`stop_sequence`.)
 pub(super) fn pumped_has_visible_text(blocks: &[lingxi_core::types::ContentBlock]) -> bool {
-    use lingxi_core::types::ContentBlock;
-    blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Text { text, .. } if !text.trim().is_empty()))
+    blocks.iter().any(|block| {
+        block
+            .visible_text()
+            .is_some_and(|text| !text.trim().is_empty())
+    })
 }
 
 /// App Chat's exact UTF-16 text remains visible even when an unpaired unit

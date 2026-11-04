@@ -7,7 +7,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account_versions;
 pub mod assemble;
+pub use account_versions::{
+    read_account_credential_version, write_account_credential_version_locked,
+    AccountCredentialVersion,
+};
+pub mod accounts;
+pub use accounts::{assemble_account_client_config, assemble_account_profiles, AccountRegistry};
 mod availability;
 mod cost_translate;
 mod credentials;
@@ -15,10 +22,10 @@ pub mod parse_routing;
 pub mod startup_catalog;
 pub mod types;
 
-pub use assemble::{assemble, assemble_for_region};
-pub use availability::{
-    compute_availability, compute_availability_with_isolation, ProviderAvailability,
+pub use assemble::{
+    assemble, assemble_for_region, assemble_management_for_region, mobile_profile_allowed,
 };
+pub use availability::{compute_availability_with_accounts, ProviderAvailability};
 pub use credentials::MultiCredentialProvider;
 pub use parse_routing::parse_routing;
 pub use types::{

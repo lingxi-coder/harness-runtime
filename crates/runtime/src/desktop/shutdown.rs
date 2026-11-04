@@ -347,6 +347,22 @@ impl DesktopSessionLifecycle {
             }
             return report;
         }
+        // All callers and reconnect producers have drained. Close transport sessions
+        // before a short-lived catalog process exits, without revoking saved OAuth.
+        let servers: Vec<String> = self.mcp_registry.connections.read().await.keys().cloned().collect();
+        let cleanup = futures::future::join_all(
+            servers.iter().map(|name| self.mcp_registry.remove_without_revoking_auth(name)),
+        );
+        match tokio::time::timeout_at(stage(std::time::Duration::from_secs(5)), cleanup).await {
+            Ok(results) => {
+                for result in results {
+                    if let Err(error) = result {
+                        report.errors.push(format!("MCP session cleanup failed: {error}"));
+                    }
+                }
+            }
+            Err(_) => report.errors.push("MCP sessions did not drain within the shutdown budget".into()),
+        }
         let retired_command_handlers =
             { self.command_registry.write().await.take_builtin_handlers() };
         // Handler destructors can release the orchestrator, whose skill-listing

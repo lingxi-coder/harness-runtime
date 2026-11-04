@@ -376,7 +376,7 @@ pub(crate) fn desktop_native_insights_system_prefix(
 ) -> lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix {
     use lingxi_llm_client::providers::anthropic::system_prompt::{NativeSystemPrefix, PromptText};
 
-    let environment_value = |name: &str| match config.oauth_environment_lookup.as_ref() {
+    let environment_value = |name: &str| match config.request_environment_lookup.as_ref() {
         Some(lookup) => lookup.get(name),
         None => std::env::var(name).ok(),
     };

@@ -311,8 +311,7 @@ mod tests {
     #[test]
     fn mobile_side_chat_uses_ram_only_and_end_preserves_user_files() {
         let root = tempfile::tempdir().unwrap();
-        let mut cfg = test_config(root.path());
-        cfg.api_key = "side-test-key".into();
+        let cfg = test_config(root.path());
         let home = cfg.lingxi_home.clone();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

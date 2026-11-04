@@ -150,23 +150,13 @@ pub fn lingxi_config_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(branding::DOT_DIR))
 }
 
-/// `getGlobalClaudeFile` (`env.ts:14-26`): legacy `<config-home>/.config.json`
-/// when it exists, else `($LINGXI_CONFIG_DIR || $HOME)/.lingxi.json`.
-///
-/// The TS oauth filename suffix (`fileSuffixForOauthConfig()` →
-/// `-custom-oauth`/`-local-oauth`/`-staging-oauth`) only applies under custom
-/// OAuth env vars this port does not model (`anthropic-oauth` has no
-/// `getOauthConfigType` substrate) — the default build resolves it to `""`,
-/// so `.lingxi.json` is hardcoded here.
+/// Resolve the host-pinned global config file, otherwise the current brand's
+/// global filename under its non-empty config override or the user's home.
+/// Obsolete config filenames are never consulted.
 #[must_use]
 pub fn global_config_path() -> Option<PathBuf> {
     if let Some(path) = GLOBAL_CONFIG_PATH_OVERRIDE.get() {
         return Some(path.clone());
-    }
-    let home = lingxi_config_home()?;
-    let legacy = home.join(branding::LEGACY_GLOBAL_CONFIG_FILE);
-    if legacy.exists() {
-        return Some(legacy);
     }
     let base = lingxi_config_dir_env().or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
     Some(base.join(branding::GLOBAL_CONFIG_FILE))
@@ -1110,11 +1100,7 @@ fn config_backups_dir(target: &Path) -> PathBuf {
         }
     }
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    if target.file_name() == Some(std::ffi::OsStr::new(branding::LEGACY_GLOBAL_CONFIG_FILE)) {
-        parent.join("backups")
-    } else {
-        parent.join(branding::DOT_DIR).join("backups")
-    }
+    parent.join(branding::DOT_DIR).join("backups")
 }
 
 /// The fallible tail of [`write_atomic`], isolated so its caller can clean up
@@ -1637,12 +1623,15 @@ mod tests {
     }
 
     #[test]
-    fn global_path_prefers_legacy_config_json_when_present() {
+    fn global_path_ignores_obsolete_config_json() {
         let _g = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("LINGXI_CONFIG_DIR", tmp.path());
         std::fs::write(tmp.path().join(".config.json"), "{}").unwrap();
-        assert_eq!(global_config_path(), Some(tmp.path().join(".config.json")));
+        assert_eq!(
+            global_config_path(),
+            Some(tmp.path().join(branding::GLOBAL_CONFIG_FILE))
+        );
         std::env::remove_var("LINGXI_CONFIG_DIR");
     }
 

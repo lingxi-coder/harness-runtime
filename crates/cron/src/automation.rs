@@ -741,16 +741,7 @@ async fn claim_manual_run(
             match run.manual_occurrence_at {
                 Some(bound) if bound != at => return None,
                 Some(_) => {}
-                None => {
-                    // Adopt only legacy non-token manual IDs. A previously
-                    // explicit token must never be rebound to another action.
-                    if run.id.starts_with(&format!("{id}-manual-at-"))
-                        && stable_id.as_ref() != Some(&run.id)
-                    {
-                        return None;
-                    }
-                    run.manual_occurrence_at = Some(at);
-                }
+                None => return None,
             }
         }
         run.claim_generation = Some(run.claim_generation.unwrap_or(0).checked_add(1)?);

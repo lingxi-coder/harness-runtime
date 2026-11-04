@@ -78,6 +78,48 @@ fn strict_manifest_requires_schema_targets_known_capabilities() {
     }
 }
 #[test]
+fn app_owned_mcp_requires_desktop_targets_and_exact_release_consent() {
+    let (_dir, library, request) = setup();
+    let mut value = manifest();
+    value["targets"] = json!([{"platform":"macos","environment":"native"}]);
+    value["capabilities"] = json!(["mcp"]);
+    value["mcpServers"] = json!({"tools":{"type":"stdio","command":"node mcp.mjs"}});
+    let parsed = Manifest::parse(&value.to_string()).unwrap();
+    assert!(parsed.requires_execution());
+    source(Path::new(&request.source_path), &value);
+    let published = library.publish(request).unwrap();
+    let id = &published.record.app_id;
+    assert!(matches!(library.prepare_run(id, 1), Err(AppError::ConsentRequired(_))));
+    library.grant_execution(id, &published.release.digest).unwrap();
+    assert!(library.prepare_run(id, 1).is_ok());
+    library.revoke_execution(id).unwrap();
+    assert!(matches!(library.require_execution_grant(id, 1), Err(AppError::ConsentRequired(_))));
+    value["targets"] = json!([{"platform":"ios","environment":"mobile-linux"}]);
+    assert!(Manifest::parse(&value.to_string()).is_err());
+    value["targets"] = json!([{"platform":"macos","environment":"native"}]);
+    value["capabilities"] = json!([]);
+    assert!(Manifest::parse(&value.to_string()).is_err());
+}
+#[test]
+fn app_owned_mcp_endpoints_are_process_bound_and_public_exports_exclude_secrets() {
+    let mut value = manifest();
+    value["targets"] = json!([{"platform":"macos","environment":"native"}]);
+    value["capabilities"] = json!(["mcp"]);
+    value["processes"] = json!([{"name":"api","command":"node server.mjs"}]);
+    value["mcpServers"] = json!({"tools":{"type":"http","process":"api","path":"/mcp"}});
+    assert!(Manifest::parse(&value.to_string()).is_ok());
+    for path in ["//remote/mcp", "/%2e%2e/mcp", "/a/../mcp", "/mcp?token=x"] {
+        value["mcpServers"]["tools"]["path"] = json!(path);
+        assert!(Manifest::parse(&value.to_string()).is_err());
+    }
+    value["mcpServers"] = json!({"tools":{"type":"http","process":"missing","path":"/mcp"}});
+    assert!(Manifest::parse(&value.to_string()).is_err());
+    value["mcpServers"] = json!({"tools":{"type":"stdio","command":"node mcp.mjs","env":{"API_KEY":"secret"}}});
+    assert!(Manifest::parse(&value.to_string()).unwrap().validate_public_export().is_err());
+    value["mcpServers"]["tools"]["url"] = json!("https://example.com");
+    assert!(Manifest::parse(&value.to_string()).is_err());
+}
+#[test]
 fn agent_requirements_are_not_runtime_grants() {
     let mut m = manifest();
     m["capabilities"] = json!(["agent"]);

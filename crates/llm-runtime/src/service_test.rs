@@ -3187,6 +3187,304 @@ mod tests {
         ws_calls: std::sync::atomic::AtomicUsize,
     }
 
+    fn scope_quota(dispatches: u32) -> Arc<crate::ScopeOutputQuota> {
+        Arc::new(crate::ScopeOutputQuota::new(
+            std::num::NonZeroU32::new(1024).unwrap(),
+            std::num::NonZeroU32::new(dispatches).unwrap(),
+        ))
+    }
+
+    struct ScopeWaitingAdmission {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        probe: Arc<AttemptProbe>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ModelAttemptHooks for Arc<ScopeWaitingAdmission> {
+        async fn begin(
+            &self,
+            _: &lingxi_core::host::ModelAttemptContext,
+            _: &LlmRequest,
+            _: &crate::PreparedLlmCall,
+        ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(Box::new(ProbeLease {
+                probe: self.probe.clone(),
+                finished: false,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_quota_rechecks_revocation_after_awaited_host_admission() {
+        for streaming in [false, true] {
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let quota = scope_quota(1);
+            let service = Arc::new(
+                make_adapter_with_retries(transport.clone(), Some(0))
+                    .with_scope_output_quota(Some(quota.clone())),
+            );
+            let waiting = Arc::new(ScopeWaitingAdmission {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                probe: Arc::new(AttemptProbe::default()),
+            });
+            service.set_model_attempt_hooks(Arc::new(waiting.clone()));
+            let run = tokio::spawn(async move {
+                if streaming {
+                    match service.stream_request(registered_request()).await {
+                        Err(error) => error,
+                        Ok(_) => panic!("revoked scope opened a stream"),
+                    }
+                } else {
+                    service
+                        .execute_side_query_request(registered_request())
+                        .await
+                        .unwrap_err()
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), waiting.entered.notified())
+                .await
+                .unwrap();
+            quota.revoke();
+            waiting.release.notify_one();
+            assert!(matches!(
+                run.await.unwrap(),
+                LlmError::RequestDispatchRejected {
+                    prior_dispatch: false
+                }
+            ));
+            assert_eq!(quota.remaining_dispatches(), 1);
+            assert_eq!(transport.seen_count(), 0);
+            assert!(!waiting.probe.events.lock().unwrap().contains(&"dispatch"));
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_quota_covers_responses_websocket_and_disables_prewarm() {
+        use futures::StreamExt;
+        let transport = Arc::new(HttpOnlyProbeTransport {
+            frames: vec![
+                br#"{"type":"response.created","response":{"id":"r1","model":"model","output":[]}}"#.to_vec(),
+                br#"{"type":"response.completed","response":{"id":"r1","model":"model","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":3,"total_tokens":7}}}"#.to_vec(),
+            ], http_calls: Default::default(), ws_calls: Default::default(),
+        });
+        let quota = scope_quota(2);
+        let service = make_adapter_for_protocol_with_websocket(
+            ProtocolFamily::OpenAiResponses,
+            ProviderId::OpenAI,
+            "https://api.openai.com/v1",
+            "test",
+            "model",
+            transport.clone(),
+            true,
+        )
+        .with_scope_output_quota(Some(quota.clone()));
+        service
+            .prewarm_responses_websocket("model", None, None, Vec::new(), Vec::new(), false)
+            .await
+            .unwrap();
+        assert_eq!(quota.remaining_dispatches(), 2);
+        assert_eq!(
+            transport.ws_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        for _ in 0..2 {
+            let mut request = LlmRequest::new("model").with_user_text("hello");
+            request.input.max_tokens = Some(u32::MAX);
+            let mut stream = service.stream_request(request).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        }
+        assert_eq!(quota.remaining_dispatches(), 0);
+        assert!(matches!(
+            service
+                .stream_request(LlmRequest::new("model").with_user_text("last"))
+                .await,
+            Err(LlmError::ApiAttemptsExhausted)
+        ));
+        assert_eq!(
+            transport
+                .http_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            transport.ws_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    fn scope_wire_service(
+        protocol: ProtocolFamily,
+        extra: serde_json::Value,
+        auth: AuthStrategy,
+        transport: Arc<dyn Transport>,
+    ) -> ApiService {
+        let endpoint = if auth == AuthStrategy::ChatGptPlan {
+            "https://api.openai.com/v1"
+        } else {
+            "https://provider.example/v1"
+        };
+        let provider_id = match protocol {
+            ProtocolFamily::GeminiGenerateContent | ProtocolFamily::GeminiInteractions => {
+                ProviderId::Gemini
+            }
+            _ => ProviderId::OpenAI,
+        };
+        let mut profile =
+            native_capability_profile(provider_id, "p", protocol, endpoint, "model", Vec::new());
+        profile.auth = auth;
+        profile.credential = CredentialConfig::Static {
+            id: "scope-test".into(),
+        };
+        profile.wire_profile = Some(serde_json::from_value(serde_json::json!({
+            "provider_id": "openai", "profile_name": "p", "protocol": protocol,
+            "base_url": endpoint, "auth": auth,
+            "model_list": "none",
+            "pricing": if auth == AuthStrategy::ChatGptPlan { serde_json::json!({"billingMode":"subscription"}) } else { serde_json::json!({}) },
+            "regions": ["international"], "extra": { "body": extra },
+            "models": [{ "display_model": "model", "request_model": "model", "billing_model": "model" }],
+        })).unwrap());
+        let credential = if auth == AuthStrategy::ChatGptOAuth {
+            Credential::ChatGptOAuth {
+                access_token: "scope-test".into(),
+                account_id: Some("scope-account".into()),
+                fedramp: false,
+            }
+        } else if auth == AuthStrategy::ChatGptPlan {
+            Credential::BearerToken("scope-test".into())
+        } else {
+            Credential::ApiKey("scope-test".into())
+        };
+        ApiService::new(
+            Arc::new(
+                ModelRuntime::from_config(ClientConfig {
+                    providers: vec![profile],
+                })
+                .unwrap()
+                .with_credential_provider(Arc::new(
+                    crate::StaticCredentialProvider::new(credential),
+                )),
+            ),
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn scope_quota_checks_final_codec_fields_and_rejects_generation_multipliers() {
+        for (protocol, extra) in [
+            (ProtocolFamily::OpenAiChat, serde_json::json!({"n": 2})),
+            (ProtocolFamily::OpenAiChat, serde_json::json!({"n": "1"})),
+            (
+                ProtocolFamily::OpenAiChat,
+                serde_json::json!({"best_of": 3}),
+            ),
+        ] {
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let quota = scope_quota(1);
+            let service =
+                scope_wire_service(protocol, extra, AuthStrategy::None, transport.clone())
+                    .with_scope_output_quota(Some(quota.clone()));
+            let error = service
+                .execute_side_query_request(LlmRequest::new("model").with_user_text("hello"))
+                .await
+                .expect_err("multiple outputs cannot share a single-output allowance");
+            assert!(
+                matches!(
+                    error,
+                    LlmError::UnsupportedCapability { .. } | LlmError::InvalidRequest { .. }
+                ),
+                "{protocol:?}: {error}"
+            );
+            assert_eq!(transport.seen_count(), 0, "{protocol:?}");
+            assert_eq!(quota.remaining_dispatches(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_quota_validates_real_sdk_wire_limits_for_supported_protocols() {
+        for protocol in [
+            ProtocolFamily::OpenAiChat,
+            ProtocolFamily::OpenAiResponses,
+            ProtocolFamily::GeminiGenerateContent,
+            ProtocolFamily::GeminiInteractions,
+        ] {
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let quota = scope_quota(1);
+            let service = scope_wire_service(
+                protocol,
+                serde_json::json!({}),
+                if protocol == ProtocolFamily::GeminiInteractions {
+                    AuthStrategy::ApiKey
+                } else {
+                    AuthStrategy::None
+                },
+                transport,
+            )
+            .with_scope_output_quota(Some(quota));
+            let mut request = LlmRequest::new("model").with_user_text("hello");
+            service.clamp_scope_output(&mut request, false).unwrap();
+            let mut prepared = service
+                .client
+                .prepare_on(&request, service.transport.clone())
+                .await
+                .unwrap();
+            service.client.seal_prepared(&mut prepared).await.unwrap();
+            service.validate_scope_output(&prepared).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_quota_never_drops_the_limit_for_unsupported_subscription_routes() {
+        for auth in [AuthStrategy::ChatGptOAuth, AuthStrategy::ChatGptPlan] {
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let quota = scope_quota(1);
+            let service = scope_wire_service(
+                ProtocolFamily::OpenAiResponses,
+                serde_json::json!({}),
+                auth,
+                transport.clone(),
+            )
+            .with_scope_output_quota(Some(quota.clone()));
+            let mut request = LlmRequest::new("model").with_user_text("hello");
+            request.stream = true;
+            request.input.controls.responses.store = Some(false);
+            // Prove this is a valid subscription fixture before adding the cap.
+            let mut uncapped = service
+                .client
+                .prepare_on(&request, service.transport.clone())
+                .await
+                .unwrap();
+            service.client.seal_prepared(&mut uncapped).await.unwrap();
+            service.clamp_scope_output(&mut request, false).unwrap();
+            let result = async {
+                let mut prepared = service
+                    .client
+                    .prepare_on(&request, service.transport.clone())
+                    .await?;
+                service.client.seal_prepared(&mut prepared).await?;
+                service.validate_scope_output(&prepared)
+            }
+            .await;
+            assert!(
+                matches!(&result, Err(LlmError::UnsupportedCapability { .. }))
+                    || matches!(&result, Err(LlmError::InvalidRequest { message }) if message.contains("max_output_tokens")),
+                "{auth:?}: {result:?}"
+            );
+            assert_eq!(transport.seen_count(), 0);
+            assert_eq!(quota.remaining_dispatches(), 1);
+        }
+    }
+
     impl llm_runtime::test_support::FixtureTransport for HttpOnlyProbeTransport {
         fn execute<'a>(
             &'a self,

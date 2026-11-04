@@ -64,24 +64,17 @@ pub const DEFAULT_BASE_API_URL: &str = "https://api.anthropic.com";
 ///
 /// Lives in the cron crate (NOT in `traits/`, which is frozen). A concrete impl
 /// is wired at the composition root (`apps/engine-desktop`) backed by the
-/// credential store; tests inject a mock. The optional [`Self::base_api_url`]
-/// override mirrors TS `getOauthConfig().BASE_API_URL` (defaults to
-/// [`DEFAULT_BASE_API_URL`]).
+/// account directory; tests inject an exact grant.
+pub struct ClaudeAiCredentials {
+    pub access_token: String,
+    pub org_uuid: String,
+    pub base_api_url: String,
+}
+
+#[async_trait]
 pub trait ClaudeAiAuthProvider: Send + Sync {
-    /// Current (refreshed) claude.ai OAuth access token, or `None` when the user
-    /// is not authenticated with a claude.ai account.
-    fn access_token(&self) -> Option<String>;
-
-    /// Stable organization UUID for the authenticated account, or `None` when it
-    /// cannot be resolved.
-    fn org_uuid(&self) -> Option<String>;
-
-    /// API base URL the triggers endpoint is built against. Defaults to
-    /// [`DEFAULT_BASE_API_URL`]; the host overrides it when it resolves a
-    /// non-default base (env / staging).
-    fn base_api_url(&self) -> String {
-        DEFAULT_BASE_API_URL.to_string()
-    }
+    /// Resolve one exact account grant for this operation.
+    async fn credentials(&self) -> Option<ClaudeAiCredentials>;
 }
 
 /// `RemoteTriggerTool` — manage scheduled cloud agent routines via the
@@ -1407,29 +1400,23 @@ impl Tool for RemoteTriggerTool {
         bus.log_event(REMOTE_TRIGGER_STARTED, md).await;
 
         // ===== Pre-flight auth (oracle `no-auth` reason) =====
-        let access_token = match self.auth.as_ref().and_then(|p| p.access_token()) {
-            Some(t) if !t.is_empty() => t,
-            _ => {
-                emit_failed(&bus, "no_token", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Internal(
-                    "Not authenticated with a claude.ai account. Run /login and try again.".into(),
-                ));
-            }
+        let grant = match self.auth.as_ref() {
+            Some(provider) => provider.credentials().await,
+            None => None,
         };
-        let org_uuid = match self.auth.as_ref().and_then(|p| p.org_uuid()) {
-            Some(o) if !o.is_empty() => o,
-            _ => {
-                emit_failed(&bus, "no_org", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Internal(
-                    "Unable to resolve organization UUID.".into(),
-                ));
-            }
+        let Some(grant) = grant.filter(|grant| !grant.access_token.is_empty()) else {
+            emit_failed(&bus, "no_token", started.elapsed().as_millis() as u64).await;
+            return Err(ToolError::Internal("No eligible claude.ai OAuth account is configured. Add an account in provider settings.".into()));
         };
-
-        let base_url = self
-            .auth
-            .as_ref()
-            .map_or_else(|| DEFAULT_BASE_API_URL.to_string(), |p| p.base_api_url());
+        if grant.org_uuid.is_empty() {
+            emit_failed(&bus, "no_org", started.elapsed().as_millis() as u64).await;
+            return Err(ToolError::Internal(
+                "Unable to resolve organization UUID.".into(),
+            ));
+        }
+        let access_token = grant.access_token;
+        let org_uuid = grant.org_uuid;
+        let base_url = grant.base_api_url;
         let base = format!("{base_url}/v1/code/triggers");
         let fail = |kind: &'static str, message: &'static str| {
             let bus = bus.clone();
@@ -1808,15 +1795,14 @@ mod tests {
             }
         }
     }
+    #[async_trait]
     impl ClaudeAiAuthProvider for MockAuth {
-        fn access_token(&self) -> Option<String> {
-            self.token.clone()
-        }
-        fn org_uuid(&self) -> Option<String> {
-            self.org.clone()
-        }
-        fn base_api_url(&self) -> String {
-            self.base.clone()
+        async fn credentials(&self) -> Option<ClaudeAiCredentials> {
+            Some(ClaudeAiCredentials {
+                access_token: self.token.clone().unwrap_or_default(),
+                org_uuid: self.org.clone().unwrap_or_default(),
+                base_api_url: self.base.clone(),
+            })
         }
     }
 
@@ -2143,7 +2129,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_token_preflight_error_is_byte_faithful() {
+    async fn missing_account_preflight_points_to_provider_settings() {
         // No auth provider at all.
         let tool = tool_with(RecordingHttp::new(200, "{}"), None);
         let err = tool
@@ -2152,7 +2138,7 @@ mod tests {
             .expect_err("no token");
         assert_eq!(
             format!("{err}"),
-            "internal: Not authenticated with a claude.ai account. Run /login and try again."
+            "internal: No eligible claude.ai OAuth account is configured. Add an account in provider settings."
         );
 
         // Provider present but token empty/None.
@@ -2167,7 +2153,7 @@ mod tests {
             .await
             .expect_err("no token");
         assert!(format!("{err}")
-            .contains("Not authenticated with a claude.ai account. Run /login and try again."));
+            .contains("No eligible claude.ai OAuth account is configured. Add an account in provider settings."));
     }
 
     #[tokio::test]

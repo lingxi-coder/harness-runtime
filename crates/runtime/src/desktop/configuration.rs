@@ -220,7 +220,6 @@ pub trait DesktopDiagnosticSink: Send + Sync {
 ///
 /// Field provenance (each mirrors a concrete read in `build_runtime`):
 /// - `api_base` — `resolve_api_base()` (env `LINGXI_API_BASE_URL`, init.rs:95).
-/// - `api_key` — env `ANTHROPIC_API_KEY` (init.rs:153).
 /// - `cwd` — `std::env::current_dir()` (init.rs:248).
 /// - `lingxi_home` — the `~/.claude` (and platform config-dir) root the hook /
 ///   agents / global-MCP loaders walk (init.rs:253-317); made explicit so the
@@ -245,7 +244,6 @@ pub trait DesktopDiagnosticSink: Send + Sync {
 /// let mut cfg = DesktopConfig::default();
 /// cfg.build_info = harness_runtime::desktop::BuildInfo::new("1.0.0", "host123");
 /// cfg.api_base = "https://api.anthropic.com".to_string();
-/// cfg.api_key = "sk-test".to_string();
 /// cfg.cwd = PathBuf::from("/tmp/project");
 /// cfg.lingxi_home = PathBuf::from("/tmp/home/.lingxi");
 /// cfg.use_noop_permission_gate = false;
@@ -261,8 +259,13 @@ pub struct DesktopConfig {
     /// Trusted, isolated Local App invocation. Hosts construct this through
     /// [`super::app_invocation::prepare_app_config`], never from renderer config.
     pub app_invocation: Option<super::app_invocation::AppInvocationProfile>,
+    /// Trusted private Team capability. Never loaded from settings or input.
+    pub team_invocation: Option<super::team_invocation::TeamInvocationProfile>,
     /// Frozen tool grants for this invocation. Clones share permanent revocation.
     pub session_tool_grant_lease: Option<tool_api::SessionToolGrantLease>,
+    /// Host-owned output quota, shared with all retries and auxiliary services.
+    /// Absent for ordinary Desktop sessions; never loaded from settings.
+    pub scope_output_quota: Option<Arc<llm_runtime::ScopeOutputQuota>>,
     /// Host-scoped official catalog delivery; absent in deterministic embedders.
     pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
@@ -297,9 +300,8 @@ pub struct DesktopConfig {
     /// Native main print thinking display admitted by the host, independent of UI.
     pub native_thinking_display:
         Option<lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy>,
-    /// Live OAuth environment owned by the embedding host. None uses the
-    /// ordinary product environment; values are never exposed by Debug.
-    pub oauth_environment_lookup:
+    /// Host environment snapshot for non-authentication request metadata.
+    pub request_environment_lookup:
         Option<llm_runtime::auth::anthropic::environment::EnvironmentLookup>,
     /// Restore the mounted session before the host fires startup lifecycle hooks.
     pub defer_session_start: bool,
@@ -359,13 +361,6 @@ pub struct DesktopConfig {
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
-    /// Anthropic API key. Empty string is valid — the orchestrator builds
-    /// successfully and only fails at `run_turn` with a 401, so slash-command
-    /// dispatch still works with no key configured.
-    pub api_key: String,
-    /// Redacted origin of the explicitly supplied API key. Hosts provide this
-    /// alongside the value rather than inferring it from ambient environment.
-    pub api_key_source: llm_runtime::CredentialSource,
     /// Inherit NO ambient credentials from the machine.
     ///
     /// The native backends are keyed by OS USER, not by [`Self::lingxi_home`],
@@ -391,28 +386,6 @@ pub struct DesktopConfig {
     /// before plugin discovery and are never included in debug output.
     pub injected_plugin_secrets:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-    /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
-    /// auth value. Used only when no higher-priority API key/OAuth source wins.
-    pub api_key_helper: Option<String>,
-    /// (M13) The HOST launcher forces Claude.ai OAuth as the effective auth
-    /// source: with a stored OAuth session it then outranks even an env
-    /// `ANTHROPIC_API_KEY` in the auth resolver
-    /// (`llm_runtime::auth::anthropic::resolver`). claude-code derives this
-    /// from `KWr()` (@228931361), a pure env predicate that
-    /// `resolve_llm_stack` reads itself via
-    /// [`llm_runtime::auth::anthropic::resolver::host_managed_oauth_only`], so
-    /// every host gets it for free; this field only lets an embedding host
-    /// declare the same forcing without the launcher env. A managed
-    /// `forceLoginMethod` policy must NEVER be fed here — it has no place in
-    /// credential precedence (`zb()` @228933355).
-    pub managed_oauth_only: bool,
-    /// (M13) `true` when the launcher advertised an FD-inherited Anthropic API
-    /// key (`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` in claude-code's managed /
-    /// remote launches). In the auth resolver an FD key outranks stored OAuth,
-    /// so a stored session must NOT report as the Claude.ai-subscriber auth
-    /// source. LingXi ships no FD-passing launcher of its own; the CLI fills
-    /// this from env presence so the seam is closed for hosts that do.
-    pub anthropic_key_fd_present: bool,
     /// Working directory the orchestrator + tool context are rooted at.
     pub cwd: std::path::PathBuf,
     /// Original session launch root, retained across a host remount after `/cd`.
@@ -580,10 +553,6 @@ pub struct DesktopConfig {
     /// `set_permission_mode("bypassPermissions")` gate accepts the mode.
     /// Default `false`.
     pub allow_dangerously_skip_permissions: bool,
-    /// Plan 3c: host secure-input port for `/connect <api-key-provider>`. The tui
-    /// supplies its masked-input widget; `None` → a headless no-op prompt
-    /// (`crate::desktop::connect::NoopKeyPrompt`) that cancels.
-    pub connect_prompt: Option<Arc<dyn crate::desktop::connect::SecureKeyPrompt>>,
     /// CLI `--system-prompt <prompt>` / `--system-prompt-file <file>`: override
     /// the assembled system prompt for the session. When `Some`, replaces the
     /// default memory-hierarchy prompt entirely (`OrchestratorConfig.system_prompt_override`).
@@ -1002,6 +971,8 @@ impl std::fmt::Debug for DesktopConfig {
                     .map(|_| "<configured>"),
             )
             .field("host_git_root_cache", &"<host-owned cache>")
+            .field("scope_output_quota", &self.scope_output_quota)
+            .field("team_invocation", &self.team_invocation.is_some())
             .field(
                 "managed_policy_snapshot_cache_initialized",
                 &self.managed_policy_snapshot_cache.is_initialized(),
@@ -1022,7 +993,10 @@ impl std::fmt::Debug for DesktopConfig {
                     .as_ref()
                     .map(|_| "<configured>"),
             )
-            .field("oauth_environment_lookup", &self.oauth_environment_lookup)
+            .field(
+                "request_environment_lookup",
+                &self.request_environment_lookup,
+            )
             .field("defer_session_start", &self.defer_session_start)
             .field("connect_mcp_in_background", &self.connect_mcp_in_background)
             .field("build_info", &self.build_info)
@@ -1056,18 +1030,6 @@ impl std::fmt::Debug for DesktopConfig {
                 } else {
                     "<configured>"
                 },
-            )
-            .field(
-                "api_key",
-                &if self.api_key.is_empty() {
-                    "<empty>"
-                } else {
-                    "<redacted>"
-                },
-            )
-            .field(
-                "api_key_helper",
-                &self.api_key_helper.as_ref().map(|_| "<redacted>"),
             )
             .field("credential_storage_policy", &self.credential_storage_policy)
             .field(
@@ -1126,14 +1088,6 @@ impl std::fmt::Debug for DesktopConfig {
             .field(
                 "permission_mode_cli_explicit",
                 &self.permission_mode_cli_explicit,
-            )
-            .field(
-                "connect_prompt",
-                if self.connect_prompt.is_some() {
-                    &"Some(<prompt>)"
-                } else {
-                    &"None"
-                },
             )
             .field(
                 "system_prompt_override_configured",
@@ -1227,6 +1181,8 @@ impl Default for DesktopConfig {
         Self {
             app_invocation: None,
             session_tool_grant_lease: None,
+            scope_output_quota: None,
+            team_invocation: None,
             startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             managed_policy_snapshot_cache:
@@ -1243,7 +1199,7 @@ impl Default for DesktopConfig {
             anthropic_compatible_version: None,
             anthropic_client_metadata: None,
             native_thinking_display: None,
-            oauth_environment_lookup: None,
+            request_environment_lookup: None,
             defer_session_start: false,
             connect_mcp_in_background: false,
             host_workspace_trusted: None,
@@ -1256,17 +1212,12 @@ impl Default for DesktopConfig {
             permission_timeout: None,
             ask_user_question_timeout_override: None,
             api_base: "https://api.anthropic.com".to_string(),
-            api_key: String::new(),
-            api_key_source: llm_runtime::CredentialSource::Configured,
             // Production reads the real keychain; only isolated hosts opt out.
             isolated_credential_storage: false,
             credential_storage_policy: CredentialStoragePolicy::NativePreferred,
             injected_plugin_secrets: std::collections::BTreeMap::new(),
-            api_key_helper: None,
             // (M13) Default: no managed OAuth forcing, no FD-inherited key —
             // hosts that resolve either fill them in.
-            managed_oauth_only: false,
-            anthropic_key_fd_present: false,
             cwd: std::path::PathBuf::from("."),
             initial_project_root: None,
             remote_workspace: false,
@@ -1302,7 +1253,6 @@ impl Default for DesktopConfig {
             permission_mode_preference: None,
             permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
-            connect_prompt: None,
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,

@@ -9,6 +9,27 @@ use llm_runtime::{
 use crate::parse_routing::parse_routing;
 use crate::types::{AssembleInputs, Assembled, ChainEntry, CredentialKind, CredentialSource};
 
+/// Apply exact mobile profile selection, including the canonical OpenAI OAuth
+/// execution binding when its logical OpenAI provider is selected. This never
+/// groups unrelated endpoints by their SDK provider type.
+pub fn mobile_profile_allowed(
+    profile: &ProviderProfile,
+    enabled: &std::collections::BTreeSet<String>,
+) -> bool {
+    enabled.contains(&profile.profile_name)
+        || (enabled.contains("openai") && canonical_openai_oauth_binding(profile))
+}
+
+fn canonical_openai_oauth_binding(profile: &ProviderProfile) -> bool {
+    profile.profile_name == "openai-chatgpt"
+        && matches!(
+            profile.auth,
+            AuthStrategy::ChatGptOAuth | AuthStrategy::ChatGptPlan
+        )
+        && reqwest::Url::parse(&profile.base_url)
+            .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("chatgpt.com"))
+}
+
 /// Build the Anthropic provider profile from the 3-way auth state.
 fn anthropic_profile(
     inputs: &AssembleInputs,
@@ -129,6 +150,70 @@ fn locate(providers: &[ProviderProfile], target: &str) -> Option<(usize, usize)>
 #[allow(clippy::needless_pass_by_value)]
 pub fn assemble(inputs: AssembleInputs) -> Assembled {
     assemble_for_region(inputs, llm_runtime::Region::International)
+}
+
+/// Build the account-management binding catalog, including disabled definitions.
+/// This view is for binding validation only; execution must use
+/// [`assemble_for_region`] with the original enabled settings.
+pub fn assemble_management_for_region(
+    mut inputs: AssembleInputs,
+    region: llm_runtime::Region,
+) -> Assembled {
+    for definition in inputs.user_providers.values_mut() {
+        if let Some(object) = definition.as_object_mut() {
+            object.insert("enabled".into(), serde_json::Value::Bool(true));
+            if let Some(connections) = object
+                .get_mut("connections")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for connection in connections {
+                    if let Some(object) = connection.as_object_mut() {
+                        object.insert("enabled".into(), serde_json::Value::Bool(true));
+                    }
+                }
+            }
+        }
+    }
+    assemble_for_region(inputs, region)
+}
+
+fn execution_definition_enabled(
+    profile: &ProviderProfile,
+    definitions: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    let disabled = |definition: &serde_json::Value| {
+        definition
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+    };
+    if definitions.get(&profile.profile_name).is_some_and(disabled)
+        || (canonical_openai_oauth_binding(profile)
+            && definitions.get("openai").is_some_and(disabled))
+    {
+        return false;
+    }
+    let Some(group) = profile
+        .connection
+        .group
+        .as_ref()
+        .and_then(|group| definitions.get(group))
+    else {
+        return true;
+    };
+    if disabled(group) {
+        return false;
+    }
+    !group
+        .get("connections")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|connections| {
+            connections.iter().any(|connection| {
+                connection.get("id").and_then(serde_json::Value::as_str)
+                    == profile.connection.connection_id.as_deref()
+                    && disabled(connection)
+            })
+        })
 }
 
 /// Build an execution catalog for one explicit product usage region.
@@ -285,7 +370,15 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
         }
     }
 
-    providers.retain(|profile| profile.regions.contains(&region));
+    providers.retain(|profile| {
+        profile.regions.contains(&region)
+            && execution_definition_enabled(profile, &inputs.user_providers)
+    });
+    credential_sources.retain(|source| {
+        providers
+            .iter()
+            .any(|profile| profile.profile_name == source.profile_name)
+    });
 
     // Defaults select a documented format on this account. Keep the other
     // formats available for explicit auxiliary operations such as web search.
@@ -336,19 +429,23 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
     let (mut chains, raw_fallback, routing_warns) = parse_routing(inputs.routing.as_ref());
     warnings.extend(routing_warns);
 
-    for (alias, target) in &chains.aliases {
+    chains.aliases.retain(|alias, target| {
         match locate(&providers, target) {
             Some((pi, mi)) => {
                 let aliases = &mut providers[pi].models[mi].aliases;
                 if !aliases.iter().any(|a| a == alias) {
                     aliases.push(alias.clone());
                 }
+                true
             }
-            None => warnings.push(format!(
-                "routing.aliases[{alias:?}]: target {target:?} matches no registered provider/model; skipped"
-            )),
+            None => {
+                warnings.push(format!(
+                    "routing.aliases[{alias:?}]: target {target:?} matches no registered provider/model; skipped"
+                ));
+                false
+            }
         }
-    }
+    });
 
     // 5. Validate fallback chains into ChainEntry lists.
     for (key, targets) in raw_fallback {
@@ -392,6 +489,129 @@ mod tests {
     use llm_runtime::ModelProfile;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn explicitly_disabled_custom_and_builtin_bindings_never_execute_or_resurrect() {
+        let mut inputs = anthropic_only_inputs();
+        inputs.user_providers = BTreeMap::from([
+            ("openai".into(), json!({"enabled":false})),
+            ("anthropic".into(), json!({"enabled":false})),
+            (
+                "off".into(),
+                json!({"enabled":false,"type":"openai","baseUrl":"https://off.invalid/v1","models":["off-model"]}),
+            ),
+            (
+                "on".into(),
+                json!({"enabled":true,"type":"openai","baseUrl":"https://on.invalid/v1","models":["on-model"]}),
+            ),
+        ]);
+        inputs.routing = Some(
+            json!({"aliases":{"disabled":"off/off-model","working":"on/on-model"},"fallback":{"working":["off/off-model","on/on-model"]}}),
+        );
+        let saved = inputs.user_providers.clone();
+        let actual = assemble(inputs.clone());
+        for name in ["openai", "openai-chatgpt", "anthropic", "off"] {
+            assert!(!actual
+                .client_config
+                .providers
+                .iter()
+                .any(|profile| profile.profile_name == name));
+            assert!(!actual
+                .credential_sources
+                .iter()
+                .any(|source| source.profile_name == name));
+        }
+        assert!(actual
+            .client_config
+            .providers
+            .iter()
+            .any(|profile| profile.profile_name == "on"));
+        assert!(!actual.chains.aliases.contains_key("disabled"));
+        assert_eq!(actual.chains.aliases["working"], "on/on-model");
+        assert_eq!(actual.chains.chains["working"].len(), 1);
+        assert_eq!(inputs.user_providers, saved);
+        let managed = assemble_management_for_region(inputs, llm_runtime::Region::International);
+        for name in ["openai", "openai-chatgpt", "anthropic", "off", "on"] {
+            assert!(
+                managed
+                    .client_config
+                    .providers
+                    .iter()
+                    .any(|profile| profile.profile_name == name),
+                "management binding {name}"
+            );
+        }
+        let mut subscription_only = anthropic_only_inputs();
+        subscription_only
+            .user_providers
+            .insert("openai-chatgpt".into(), json!({"enabled":false}));
+        let actual = assemble(subscription_only);
+        assert!(actual
+            .client_config
+            .providers
+            .iter()
+            .any(|profile| profile.profile_name == "openai"));
+        assert!(!actual
+            .client_config
+            .providers
+            .iter()
+            .any(|profile| profile.profile_name == "openai-chatgpt"));
+    }
+
+    #[test]
+    fn disabled_connection_and_group_filter_exact_profiles_while_management_keeps_them() {
+        let mut inputs = anthropic_only_inputs();
+        inputs.user_providers = BTreeMap::from([
+            (
+                "mixed".into(),
+                json!({"type":"openai","baseUrl":"https://mixed.invalid/v1","models":["model"],"connections":[{"id":"off","enabled":false},{"id":"on","enabled":true}]}),
+            ),
+            (
+                "disabled-group".into(),
+                json!({"enabled":false,"type":"openai","baseUrl":"https://group.invalid/v1","models":["model"],"connections":[{"id":"child","enabled":true}]}),
+            ),
+        ]);
+        let saved = inputs.user_providers.clone();
+        let actual = assemble(inputs.clone());
+        assert!(actual
+            .client_config
+            .providers
+            .iter()
+            .any(|profile| profile.profile_name == "mixed:on"));
+        assert!(!actual
+            .client_config
+            .providers
+            .iter()
+            .any(|profile| profile.profile_name == "mixed:off"
+                || profile.profile_name == "disabled-group:child"));
+        assert!(!actual
+            .credential_sources
+            .iter()
+            .any(|source| source.profile_name == "mixed:off"
+                || source.profile_name == "disabled-group:child"));
+        let managed =
+            assemble_management_for_region(inputs.clone(), llm_runtime::Region::International);
+        for name in ["mixed:on", "mixed:off", "disabled-group:child"] {
+            assert!(managed
+                .client_config
+                .providers
+                .iter()
+                .any(|profile| profile.profile_name == name));
+        }
+        inputs
+            .user_providers
+            .get_mut("mixed")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("enabled".into(), json!(false));
+        assert!(!assemble(inputs)
+            .client_config
+            .providers
+            .iter()
+            .any(|profile| profile.connection.group.as_deref() == Some("mixed")));
+        assert_eq!(saved["mixed"]["connections"][0]["enabled"], false);
+    }
 
     #[test]
     fn protocol_defaults_route_real_accounts_and_preserve_search_credentials() {

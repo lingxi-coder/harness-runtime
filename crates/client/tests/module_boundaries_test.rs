@@ -113,7 +113,7 @@ impl Boundary {
 impl<'ast> Visit<'ast> for Boundary {
     fn visit_path(&mut self, path: &'ast syn::Path) {
         // A one-segment path is also how Rust represents a local value use, as
-        // in `Self::OpenAiOAuthUpdated { session }`. Import trees are checked
+        // in `Self::ProviderAccountsUpdated { session }`. Import trees are checked
         // separately by `visit_item_use`; only qualified paths prove a module
         // dependency here.
         if path.segments.len() > 1 {
@@ -239,7 +239,7 @@ fn guard_ignores_bare_values_but_detects_qualified_module_paths() {
         violations: Vec::new(),
     };
     guard.visit_file(&syn::parse_file(
-        "fn f(session: &str) { let _ = session; let _ = Self::OpenAiOAuthUpdated { session }; }",
+        "fn f(session: &str) { let _ = session; let _ = Self::ProviderAccountsUpdated { session }; }",
     ).unwrap());
     assert!(
         guard.violations.is_empty(),

@@ -3,14 +3,10 @@ use lingxi_core::host::effort_table::TableOptions;
 use std::path::Path;
 
 pub(crate) fn table_options(config_home: &Path) -> TableOptions {
-    let native_legacy = config_home.join(branding::LEGACY_GLOBAL_CONFIG_FILE);
-    let path = if native_legacy.exists() {
-        Some(native_legacy)
-    } else {
-        migrations::global_config::lingxi_config_home()
-            .filter(|home| home == config_home)
-            .and_then(|_| migrations::global_config::global_config_path())
-    };
+    let path = migrations::global_config::lingxi_config_home()
+        .filter(|home| home == config_home)
+        .and_then(|_| migrations::global_config::global_config_path())
+        .or_else(|| Some(config_home.join(branding::GLOBAL_CONFIG_FILE)));
     let global = path
         .and_then(|path| migrations::global_config::read_map(&path).ok())
         .unwrap_or_default();
@@ -29,13 +25,13 @@ mod tests {
         let options = table_options(temp.path());
         assert_eq!(options.excluded_user_models.len(), 3);
         std::fs::write(
-            temp.path().join(branding::LEGACY_GLOBAL_CONFIG_FILE),
+            temp.path().join(branding::GLOBAL_CONFIG_FILE),
             r#"{"firstStartVersion":null}"#,
         )
         .unwrap();
         assert!(table_options(temp.path()).excluded_user_models.is_empty());
         std::fs::write(
-            temp.path().join(branding::LEGACY_GLOBAL_CONFIG_FILE),
+            temp.path().join(branding::GLOBAL_CONFIG_FILE),
             r#"{"unpinOpus47LaunchEffort":true,"unpinFable5LaunchEffort":"yes"}"#,
         )
         .unwrap();

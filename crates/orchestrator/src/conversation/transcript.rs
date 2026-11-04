@@ -2994,6 +2994,9 @@ impl ConversationOrchestrator {
     /// HEAD reporting `"HEAD"`), matching TS's `try { getBranch() } catch {
     /// undefined }` — a `None` is then omitted from the JSONL line.
     pub(super) async fn resolve_git_branch(&self) -> Option<String> {
+        if self.prompt_runtime.host_environment_probes_disabled {
+            return None;
+        }
         {
             let cache = self.transcript.git_branch_cache.lock().await;
             if let Some(resolved) = cache.as_ref() {
@@ -5273,6 +5276,13 @@ impl ConversationOrchestrator {
         let row_uuid = row.row_id.as_uuid().to_string();
         jmsg.uuid.clone_from(&row_uuid);
         jmsg.timestamp.clone_from(&row.timestamp);
+        // Compaction refers to the live host message, while message.id keeps
+        // the provider response identity shared by its streamed block rows.
+        if let Some(logical_id) = row.logical_message_id {
+            jmsg.extra
+                .set_field("logicalMessageId", logical_id.as_uuid().to_string().into())
+                .expect("extra metadata is an object");
+        }
         if self.is_persistent_app_chat() {
             jmsg.extra
                 .set_field("providerMessageId", row.provider_message_id.clone().into())
@@ -5917,7 +5927,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         per_turn_effort: None,
         stream_order: 0,
         row_id: MessageId::new(),
-        logical_message_id: None,
+        logical_message_id: Some(MessageId::new()),
         provider_message_id: "assistant-presence-row".into(),
         model: "claude-sonnet-4-5".into(),
         model_profile: None,
@@ -5992,6 +6002,21 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
     .await
     .expect("reload durable transcript");
     assert_eq!(loaded.len(), 3, "prompt, accepted assistant, paired result");
+    assert_eq!(
+        loaded[1].extra.string_at("/logicalMessageId"),
+        Some(
+            assistant_row
+                .logical_message_id
+                .unwrap()
+                .as_uuid()
+                .to_string()
+                .as_str()
+        )
+    );
+    assert_eq!(
+        loaded[1].message.string_at("/id"),
+        Some("assistant-presence-row")
+    );
     let accepted_assistant = &loaded[1].message;
     assert_eq!(
         accepted_assistant.string_at("/stop_reason"),

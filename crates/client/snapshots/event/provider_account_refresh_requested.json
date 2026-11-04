@@ -1,0 +1,6 @@
+{
+  "type": "provider_account_refresh_requested",
+  "account_id": "account-a",
+  "identity_generation": 2,
+  "credential_revision": 3
+}

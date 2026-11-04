@@ -61,53 +61,6 @@ pub const CONFIG_FILE_NAME: &str = "settings.json";
 /// `~/.lingxi/` subdirectory.
 pub const CONFIG_SUBDIR: &str = branding::DOT_DIR;
 
-// ─── legacy wire-identifier surface (pre-registry M4-08 parity fixture) ───
-//
-// These four constants predate the `SUPPORTED_SETTINGS` registry and no longer
-// drive `call` (the tool now keys off the registry + `{setting, value?}` input
-// shape). They are retained only as the byte-locked wire identifiers asserted by
-// the `parity/fixtures/system_tools.json` driver in the `test-harness` crate.
-
-/// Legacy allowed config field: model.
-pub const CONFIG_FIELD_MODEL: &str = "model";
-/// Legacy allowed config field: output style (camelCase wire key).
-pub const CONFIG_FIELD_OUTPUT_STYLE: &str = "outputStyle";
-/// Legacy allowed config field: theme.
-pub const CONFIG_FIELD_THEME: &str = "theme";
-/// Legacy allowed config field: verbose toggle.
-pub const CONFIG_FIELD_VERBOSE: &str = "verbose";
-/// Legacy order-locked allowlist (the original M4-08 4-field set). Superseded
-/// by [`SUPPORTED_SETTINGS`]; kept for the parity fixture.
-pub const CONFIG_FIELDS_ALLOWED: [&str; 4] = [
-    CONFIG_FIELD_MODEL,
-    CONFIG_FIELD_OUTPUT_STYLE,
-    CONFIG_FIELD_THEME,
-    CONFIG_FIELD_VERBOSE,
-];
-
-// ─── byte-faithful option allowlists (utils/configConstants.ts, utils/theme.ts) ───
-
-/// `THEME_NAMES` (`utils/theme.ts:91-98`).
-const THEME_NAMES: &[&str] = &[
-    "dark",
-    "light",
-    "light-daltonized",
-    "dark-daltonized",
-    "light-ansi",
-    "dark-ansi",
-];
-/// `EDITOR_MODES` (`utils/configConstants.ts:15`).
-const EDITOR_MODES: &[&str] = &["normal", "vim"];
-/// `NOTIFICATION_CHANNELS` (`utils/configConstants.ts:4-12`).
-const NOTIFICATION_CHANNELS: &[&str] = &[
-    "auto",
-    "iterm2",
-    "iterm2_with_bell",
-    "terminal_bell",
-    "kitty",
-    "ghostty",
-    "notifications_disabled",
-];
 /// `TEAMMATE_MODES` (`utils/configConstants.ts:21`).
 const TEAMMATE_MODES: &[&str] = &["auto", "tmux", "in-process"];
 /// `permissions.defaultMode` options (non-`TRANSCRIPT_CLASSIFIER` branch,
@@ -166,26 +119,6 @@ pub struct SettingConfig {
 /// `BRIDGE_MODE`/`KAIROS`) are omitted: no build-flag substrate.
 pub static SUPPORTED_SETTINGS: Lazy<HashMap<&'static str, SettingConfig>> = Lazy::new(|| {
     let mut m: HashMap<&'static str, SettingConfig> = HashMap::new();
-    // theme (options: THEME_NAMES — non-AUTO_THEME branch)
-    m.insert(
-        "theme",
-        SettingConfig {
-            source: Source::Global,
-            ty: SettingType::String,
-            options: Some(THEME_NAMES),
-            path: None,
-        },
-    );
-    // editorMode
-    m.insert(
-        "editorMode",
-        SettingConfig {
-            source: Source::Global,
-            ty: SettingType::String,
-            options: Some(EDITOR_MODES),
-            path: None,
-        },
-    );
     // verbose
     m.insert(
         "verbose",
@@ -193,16 +126,6 @@ pub static SUPPORTED_SETTINGS: Lazy<HashMap<&'static str, SettingConfig>> = Lazy
             source: Source::Global,
             ty: SettingType::Boolean,
             options: None,
-            path: None,
-        },
-    );
-    // preferredNotifChannel
-    m.insert(
-        "preferredNotifChannel",
-        SettingConfig {
-            source: Source::Global,
-            ty: SettingType::String,
-            options: Some(NOTIFICATION_CHANNELS),
             path: None,
         },
     );
@@ -264,26 +187,6 @@ pub static SUPPORTED_SETTINGS: Lazy<HashMap<&'static str, SettingConfig>> = Lazy
     // fileCheckpointingEnabled
     m.insert(
         "fileCheckpointingEnabled",
-        SettingConfig {
-            source: Source::Global,
-            ty: SettingType::Boolean,
-            options: None,
-            path: None,
-        },
-    );
-    // showTurnDuration
-    m.insert(
-        "showTurnDuration",
-        SettingConfig {
-            source: Source::Global,
-            ty: SettingType::Boolean,
-            options: None,
-            path: None,
-        },
-    );
-    // terminalProgressBarEnabled
-    m.insert(
-        "terminalProgressBarEnabled",
         SettingConfig {
             source: Source::Global,
             ty: SettingType::Boolean,
@@ -478,29 +381,26 @@ fn get_value(source: Source, path: &[String], settings: &Map<String, Value>) -> 
     }
 }
 
-fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| ToolError::Internal("Config: HOME directory not available".into()))
-}
-
+#[cfg(test)]
 #[must_use]
 pub(crate) fn config_path(home: &Path) -> PathBuf {
-    config_home_dir(home).join(CONFIG_FILE_NAME)
+    lingxi_core::settings::loader::user_settings_path()
+        .unwrap_or_else(|| config_home_dir(home).join(CONFIG_FILE_NAME))
 }
 
-/// User config-home: `$LINGXI_CONFIG_DIR` when set (claude-code `tr()` `??`: an
-/// empty value is honored verbatim → cwd-relative), else `<home>/<CONFIG_SUBDIR>`.
+/// Non-empty branded config-home override, otherwise the brand's home subdirectory.
+#[cfg(test)]
 #[must_use]
 fn config_home_dir(home: &Path) -> PathBuf {
     match std::env::var_os(branding::CONFIG_DIR_ENV) {
-        Some(dir) => PathBuf::from(dir),
-        None => home.join(CONFIG_SUBDIR),
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home.join(CONFIG_SUBDIR),
     }
 }
 
 /// `ConfigTool` — get/set LingXi settings.
 pub struct ConfigTool {
+    settings_path: Option<PathBuf>,
     pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
@@ -508,7 +408,19 @@ impl ConfigTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            settings_path: lingxi_core::settings::loader::user_settings_path(),
+            ctx,
+        }
+    }
+
+    /// Bind this tool to the immutable settings owner supplied by its host.
+    #[must_use]
+    pub fn with_settings_path(ctx: tool_api::BuiltinToolContext, path: PathBuf) -> Self {
+        Self {
+            settings_path: Some(path),
+            ctx,
+        }
     }
 }
 
@@ -518,7 +430,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "setting": {
                 "type": "string",
-                "description": "The setting key (e.g., \"theme\", \"model\", \"permissions.defaultMode\")"
+                "description": "The setting key (e.g., \"model\", \"permissions.defaultMode\")"
             },
             "value": {
                 "description": "The new value. Omit to get current value."
@@ -813,7 +725,7 @@ impl Tool for ConfigTool {
         CONFIG_TOOL_NAME
     }
     fn search_hint(&self) -> Option<Utf16JsonProjection> {
-        Some("get or set LingXi settings (theme, model)".into())
+        Some("get or set LingXi Harness settings (model, permissions)".into())
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         &SOURCE_SCHEMA
@@ -859,7 +771,8 @@ impl Tool for ConfigTool {
         if input.get_property("value").is_none() {
             return PermissionResult::Allow {
                 reason: PermissionDecisionReason::Other {
-                    reason: "Config reads ~/.lingxi/settings.json (read-only)".into(),
+                    reason: "Config reads the host-resolved Harness settings file (read-only)"
+                        .into(),
                 },
                 updated_input: None,
                 update_destination: None,
@@ -876,7 +789,7 @@ impl Tool for ConfigTool {
         let message = format!("Set {setting} to {}", json_stringify_projection(&value));
         PermissionResult::Ask {
             reason: PermissionDecisionReason::Other {
-                reason: "Config writes ~/.lingxi/settings.json".into(),
+                reason: "Config writes the host-resolved Harness settings file".into(),
             },
             prompt: PermissionPrompt {
                 title: "Config".into(),
@@ -889,11 +802,11 @@ impl Tool for ConfigTool {
     }
 
     async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
-        "Get or set LingXi configuration settings.".into()
+        "Get or set Harness user settings. Native appearance and provider account selection use the client Settings UI.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
-        "Get or set LingXi configuration settings.".into()
+        "Get or set Harness user settings. Native appearance and provider account selection use the client Settings UI.".into()
     }
 
     async fn validate_input(
@@ -954,6 +867,20 @@ impl Tool for ConfigTool {
         md.insert("setting".into(), verified_str(&setting_display));
         bus.log_event(CONFIG_STARTED, md).await;
 
+        // Appearance/input preferences belong to the native client, not the
+        // Harness settings loader. Never report success for an inert write.
+        if matches!(
+            setting.as_deref().unwrap_or_default(),
+            "theme"
+                | "editorMode"
+                | "preferredNotifChannel"
+                | "showTurnDuration"
+                | "terminalProgressBarEnabled"
+        ) {
+            return Err(ToolError::InvalidInput(
+                "This preference is owned by the client. Use the native Settings UI; Config edits Harness settings only.".into()));
+        }
+
         // 1. Check if setting is supported.
         let Some(setting) = setting.filter(|setting| is_supported(setting)) else {
             emit_failed(
@@ -977,14 +904,9 @@ impl Tool for ConfigTool {
         let config = get_config(&setting).expect("supported ⇒ config present");
         let path = get_path(&setting);
 
-        let home = match home_dir_or_internal() {
-            Ok(h) => h,
-            Err(e) => {
-                emit_failed(&bus, "no_home", started.elapsed().as_millis() as u64).await;
-                return Err(e);
-            }
-        };
-        let file = config_path(&home);
+        let file = self.settings_path.clone().ok_or_else(|| {
+            ToolError::Internal("Config: host user-settings path is unavailable".into())
+        })?;
 
         // 2. GET operation.
         if is_get {
@@ -1237,27 +1159,16 @@ mod tests {
         assert_eq!(CONFIG_TOOL_NAME, "Config");
         assert_eq!(CONFIG_FILE_NAME, "settings.json");
         assert_eq!(CONFIG_SUBDIR, ".lingxi");
-        // legacy parity-fixture surface
-        assert_eq!(CONFIG_FIELDS_ALLOWED.len(), 4);
-        assert_eq!(
-            CONFIG_FIELDS_ALLOWED,
-            ["model", "outputStyle", "theme", "verbose"]
-        );
     }
 
     #[test]
     fn registry_has_core_set() {
         for key in [
-            "theme",
-            "editorMode",
             "verbose",
-            "preferredNotifChannel",
             "autoCompactEnabled",
             "autoMemoryEnabled",
             "autoDreamEnabled",
             "fileCheckpointingEnabled",
-            "showTurnDuration",
-            "terminalProgressBarEnabled",
             "todoFeatureEnabled",
             "model",
             "alwaysThinkingEnabled",
@@ -1270,7 +1181,7 @@ mod tests {
         ] {
             assert!(is_supported(key), "missing setting {key}");
         }
-        assert_eq!(SUPPORTED_SETTINGS.len(), 19);
+        assert_eq!(SUPPORTED_SETTINGS.len(), 14);
     }
 
     #[test]
@@ -1289,11 +1200,7 @@ mod tests {
 
     #[test]
     fn get_config_shapes() {
-        let theme = get_config("theme").unwrap();
-        assert_eq!(theme.source, Source::Global);
-        assert_eq!(theme.ty, SettingType::String);
-        assert_eq!(theme.options, Some(THEME_NAMES));
-
+        assert!(get_config("theme").is_none());
         let verbose = get_config("verbose").unwrap();
         assert_eq!(verbose.ty, SettingType::Boolean);
         assert!(verbose.options.is_none());
@@ -1307,22 +1214,7 @@ mod tests {
 
     #[test]
     fn options_for_setting() {
-        assert_eq!(
-            get_options_for_setting("theme"),
-            Some(
-                vec![
-                    "dark",
-                    "light",
-                    "light-daltonized",
-                    "dark-daltonized",
-                    "light-ansi",
-                    "dark-ansi"
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect()
-            )
-        );
+        assert!(get_options_for_setting("theme").is_none());
         assert_eq!(
             get_options_for_setting("permissions.defaultMode"),
             Some(
@@ -1599,25 +1491,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn options_rejection_message_format() {
-        let _g = HOME_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let out = tool()
+    async fn host_injected_owner_wins_over_ambient_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("brand-private").join("settings.json");
+        let tool = ConfigTool::with_settings_path(tool().ctx.clone(), path.clone());
+        let result = tool
             .call(
-                json!({ "setting": "theme", "value": "neon" }),
+                json!({"setting":"verbose", "value":true}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect("ok envelope");
-        assert_eq!(out.data["success"], json!(false));
-        assert_eq!(
-            out.data["error"],
-            json!(
-                "Invalid value \"neon\". Options: dark, light, light-daltonized, dark-daltonized, light-ansi, dark-ansi"
+            .unwrap();
+        assert_eq!(result.data["success"], json!(true));
+        let saved: Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert_eq!(saved["verbose"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn client_preferences_cannot_be_written_as_harness_settings() {
+        let out = tool()
+            .call(
+                json!({ "setting": "theme", "value": "dark" }),
+                fresh_ctx(),
+                fresh_tx(),
             )
-        );
+            .await;
+        assert!(matches!(out, Err(ToolError::InvalidInput(_))));
     }
 
     #[tokio::test]
@@ -1757,7 +1658,7 @@ mod tests {
         assert_eq!(t.name(), "Config");
         assert_eq!(
             t.search_hint().as_ref().and_then(|hint| hint.string_at("")),
-            Some("get or set LingXi settings (theme, model)")
+            Some("get or set LingXi Harness settings (model, permissions)")
         );
         assert!(t.should_defer());
         assert_eq!(t.max_result_size_chars(), 100_000);

@@ -570,6 +570,7 @@ pub fn next_step_with_backoff(
     }
 
     match error.classification_source() {
+        LlmError::AllAccountsUnavailable { .. } | LlmError::AccountStorageUnavailable => DriveStep::Terminal,
         LlmError::Overloaded { .. } => {
             // Increment consecutive counter (always, regardless of allow_fallback,
             // so the count is accurate when allow_fallback later becomes true).

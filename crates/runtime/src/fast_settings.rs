@@ -30,14 +30,10 @@ pub(crate) fn policy(
         SettingsJson::default(),
         lingxi_core::settings::merger::merge,
     )?;
-    let native_global = home.join(branding::LEGACY_GLOBAL_CONFIG_FILE);
-    let path = if native_global.exists() {
-        Some(native_global)
-    } else {
-        migrations::global_config::lingxi_config_home()
-            .filter(|value| value == home)
-            .and_then(|_| migrations::global_config::global_config_path())
-    };
+    let path = migrations::global_config::lingxi_config_home()
+        .filter(|value| value == home)
+        .and_then(|_| migrations::global_config::global_config_path())
+        .or_else(|| Some(home.join(branding::GLOBAL_CONFIG_FILE)));
     let cached_org_enabled = path
         .and_then(|path| migrations::global_config::read_map(&path).ok())
         .and_then(|map| {

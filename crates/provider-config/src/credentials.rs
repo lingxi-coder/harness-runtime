@@ -1,16 +1,6 @@
-//! Composite credential provider: the single `llm_runtime::CredentialProvider`
-//! slot backing every routable profile.
-//!
-//! Dispatch (on `scope.credential_id`):
-//! - any registered OAuth delegate id (e.g. `"anthropic-oauth"`, `"openai-chatgpt"`)
-//!   → delegate to the corresponding per-id provider.
-//! - `"anthropic-api-key"` → the configured Anthropic key.
-//! - any other id → keychain[id] → env[recorded var] → `Err(Authentication)`
-//!   (matching `EnvCredentialProvider`; spec §6.1/§6.6).
-//!
-//! OAuth delegates retain their account/scope credential material. The host
-//! passes selected credentials to the SDK authenticator; the profile strategy
-//! determines its wire headers.
+//! Exact-account credential provider shared by native and Desktop hosts.
+//! Every request resolves one account identity and its published credential
+//! revision. Missing accounts never fall back to provider-wide credentials.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,294 +10,356 @@ use llm_runtime::{
     LlmError,
 };
 
-use crate::CredentialSource;
-
-/// The single composite credential slot for all provider profiles.
 pub struct MultiCredentialProvider {
+    account_version_root: Option<std::path::PathBuf>,
+    account_directory: Option<lingxi_core::host::provider_accounts::SharedAccountDirectory>,
+    accounts: BTreeMap<String, lingxi_core::host::provider_accounts::AccountMetadata>,
     credentials: Arc<secret::CredentialManager>,
-    sources: BTreeMap<String, CredentialSource>,
-    anthropic_api_key: Option<String>,
-    anthropic_api_key_source: Source,
-    anthropic_api_key_helper: Option<String>,
-    anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache,
-    oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
 }
 
-// `credentials` (an `Arc<secret::CredentialManager>`) is intentionally omitted —
-// it is not `Debug` and would leak nothing useful; the redacted summary below is
-// the deliberate shape.
-#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for MultiCredentialProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MultiCredentialProvider")
-            .field("source_ids", &self.sources.keys().collect::<Vec<_>>())
-            .field("has_anthropic_api_key", &self.anthropic_api_key.is_some())
-            .field(
-                "has_anthropic_api_key_helper",
-                &self.anthropic_api_key_helper.is_some(),
-            )
-            .field(
-                "oauth_delegate_ids",
-                &self.oauth_delegates.keys().collect::<Vec<_>>(),
-            )
-            .finish()
+            .field("has_live_directory", &self.account_directory.is_some())
+            .field("account_count", &self.accounts.len())
+            .finish_non_exhaustive()
     }
 }
 
 impl MultiCredentialProvider {
-    /// Build the composite from the assembled `credential_sources`, an optional
-    /// Anthropic API key, and a map of OAuth delegates keyed by `credential_id`
-    /// (e.g. `"anthropic-oauth"`, `"openai-chatgpt"`).
     #[must_use]
-    pub fn new(
-        credentials: Arc<secret::CredentialManager>,
-        sources: Vec<CredentialSource>,
-        anthropic_api_key: Option<String>,
-        anthropic_api_key_helper: Option<String>,
-        oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
-    ) -> Self {
-        let sources = sources
-            .into_iter()
-            .map(|s| (s.credential_id.clone(), s))
-            .collect();
+    pub fn new(credentials: Arc<secret::CredentialManager>) -> Self {
         Self {
+            account_directory: None,
+            account_version_root: None,
+            accounts: BTreeMap::new(),
             credentials,
-            sources,
-            anthropic_api_key,
-            anthropic_api_key_source: Source::Configured,
-            anthropic_api_key_helper,
-            anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache::new(),
-            oauth_delegates,
         }
     }
 
-    /// Carry the origin supplied by the host that resolved the static key.
+    /// Bind exact host-local account references; no account may fall back to ambient keys.
     #[must_use]
-    pub fn with_anthropic_api_key_source(mut self, source: Source) -> Self {
-        self.anthropic_api_key_source = source;
+    pub fn with_accounts(
+        mut self,
+        accounts: Vec<lingxi_core::host::provider_accounts::AccountMetadata>,
+    ) -> Self {
+        self.accounts = accounts
+            .into_iter()
+            .map(|a| (a.credential_ref.secret_ref.clone(), a))
+            .collect();
         self
     }
-
-    async fn direct_anthropic_api_key(&self) -> Option<(Credential, Source)> {
-        if let Some(key) = self
-            .credentials
-            .get_provider_key_ephemeral("anthropic-api-key")
-            .await
-        {
-            return Some((
-                Credential::ApiKey(key.expose_secret().clone()),
-                Source::Stored,
-            ));
-        }
-        self.anthropic_api_key.clone().map(|key| {
-            (
-                Credential::ApiKey(key),
-                self.anthropic_api_key_source.clone(),
-            )
-        })
+    #[must_use]
+    pub fn with_account_directory(
+        mut self,
+        directory: lingxi_core::host::provider_accounts::SharedAccountDirectory,
+    ) -> Self {
+        self.account_directory = Some(directory);
+        self
     }
-
-    async fn load_anthropic_api_key(&self) -> Result<Credential, LlmError> {
-        self.select_anthropic_api_key()
-            .await?
-            .ok_or(LlmError::Authentication {
-                message: String::new(),
+    #[must_use]
+    pub fn with_account_version_root(mut self, root: std::path::PathBuf) -> Self {
+        self.account_version_root = Some(root);
+        self
+    }
+    async fn published_revision(
+        &self,
+        account: &lingxi_core::host::provider_accounts::AccountMetadata,
+    ) -> Result<Option<u64>, LlmError> {
+        if let Some(root) = &self.account_version_root {
+            let root = root.clone();
+            let account = account.clone();
+            return tokio::task::spawn_blocking(move || {
+                crate::read_account_credential_version(&root, &account)
             })
-    }
-
-    /// Absence allows the first-party route to use OAuth. A vault failure
-    /// must remain an error rather than silently selecting another account.
-    async fn select_anthropic_api_key(&self) -> Result<Option<Credential>, LlmError> {
-        if self
-            .credentials
-            .provider_key_is_suppressed("anthropic-api-key")
             .await
-        {
-            return Ok(None);
-        }
-        // A signed Desktop host can rotate the session's broker-owned key at
-        // runtime. That process-local value must supersede the immutable boot
-        // snapshot, while the normal static/helper/persistent precedence below
-        // remains unchanged for CLI and TUI.
-        if let Some((credential, _)) = self.direct_anthropic_api_key().await {
-            return Ok(Some(credential));
-        }
-        // claude-code `jM()` (getAnthropicApiKeyWithSource) resolves in order:
-        // approved env → managed → apiKeyHelper → config/macOS-keychain → none.
-        // So the `apiKeyHelper` runs BEFORE the OS secure store and a configured
-        // helper SHADOWS a stored key (the port previously consulted the store
-        // first, inverting this). A helper that yields nothing (or fails) falls
-        // through to the store; only when the store is ALSO empty does a helper
-        // failure surface, preserving its diagnostic message.
-        let helper_error = if let Some(helper) = self.anthropic_api_key_helper.as_deref() {
-            let ttl_ms = llm_runtime::auth::anthropic::api_key_helper_ttl_ms();
-            match llm_runtime::auth::anthropic::fetch_api_key_result(
-                helper,
-                &self.anthropic_api_key_helper_cache,
-                ttl_ms,
-            )
-            .await
-            {
-                Ok(key) => return Ok(Some(Credential::ApiKey(key))),
-                Err(e) => Some(LlmError::InvalidRequest {
-                    message: format!("apiKeyHelper failed: {e}"),
-                }),
-            }
-        } else {
-            None
-        };
-        match self.credentials.get_anthropic_api_key().await {
-            Ok(Some(key)) => Ok(Some(Credential::ApiKey(key.expose_secret().clone()))),
-            Ok(None) => helper_error.map_or(Ok(None), Err),
-            Err(_) => Err(helper_error.unwrap_or(LlmError::Authentication {
-                message: "provider credential storage is unavailable".into(),
-            })),
-        }
-    }
-
-    /// Resolve a non-Anthropic provider key: keychain[id] → env[var] → Authentication.
-    async fn load_provider_key(&self, credential_id: &str) -> Result<Credential, LlmError> {
-        let (credential, _) = self.provider_key_selection(credential_id).await;
-        credential.ok_or(LlmError::Authentication {
-            message: String::new(),
-        })
-    }
-
-    /// The same selection serves request loading and redacted source inspection.
-    async fn provider_key_selection(&self, credential_id: &str) -> (Option<Credential>, Source) {
-        if self
-            .credentials
-            .provider_key_is_suppressed(credential_id)
-            .await
-        {
-            return (None, Source::None);
-        }
-        let store_unavailable = match self.credentials.get_provider_key(credential_id).await {
-            Ok(Some(secret)) => {
-                return (
-                    Some(Credential::ApiKey(secret.expose_secret().clone())),
-                    Source::Stored,
-                );
-            }
-            Ok(None) => false,
-            // Keychain unavailable (headless): fall through to env so env keys
-            // still work; a truly-missing key surfaces as the per-turn 401.
-            Err(_) => true,
-        };
-        if let Some(var) = self
-            .sources
-            .get(credential_id)
-            .and_then(|s| s.env_var.as_deref())
-        {
-            if let Ok(val) = std::env::var(var) {
-                return (
-                    Some(Credential::ApiKey(val)),
-                    Source::Environment {
-                        variable: var.to_owned(),
-                    },
-                );
-            }
-        }
-        (
-            None,
-            if store_unavailable {
-                Source::Unknown
-            } else {
-                Source::None
-            },
-        )
-    }
-    async fn status_api_key(&self) -> Result<Option<Credential>, LlmError> {
-        if self
-            .credentials
-            .provider_key_is_suppressed("anthropic-api-key")
-            .await
-        {
-            return Ok(None);
-        }
-        if let Some(key) = self
-            .credentials
-            .get_provider_key_ephemeral("anthropic-api-key")
-            .await
-        {
-            return Ok(Some(Credential::ApiKey(key.expose_secret().clone())));
-        }
-        if let Some(key) = self
-            .anthropic_api_key
-            .as_ref()
-            .filter(|key| !key.is_empty())
-        {
-            return Ok(Some(Credential::ApiKey(key.clone())));
-        }
-        // Native mb shadows the store with a configured helper, including
-        // a cold cache. NQn reads it without executing or checking the TTL.
-        if self.anthropic_api_key_helper.is_some() {
-            return Ok(self
-                .anthropic_api_key_helper_cache
-                .snapshot()
-                .map(Credential::ApiKey));
+            .map_err(|_| LlmError::AccountStorageUnavailable)?
+            .map_err(|_| LlmError::AccountStorageUnavailable);
         }
         self.credentials
-            .get_anthropic_api_key()
+            .get_account_credential(&account.credential_ref)
             .await
-            .map(|key| key.map(|key| Credential::ApiKey(key.expose_secret().clone())))
-            .map_err(|_| LlmError::Authentication {
-                message: String::new(),
+            .map(|value| {
+                value
+                    .filter(|value| value.identity_generation == account.identity_generation)
+                    .map(|value| value.credential_revision)
             })
+            .map_err(|_| LlmError::AccountStorageUnavailable)
+    }
+    fn verify_account_scope(&self, scope: &CredentialScope) -> Result<(), LlmError> {
+        if let Some(expected) = scope.expected_identity_generation {
+            if scope
+                .credential_id
+                .as_deref()
+                .and_then(|id| self.account(id))
+                .is_none_or(|a| a.identity_generation != expected)
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: "stale account route identity".into(),
+                });
+            }
+        }
+        Ok(())
+    }
+    fn account(&self, id: &str) -> Option<lingxi_core::host::provider_accounts::AccountMetadata> {
+        if let Some(directory) = &self.account_directory {
+            return directory
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .accounts
+                .iter()
+                .find(|a| a.credential_ref.secret_ref == id)
+                .cloned();
+        }
+        self.accounts.get(id).cloned()
+    }
+    async fn load_account_versioned(
+        &self,
+        id: &str,
+    ) -> Result<llm_runtime::VersionedCredential, llm_runtime::VersionedCredentialError> {
+        let mut rejected_revision = None;
+        let result: Result<_, LlmError> = async {
+            let account = self.account(id).ok_or_else(|| LlmError::Authentication {
+                message: "unknown account".into(),
+            })?;
+            if !account.enabled {
+                return Err(LlmError::Authentication {
+                    message: "account disabled".into(),
+                });
+            }
+            let stored = self
+                .credentials
+                .get_account_credential(&account.credential_ref)
+                .await
+                .map_err(|_| LlmError::AccountStorageUnavailable)?;
+            let mut record = match stored {
+                Some(record) => record,
+                None => self
+                    .credentials
+                    .refresh_account_credential(account.clone(), 0)
+                    .await
+                    .map_err(account_refresh_error)?
+                    .ok_or_else(|| LlmError::Authentication {
+                        message: "account requires authentication".into(),
+                    })?,
+            };
+            rejected_revision = Some(record.credential_revision);
+            if record.identity_generation < account.identity_generation {
+                record = self
+                    .credentials
+                    .refresh_account_credential(account.clone(), 0)
+                    .await
+                    .map_err(|_| LlmError::AccountStorageUnavailable)?
+                    .ok_or(LlmError::AccountStorageUnavailable)?;
+            }
+            if record.identity_generation != account.identity_generation {
+                return Err(LlmError::AccountStorageUnavailable);
+            }
+            if matches!(&record.kind,secret::AccountCredentialKind::OAuth{expires_at,..} if *expires_at<=std::time::SystemTime::now()+std::time::Duration::from_secs(60))
+            {
+                record = self
+                    .credentials
+                    .refresh_account_credential(account.clone(), record.credential_revision)
+                    .await
+                    .map_err(account_refresh_error)?
+                    .ok_or_else(|| LlmError::Authentication {
+                        message: "account token expired".into(),
+                    })?;
+            }
+            if self.account_version_root.is_some() {
+                let published = self.published_revision(&account).await?;
+                if published != Some(record.credential_revision) {
+                    let rejected =
+                        if published.is_some_and(|revision| revision > record.credential_revision) {
+                            record.credential_revision
+                        } else {
+                            record.credential_revision.saturating_sub(1)
+                        };
+                    record = self
+                        .credentials
+                        .refresh_account_credential(account.clone(), rejected)
+                        .await
+                        .map_err(|_| LlmError::AccountStorageUnavailable)?
+                        .ok_or(LlmError::AccountStorageUnavailable)?;
+                    if self.published_revision(&account).await? != Some(record.credential_revision) {
+                        return Err(LlmError::AccountStorageUnavailable);
+                    }
+                }
+            }
+            rejected_revision = Some(record.credential_revision);
+            let revision = record.credential_revision;
+            account_credential_to_runtime(&account, record).map(|credential| {
+                llm_runtime::VersionedCredential {
+                    credential,
+                    credential_revision: Some(revision),
+                }
+            })
+        }
+        .await;
+        result.map_err(|error| llm_runtime::VersionedCredentialError {
+            error,
+            credential_revision: rejected_revision,
+        })
+    }
+    async fn load_account(&self, id: &str) -> Result<Credential, LlmError> {
+        self.load_account_versioned(id)
+            .await
+            .map(|value| value.credential)
+            .map_err(|error| error.error)
+    }
+    async fn refresh_account_versioned(
+        &self,
+        id: &str,
+        rejected: &Credential,
+    ) -> Result<Option<llm_runtime::VersionedCredential>, llm_runtime::VersionedCredentialError>
+    {
+        let mut rejected_revision = None;
+        let result: Result<_, LlmError> = async {
+            let account = self.account(id).ok_or_else(|| LlmError::Authentication {
+                message: "unknown account".into(),
+            })?;
+            if account.auth_kind != lingxi_core::host::provider_accounts::AccountAuthKind::OAuth {
+                return Ok(None);
+            }
+            let current = self
+                .credentials
+                .get_account_credential(&account.credential_ref)
+                .await
+                .map_err(|_| LlmError::AccountStorageUnavailable)?
+                .ok_or_else(|| LlmError::Authentication {
+                    message: "account requires authentication".into(),
+                })?;
+            rejected_revision = Some(current.credential_revision);
+            let resolved = account_credential_to_runtime(&account, clone_record(&current)?)?;
+            if self.account_version_root.is_some()
+                && self.published_revision(&account).await? != Some(current.credential_revision)
+            {
+                return Err(LlmError::AccountStorageUnavailable);
+            }
+            if &resolved != rejected {
+                return Ok(Some(llm_runtime::VersionedCredential {
+                    credential: resolved,
+                    credential_revision: Some(current.credential_revision),
+                }));
+            }
+            let record = self
+                .credentials
+                .refresh_account_credential(account.clone(), current.credential_revision)
+                .await
+                .map_err(account_refresh_error)?;
+            let Some(record) = record else {
+                return Ok(None);
+            };
+            if self.account_version_root.is_some()
+                && self.published_revision(&account).await? != Some(record.credential_revision)
+            {
+                return Err(LlmError::AccountStorageUnavailable);
+            }
+            let revision = record.credential_revision;
+            account_credential_to_runtime(&account, record).map(|credential| {
+                Some(llm_runtime::VersionedCredential {
+                    credential,
+                    credential_revision: Some(revision),
+                })
+            })
+        }
+        .await;
+        result.map_err(|error| llm_runtime::VersionedCredentialError {
+            error,
+            credential_revision: rejected_revision,
+        })
     }
 
-    async fn anthropic_api_key_source(&self) -> Source {
-        if self
-            .credentials
-            .provider_key_is_suppressed("anthropic-api-key")
+    async fn refresh_account(
+        &self,
+        id: &str,
+        rejected: &Credential,
+    ) -> Result<Option<Credential>, LlmError> {
+        self.refresh_account_versioned(id, rejected)
             .await
-        {
-            return Source::None;
-        }
-        if let Some((_, source)) = self.direct_anthropic_api_key().await {
-            return source;
-        }
-        if self.anthropic_api_key_helper.is_some() {
-            return Source::ApiKeyHelper;
-        }
-        match self.credentials.get_anthropic_api_key().await {
-            Ok(Some(_)) => Source::Stored,
-            Ok(None) => Source::None,
-            Err(_) => Source::Unknown,
-        }
+            .map(|value| value.map(|value| value.credential))
+            .map_err(|error| error.error)
     }
 }
 
 impl CredentialProvider for MultiCredentialProvider {
+    fn load_versioned<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<
+        'a,
+        Result<llm_runtime::VersionedCredential, llm_runtime::VersionedCredentialError>,
+    > {
+        Box::pin(async move {
+            self.verify_account_scope(scope)?;
+            let id = scope
+                .credential_id
+                .as_deref()
+                .ok_or_else(|| LlmError::Authentication {
+                    message: "account credential required".into(),
+                })?;
+            self.load_account_versioned(id).await
+        })
+    }
+
+    fn refresh_versioned<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+        rejected: &'a Credential,
+    ) -> BoxFuture<
+        'a,
+        Result<Option<llm_runtime::VersionedCredential>, llm_runtime::VersionedCredentialError>,
+    > {
+        Box::pin(async move {
+            self.verify_account_scope(scope)?;
+            match scope
+                .credential_id
+                .as_deref()
+                .filter(|id| self.account(id).is_some())
+            {
+                Some(id) => self.refresh_account_versioned(id, rejected).await,
+                None => Ok(None),
+            }
+        })
+    }
+
+    fn current_credential_revision<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<Option<u64>, LlmError>> {
+        Box::pin(async move {
+            self.verify_account_scope(scope)?;
+            match scope
+                .credential_id
+                .as_deref()
+                .and_then(|id| self.account(id))
+            {
+                Some(account) => self.published_revision(&account).await,
+                None => Ok(None),
+            }
+        })
+    }
+
     fn source<'a>(&'a self, scope: &'a CredentialScope) -> BoxFuture<'a, Result<Source, LlmError>> {
         Box::pin(async move {
-            let Some(credential_id) = scope.credential_id.as_deref() else {
+            self.verify_account_scope(scope)?;
+            let Some(id) = scope.credential_id.as_deref() else {
                 return Ok(Source::None);
             };
-            if scope.selects_anthropic_auth() {
-                let source = self.anthropic_api_key_source().await;
-                if source != Source::None {
-                    return Ok(source);
-                }
-                return match self.oauth_delegates.get("anthropic-oauth") {
-                    Some(delegate) => {
-                        delegate
-                            .source(&scope.clone().with_credential_id("anthropic-oauth"))
-                            .await
+            let account = self.account(id).ok_or_else(|| LlmError::Authentication {
+                message: "unknown account".into(),
+            })?;
+            self.credentials
+                .has_account_credential(&account.credential_ref)
+                .await
+                .map(|present| {
+                    if present {
+                        Source::Stored
+                    } else {
+                        Source::None
                     }
-                    None => Ok(Source::None),
-                };
-            }
-            if credential_id == "anthropic-oauth" && scope.forbids_anthropic_oauth() {
-                return Ok(Source::None);
-            }
-            if let Some(delegate) = self.oauth_delegates.get(credential_id) {
-                return delegate.source(scope).await;
-            }
-            if credential_id == "anthropic-api-key" {
-                return Ok(self.anthropic_api_key_source().await);
-            }
-            Ok(self.provider_key_selection(credential_id).await.1)
+                })
+                .map_err(|_| LlmError::AccountStorageUnavailable)
         })
     }
 
@@ -316,105 +368,45 @@ impl CredentialProvider for MultiCredentialProvider {
         scope: &'a CredentialScope,
     ) -> BoxFuture<'a, Result<llm_runtime::AnthropicAuthSnapshot, LlmError>> {
         Box::pin(async move {
-            if scope.provider_id != llm_runtime::ProviderId::AnthropicFirstParty {
-                return Ok(llm_runtime::AnthropicAuthSnapshot::default());
-            }
-            let oauth_scope = scope.clone().with_credential_id("anthropic-oauth");
-            let oauth = if scope.forbids_anthropic_oauth() {
-                None
-            } else if let Some(delegate) = self.oauth_delegates.get("anthropic-oauth") {
-                delegate
-                    .anthropic_auth_snapshot(&oauth_scope)
-                    .await
-                    .ok()
-                    .and_then(|snapshot| snapshot.oauth)
-            } else {
-                None
-            };
-            // Native Xb suppresses key lookup failure without discarding OAuth.
-            let api_key = self.status_api_key().await.unwrap_or(None);
-            Ok(llm_runtime::AnthropicAuthSnapshot { oauth, api_key })
+            let credential = self.load(scope).await?;
+            Ok(llm_runtime::AnthropicAuthSnapshot::from_credential(
+                scope.clone(),
+                credential,
+            ))
         })
     }
+
     fn refresh<'a>(
         &'a self,
         scope: &'a CredentialScope,
         rejected: &'a Credential,
     ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
         Box::pin(async move {
-            if scope.selects_anthropic_auth() {
-                if !matches!(
-                    rejected,
-                    Credential::AnthropicOAuth { .. } | Credential::BearerToken(_)
-                ) {
-                    return Ok(None);
-                }
-                return match self.oauth_delegates.get("anthropic-oauth") {
-                    Some(delegate) => {
-                        delegate
-                            .refresh(
-                                &scope.clone().with_credential_id("anthropic-oauth"),
-                                rejected,
-                            )
-                            .await
-                    }
-                    None => Ok(None),
-                };
-            }
-            if scope.credential_id.as_deref() == Some("anthropic-oauth")
-                && scope.forbids_anthropic_oauth()
-            {
-                return Ok(None);
-            }
-            let delegate = scope
+            self.verify_account_scope(scope)?;
+            match scope
                 .credential_id
                 .as_deref()
-                .and_then(|id| self.oauth_delegates.get(id));
-            match delegate {
-                Some(delegate) => delegate.refresh(scope, rejected).await,
+                .filter(|id| self.account(id).is_some())
+            {
+                Some(id) => self.refresh_account(id, rejected).await,
                 None => Ok(None),
             }
         })
     }
+
     fn load<'a>(
         &'a self,
         scope: &'a CredentialScope,
     ) -> BoxFuture<'a, Result<Credential, LlmError>> {
         Box::pin(async move {
-            let Some(credential_id) = scope.credential_id.as_deref() else {
-                return Err(LlmError::Authentication {
-                    message: String::new(),
-                });
-            };
-            if scope.selects_anthropic_auth() {
-                if let Some(key) = self.select_anthropic_api_key().await? {
-                    return Ok(key);
-                }
-                return match self.oauth_delegates.get("anthropic-oauth") {
-                    Some(delegate) => {
-                        delegate
-                            .load(&scope.clone().with_credential_id("anthropic-oauth"))
-                            .await
-                    }
-                    None => Err(LlmError::Authentication {
-                        message: String::new(),
-                    }),
-                };
-            }
-            if credential_id == "anthropic-oauth" && scope.forbids_anthropic_oauth() {
-                return Err(LlmError::Authentication {
-                    message: "first-party OAuth cannot authenticate this endpoint".into(),
-                });
-            }
-            // Any registered OAuth delegate wins for its credential_id
-            // (anthropic-oauth, openai-chatgpt, …).
-            if let Some(delegate) = self.oauth_delegates.get(credential_id) {
-                return delegate.load(scope).await;
-            }
-            match credential_id {
-                "anthropic-api-key" => self.load_anthropic_api_key().await,
-                other => self.load_provider_key(other).await,
-            }
+            self.verify_account_scope(scope)?;
+            let id = scope
+                .credential_id
+                .as_deref()
+                .ok_or_else(|| LlmError::Authentication {
+                    message: "account credential required".into(),
+                })?;
+            self.load_account(id).await
         })
     }
 }
@@ -422,194 +414,7 @@ impl CredentialProvider for MultiCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_runtime::{
-        Capabilities, Credential, CredentialProvider, CredentialScope, LlmError, LlmRequest,
-        ModelProfile, ModelRuntime, ProviderId,
-    };
-    use std::sync::Arc;
-
-    #[derive(Debug)]
-    struct RefreshDelegate;
-    impl CredentialProvider for RefreshDelegate {
-        fn anthropic_auth_snapshot<'a>(
-            &'a self,
-            scope: &'a CredentialScope,
-        ) -> BoxFuture<'a, Result<llm_runtime::AnthropicAuthSnapshot, LlmError>> {
-            Box::pin(async move {
-                Ok(llm_runtime::AnthropicAuthSnapshot::from_credential(
-                    scope.clone(),
-                    Credential::AnthropicOAuth {
-                        access_token: "old".into(),
-                        scopes: vec!["user:profile".into()],
-                    },
-                ))
-            })
-        }
-
-        fn load<'a>(
-            &'a self,
-            _: &'a CredentialScope,
-        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
-            Box::pin(async {
-                Ok(Credential::AnthropicOAuth {
-                    access_token: "old".into(),
-                    scopes: vec!["user:profile".into()],
-                })
-            })
-        }
-        fn refresh<'a>(
-            &'a self,
-            scope: &'a CredentialScope,
-            rejected: &'a Credential,
-        ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
-            Box::pin(async move {
-                assert_eq!(scope.credential_id.as_deref(), Some("anthropic-oauth"));
-                assert!(
-                    matches!(rejected, Credential::AnthropicOAuth { access_token, .. } if access_token=="old")
-                );
-                Ok(Some(Credential::AnthropicOAuth {
-                    access_token: "new".into(),
-                    scopes: vec!["user:profile".into()],
-                }))
-            })
-        }
-    }
-    #[tokio::test]
-    async fn status_oauth_remains_independent_of_the_model_api_key() {
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            vec![],
-            Some("model-key".into()),
-            None,
-            BTreeMap::from([(
-                "anthropic-oauth".into(),
-                Arc::new(RefreshDelegate) as Arc<dyn CredentialProvider>,
-            )]),
-        );
-        let model_scope = CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic")
-            .with_credential_id("anthropic-api-key");
-        assert_eq!(
-            provider.load(&model_scope).await.unwrap(),
-            Credential::ApiKey("model-key".into())
-        );
-        let snapshot = provider
-            .anthropic_auth_snapshot(&model_scope)
-            .await
-            .unwrap();
-        assert_eq!(
-            snapshot.api_key,
-            Some(Credential::ApiKey("model-key".into()))
-        );
-        let (oauth_scope, credential) = snapshot.oauth.unwrap();
-        assert_eq!(
-            oauth_scope.credential_id.as_deref(),
-            Some("anthropic-oauth")
-        );
-        assert_eq!(oauth_scope.profile_name, model_scope.profile_name);
-        assert!(
-            matches!(credential, Credential::AnthropicOAuth {ref access_token, ..} if access_token == "old")
-        );
-        assert!(provider
-            .refresh(&oauth_scope, &credential)
-            .await
-            .unwrap()
-            .is_some());
-        assert!(!format!("{credential:?}").contains("old"));
-    }
-
-    #[tokio::test]
-    async fn explicit_refresh_reaches_only_the_selected_oauth_delegate() {
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            vec![],
-            None,
-            None,
-            BTreeMap::from([(
-                "anthropic-oauth".into(),
-                Arc::new(RefreshDelegate) as Arc<dyn CredentialProvider>,
-            )]),
-        );
-        let scope = CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic")
-            .with_credential_id("anthropic-oauth");
-        let old = provider.load(&scope).await.unwrap();
-        assert!(
-            matches!(provider.refresh(&scope, &old).await.unwrap(), Some(Credential::AnthropicOAuth { access_token, .. }) if access_token=="new")
-        );
-        let other =
-            CredentialScope::new(ProviderId::OpenAI, "other").with_credential_id("unregistered");
-        assert_eq!(provider.refresh(&other, &old).await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn native_fast_key_snapshots_preserve_helper_shadowing_without_execution() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../llm-runtime/tests/fixtures/fast_auth_sources_2_1_287.json"
-        ))
-        .unwrap();
-        let marker = std::env::temp_dir().join(format!(
-            "harness-fast-helper-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let marker_quoted = marker.to_string_lossy().replace('\'', "'\\''");
-        for row in fixture["key_sources"].as_array().unwrap() {
-            let input = &row["input"];
-            let credentials = manager();
-            if let Some(key) = input["stored"].as_str() {
-                credentials.store_anthropic_api_key(key).await.unwrap();
-            }
-            let provider = MultiCredentialProvider::new(
-                credentials,
-                vec![],
-                input["static_key"].as_str().map(str::to_owned),
-                input["helper"]
-                    .as_bool()
-                    .unwrap()
-                    .then(|| format!("touch '{marker_quoted}'; printf unexpected")),
-                BTreeMap::new(),
-            );
-            if let Some(key) = input["cached"].as_str() {
-                provider.anthropic_api_key_helper_cache.store(key.into());
-                assert!(provider
-                    .anthropic_api_key_helper_cache
-                    .get_fresh(0)
-                    .is_none());
-            }
-            let current_scope = scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-oauth",
-            );
-            let actual = provider
-                .anthropic_auth_snapshot(&current_scope)
-                .await
-                .unwrap()
-                .api_key;
-            let actual = actual.map(|credential| match credential {
-                Credential::ApiKey(key) => key,
-                other => panic!("unexpected alternate credential: {other:?}"),
-            });
-            assert_eq!(
-                serde_json::to_value(actual).unwrap(),
-                row["expected"],
-                "{row}"
-            );
-            assert!(!marker.exists(), "Fast snapshots must not execute helpers");
-            assert_eq!(
-                provider
-                    .anthropic_auth_snapshot(&scope(ProviderId::OpenAI, "other", "other"))
-                    .await
-                    .unwrap()
-                    .api_key,
-                None
-            );
-        }
-    }
-
-    /// Shared in-memory `CredentialManager` harness (re-used by availability.rs too).
+    use llm_runtime::{LlmRequest, ModelRuntime, ProviderId};
     #[derive(Default)]
     struct MemStorage {
         map: std::sync::Mutex<
@@ -704,6 +509,88 @@ mod tests {
             panic!("credential tests must not perform HTTP");
         }
     }
+    #[tokio::test]
+    async fn exact_chatgpt_account_uses_workspace_header_and_keeps_principal_separate() {
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountMetadata, CredentialRef,
+        };
+        let cm = manager();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let reference = CredentialRef {
+            store_scope: "header_test".into(),
+            secret_ref: format!("acct.{id}"),
+        };
+        cm.store_account_credential(
+            &reference,
+            &secret::AccountCredential {
+                credential_revision: 1,
+                identity_generation: 1,
+                kind: secret::AccountCredentialKind::OAuth {
+                    access_token: lingxi_core::types::Secret::new("token-A".into()),
+                    refresh_token: None,
+                    expires_at: std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+                    scopes: vec![],
+                    issuer: "https://auth.openai.com".into(),
+                    subject: Some("oidc-user-A".into()),
+                    organization_id: Some("workspace-shared".into()),
+                    email: None,
+                    fedramp: false,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let account = AccountMetadata {
+            account_id: id.into(),
+            provider_id: "openai".into(),
+            display_name: "A".into(),
+            auth_kind: AccountAuthKind::OAuth,
+            execution_binding_id: "openai-chatgpt".into(),
+            credential_ref: reference.clone(),
+            enabled: true,
+            user_priority: 0,
+            config_revision: 1,
+            identity_generation: 1,
+        };
+        let mut profile = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|p| p.profile_name == "openai-chatgpt")
+            .unwrap();
+        let model = profile.models[0].request_model.clone();
+        profile.profile_name = format!("account.{id}");
+        profile.credential = llm_runtime::CredentialConfig::Static {
+            id: reference.secret_ref,
+        };
+        let client = ModelRuntime::from_config(llm_runtime::ClientConfig {
+            providers: vec![profile],
+        })
+        .unwrap()
+        .with_credential_provider(Arc::new(
+            MultiCredentialProvider::new(cm).with_accounts(vec![account]),
+        ));
+        let prepared = client
+            .prepare(&LlmRequest::new(model).with_user_text("hello"))
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared
+                .provider_request
+                .headers
+                .get("ChatGPT-Account-ID")
+                .map(String::as_str),
+            Some("workspace-shared")
+        );
+        assert_ne!(
+            prepared
+                .provider_request
+                .headers
+                .get("ChatGPT-Account-ID")
+                .map(String::as_str),
+            Some("oidc-user-A")
+        );
+    }
+
     fn manager() -> Arc<secret::CredentialManager> {
         Arc::new(secret::CredentialManager::new(
             Arc::new(MemStorage::default()),
@@ -711,1041 +598,188 @@ mod tests {
             Arc::new(NoHttp),
         ))
     }
-    fn source(
-        provider_id: ProviderId,
-        credential_id: &str,
-        env_var: Option<&str>,
-        kind: crate::CredentialKind,
-    ) -> crate::CredentialSource {
-        crate::CredentialSource {
-            provider_id,
-            profile_name: credential_id.to_string(),
-            credential_id: credential_id.to_string(),
-            env_var: env_var.map(str::to_string),
-            kind,
-        }
-    }
-    fn scope(provider: ProviderId, profile: &str, cred_id: &str) -> CredentialScope {
-        CredentialScope::new(provider, profile).with_credential_id(cred_id.to_string())
-    }
 
-    /// Serialize env mutation across tests (process-global env).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[derive(Debug)]
-    struct LiveOAuth(std::sync::atomic::AtomicBool);
-    impl CredentialProvider for LiveOAuth {
-        fn source<'a>(&'a self, _: &'a CredentialScope) -> BoxFuture<'a, Result<Source, LlmError>> {
-            Box::pin(async {
-                Ok(if self.0.load(std::sync::atomic::Ordering::SeqCst) {
-                    Source::OAuth
-                } else {
-                    Source::None
-                })
-            })
-        }
-        fn load<'a>(
-            &'a self,
-            scope: &'a CredentialScope,
-        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
-            assert_eq!(scope.credential_id.as_deref(), Some("anthropic-oauth"));
-            Box::pin(async {
-                if !self.0.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Err(LlmError::Authentication {
-                        message: String::new(),
-                    });
-                }
-                Ok(Credential::AnthropicOAuth {
-                    access_token: "oauth-live".into(),
-                    scopes: vec!["user:inference".into()],
-                })
-            })
+    fn api_account(id: &str) -> lingxi_core::host::provider_accounts::AccountMetadata {
+        use lingxi_core::host::provider_accounts::{
+            AccountAuthKind, AccountMetadata, CredentialRef,
+        };
+        AccountMetadata {
+            account_id: id.into(),
+            provider_id: "openai".into(),
+            display_name: id.into(),
+            auth_kind: AccountAuthKind::ApiKey,
+            execution_binding_id: "openai".into(),
+            credential_ref: CredentialRef {
+                store_scope: "credential_test".into(),
+                secret_ref: format!("acct.{id}"),
+            },
+            enabled: true,
+            user_priority: 0,
+            config_revision: 1,
+            identity_generation: 1,
         }
     }
 
-    fn live_anthropic_client(
-        credentials: Arc<secret::CredentialManager>,
-        api_base: &str,
-        oauth: Option<Arc<LiveOAuth>>,
-    ) -> ModelRuntime {
-        let assembled = crate::assemble::assemble(crate::AssembleInputs {
-            official_catalog: None,
-            anthropic_api_base: api_base.into(),
-            anthropic_models: vec![ModelProfile {
-                display_model: "claude-sonnet-4-6".into(),
-                request_model: "claude-sonnet-4-6".into(),
-                billing_model: "claude-sonnet-4-6".into(),
-                aliases: vec![],
-                description: None,
-                metadata: Default::default(),
-                capabilities: Capabilities::default(),
-            }],
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: oauth.is_some(),
-            user_providers: Default::default(),
-            routing: None,
-        });
-        ModelRuntime::from_config(assembled.client_config)
-            .unwrap()
-            .with_credential_provider(Arc::new(MultiCredentialProvider::new(
-                credentials,
-                assembled.credential_sources,
-                None,
-                None,
-                oauth
-                    .map(|delegate| {
-                        BTreeMap::from([(
-                            "anthropic-oauth".into(),
-                            delegate as Arc<dyn CredentialProvider>,
-                        )])
-                    })
-                    .unwrap_or_default(),
-            )))
+    fn account_scope(
+        account: &lingxi_core::host::provider_accounts::AccountMetadata,
+    ) -> CredentialScope {
+        let mut scope = CredentialScope::new(
+            ProviderId::OpenAICompatible {
+                name: "openai".into(),
+            },
+            format!("account.{}", account.account_id),
+        )
+        .with_credential_id(account.credential_ref.secret_ref.clone());
+        scope.expected_identity_generation = Some(account.identity_generation);
+        scope
     }
 
     #[tokio::test]
-    async fn live_client_tracks_persistent_api_key_and_oauth_changes_without_rebuild() {
-        let credentials = manager();
-        let oauth = Arc::new(LiveOAuth(std::sync::atomic::AtomicBool::new(true)));
-        let client = live_anthropic_client(
-            credentials.clone(),
-            "https://api.anthropic.com",
-            Some(oauth.clone()),
-        );
-        let request =
-            LlmRequest::new("claude-sonnet-4-6").with_user_text("message stays unchanged");
-        let before = client.prepare(&request).await.unwrap();
-        assert_eq!(
-            before
-                .provider_request
-                .headers
-                .get("Authorization")
-                .map(String::as_str),
-            Some("Bearer oauth-live")
-        );
-        assert_eq!(
-            client
-                .credential_source("claude-sonnet-4-6", Some("anthropic"))
-                .await
-                .unwrap(),
-            Source::OAuth
-        );
-
-        for key in ["first-api-key", "replacement-api-key"] {
-            credentials
-                .set_provider_key("anthropic", key)
-                .await
-                .unwrap();
-            let after = client.prepare(&request).await.unwrap();
-            assert_eq!(
-                after
-                    .provider_request
-                    .headers
-                    .get("x-api-key")
-                    .map(String::as_str),
-                Some(key)
-            );
-            assert!(!after
-                .provider_request
-                .headers
-                .keys()
-                .any(|name| name.eq_ignore_ascii_case("authorization")));
-            assert_eq!(
-                after.provider_request.body_json,
-                before.provider_request.body_json
-            );
-            assert_eq!(
-                client
-                    .credential_source("claude-sonnet-4-6", Some("anthropic"))
-                    .await
-                    .unwrap(),
-                Source::Stored
-            );
-        }
-        credentials.delete_provider_key("anthropic").await.unwrap();
-        let restored = client.prepare(&request).await.unwrap();
-        assert_eq!(
-            restored
-                .provider_request
-                .headers
-                .get("Authorization")
-                .map(String::as_str),
-            Some("Bearer oauth-live")
-        );
-        assert_eq!(
-            restored.provider_request.body_json,
-            before.provider_request.body_json
-        );
-        oauth.0.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(matches!(
-            client.prepare(&request).await,
-            Err(LlmError::Authentication { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn custom_anthropic_endpoint_never_inherits_oauth_but_accepts_live_api_keys() {
-        let credentials = manager();
-        let oauth = Arc::new(LiveOAuth(std::sync::atomic::AtomicBool::new(true)));
-        let client =
-            live_anthropic_client(credentials.clone(), "https://custom.example", Some(oauth));
-        let request = LlmRequest::new("claude-sonnet-4-6").with_user_text("custom request");
-        assert!(matches!(
-            client.prepare(&request).await,
-            Err(LlmError::Authentication { .. })
-        ));
-        credentials
-            .set_provider_key("anthropic", "custom-api-key")
-            .await
-            .unwrap();
-        let prepared = client.prepare(&request).await.unwrap();
-        assert!(prepared
-            .provider_request
-            .url
-            .starts_with("https://custom.example/"));
-        assert_eq!(
-            prepared
-                .provider_request
-                .headers
-                .get("x-api-key")
-                .map(String::as_str),
-            Some("custom-api-key")
-        );
-        assert!(!prepared
-            .provider_request
-            .headers
-            .keys()
-            .any(|name| name.eq_ignore_ascii_case("authorization")));
-        credentials.delete_provider_key("anthropic").await.unwrap();
-        assert!(matches!(
-            client.prepare(&request).await,
-            Err(LlmError::Authentication { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn unavailable_key_store_cannot_silently_select_the_oauth_account() {
+    async fn exact_accounts_keep_keys_isolated_and_never_read_provider_slots() {
         let storage = Arc::new(MemStorage::default());
-        let credentials = Arc::new(secret::CredentialManager::new(
+        let cm = Arc::new(secret::CredentialManager::new(
             storage.clone(),
             Arc::new(FixedClock),
             Arc::new(NoHttp),
         ));
-        credentials
-            .store_anthropic_api_key("stored-key")
-            .await
-            .unwrap();
-        storage
-            .fail_reads
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let client = live_anthropic_client(
-            credentials,
-            "https://api.anthropic.com",
-            Some(Arc::new(LiveOAuth(std::sync::atomic::AtomicBool::new(
-                true,
-            )))),
-        );
-        let request =
-            LlmRequest::new("claude-sonnet-4-6").with_user_text("preserve selected account");
-        assert!(
-            matches!(client.prepare(&request).await, Err(LlmError::Authentication { message }) if message == "provider credential storage is unavailable")
-        );
-        assert_eq!(
-            client
-                .credential_source("claude-sonnet-4-6", Some("anthropic"))
-                .await
-                .unwrap(),
-            Source::Unknown
-        );
-    }
-
-    #[tokio::test]
-    async fn live_anthropic_oauth_refresh_keeps_the_oauth_delegate_scope() {
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            vec![],
-            None,
-            None,
-            BTreeMap::from([(
-                "anthropic-oauth".into(),
-                Arc::new(RefreshDelegate) as Arc<dyn CredentialProvider>,
-            )]),
-        );
-        let selected = scope(
-            ProviderId::AnthropicFirstParty,
-            "anthropic",
-            "anthropic-api-key",
-        )
-        .with_route(
-            "https://api.anthropic.com",
-            llm_runtime::ProtocolFamily::AnthropicMessages,
-        );
-        let rejected = Credential::AnthropicOAuth {
-            access_token: "old".into(),
-            scopes: vec!["user:profile".into()],
-        };
-        assert!(
-            matches!(provider.refresh(&selected, &rejected).await.unwrap(), Some(Credential::AnthropicOAuth { access_token, .. }) if access_token == "new")
-        );
-        let untrusted = selected
-            .with_route(
-                "https://custom.example",
-                llm_runtime::ProtocolFamily::AnthropicMessages,
+        let a = api_account("11111111-1111-4111-8111-111111111111");
+        let b = api_account("22222222-2222-4222-8222-222222222222");
+        for (account, key) in [(&a, "key-A"), (&b, "key-B")] {
+            cm.store_account_credential(
+                &account.credential_ref,
+                &secret::AccountCredential {
+                    credential_revision: 3,
+                    identity_generation: 1,
+                    kind: secret::AccountCredentialKind::ApiKey {
+                        key: lingxi_core::types::Secret::new(key.into()),
+                    },
+                },
             )
-            .with_credential_id("anthropic-oauth");
-        assert!(provider
-            .refresh(&untrusted, &rejected)
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn host_managed_cold_start_rejects_immutable_key_and_helper_fallbacks() {
-        let credentials = manager();
-        credentials.use_host_managed_provider_keys();
-        let provider = MultiCredentialProvider::new(
-            credentials.clone(),
-            vec![],
-            Some("boot-key".into()),
-            Some("printf helper-key".into()),
-            Default::default(),
-        );
-        let selected = scope(
-            ProviderId::AnthropicFirstParty,
-            "anthropic",
-            "anthropic-api-key",
-        );
-        assert!(matches!(
-            provider.load(&selected).await,
-            Err(LlmError::Authentication { .. })
-        ));
-        assert_eq!(provider.source(&selected).await.unwrap(), Source::None);
-        assert!(provider
-            .anthropic_auth_snapshot(&selected)
-            .await
-            .unwrap()
-            .api_key
-            .is_none());
-        credentials
-            .set_provider_key_ephemeral("anthropic", "injected-key")
-            .await;
-        assert_eq!(
-            provider.load(&selected).await.unwrap(),
-            Credential::ApiKey("injected-key".into())
-        );
-    }
-
-    #[tokio::test]
-    async fn host_deletion_suppresses_anthropic_storage_boot_helper_and_metadata() {
-        let credentials = manager();
-        credentials
-            .store_anthropic_api_key("stored-key")
             .await
             .unwrap();
-        assert!(credentials.get_anthropic_api_key().await.unwrap().is_some());
-        let provider = MultiCredentialProvider::new(
-            credentials.clone(),
-            vec![],
-            Some("boot-key".into()),
-            Some("printf helper-key".into()),
-            Default::default(),
-        );
-        let selected = scope(
-            ProviderId::AnthropicFirstParty,
-            "anthropic",
-            "anthropic-api-key",
-        );
-        credentials
-            .suppress_provider_key_ephemeral("anthropic")
-            .await;
-        assert!(matches!(
-            provider.load(&selected).await,
-            Err(LlmError::Authentication { .. })
-        ));
-        assert_eq!(provider.source(&selected).await.unwrap(), Source::None);
-        assert!(provider
-            .anthropic_auth_snapshot(&selected)
-            .await
-            .unwrap()
-            .api_key
-            .is_none());
-
-        credentials
-            .set_provider_key_ephemeral("anthropic-api-key", "replacement-key")
-            .await;
-        assert_eq!(
-            provider.load(&selected).await.unwrap(),
-            Credential::ApiKey("replacement-key".into())
-        );
-        assert_eq!(provider.source(&selected).await.unwrap(), Source::Stored);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn host_deletion_suppresses_generic_storage_environment_and_metadata() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let variable = "HOST_DELETED_PROVIDER_REGRESSION_KEY";
-        let previous = std::env::var_os(variable);
-        std::env::set_var(variable, "environment-key");
-        let credentials = manager();
-        credentials
-            .set_provider_key("host-test", "stored-key")
-            .await
-            .unwrap();
-        let provider = MultiCredentialProvider::new(
-            credentials.clone(),
-            vec![source(
-                ProviderId::OpenAI,
-                "host-test",
-                Some(variable),
-                crate::CredentialKind::ApiKey,
-            )],
-            None,
-            None,
-            Default::default(),
-        );
-        let selected = scope(ProviderId::OpenAI, "host-test", "host-test");
-        credentials
-            .suppress_provider_key_ephemeral("host-test")
-            .await;
-        assert!(matches!(
-            provider.load(&selected).await,
-            Err(LlmError::Authentication { .. })
-        ));
-        assert_eq!(provider.source(&selected).await.unwrap(), Source::None);
-        match previous {
-            Some(value) => std::env::set_var(variable, value),
-            None => std::env::remove_var(variable),
         }
-    }
-
-    #[tokio::test]
-    async fn credential_source_matches_selected_profile_key_precedence() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let variable = "CREDENTIAL_SOURCE_REGRESSION_KEY";
-        let previous = std::env::var_os(variable);
-        std::env::set_var(variable, "environment-credential");
-        let credentials = manager();
-        credentials
-            .set_provider_key("custom-key", "stored-credential")
-            .await
-            .unwrap();
-        let provider = MultiCredentialProvider::new(
-            credentials.clone(),
-            vec![source(
-                ProviderId::OpenAI,
-                "custom-key",
-                Some(variable),
-                crate::CredentialKind::ApiKey,
-            )],
-            None,
-            None,
-            Default::default(),
+        storage.map.lock().unwrap().insert(
+            ("lingxi".into(), "provider-key-openai".into()),
+            lingxi_core::types::SecureStorageData::new(
+                b"obsolete-provider-key".to_vec(),
+                lingxi_core::types::SecureStorageMetadata {
+                    created_at: std::time::SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: lingxi_core::types::SecretKindDto("generic_api_key".into()),
+                },
+            ),
         );
-        let selected = scope(ProviderId::OpenAI, "custom-profile", "custom-key");
-        assert_eq!(provider.source(&selected).await.unwrap(), Source::Stored);
-        assert_eq!(
-            provider.load(&selected).await.unwrap(),
-            Credential::ApiKey("stored-credential".into())
-        );
-        credentials.delete_provider_key("custom-key").await.unwrap();
-        assert_eq!(
-            provider.source(&selected).await.unwrap(),
-            Source::Environment {
-                variable: variable.into()
-            }
-        );
-        assert_eq!(
-            provider.load(&selected).await.unwrap(),
-            Credential::ApiKey("environment-credential".into())
-        );
-        std::env::remove_var(variable);
-        assert_eq!(provider.source(&selected).await.unwrap(), Source::None);
-        assert!(provider.load(&selected).await.is_err());
-        match previous {
-            Some(value) => std::env::set_var(variable, value),
-            None => std::env::remove_var(variable),
+        let provider = MultiCredentialProvider::new(cm).with_accounts(vec![a.clone(), b.clone()]);
+        for (account, key) in [(&a, "key-A"), (&b, "key-B")] {
+            let loaded = provider
+                .load_versioned(&account_scope(account))
+                .await
+                .unwrap();
+            assert_eq!(loaded.credential, Credential::ApiKey(key.into()));
+            assert_eq!(loaded.credential_revision, Some(3));
         }
-    }
-
-    #[tokio::test]
-    async fn credential_source_keeps_helper_precedence_without_executing_it() {
-        let credentials = manager();
-        credentials
-            .store_anthropic_api_key("stored-credential")
-            .await
-            .unwrap();
-        let marker = std::env::temp_dir().join(format!(
-            "harness-credential-source-helper-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let provider = MultiCredentialProvider::new(
-            credentials,
-            vec![],
-            None,
-            Some(format!("touch '{}'", marker.display())),
-            Default::default(),
-        );
-        let selected = scope(
-            ProviderId::AnthropicFirstParty,
-            "anthropic",
-            "anthropic-api-key",
-        );
-        assert_eq!(
-            provider.source(&selected).await.unwrap(),
-            Source::ApiKeyHelper
-        );
-        assert!(
-            !marker.exists(),
-            "metadata inspection must not run a helper"
-        );
-    }
-
-    #[tokio::test]
-    async fn credential_source_retains_host_supplied_static_origin() {
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            vec![],
-            Some("configured-credential".into()),
-            None,
-            Default::default(),
+        let old_slot = CredentialScope::new(
+            ProviderId::OpenAICompatible {
+                name: "openai".into(),
+            },
+            "openai",
         )
-        .with_anthropic_api_key_source(Source::Environment {
-            variable: "ANTHROPIC_API_KEY".into(),
-        });
-        let selected = scope(
-            ProviderId::AnthropicFirstParty,
-            "anthropic",
-            "anthropic-api-key",
-        );
-        assert_eq!(
-            provider.source(&selected).await.unwrap(),
-            Source::Environment {
-                variable: "ANTHROPIC_API_KEY".into()
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn anthropic_api_key_dispatch_returns_configured_key() {
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            Vec::new(),
-            Some("sk-ant-test".to_string()),
-            None,
-            Default::default(),
-        );
-        let got = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-api-key",
-            ))
-            .await
-            .expect("api-key dispatch");
-        assert_eq!(got, Credential::ApiKey("sk-ant-test".to_string()));
-    }
-
-    #[tokio::test]
-    async fn ephemeral_anthropic_key_replaces_the_boot_snapshot() {
-        let credentials = manager();
-        let provider = MultiCredentialProvider::new(
-            credentials.clone(),
-            Vec::new(),
-            Some("boot-key".to_string()),
-            None,
-            Default::default(),
-        );
-        credentials
-            .set_provider_key_ephemeral("anthropic", "rotated-key")
-            .await;
-
-        let got = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-api-key",
-            ))
-            .await
-            .expect("rotated api-key dispatch");
-        assert_eq!(got, Credential::ApiKey("rotated-key".to_string()));
-    }
-
-    #[tokio::test]
-    async fn anthropic_api_key_dispatch_reads_the_shared_secure_store() {
-        let credentials = manager();
-        credentials
-            .store_anthropic_api_key("sk-ant-shared")
-            .await
-            .expect("seed shared store");
-        let provider =
-            MultiCredentialProvider::new(credentials, Vec::new(), None, None, Default::default());
-
-        let got = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-api-key",
-            ))
-            .await
-            .expect("shared api-key dispatch");
-        assert_eq!(got, Credential::ApiKey("sk-ant-shared".to_string()));
-    }
-
-    #[tokio::test]
-    async fn persistent_anthropic_key_rotation_and_delete_are_live() {
-        let credentials = manager();
-        credentials
-            .store_anthropic_api_key("sk-ant-old")
-            .await
-            .expect("seed old key");
-        // Desktop passes no immutable snapshot when the resolved key came
-        // from this shared store.
-        let provider = MultiCredentialProvider::new(
-            credentials.clone(),
-            Vec::new(),
-            None,
-            None,
-            Default::default(),
-        );
-        let scope = scope(
-            ProviderId::AnthropicFirstParty,
-            "anthropic",
-            "anthropic-api-key",
-        );
-
-        credentials
-            .store_anthropic_api_key("sk-ant-new")
-            .await
-            .expect("rotate key");
-        assert_eq!(
-            provider.load(&scope).await.expect("rotated key"),
-            Credential::ApiKey("sk-ant-new".to_string())
-        );
-
-        credentials
-            .delete_anthropic_api_key()
-            .await
-            .expect("delete key");
+        .with_credential_id("openai");
         assert!(matches!(
-            provider.load(&scope).await,
+            provider.load(&old_slot).await,
+            Err(LlmError::Authentication { .. })
+        ));
+        assert!(matches!(
+            provider.source(&old_slot).await,
             Err(LlmError::Authentication { .. })
         ));
     }
 
     #[tokio::test]
-    async fn anthropic_api_key_dispatch_missing_key_is_authentication_error() {
-        let provider =
-            MultiCredentialProvider::new(manager(), Vec::new(), None, None, Default::default());
-        let err = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-api-key",
-            ))
-            .await
-            .expect_err("no key configured");
-        assert_eq!(
-            err,
-            LlmError::Authentication {
-                message: String::new()
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn cold_anthropic_route_tracks_host_key_add_rotate_and_delete() {
-        let credentials = manager();
-        let assembled = crate::assemble::assemble(crate::AssembleInputs {
-            official_catalog: None,
-            anthropic_api_base: "https://api.anthropic.com".to_string(),
-            anthropic_models: vec![ModelProfile {
-                display_model: "claude-sonnet-4-6".to_string(),
-                request_model: "claude-sonnet-4-6".to_string(),
-                billing_model: "claude-sonnet-4-6".to_string(),
-                aliases: Vec::new(),
-                description: None,
-                metadata: Default::default(),
-                capabilities: Capabilities::default(),
-            }],
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            user_providers: Default::default(),
-            routing: None,
-        });
-        let mut client = ModelRuntime::from_config(assembled.client_config)
-            .expect("cold-start route config must be valid");
-        client = client.with_credential_provider(Arc::new(MultiCredentialProvider::new(
-            credentials.clone(),
-            assembled.credential_sources,
-            None,
-            None,
-            Default::default(),
-        )));
-        let request = LlmRequest::new("claude-sonnet-4-6").with_user_text("hello");
-        assert!(client.prepare(&request).await.is_err());
-
-        credentials
-            .set_provider_key_ephemeral("anthropic", "sk-ant-after-boot")
-            .await;
-        let prepared = client
-            .prepare(&request)
-            .await
-            .expect("the same live route must load a key added after boot");
-        assert_eq!(
-            prepared
-                .provider_request
-                .headers
-                .get("x-api-key")
-                .map(String::as_str),
-            Some("sk-ant-after-boot")
-        );
-
-        credentials
-            .set_provider_key_ephemeral("anthropic", "rotated-key")
-            .await;
-        let next = client
-            .prepare(&request)
-            .await
-            .expect("same client uses rotated key");
-        assert_eq!(
-            next.provider_request
-                .headers
-                .get("x-api-key")
-                .map(String::as_str),
-            Some("rotated-key")
-        );
-        assert_eq!(
-            prepared
-                .provider_request
-                .headers
-                .get("x-api-key")
-                .map(String::as_str),
-            Some("sk-ant-after-boot")
-        );
-
-        credentials
-            .suppress_provider_key_ephemeral("anthropic")
-            .await;
-        assert!(matches!(
-            client.prepare(&request).await,
-            Err(LlmError::Authentication { .. })
-        ));
-        assert_eq!(
-            next.provider_request
-                .headers
-                .get("x-api-key")
-                .map(String::as_str),
-            Some("rotated-key")
-        );
-    }
-
-    #[tokio::test]
-    async fn anthropic_api_key_helper_supplies_key_when_no_static_key() {
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            Vec::new(),
-            None,
-            Some("printf '  sk-helper-123  \\n'".to_string()),
-            Default::default(),
-        );
-        let got = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-api-key",
-            ))
-            .await
-            .expect("helper key");
-        assert_eq!(got, Credential::ApiKey("sk-helper-123".to_string()));
-    }
-
-    #[tokio::test]
-    async fn anthropic_api_key_helper_failure_preserves_error() {
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            Vec::new(),
-            None,
-            Some("echo boom 1>&2; exit 3".to_string()),
-            Default::default(),
-        );
-        let err = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-api-key",
-            ))
-            .await
-            .expect_err("helper failure");
-        assert_eq!(
-            err,
-            LlmError::InvalidRequest {
-                message: "apiKeyHelper failed: exited 3: boom".to_string()
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_credential_id_is_authentication_error() {
-        let provider =
-            MultiCredentialProvider::new(manager(), Vec::new(), None, None, Default::default());
-        let err = provider
-            .load(&CredentialScope::new(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-            ))
-            .await
-            .expect_err("no credential id");
-        assert_eq!(
-            err,
-            LlmError::Authentication {
-                message: String::new()
-            }
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn keychain_wins_over_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    async fn disabled_or_replaced_identity_cannot_load_a_saved_key() {
         let cm = manager();
-        cm.set_provider_key("openrouter", "key-from-keychain")
-            .await
-            .expect("store");
-        std::env::set_var("OPENROUTER_API_KEY", "key-from-env");
-        let provider = MultiCredentialProvider::new(
-            cm,
-            vec![source(
-                ProviderId::OpenAICompatible {
-                    name: "openrouter".to_string(),
+        let mut account = api_account("11111111-1111-4111-8111-111111111111");
+        cm.store_account_credential(
+            &account.credential_ref,
+            &secret::AccountCredential {
+                credential_revision: 1,
+                identity_generation: 1,
+                kind: secret::AccountCredentialKind::ApiKey {
+                    key: lingxi_core::types::Secret::new("key-A".into()),
                 },
-                "openrouter",
-                Some("OPENROUTER_API_KEY"),
-                crate::CredentialKind::Keychain,
-            )],
-            None,
-            None,
-            Default::default(),
-        );
-        let got = provider
-            .load(&scope(
-                ProviderId::OpenAICompatible {
-                    name: "openrouter".to_string(),
-                },
-                "openrouter",
-                "openrouter",
-            ))
-            .await
-            .expect("resolve");
-        std::env::remove_var("OPENROUTER_API_KEY");
-        assert_eq!(got, Credential::ApiKey("key-from-keychain".to_string()));
+            },
+        )
+        .await
+        .unwrap();
+        let original_scope = account_scope(&account);
+        account.enabled = false;
+        let disabled =
+            MultiCredentialProvider::new(cm.clone()).with_accounts(vec![account.clone()]);
+        assert!(matches!(
+            disabled.load(&original_scope).await,
+            Err(LlmError::Authentication { .. })
+        ));
+        account.enabled = true;
+        account.identity_generation = 2;
+        let replaced = MultiCredentialProvider::new(cm).with_accounts(vec![account]);
+        assert!(matches!(
+            replaced.load(&original_scope).await,
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        assert!(matches!(
+            replaced.source(&original_scope).await,
+            Err(LlmError::InvalidRequest { .. })
+        ));
     }
+}
 
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn env_used_when_keychain_empty() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("DEEPSEEK_API_KEY", "key-from-env");
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            vec![source(
-                ProviderId::OpenAICompatible {
-                    name: "deepseek".to_string(),
-                },
-                "deepseek",
-                Some("DEEPSEEK_API_KEY"),
-                crate::CredentialKind::ApiKey,
-            )],
-            None,
-            None,
-            Default::default(),
-        );
-        let got = provider
-            .load(&scope(
-                ProviderId::OpenAICompatible {
-                    name: "deepseek".to_string(),
-                },
-                "deepseek",
-                "deepseek",
-            ))
-            .await
-            .expect("resolve");
-        std::env::remove_var("DEEPSEEK_API_KEY");
-        assert_eq!(got, Credential::ApiKey("key-from-env".to_string()));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn none_when_neither_keychain_nor_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("GLM_NO_SUCH_VAR");
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            vec![source(
-                ProviderId::Custom {
-                    name: "glm-coding".to_string(),
-                },
-                "glm-coding",
-                Some("GLM_NO_SUCH_VAR"),
-                crate::CredentialKind::ApiKey,
-            )],
-            None,
-            None,
-            Default::default(),
-        );
-        let err = provider
-            .load(&scope(
-                ProviderId::Custom {
-                    name: "glm-coding".to_string(),
-                },
-                "glm-coding",
-                "glm-coding",
-            ))
-            .await
-            .expect_err("nothing configured");
-        assert_eq!(
-            err,
-            LlmError::Authentication {
-                message: String::new()
-            }
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
-    async fn copilot_via_github_token_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("GITHUB_TOKEN", "ghp-token");
-        let provider = MultiCredentialProvider::new(
-            manager(),
-            vec![source(
-                ProviderId::OpenAICompatible {
-                    name: "github-copilot".to_string(),
-                },
-                "github-copilot",
-                Some("GITHUB_TOKEN"),
-                crate::CredentialKind::Keychain,
-            )],
-            None,
-            None,
-            Default::default(),
-        );
-        let got = provider
-            .load(&scope(
-                ProviderId::OpenAICompatible {
-                    name: "github-copilot".to_string(),
-                },
-                "github-copilot",
-                "github-copilot",
-            ))
-            .await
-            .expect("resolve copilot");
-        std::env::remove_var("GITHUB_TOKEN");
-        assert_eq!(got, Credential::ApiKey("ghp-token".to_string()));
-    }
-
-    #[derive(Debug)]
-    struct StubOAuth {
-        token: String,
-    }
-    impl CredentialProvider for StubOAuth {
-        fn load<'a>(
-            &'a self,
-            _scope: &'a CredentialScope,
-        ) -> llm_runtime::BoxFuture<'a, Result<Credential, LlmError>> {
-            let tok = self.token.clone();
-            Box::pin(async move { Ok(Credential::BearerToken(tok)) })
-        }
-    }
-
-    #[tokio::test]
-    async fn oauth_id_delegates_to_delegate() {
-        let delegate: Arc<dyn CredentialProvider> = Arc::new(StubOAuth {
-            token: "oauth-access".to_string(),
+fn clone_record(record: &secret::AccountCredential) -> Result<secret::AccountCredential, LlmError> {
+    let bytes = lingxi_core::types::Secret::new(
+        serde_json::to_vec(record).map_err(|_| LlmError::AccountStorageUnavailable)?,
+    );
+    serde_json::from_slice(bytes.expose_secret()).map_err(|_| LlmError::AccountStorageUnavailable)
+}
+fn account_credential_to_runtime(
+    account: &lingxi_core::host::provider_accounts::AccountMetadata,
+    record: secret::AccountCredential,
+) -> Result<Credential, LlmError> {
+    if record.identity_generation != account.identity_generation {
+        return Err(LlmError::InvalidRequest {
+            message: "stale account credential identity".into(),
         });
-        let mut delegates: BTreeMap<String, Arc<dyn CredentialProvider>> = BTreeMap::new();
-        delegates.insert("anthropic-oauth".into(), delegate);
-        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, None, delegates);
-        let got = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-oauth",
-            ))
-            .await
-            .expect("delegate");
-        assert_eq!(got, Credential::BearerToken("oauth-access".to_string()));
     }
-
-    #[tokio::test]
-    async fn oauth_id_without_delegate_is_authentication_error() {
-        let provider =
-            MultiCredentialProvider::new(manager(), Vec::new(), None, None, Default::default());
-        let err = provider
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-oauth",
-            ))
-            .await
-            .expect_err("no delegate");
-        assert_eq!(
-            err,
-            LlmError::Authentication {
-                message: String::new()
+    match record.kind {
+        secret::AccountCredentialKind::ApiKey { key } => {
+            Ok(Credential::ApiKey(key.expose_secret().clone()))
+        }
+        secret::AccountCredentialKind::OAuth {
+            access_token,
+            organization_id,
+            fedramp,
+            scopes,
+            ..
+        } => {
+            if account.execution_binding_id == "openai-chatgpt" {
+                Ok(Credential::ChatGptOAuth {
+                    access_token: access_token.expose_secret().clone(),
+                    account_id: organization_id,
+                    fedramp,
+                })
+            } else {
+                Ok(Credential::AnthropicOAuth {
+                    access_token: access_token.expose_secret().clone(),
+                    scopes,
+                })
             }
-        );
-    }
-
-    /// A stub that always returns the fixed `Credential` it was constructed with.
-    #[derive(Debug)]
-    struct StubProvider(Credential);
-    impl CredentialProvider for StubProvider {
-        fn load<'a>(
-            &'a self,
-            _scope: &'a CredentialScope,
-        ) -> llm_runtime::BoxFuture<'a, Result<Credential, LlmError>> {
-            let c = self.0.clone();
-            Box::pin(async move { Ok(c) })
         }
     }
+}
 
-    #[tokio::test]
-    async fn routes_oauth_delegate_by_credential_id() {
-        let anthropic = Arc::new(StubProvider(Credential::BearerToken("ANT".into())));
-        let openai = Arc::new(StubProvider(Credential::ChatGptOAuth {
-            access_token: "OAI".into(),
-            account_id: Some("a".into()),
-            fedramp: false,
-        }));
-        let mut delegates: BTreeMap<String, Arc<dyn CredentialProvider>> = BTreeMap::new();
-        delegates.insert("anthropic-oauth".into(), anthropic);
-        delegates.insert("openai-chatgpt".into(), openai);
-        let mcp = MultiCredentialProvider::new(manager(), vec![], None, None, delegates);
-        let got = mcp
-            .load(&scope(
-                ProviderId::OpenAICompatible {
-                    name: "openai-chatgpt".into(),
-                },
-                "openai-chatgpt",
-                "openai-chatgpt",
-            ))
-            .await
-            .unwrap();
-        assert!(matches!(got, Credential::ChatGptOAuth { .. }));
-        let got_ant = mcp
-            .load(&scope(
-                ProviderId::AnthropicFirstParty,
-                "anthropic",
-                "anthropic-oauth",
-            ))
-            .await
-            .unwrap();
-        assert!(matches!(got_ant, Credential::BearerToken(_)));
+fn account_refresh_error(error: secret::CredentialError) -> LlmError {
+    match error {
+        secret::CredentialError::RefreshFailed(_) => LlmError::Authentication {
+            message: "account requires reauthorization".into(),
+        },
+        _ => LlmError::AccountStorageUnavailable,
     }
 }

@@ -307,7 +307,7 @@ async fn session_environment_worker() {
     // A persisted local enabled guess cannot manufacture remote-owned server
     // permission, even with explicit flag opt-in and a session token.
     std::fs::write(
-        home.path().join(branding::LEGACY_GLOBAL_CONFIG_FILE),
+        home.path().join(branding::GLOBAL_CONFIG_FILE),
         r#"{"penguinModeOrgEnabled":true}"#,
     )
     .unwrap();
@@ -321,7 +321,7 @@ async fn session_environment_worker() {
         .is_err());
     assert_eq!(credentials.0.load(Ordering::SeqCst), 0);
     assert!(capture.0.lock().unwrap().is_empty());
-    std::fs::remove_file(home.path().join(branding::LEGACY_GLOBAL_CONFIG_FILE)).unwrap();
+    std::fs::remove_file(home.path().join(branding::GLOBAL_CONFIG_FILE)).unwrap();
     // OAuth token presence alone is not session-token identity.
     apply(&Value::Null);
     std::env::set_var(

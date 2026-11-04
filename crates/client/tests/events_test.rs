@@ -75,6 +75,7 @@ fn tool_header_icon_can_be_absent_for_current_renderers() {
 #[test]
 fn session_agent_events_round_trip() {
     let summary = SessionAgentSummaryDto {
+        report_delivery: Some("delivered".into()),
         agent_id: "agent:00000000-0000-0000-0000-000000000001".into(),
         name: "researcher".into(),
         agent_type: "explorer".into(),
@@ -90,6 +91,7 @@ fn session_agent_events_round_trip() {
     };
     let json = serde_json::to_value(&list).expect("serialize SessionAgentList");
     assert_eq!(json["type"], "session_agent_list");
+    assert_eq!(json["agents"][0]["report_delivery"], "delivered");
     assert_eq!(serde_json::from_value::<ClientEvent>(json).unwrap(), list);
 
     let message = MessageDto {

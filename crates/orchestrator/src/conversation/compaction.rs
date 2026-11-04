@@ -2906,6 +2906,7 @@ impl ConversationOrchestrator {
         if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return None;
         }
+        self.api.reset_conversation_context();
         // Query auto/PTL success (`DCr(..., u4(w))`, 2.1.286) rolls the
         // complete last-assistant usage before replacing the model context.
         // Manual compact and selector summaries do not call that producer.
@@ -3103,7 +3104,9 @@ impl ConversationOrchestrator {
                 .active_goal
                 .as_ref()
                 .map(compaction::compact_active_goal_from_engine);
-            debug_assert!(marker.set_compact_metadata(metadata.clone()));
+            // Cold resume needs the preserved-tail links in release builds too.
+            let metadata_updated = marker.set_compact_metadata(metadata.clone());
+            debug_assert!(metadata_updated);
         }
         marker = self
             .mod_session_append_row(&marker, None, false, None)
@@ -4101,7 +4104,7 @@ impl ConversationOrchestrator {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return;
         };
-        let session_id_str = self.session.lock().await.session_id.to_string();
+        let session_id_str = self.session.lock().await.session_id.as_uuid().to_string();
         let explicit_parent = match marker {
             ConversationMessage::System {
                 compact_metadata: Some(metadata),

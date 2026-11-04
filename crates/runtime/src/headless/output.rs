@@ -18,6 +18,7 @@
 use crate::headless::io::Output;
 use async_trait::async_trait;
 use chrono::Utc;
+use lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::json;
 
@@ -55,6 +56,8 @@ pub trait OutputSink: Send + Sync {
     async fn mod_toast(&self, _plugin: &str, _text: &Utf16JsonProjection, _timeout_ms: u64) {}
     /// Pinned status; plain output has no live status surface.
     async fn mod_status(&self, _plugin: &str, _text: Option<&Utf16JsonProjection>) {}
+    /// Publish sanitized exact-account selection and aggregate failure facts.
+    async fn provider_account_routing(&self, _event: &ProviderAccountRoutingEvent) {}
     /// Emit an error. Plain mode goes to stderr; JSON mode goes to stdout.
     async fn error(&self, code: &str, message: &str);
     /// Emit a source-backed error. Human sinks use the projection's display
@@ -288,6 +291,10 @@ impl OutputSink for JsonSink {
             self.emit(json!({"event":"ui_status", "plugin":plugin, "ts":Self::ts(), "text":null}))
                 .await;
         }
+    }
+    async fn provider_account_routing(&self, event: &ProviderAccountRoutingEvent) {
+        self.emit(json!({"event":"provider_account_routing","ts":Self::ts(),"routing":event}))
+            .await;
     }
     async fn error(&self, code: &str, message: &str) {
         self.emit(json!({

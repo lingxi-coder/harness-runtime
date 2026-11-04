@@ -302,6 +302,8 @@ impl PartialEq for RequestCredentials {
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
+    /// Selected resource identity; token rotation keeps this identity stable.
+    pub selected_account: Option<crate::accounts::AccountResourceScope>,
     /// Optional operation-wide physical API attempt budget. Host-only; never
     /// serialized into provider input. Cloned retry requests share its count.
     pub api_attempts_left: Option<ApiAttemptsLeft>,
@@ -436,6 +438,9 @@ pub struct ExecutionContext {
     pub file_account_scope: Option<String>,
     /// Whether the host response should include per-call retry accounting.
     pub capture_retry_count: bool,
+    /// Independent utility/fork ownership. Unlike a query-source label or wire
+    /// policy this never grants access to the parent conversation's state.
+    pub isolated_query: bool,
     /// Internal side-query purpose for telemetry; never sent to providers.
     pub query_source: Option<String>,
     /// Activate the context-hint beta even when the offer omits its body.

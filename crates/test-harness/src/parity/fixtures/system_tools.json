@@ -24,10 +24,8 @@
     "brief_task_id_prefix": "b",
     "config_file_name": "settings.json",
     "config_subdir": ".lingxi",
-    "config_fields_allowed": ["model", "outputStyle", "theme", "verbose"],
+    "supported_config_settings": ["alwaysThinkingEnabled", "askUserQuestionTimeout", "autoCompactEnabled", "autoDreamEnabled", "autoMemoryEnabled", "crossSessionInbound", "dialogExpiry", "fileCheckpointingEnabled", "language", "model", "permissions.defaultMode", "teammateMode", "todoFeatureEnabled", "verbose"],
     "max_skill_descriptor_len": 1024,
-    "cron_subdir": "cron",
-    "cron_file_suffix": ".json",
     "cron_task_id_length": 8,
     "six_field_rejection": "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)",
     "tool_search_max_results": 20

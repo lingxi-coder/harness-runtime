@@ -32,7 +32,7 @@ use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use crate::{
     CostEstimator, HistoryEvent, HistoryResponse, LlmError, LlmRequest, MediaRoute, ModelRuntime,
-    PromptCacheQuerySource, ResponsesSession, Transport,
+    PromptCacheQuerySource, Transport,
 };
 
 const NATIVE_ANTHROPIC_FIRST_PARTY_BASE_URL: &str = "https://api.anthropic.com";
@@ -862,6 +862,7 @@ mod native_thinking_resumption_refusal_latch_tests {
 }
 
 tokio::task_local! {
+    static ACCOUNT_CALL_CLIENT: (usize,Arc<ModelRuntime>);
     static MOD_REQUEST_EFFORT: serde_json::Value;
 }
 
@@ -990,6 +991,22 @@ fn allows_automatic_replay(request: &LlmRequest) -> bool {
     }
     lingxi_llm_client::execution_safety::request_replay_safety(&request.input)
         == lingxi_llm_client::execution_safety::RequestReplaySafety::Stateless
+}
+
+fn allows_account_switch(request: &LlmRequest) -> bool {
+    allows_automatic_replay(request)
+        && request.input.continuation.is_none()
+        && request.execution.file_account_scope.is_none()
+        && !request.input.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
+                        | lingxi_llm_client::protocol::ContentBlock::RedactedThinking { .. }
+                        | lingxi_llm_client::protocol::ContentBlock::ProviderContent { .. }
+                )
+            })
+        })
 }
 
 // ── Subscriber state ─────────────────────────────────────────────────────────
@@ -1123,6 +1140,17 @@ pub struct NonStreamingRetryOptions {
 
 /// State threaded through the `futures::stream::unfold` loop in `drive_stream`.
 struct StreamState {
+    account_coordinator: Option<crate::accounts::AttemptCoordinator>,
+    account_retry_scope: ModelCallRetryScope,
+    account_retry_after: Option<Duration>,
+    account_authentication: Option<(
+        Arc<ModelRuntime>,
+        String,
+        String,
+        Option<u64>,
+        Option<crate::Credential>,
+    )>,
+    account_derived_token: bool,
     per_turn_effort: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     context_1m_latch: Option<(crate::thinking_scope::ThinkingRecoveryScope, Vec<u16>)>,
     mark_context_1m_latch_on_message_start: bool,
@@ -1166,9 +1194,8 @@ struct StreamState {
     /// disables it (`LINGXI_ENABLE_STREAM_WATCHDOG=0`). The deadline resets on
     /// every received event because a fresh timeout wraps each frame fetch.
     idle_timeout: Option<Duration>,
-    /// Pooled WebSocket session of a side stream. Last, so it returns to the
-    /// pool only after `frames` has released its socket.
-    side_ws_lease: Option<SideWsLease>,
+    /// Last so the conversation lease returns only after frames release the socket.
+    side_ws_lease: Option<ConversationLease>,
 }
 
 fn frozen_stream_quote(
@@ -1488,6 +1515,8 @@ fn sdk_prompt_cache_ttl_settings(
 
 /// Production service: drives `ModelRuntime` with full retry/rate-limit/betas.
 pub struct ApiService {
+    account_routing_reporter: RwLock<Option<Arc<dyn crate::accounts::AccountRoutingReporter>>>,
+    scope_output_quota: Option<Arc<crate::ScopeOutputQuota>>,
     fast_policy: crate::model::fast_admission::PolicySource,
     fast_availability: Arc<crate::model::fast_admission::Availability>,
     account_change_observer: Arc<ApiServiceAccountObserver>,
@@ -1762,18 +1791,13 @@ pub struct ApiService {
     /// Test-only override for the connect-phase first-byte watchdog. `None`
     /// resolves the provider/body-aware timeout from the process environment.
     stream_first_byte_timeout_override: Option<Duration>,
-    /// Conversation-session scoped OpenAI Responses WebSocket connection/cache.
-    ///
-    /// The adapter is used by one conversation runtime; mobile already enforces
-    /// one in-flight turn. The underlying `llm-runtime` session still only sends
-    /// `previous_response_id` when the new request is a strict compatible
-    /// extension of the previous completed request.
-    responses_ws_session: tokio::sync::Mutex<ResponsesSession>,
-    /// Idle Responses WebSocket sessions for streams outside the main
-    /// conversation (auto-mode classifier, subagents, scheduled tasks). As
-    /// with Codex's Guardian pool, they never share the conversation's
-    /// socket, which stays busy while its own response streams.
-    side_ws_sessions: Arc<Mutex<Vec<ResponsesSession>>>,
+    /// Main-conversation continuation and transport state. Checked out without
+    /// holding a lock across preparation, admission, dispatch or streaming.
+    responses_ws_session: Arc<Mutex<ConversationSlot>>,
+    /// Bounded projection cache for this conversation; sidequeries bypass it.
+    history_projection_cache: Mutex<crate::convert::input_projection::MessageProjectionCache>,
+    /// Idle connections only. Every checkout starts without conversation state.
+    side_sessions: Arc<Mutex<Vec<lingxi_llm_client::ConversationSession>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1951,45 +1975,80 @@ fn native_foundry_feature_name(name: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
-/// A pooled session held for one stream. Dropping it, when the stream ends
-/// or is abandoned, returns the session for the next side stream.
-struct SideWsLease {
-    session: Option<ResponsesSession>,
-    pool: Arc<Mutex<Vec<ResponsesSession>>>,
+#[derive(Default)]
+struct ConversationSlot {
+    generation: u64,
+    session: Option<lingxi_llm_client::ConversationSession>,
 }
 
-impl SideWsLease {
-    /// Codex opens at most four Guardian sockets at once.
-    const MAX_IDLE: usize = 4;
-
-    fn checkout(pool: &Arc<Mutex<Vec<ResponsesSession>>>) -> Self {
-        let session = pool
+/// Only the owner lease can return a session. Reset/compaction advances the
+/// generation so an old stream cannot reinstall retired state on drop.
+struct ConversationLease {
+    session: lingxi_llm_client::ConversationSession,
+    slot: Option<Arc<Mutex<ConversationSlot>>>,
+    generation: u64,
+    pool: Option<Arc<Mutex<Vec<lingxi_llm_client::ConversationSession>>>>,
+}
+impl ConversationLease {
+    fn checkout(slot: &Arc<Mutex<ConversationSlot>>) -> Self {
+        let mut state = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.session.take() {
+            Some(session) => Self {
+                session,
+                slot: Some(slot.clone()),
+                generation: state.generation,
+                pool: None,
+            },
+            None => Self::independent(),
+        }
+    }
+    fn independent() -> Self {
+        Self {
+            session: Default::default(),
+            slot: None,
+            generation: 0,
+            pool: None,
+        }
+    }
+    fn auxiliary(pool: &Arc<Mutex<Vec<lingxi_llm_client::ConversationSession>>>) -> Self {
+        let mut session = pool
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop()
             .unwrap_or_default();
+        session.clear_history_preserving_transport();
         Self {
-            session: Some(session),
-            pool: Arc::clone(pool),
+            session,
+            slot: None,
+            generation: 0,
+            pool: Some(pool.clone()),
         }
     }
-
-    fn session(&mut self) -> &mut ResponsesSession {
-        self.session.as_mut().expect("leased session")
+    fn session(&mut self) -> &mut lingxi_llm_client::ConversationSession {
+        &mut self.session
     }
 }
-
-impl Drop for SideWsLease {
+impl Drop for ConversationLease {
     fn drop(&mut self) {
-        let Some(session) = self.session.take() else {
-            return;
-        };
-        let mut pool = self
-            .pool
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pool.len() < Self::MAX_IDLE {
-            pool.push(session);
+        if let Some(pool) = &self.pool {
+            self.session.clear_history_preserving_transport();
+            let mut pool = pool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pool.len() < 4 {
+                pool.push(std::mem::take(&mut self.session));
+            }
+        }
+
+        if let Some(slot) = &self.slot {
+            let mut state = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.generation == self.generation {
+                state.session = Some(std::mem::take(&mut self.session));
+            }
         }
     }
 }
@@ -2375,6 +2434,12 @@ impl ApiService {
         ),
         LlmError,
     > {
+        if self.scope_output_quota.is_some() {
+            return Err(LlmError::UnsupportedCapability {
+                capability: "independent web requests are disabled for output-limited scopes"
+                    .into(),
+            });
+        }
         let started = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_secs(60);
         let profile = self
@@ -2511,6 +2576,7 @@ impl ApiService {
         mut request: LlmRequest,
     ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
+        request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         let control = resolve_retry_control_with_settings(
             &request.input.model,
@@ -2530,6 +2596,7 @@ impl ApiService {
         max_retries: u32,
     ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
+        request.execution.isolated_query = true;
         request.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
         let mut control = resolve_retry_control_with_settings(
             &request.input.model,
@@ -3516,7 +3583,9 @@ impl ApiService {
             prompt_cache_overage: prompt_cache_overage.clone(),
         });
         Self {
+            account_routing_reporter: RwLock::new(None),
             fast_policy: Arc::new(|| Ok(crate::model::fast_admission::Policy::default())),
+            scope_output_quota: None,
             fast_availability,
             account_change_observer: account_change_observer.clone(),
             account_change_observer_keepalive: vec![account_change_observer],
@@ -3572,8 +3641,12 @@ impl ApiService {
             foundry_capabilities: Mutex::new(Default::default()),
             stream_idle_timeout_override: None,
             stream_first_byte_timeout_override: None,
-            responses_ws_session: tokio::sync::Mutex::new(ResponsesSession::new()),
-            side_ws_sessions: Arc::default(),
+            responses_ws_session: Arc::new(Mutex::new(ConversationSlot {
+                generation: 0,
+                session: Some(Default::default()),
+            })),
+            history_projection_cache: Mutex::default(),
+            side_sessions: Arc::default(),
         }
     }
 
@@ -3583,7 +3656,7 @@ impl ApiService {
     #[must_use]
     pub fn fork_independent(&self) -> Self {
         let mut child = Self::new_with_routing(
-            self.client().clone(),
+            self.client.clone(),
             self.transport.clone(),
             self.subscriber,
             self.ua.clone(),
@@ -3595,7 +3668,16 @@ impl ApiService {
             self.settings_max_retries,
             self.settings_backoff_ms,
         );
+        *child
+            .account_routing_reporter
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = self
+            .account_routing_reporter
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         child.fallback_models = self.fallback_models.clone();
+        child.scope_output_quota = self.scope_output_quota.clone();
         child.subscription = self.subscription.clone();
         child.aws_auth = self.aws_auth.clone();
         child.custom_cli_betas = self.custom_cli_betas.clone();
@@ -3623,6 +3705,162 @@ impl ApiService {
         child.fallback_models.clear();
         child.fallback_overrides.clear();
         child
+    }
+
+    pub fn set_account_routing_reporter(
+        &self,
+        reporter: Arc<dyn crate::accounts::AccountRoutingReporter>,
+    ) {
+        *self
+            .account_routing_reporter
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(reporter);
+    }
+    async fn report_account_routing(
+        &self,
+        event: lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent,
+    ) {
+        let reporter = self
+            .account_routing_reporter
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(reporter) = reporter {
+            reporter.report(event).await;
+        }
+    }
+    async fn make_account_coordinator(
+        &self,
+        request: &LlmRequest,
+        scope: &ModelCallRetryScope,
+    ) -> Result<Option<crate::accounts::AttemptCoordinator>, LlmError> {
+        match self
+            .client()
+            .account_coordinator(&request.input.model, request.profile.as_deref())
+        {
+            Ok(mut coordinator) => {
+                if let Some(coordinator) = coordinator.as_mut() {
+                    let runtime = self.client();
+                    coordinator.retain_supported(|candidate| {
+                        runtime.account_supports_request(request, candidate)
+                    });
+                    let resource_bound = request.input.continuation.is_some()
+                        || request.execution.file_account_scope.is_some()
+                        || request.execution.expected_computer_binding.is_some()
+                        || request.execution.computer_submission.is_some();
+                    if resource_bound {
+                        let mut scopes = Vec::new();
+                        if let Some(selected) = request.execution.selected_account.as_ref() {
+                            scopes.push(selected.clone());
+                        }
+                        let raw_scopes = [
+                            request.execution.account_scope.as_deref(),
+                            request.execution.file_account_scope.as_deref(),
+                            request
+                                .input
+                                .continuation
+                                .as_ref()
+                                .map(|continuation| continuation.account_scope.as_str()),
+                            request
+                                .execution
+                                .expected_computer_binding
+                                .as_ref()
+                                .map(|binding| binding.account.as_str()),
+                        ];
+                        for raw in raw_scopes.into_iter().flatten() {
+                            scopes.push(
+                                serde_json::from_str::<crate::accounts::AccountResourceScope>(raw)
+                                    .map_err(|_| LlmError::InvalidRequest {
+                                        message: "account-owned resource scope is invalid".into(),
+                                    })?,
+                            );
+                        }
+                        let scope = scopes.first().ok_or_else(|| LlmError::InvalidRequest {
+                            message:
+                                "account-owned resources require their original account identity"
+                                    .into(),
+                        })?;
+                        if scopes.iter().any(|other| other != scope) {
+                            return Err(LlmError::InvalidRequest {message:"account-owned resources belong to different identities or storage domains".into()});
+                        }
+                        let profile = format!("account.{}", scope.account_id);
+                        if request.profile.as_deref().is_some_and(|explicit| {
+                            explicit.starts_with("account.") && explicit != profile
+                        }) || request
+                            .execution
+                            .expected_computer_binding
+                            .as_ref()
+                            .is_some_and(|binding| binding.profile != profile)
+                        {
+                            return Err(LlmError::InvalidRequest {
+                                message: "resource owner differs from the selected account profile"
+                                    .into(),
+                            });
+                        }
+                        if !coordinator.pin_scope(scope) {
+                            return Err(LlmError::InvalidRequest {message:"account-owned resource belongs to a replaced account identity or storage domain".into()});
+                        }
+                    }
+                }
+                Ok(coordinator)
+            }
+            Err(error) => {
+                if let LlmError::AllAccountsUnavailable {
+                    accounts,
+                    earliest_recovery_ms,
+                } = &error
+                {
+                    self.report_account_routing(
+                        lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent {
+                            logical_call_id: scope.account_call_id(),
+                            model: request.input.model.clone(),
+                            attempt: 0,
+                            status: "all_unavailable".into(),
+                            selected_account_id: None,
+                            profile: None,
+                            identity_generation: None,
+                            config_revision: None,
+                            failed_accounts: accounts
+                                .iter()
+                                .map(crate::accounts::AccountUnavailable::as_public_failure)
+                                .collect(),
+                            earliest_recovery_ms: *earliest_recovery_ms,
+                        },
+                    )
+                    .await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Attach one trusted invocation quota. Forked services retain the same
+    /// capability; request JSON, explicit max_tokens and retries cannot reset it.
+    #[must_use]
+    pub fn with_scope_output_quota(mut self, quota: Option<Arc<crate::ScopeOutputQuota>>) -> Self {
+        self.scope_output_quota = quota;
+        self
+    }
+
+    fn clamp_scope_output(
+        &self,
+        request: &mut LlmRequest,
+        prior_dispatch: bool,
+    ) -> Result<(), LlmError> {
+        if let Some(quota) = &self.scope_output_quota {
+            if quota.is_revoked() {
+                return Err(LlmError::RequestDispatchRejected { prior_dispatch });
+            }
+            request.input.max_tokens = Some(quota.clamp(request.input.max_tokens));
+        }
+        Ok(())
+    }
+
+    fn validate_scope_output(&self, prepared: &crate::PreparedLlmCall) -> Result<(), LlmError> {
+        if let Some(quota) = &self.scope_output_quota {
+            quota.validate_prepared(prepared)?;
+        }
+        Ok(())
     }
 
     /// Attach the AWS auth-refresh driver (2.1.198 `awsAuthRefresh` flow).
@@ -6024,11 +6262,134 @@ impl ApiService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         snapshots.get(profile)?.credential.get()?.clone()
     }
+    fn captured_request_credential_revision(request: &LlmRequest, profile: &str) -> Option<u64> {
+        let credentials = request.execution.request_credentials.as_ref()?;
+        let snapshots = credentials
+            .snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = snapshots.get(profile)?;
+        if snapshot.credential.get().is_some() {
+            snapshot.credential_revision.get().copied().flatten()
+        } else {
+            let revision = *snapshot
+                .rejected_credential_revision
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            revision
+        }
+    }
+    async fn account_auth_failure_revision(
+        &self,
+        request: &LlmRequest,
+        error: &LlmError,
+    ) -> Result<Option<u64>, LlmError> {
+        let Some(profile) = request.profile.as_deref() else {
+            return Ok(None);
+        };
+        let rejected = Self::captured_request_credential_revision(request, profile);
+        self.check_account_auth_failure_revision(request, error, rejected, true)
+            .await
+    }
+    async fn check_account_auth_failure_revision(
+        &self,
+        request: &LlmRequest,
+        error: &LlmError,
+        rejected: Option<u64>,
+        check_material: bool,
+    ) -> Result<Option<u64>, LlmError> {
+        let Some(profile) = request.profile.as_deref() else {
+            return Ok(rejected);
+        };
+        if matches!(
+            error.classification_source(),
+            LlmError::Authentication { .. } | LlmError::OAuthRefreshDead
+        ) {
+            let current = self
+                .client()
+                .current_account_credential_revision(&request.input.model, profile)
+                .await?;
+            if current != rejected {
+                return Err(error.clone());
+            }
+            if let Some(credential) =
+                Self::captured_request_credential(request, profile).filter(|_| check_material)
+            {
+                if !self
+                    .client()
+                    .rejected_account_credential_is_current(profile, &credential)
+                    .await?
+                {
+                    return Err(error.clone());
+                }
+            }
+        }
+        Ok(rejected)
+    }
+    async fn record_pool_failure(
+        &self,
+        request: &LlmRequest,
+        coordinator: &mut crate::accounts::AttemptCoordinator,
+        error: &LlmError,
+        retry_after: Option<Duration>,
+    ) -> Result<bool, LlmError> {
+        let revision = self.account_auth_failure_revision(request, error).await?;
+        coordinator.set_rejected_credential_revision(revision);
+        if matches!(
+            error.classification_source(),
+            LlmError::Authentication { .. }
+        ) && request.profile.as_deref().is_some_and(|profile| {
+            self.client().derives_account_bearer(profile)
+                && Self::captured_request_credential(request, profile).is_some()
+        }) {
+            return Ok(coordinator.derived_token_rejected().await);
+        }
+        let recorded = coordinator
+            .failed_with_retry_after(error, retry_after)
+            .await;
+        if !recorded
+            && matches!(
+                error.classification_source(),
+                LlmError::Authentication { .. } | LlmError::OAuthRefreshDead
+            )
+        {
+            return Err(error.clone());
+        }
+        Ok(recorded)
+    }
+    async fn record_pool_refresh_failure(
+        &self,
+        request: &LlmRequest,
+        coordinator: &mut crate::accounts::AttemptCoordinator,
+        failure: &crate::auth::provider::VersionedCredentialError,
+    ) -> Result<bool, LlmError> {
+        let error = &failure.error;
+        let rejected = failure.credential_revision.or_else(|| {
+            request
+                .profile
+                .as_deref()
+                .and_then(|profile| Self::captured_request_credential_revision(request, profile))
+        });
+        let revision = self
+            .check_account_auth_failure_revision(request, error, rejected, false)
+            .await?;
+        coordinator.set_rejected_credential_revision(revision);
+        let recorded = coordinator.refresh_failed(error).await;
+        if !recorded
+            && matches!(
+                error.classification_source(),
+                LlmError::Authentication { .. } | LlmError::OAuthRefreshDead
+            )
+        {
+            return Err(error.clone());
+        }
+        Ok(recorded)
+    }
 
     fn replace_request_credential(
         request: &mut LlmRequest,
         profile: &str,
-        credential: crate::Credential,
+        credential: crate::auth::provider::VersionedCredential,
     ) {
         let credentials = request
             .execution
@@ -6037,16 +6398,66 @@ impl ApiService {
         let snapshot = Arc::new(crate::execution::RequestCredentialSnapshot {
             profile: profile.to_owned(),
             credential: tokio::sync::OnceCell::new(),
+            credential_revision: std::sync::OnceLock::new(),
+            rejected_credential_revision: std::sync::Mutex::new(None),
         });
         snapshot
             .credential
-            .set(Some(credential))
+            .set(Some(credential.credential))
             .expect("new request credential snapshot is empty");
+        let _ = snapshot
+            .credential_revision
+            .set(credential.credential_revision);
         credentials
             .snapshots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(profile.to_owned(), snapshot);
+    }
+
+    async fn refresh_pool_account(
+        &self,
+        request: &mut LlmRequest,
+        scope: &ModelCallRetryScope,
+        error: &LlmError,
+    ) -> Result<bool, crate::auth::provider::VersionedCredentialError> {
+        if !matches!(
+            error.classification_source(),
+            LlmError::Authentication { .. }
+        ) {
+            return Ok(false);
+        }
+        let Some(account) = request.execution.selected_account.as_ref() else {
+            return Ok(false);
+        };
+        let Some(profile) = request.profile.clone() else {
+            return Ok(false);
+        };
+        let Some(rejected) = Self::captured_request_credential(request, &profile) else {
+            return Ok(false);
+        };
+        if !matches!(
+            rejected,
+            crate::Credential::AnthropicOAuth { .. }
+                | crate::Credential::ChatGptOAuth { .. }
+                | crate::Credential::BearerToken(_)
+        ) {
+            return Ok(false);
+        }
+        let key = serde_json::to_string(account).expect("account scope");
+        if !scope.take_account_renewal(key) {
+            return Ok(false);
+        }
+        let refreshed = self
+            .client()
+            .refresh_rejected_account_credential(&request.input.model, Some(&profile), &rejected)
+            .await?;
+        if let Some(refreshed) = refreshed {
+            Self::replace_request_credential(request, &profile, refreshed);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn native_context_1m_probe_refusal(
@@ -6754,6 +7165,8 @@ impl ApiService {
     /// | *(llm-runtime only)*    | `UnsupportedCapability`            | `"unsupported_capability"` |
     fn error_kind(err: &LlmError) -> &'static str {
         match err.classification_source() {
+            LlmError::AllAccountsUnavailable { .. } => "all_accounts_unavailable",
+            LlmError::AccountStorageUnavailable => "account_storage_unavailable",
             // "unauthorized" — api-client `Unauthorized(_) => "unauthorized"` (:1153).
             // A dead OAuth session is an auth failure like any other here; it
             // differs only in the copy the orchestrator renders for it.
@@ -7642,7 +8055,9 @@ impl ApiService {
             // No HTTP status: the request never reached the model API. The
             // refresh call to the IdP failed locally, so inventing a 401 here
             // would put a status in the transcript that no server ever sent.
-            LlmError::OAuthRefreshDead
+            LlmError::AllAccountsUnavailable { .. }
+            | LlmError::AccountStorageUnavailable
+            | LlmError::OAuthRefreshDead
             | LlmError::InputBudgetExceeded { .. }
             | LlmError::Transport { .. }
             | LlmError::TransportTimeout { .. }
@@ -7732,16 +8147,47 @@ impl ApiService {
         dispatch: DispatchHeaderState,
         policy: NonStreamDrivePolicy,
     ) -> crate::BoxFuture<'a, Result<HistoryResponse, LlmError>> {
-        Box::pin(crate::model::request_trace::non_stream(
-            self.drive_non_stream_inner(
-                req,
-                retry_control,
-                initial_consecutive_overloaded,
-                chain,
-                dispatch,
-                policy,
-            ),
-        ))
+        Box::pin(async move {
+            let client = self.client.account_call_snapshot().await?;
+            let owner = Arc::as_ptr(&self.client) as usize;
+            ACCOUNT_CALL_CLIENT
+                .scope((owner, client), async move {
+                    let pooled = self.client().has_account_pool();
+                    let scope = ModelCallRetryScope::current_or_new();
+                    if pooled {
+                        if let Some(error) = scope.account_replay_error() {
+                            return Err(error);
+                        }
+                    }
+                    let deadline =
+                        if pooled {
+                            Some(scope.account_deadline(
+                                crate::model::request_timeout::non_stream_timeout()?,
+                            ))
+                        } else {
+                            None
+                        };
+                    let drive =
+                        crate::model::request_trace::non_stream(self.drive_non_stream_inner(
+                            req,
+                            retry_control,
+                            initial_consecutive_overloaded,
+                            chain,
+                            dispatch,
+                            policy,
+                        ));
+                    if let Some(deadline) = deadline {
+                        tokio::time::timeout_at(deadline, scope.run(drive))
+                            .await
+                            .map_err(|_| LlmError::TransportTimeout {
+                                message: "logical account call deadline exceeded".into(),
+                            })?
+                    } else {
+                        scope.run(drive).await
+                    }
+                })
+                .await
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -7828,6 +8274,10 @@ impl ApiService {
             NonStreamDrivePolicy::Standard => ModelCallRetryScope::current_or_new(),
             NonStreamDrivePolicy::ModelValidation => ModelCallRetryScope::default(),
         };
+        let mut account_coordinator = self.make_account_coordinator(&req, &retry_scope).await?;
+        if account_coordinator.is_some() && req.execution.api_attempts_left.is_none() {
+            req.execution.api_attempts_left = Some(retry_scope.account_api_budget());
+        }
         let context_1m_scope = (policy == NonStreamDrivePolicy::Standard)
             .then(|| req.execution.thinking_recovery_scope.clone())
             .flatten();
@@ -7857,7 +8307,43 @@ impl ApiService {
             NonStreamDrivePolicy::ModelValidation => None,
         };
         let mut timeout_retries = crate::model::request_timeout::TimeoutRetryCount::default();
+        let mut conversation_lease = if policy == NonStreamDrivePolicy::Standard
+            && !req.execution.isolated_query
+            && request_query_source_category(&req) == Some(QuerySourceCategory::Main)
+        {
+            ConversationLease::checkout(&self.responses_ws_session)
+        } else {
+            ConversationLease::auxiliary(&self.side_sessions)
+        };
+        let mut continuation_recovered = false;
+
         loop {
+            if let Some(coordinator) = account_coordinator.as_mut() {
+                if coordinator.active_scope().is_none() {
+                    let selected = coordinator.select_with_scope(&retry_scope).await;
+                    self.report_account_routing(coordinator.routing_event(
+                        retry_scope.account_call_id(),
+                        selected.as_ref().ok().map(|hop| hop.profile_name.clone()),
+                    ))
+                    .await;
+                    let hop = selected?;
+                    req.profile = Some(hop.profile_name);
+                    req.input.model = hop.request_model;
+                    req.execution.selected_account = coordinator.active_scope();
+                    req.execution
+                        .request_credentials
+                        .get_or_insert_with(Default::default);
+                    // SDK-owned continuation and socket state must remain tied
+                    // to the selected account; ordinary token rotation is stable.
+                    req.execution.account_scope = req
+                        .execution
+                        .selected_account
+                        .as_ref()
+                        .map(|scope| serde_json::to_string(scope).expect("account scope"));
+                }
+            }
+
+            self.clamp_scope_output(&mut req, any_dispatched)?;
             if policy == NonStreamDrivePolicy::Standard {
                 self.apply_native_main_thinking_policy(&mut req)?;
             }
@@ -7892,7 +8378,10 @@ impl ApiService {
                 Self::log_deepseek_prepared_request(&req.input.model, &prepared, false);
                 let (dispatch_attempt, server_fallback_parameter_added) =
                     self.inject_headers(&mut prepared, dispatch)?;
-                request_client.seal_prepared(&mut prepared).await?;
+                request_client
+                    .seal_prepared_with_session(&mut prepared, Some(conversation_lease.session()))
+                    .await?;
+                self.validate_scope_output(&prepared)?;
                 Ok((prepared, dispatch_attempt, server_fallback_parameter_added))
             };
             let prepared = match timeout {
@@ -7902,6 +8391,18 @@ impl ApiService {
             let (mut prepared, dispatch_attempt, server_fallback_parameter_added) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
+                    if let Some(coordinator) = account_coordinator.as_mut() {
+                        if self
+                            .record_pool_failure(&req, coordinator, &error, None)
+                            .await?
+                        {
+                            retry_scope.mark_account_failed(coordinator.last_failed_account_key());
+                            if allows_account_switch(&req) {
+                                continue;
+                            }
+                        }
+                    }
+
                     telemetry::emit_failed(
                         &self.analytics,
                         &req.input.model,
@@ -7915,7 +8416,7 @@ impl ApiService {
             };
             if !connections_captured {
                 connections_captured = true;
-                if policy == NonStreamDrivePolicy::Standard {
+                if policy == NonStreamDrivePolicy::Standard && account_coordinator.is_none() {
                     connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
                     failover = prepared.route.resolved_route.failover;
                 }
@@ -7964,11 +8465,16 @@ impl ApiService {
                 }
                 prepared.before_computer_submit().await?;
                 let mut api_attempt_reservation = None;
-                let received = call
-                    .dispatch_once_with(|| {
+                let received = conversation_lease
+                    .session()
+                    .dispatch(call, || {
                         if admission
                             .as_ref()
                             .is_some_and(|admission| !admission.is_admitted())
+                            || self
+                                .scope_output_quota
+                                .as_ref()
+                                .is_some_and(|quota| quota.is_revoked())
                         {
                             admission_rejected = true;
                             dispatch_callback_rejected = true;
@@ -7986,11 +8492,27 @@ impl ApiService {
                             };
                             api_attempt_reservation = Some(reservation);
                         }
+                        let scope_reservation = match self.scope_output_quota.as_ref() {
+                            Some(quota) => {
+                                let Some(reservation) = quota.reserve() else {
+                                    dispatch_callback_rejected = true;
+                                    callback_error = Some(LlmError::ApiAttemptsExhausted);
+                                    return Err(crate::execution::wire_error(
+                                        LlmError::ApiAttemptsExhausted,
+                                    ));
+                                };
+                                Some(reservation)
+                            }
+                            None => None,
+                        };
                         if let Err(error) = attempt.mark_dispatched() {
                             dispatch_callback_rejected = true;
                             return Err(crate::execution::wire_error(error));
                         }
                         if let Some(reservation) = api_attempt_reservation.take() {
+                            reservation.commit();
+                        }
+                        if let Some(reservation) = scope_reservation {
                             reservation.commit();
                         }
                         if mctc_header_sent {
@@ -8125,6 +8647,16 @@ impl ApiService {
                         .await;
                         return Err(transport_err);
                     }
+                    if account_coordinator.is_some()
+                        && matches!(
+                            transport_err.classification_source(),
+                            LlmError::Transport { .. }
+                                | LlmError::TransportTimeout { .. }
+                                | LlmError::StreamInterrupted { .. }
+                        )
+                    {
+                        return Err(transport_err);
+                    }
                     if let Some(fallback) = Self::note_dispatch_header_failure(
                         &mut dispatch,
                         &dispatch_attempt,
@@ -8133,6 +8665,43 @@ impl ApiService {
                     ) {
                         self.report_dispatch_fallback(&req, fallback, None).await;
                         continue;
+                    }
+                    if let Some(coordinator) = account_coordinator.as_mut() {
+                        match self
+                            .refresh_pool_account(&mut req, &retry_scope, &transport_err)
+                            .await
+                        {
+                            Ok(true) => continue,
+                            Err(refresh_error) => {
+                                self.record_pool_refresh_failure(&req, coordinator, &refresh_error)
+                                    .await?;
+                                retry_scope
+                                    .mark_account_failed(coordinator.last_failed_account_key());
+                                if allows_account_switch(&req) {
+                                    continue;
+                                }
+                                return Err(refresh_error.error);
+                            }
+                            Ok(false) => {}
+                        }
+                        if self
+                            .record_pool_failure(&req, coordinator, &transport_err, None)
+                            .await?
+                        {
+                            retry_scope.mark_account_failed(coordinator.last_failed_account_key());
+                            if allows_account_switch(&req) {
+                                continue;
+                            }
+                            return Err(transport_err);
+                        }
+                        // Unknown transport settlement cannot be replayed under a
+                        // different account or by the standalone retry driver.
+                        if matches!(
+                            transport_err.classification_source(),
+                            LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
+                        ) {
+                            return Err(transport_err);
+                        }
                     }
                     if let Some(next) = advance_connection(
                         &mut req,
@@ -8284,8 +8853,15 @@ impl ApiService {
                             attempt.observe(&response.usage, completeness);
                         }
                     }
+                    let recover_continuation = !continuation_recovered
+                        && allow_replay
+                        && conversation_lease.session().recover(collected.response());
                     attempt.finish().await?;
                     collected.finish().await;
+                    if recover_continuation {
+                        continuation_recovered = true;
+                        continue;
+                    }
                     match decoded {
                         Ok(mut response) => {
                             if let Some(binding) = prepared.computer_binding.as_ref() {
@@ -8352,6 +8928,9 @@ impl ApiService {
                                 if let Some(scope) = context_1m_scope.as_ref() {
                                     scope.mark_context_1m_refused(&context_1m_model_key);
                                 }
+                            }
+                            if let Some(coordinator) = account_coordinator.as_mut() {
+                                coordinator.succeeded().await;
                             }
                             return Ok(response);
                         }
@@ -8469,7 +9048,12 @@ impl ApiService {
                                     {
                                         model_validation_oauth_refreshed = true;
                                         Self::replace_request_credential(
-                                            &mut req, profile, refreshed,
+                                            &mut req,
+                                            profile,
+                                            crate::auth::provider::VersionedCredential {
+                                                credential: refreshed,
+                                                credential_revision: None,
+                                            },
                                         );
                                         continue;
                                     }
@@ -8625,7 +9209,7 @@ impl ApiService {
                                 }
                             }
                             // Capacity acceptance precedes retry-decline headers in native eWo.
-                            if crate::model::retry_scope::http_retry_decline_is_terminal(
+                            if account_coordinator.is_none() && crate::model::retry_scope::http_retry_decline_is_terminal(
                                 provider_resp.status,
                                 x_should_retry_false,
                                 lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&provider_resp.body_json),
@@ -8731,6 +9315,60 @@ impl ApiService {
                                 }
                             }
 
+                            if let Some(coordinator) = account_coordinator.as_mut() {
+                                match self
+                                    .refresh_pool_account(&mut req, &retry_scope, &effective_err)
+                                    .await
+                                {
+                                    Ok(true) => continue,
+                                    Err(refresh_error) => {
+                                        self.record_pool_refresh_failure(
+                                            &req,
+                                            coordinator,
+                                            &refresh_error,
+                                        )
+                                        .await?;
+                                        retry_scope.mark_account_failed(
+                                            coordinator.last_failed_account_key(),
+                                        );
+                                        if allows_account_switch(&req) {
+                                            continue;
+                                        }
+                                        return Err(refresh_error.error);
+                                    }
+                                    Ok(false) => {}
+                                }
+                                if self
+                                    .record_pool_failure(
+                                        &req,
+                                        coordinator,
+                                        &effective_err,
+                                        Self::resolve_retry_after(
+                                            &provider_resp.headers,
+                                            prepared.route.protocol,
+                                            crate::execution::response_provider_id(
+                                                &prepared.route.resolved_route.provider_id,
+                                            ),
+                                        ),
+                                    )
+                                    .await?
+                                {
+                                    retry_scope
+                                        .mark_account_failed(coordinator.last_failed_account_key());
+                                    if allows_account_switch(&req) {
+                                        continue;
+                                    }
+                                    return Err(effective_err);
+                                }
+                                // Unknown transport settlement cannot be replayed under a
+                                // different account or by the standalone retry driver.
+                                if matches!(
+                                    effective_err.classification_source(),
+                                    LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
+                                ) {
+                                    return Err(effective_err);
+                                }
+                            }
                             if let Some(next) = advance_connection(
                                 &mut req,
                                 &mut state,
@@ -8944,7 +9582,10 @@ impl ApiService {
         }
         let dispatch = match class {
             NonStreamingRequestClass::Main => DispatchHeaderState::default(),
-            NonStreamingRequestClass::Auxiliary => DispatchHeaderState::AUXILIARY,
+            NonStreamingRequestClass::Auxiliary => {
+                request.execution.isolated_query = true;
+                DispatchHeaderState::AUXILIARY
+            }
         };
         self.drive_non_stream_seeded_with_chain(
             request,
@@ -9367,7 +10008,12 @@ impl ApiService {
     }
 
     fn client(&self) -> Arc<ModelRuntime> {
-        crate::catalog_task::client(&self.client)
+        let owner = Arc::as_ptr(&self.client) as usize;
+        ACCOUNT_CALL_CLIENT
+            .try_with(|(selected_owner, client)| (*selected_owner == owner).then(|| client.clone()))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| crate::catalog_task::client(&self.client))
     }
 
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s list
@@ -9387,6 +10033,59 @@ impl ApiService {
     #[must_use]
     pub fn model_listings(&self) -> Vec<crate::ModelListing> {
         self.client().available_models()
+    }
+
+    /// Validate an accounting route against this call's authoritative account
+    /// candidates. A request payload cannot manufacture another provider route.
+    pub fn authorized_account_route(
+        &self,
+        original: &crate::ResolvedRoute,
+        selected: &crate::accounts::AccountResourceScope,
+        actual: &crate::ResolvedRoute,
+    ) -> Option<lingxi_core::host::provider_accounts::AccountMetadata> {
+        let runtime = self.client();
+        let coordinator = runtime
+            .account_coordinator(&original.request_model, Some(&original.profile_name))
+            .ok()??;
+        let account = coordinator.permits(selected, &actual.profile_name, &actual.request_model)?;
+        let mut resolved = runtime
+            .resolve_media_route(&actual.request_model, Some(&actual.profile_name))
+            .ok()?
+            .main;
+        let mut actual = actual.clone();
+        resolved.connection_chain.clear();
+        actual.connection_chain.clear();
+        (resolved == actual).then_some(account)
+    }
+    /// Validate an audio session's owner independently of chat-model routing.
+    /// The refresh happens before the check; no base credential is loaded.
+    pub async fn audio_account_binding_is_current(
+        &self,
+        original_profile: &str,
+        actual_profile: &str,
+        scope: &str,
+    ) -> bool {
+        let Ok(runtime) = self.client.account_call_snapshot().await else {
+            return false;
+        };
+        match runtime.service_account_coordinator(original_profile, "audio/binding") {
+            Ok(Some(mut coordinator)) => {
+                let Ok(scope) =
+                    serde_json::from_str::<crate::accounts::AccountResourceScope>(scope)
+                else {
+                    return false;
+                };
+                coordinator.pin_scope(&scope)
+                    && coordinator
+                        .candidate_profiles()
+                        .iter()
+                        .any(|profile| profile == actual_profile)
+            }
+            Ok(None) => {
+                actual_profile == original_profile && scope.starts_with("explicit-service.")
+            }
+            Err(_) => false,
+        }
     }
 
     /// Capture the configured pricing policy for one exact provider profile.
@@ -9421,9 +10120,14 @@ impl ApiService {
         let mut request = LlmRequest::new(model);
         request.profile = profile.map(str::to_string);
         request.stream = true;
-        let mut session = self.responses_ws_session.lock().await;
+        let mut lease = ConversationLease::checkout(&self.responses_ws_session);
+        let session = lease.session();
         self.client()
-            .preconnect_websocket(&request, self.transport.clone(), &mut session)
+            .preconnect_websocket(
+                &request,
+                self.transport.clone(),
+                session.responses_transport_mut(),
+            )
             .await
     }
 
@@ -9463,6 +10167,17 @@ impl ApiService {
         tools: Vec<crate::ToolDeclaration>,
         skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
+        // An optional latency optimization must not send an unmetered side
+        // request for an invocation with a hard generation ceiling.
+        if self.scope_output_quota.is_some() {
+            return Ok(());
+        }
+        // Account selection belongs to the next real business request. A
+        // speculative prewarm must neither consume its recovery probe lease
+        // nor establish a socket authenticated to an unselected base profile.
+        if self.client().account_coordinator(model, profile)?.is_some() {
+            return Ok(());
+        }
         let mut req = self.build_request(
             model,
             profile,
@@ -9483,9 +10198,14 @@ impl ApiService {
         // Responses-WebSocket prewarm only — never a first-party Anthropic
         // route, so the dispatch gate is inert here.
         self.inject_stream_headers(&mut prepared, DispatchHeaderState::default())?;
-        let mut session = self.responses_ws_session.lock().await;
+        let mut lease = ConversationLease::checkout(&self.responses_ws_session);
+        let session = lease.session();
         request_client
-            .prewarm_prepared_websocket(prepared, self.transport.clone(), &mut session)
+            .prewarm_prepared_websocket(
+                prepared,
+                self.transport.clone(),
+                session.responses_transport_mut(),
+            )
             .await
     }
 
@@ -9493,8 +10213,27 @@ impl ApiService {
     /// the `OrchestratorApiClient::close_responses_websocket_session` trait
     /// override.
     pub async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
-        let mut session = self.responses_ws_session.lock().await;
+        let mut session = self.retire_conversation_context();
         session.close().await.map_err(crate::upstream::error)
+    }
+
+    fn retire_conversation_context(&self) -> lingxi_llm_client::ConversationSession {
+        *self
+            .history_projection_cache
+            .lock()
+            .expect("history projection cache") = Default::default();
+        let mut slot = self
+            .responses_ws_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.session.replace(Default::default()).unwrap_or_default()
+    }
+
+    /// Invalidate derived history and remote continuation at a committed history
+    /// rewrite. In-flight leases cannot repopulate the new generation.
+    pub fn reset_conversation_context(&self) {
+        drop(self.retire_conversation_context());
     }
 
     // ── Stream drive (Step 2) ─────────────────────────────────────────────────
@@ -9519,9 +10258,71 @@ impl ApiService {
         req: LlmRequest,
     ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>>
     {
-        Box::pin(crate::model::request_trace::stream(
-            self.drive_stream_inner(req),
-        ))
+        Box::pin(async move {
+            let client = self.client.account_call_snapshot().await?;
+            let owner = Arc::as_ptr(&self.client) as usize;
+            ACCOUNT_CALL_CLIENT
+                .scope((owner, client), async move {
+                    let pooled = self.client().has_account_pool();
+                    let scope = ModelCallRetryScope::current_or_new();
+                    if pooled {
+                        if let Some(error) = scope.account_replay_error() {
+                            return Err(error);
+                        }
+                    }
+                    let deadline =
+                        if pooled {
+                            Some(scope.account_deadline(
+                                crate::model::request_timeout::non_stream_timeout()?,
+                            ))
+                        } else {
+                            None
+                        };
+                    let drive = crate::model::request_trace::stream(self.drive_stream_inner(req));
+                    if let Some(deadline) = deadline {
+                        let stream = tokio::time::timeout_at(deadline, scope.run(drive))
+                            .await
+                            .map_err(|_| LlmError::TransportTimeout {
+                            message: "logical account call deadline exceeded".into(),
+                        })??;
+                        // The deadline includes response reading. Once an item has
+                        // been delivered, this wrapper only ends the stream; it never
+                        // re-enters account selection or replays prior output.
+                        let bounded: BoxStream<'static, Result<HistoryEvent, LlmError>> =
+                            Box::pin(futures::stream::unfold(
+                                (stream, false, scope),
+                                move |(mut stream, done, retry_scope)| async move {
+                                    if done {
+                                        return None;
+                                    }
+                                    match tokio::time::timeout_at(
+                                        deadline,
+                                        futures::StreamExt::next(&mut stream),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(item)) => {
+                                            Some((item, (stream, false, retry_scope)))
+                                        }
+                                        Ok(None) => None,
+                                        Err(_) => {
+                                            let error = LlmError::TransportTimeout {
+                                                message: "logical account call deadline exceeded"
+                                                    .into(),
+                                            };
+                                            retry_scope.record_account_stream_error(&error);
+                                            Some((Err(error), (stream, true, retry_scope)))
+                                        }
+                                    }
+                                },
+                            ));
+                        Ok(bounded)
+                    } else {
+                        scope.run(drive).await
+                    }
+                })
+                .await
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -9580,6 +10381,11 @@ impl ApiService {
             self.settings_max_retries,
         );
         let retry_scope = ModelCallRetryScope::current_or_new();
+        let mut account_coordinator = self.make_account_coordinator(&req, &retry_scope).await?;
+        if account_coordinator.is_some() && req.execution.api_attempts_left.is_none() {
+            req.execution.api_attempts_left = Some(retry_scope.account_api_budget());
+        }
+
         let ctl = retry_scope.configure(&ctl, &mut state);
         let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
         let context_1m_scope = req.execution.thinking_recovery_scope.clone();
@@ -9615,9 +10421,44 @@ impl ApiService {
                 .as_ref()
                 .and_then(|cache| cache.policy.query_source.as_deref())
         });
-        let main_conversation = query_source_category(source) == Some(QuerySourceCategory::Main);
+        let main_conversation = !req.execution.isolated_query
+            && query_source_category(source) == Some(QuerySourceCategory::Main);
+        tracing::debug!(target: "llm_runtime::continuation", main_conversation,
+            query_source = source, isolated_query = req.execution.isolated_query, "conversation lease");
+        let mut conversation_lease = Some(if main_conversation {
+            ConversationLease::checkout(&self.responses_ws_session)
+        } else {
+            ConversationLease::auxiliary(&self.side_sessions)
+        });
+        let mut continuation_recovered = false;
 
         loop {
+            if let Some(coordinator) = account_coordinator.as_mut() {
+                if coordinator.active_scope().is_none() {
+                    let selected = coordinator.select_with_scope(&retry_scope).await;
+                    self.report_account_routing(coordinator.routing_event(
+                        retry_scope.account_call_id(),
+                        selected.as_ref().ok().map(|hop| hop.profile_name.clone()),
+                    ))
+                    .await;
+                    let hop = selected?;
+                    req.profile = Some(hop.profile_name);
+                    req.input.model = hop.request_model;
+                    req.execution.selected_account = coordinator.active_scope();
+                    req.execution
+                        .request_credentials
+                        .get_or_insert_with(Default::default);
+                    // SDK-owned continuation and socket state must remain tied
+                    // to the selected account; ordinary token rotation is stable.
+                    req.execution.account_scope = req
+                        .execution
+                        .selected_account
+                        .as_ref()
+                        .map(|scope| serde_json::to_string(scope).expect("account scope"));
+                }
+            }
+
+            self.clamp_scope_output(&mut req, any_dispatched)?;
             self.apply_native_main_thinking_policy(&mut req)?;
             req.execution.context_1m_beta_suppressed |= mark_context_1m_latch_on_message_start
                 || context_1m_scope
@@ -9634,13 +10475,28 @@ impl ApiService {
                 .await
             {
                 Ok(p) => p,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if let Some(coordinator) = account_coordinator.as_mut() {
+                        if self
+                            .record_pool_failure(&req, coordinator, &e, None)
+                            .await?
+                        {
+                            retry_scope.mark_account_failed(coordinator.last_failed_account_key());
+                            if allows_account_switch(&req) {
+                                continue;
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
             };
             prepared.native_thinking_binding_controls_attempt = native_tbc_attempt.clone();
             if !connections_captured {
                 connections_captured = true;
-                connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
-                failover = prepared.route.resolved_route.failover;
+                if account_coordinator.is_none() {
+                    connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
+                    failover = prepared.route.resolved_route.failover;
+                }
             }
             Self::log_deepseek_prepared_request(&req.input.model, &prepared, true);
             tracing::debug!(model = %req.input.model, event = "request_prepared");
@@ -9669,29 +10525,8 @@ impl ApiService {
             // attempt takes the same path: the opener marks dispatch
             // immediately before whichever transport call carries it, so a
             // WebSocket send is metered exactly like an HTTP one.
-            let websocket = matches!(
-                prepared.provider_request.stream_transport,
-                crate::ProviderStreamTransport::ResponsesWebSocket
-            );
-            let mut side_ws_lease = (websocket && !main_conversation)
-                .then(|| SideWsLease::checkout(&self.side_ws_sessions));
             let opened = async {
-                // HTTP attempts have no shared connection state. Never hold
-                // the WebSocket mutex while an HTTP admission waits for a
-                // durable intent: a concurrent revoked call must reject without
-                // waiting for the first intent's acknowledgement.
-                let mut http_session = ResponsesSession::new();
-                let mut shared_session = if websocket && side_ws_lease.is_none() {
-                    Some(self.responses_ws_session.lock().await)
-                } else {
-                    None
-                };
-                let responses_ws_session =
-                    match (shared_session.as_deref_mut(), side_ws_lease.as_mut()) {
-                        (Some(session), _) => session,
-                        (None, Some(lease)) => lease.session(),
-                        (None, None) => &mut http_session,
-                    };
+                let responses_ws_session = conversation_lease.as_mut().expect("conversation lease").session();
                 let preparing = tokio::time::Instant::now();
                 let prepared = crate::execution::first_byte_bound(
                     first_byte_timeout,
@@ -9701,6 +10536,7 @@ impl ApiService {
                 .await?;
                 let remaining =
                     first_byte_timeout.map(|timeout| timeout.saturating_sub(preparing.elapsed()));
+                self.validate_scope_output(&prepared)?;
                 // Budget/queue admission is host work, outside the network
                 // watchdog. Its wait must not masquerade as a provider timeout.
                 attempt = self.begin_model_attempt(&req, &prepared).await?;
@@ -9726,6 +10562,7 @@ impl ApiService {
                             if admission
                                 .as_ref()
                                 .is_some_and(|admission| !admission.is_admitted())
+                                || self.scope_output_quota.as_ref().is_some_and(|quota| quota.is_revoked())
                             {
                                 admission_rejected = true;
                                 return Err(LlmError::InvalidRequest {
@@ -9740,8 +10577,14 @@ impl ApiService {
                                 ),
                                 None => None,
                             };
+                            let scope_reservation = self.scope_output_quota.as_ref()
+                                .map(|quota| quota.reserve().ok_or(LlmError::ApiAttemptsExhausted))
+                                .transpose()?;
                             attempt.mark_dispatched()?;
                             if let Some(reservation) = api_attempt_reservation {
+                                reservation.commit();
+                            }
+                            if let Some(reservation) = scope_reservation {
                                 reservation.commit();
                             }
                             if mctc_header_sent {
@@ -9827,6 +10670,16 @@ impl ApiService {
                     {
                         return Err(transport_err);
                     }
+                    if account_coordinator.is_some()
+                        && matches!(
+                            transport_err.classification_source(),
+                            LlmError::Transport { .. }
+                                | LlmError::TransportTimeout { .. }
+                                | LlmError::StreamInterrupted { .. }
+                        )
+                    {
+                        return Err(transport_err);
+                    }
                     if let Some(fallback) = Self::note_dispatch_header_failure(
                         &mut dispatch,
                         &dispatch_attempt,
@@ -9835,6 +10688,43 @@ impl ApiService {
                     ) {
                         self.report_dispatch_fallback(&req, fallback, None).await;
                         continue;
+                    }
+                    if let Some(coordinator) = account_coordinator.as_mut() {
+                        match self
+                            .refresh_pool_account(&mut req, &retry_scope, &transport_err)
+                            .await
+                        {
+                            Ok(true) => continue,
+                            Err(refresh_error) => {
+                                self.record_pool_refresh_failure(&req, coordinator, &refresh_error)
+                                    .await?;
+                                retry_scope
+                                    .mark_account_failed(coordinator.last_failed_account_key());
+                                if allows_account_switch(&req) {
+                                    continue;
+                                }
+                                return Err(refresh_error.error);
+                            }
+                            Ok(false) => {}
+                        }
+                        if self
+                            .record_pool_failure(&req, coordinator, &transport_err, None)
+                            .await?
+                        {
+                            retry_scope.mark_account_failed(coordinator.last_failed_account_key());
+                            if allows_account_switch(&req) {
+                                continue;
+                            }
+                            return Err(transport_err);
+                        }
+                        // Unknown transport settlement cannot be replayed under a
+                        // different account or by the standalone retry driver.
+                        if matches!(
+                            transport_err.classification_source(),
+                            LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
+                        ) {
+                            return Err(transport_err);
+                        }
                     }
                     if let Some(next) = advance_connection(
                         &mut req,
@@ -9867,7 +10757,7 @@ impl ApiService {
                         _ => return Err(transport_err),
                     }
                 }
-                Ok((mut prepared, streaming)) => {
+                Ok((mut prepared, streaming, continuation_rejection)) => {
                     let outgoing_client_request_id =
                         streaming.client_request_id().map(str::to_owned);
                     let response_headers: std::collections::BTreeMap<String, String> = streaming
@@ -9881,7 +10771,7 @@ impl ApiService {
                         status = streaming.status()
                     );
                     // Connect-phase status ≥ 400: drain and decode as error.
-                    if streaming.status() >= 400 {
+                    if streaming.status() >= 400 || continuation_rejection.is_some() {
                         let response_status = streaming.status();
                         // Error responses do not enter the event watchdog below.
                         // Bound their body collection too, respecting the host's
@@ -9934,8 +10824,23 @@ impl ApiService {
                         Self::classify_native_invalid_request_413(&mut decode_err);
                         self.observe_native_thinking_resumption_refusal(&decode_err);
                         safety.error(&decode_err);
+                        let recover_continuation = !continuation_recovered
+                            && allow_replay
+                            && conversation_lease
+                                .as_mut()
+                                .expect("conversation lease")
+                                .session()
+                                .recover(
+                                    continuation_rejection
+                                        .as_ref()
+                                        .unwrap_or(collected.response()),
+                                );
                         collected.finish().await;
                         attempt.finish().await?;
+                        if recover_continuation {
+                            continuation_recovered = true;
+                            continue;
+                        }
                         // Native streaming Kie handles an AFK-only refusal
                         // before context-1m and TBC recovery. Keep this ahead
                         // of both so an overlapping error removes AFK first.
@@ -10080,7 +10985,7 @@ impl ApiService {
                             .is_some_and(|value| value == "false");
                         // Native server/overload model gates precede retry hints.
                         // SDK stateful execution still requires an explicit host decision.
-                        if allow_replay && retry_scope.request_http_model_fallback(response_status, lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&body_json))
+                        if allow_replay && account_coordinator.is_none() && retry_scope.request_http_model_fallback(response_status, lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&body_json))
                         {
                             return Err(decode_err);
                         }
@@ -10167,12 +11072,12 @@ impl ApiService {
                             return Err(decode_err);
                         }
                         if !allow_replay
-                            || crate::model::retry_scope::http_retry_decline_is_terminal(
+                            || (account_coordinator.is_none() && crate::model::retry_scope::http_retry_decline_is_terminal(
                                 response_status,
                                 declined,
                                 lingxi_llm_client::providers::anthropic::response_policy::has_overload_payload(&body_json),
                                 crate::model::retry::retry_watchdog_from_env(),
-                            )
+                            ))
                         {
                             if matches!(
                                 decode_err.classification_source(),
@@ -10205,6 +11110,59 @@ impl ApiService {
                             }
                         }
 
+                        if let Some(coordinator) = account_coordinator.as_mut() {
+                            match self
+                                .refresh_pool_account(&mut req, &retry_scope, &effective_err)
+                                .await
+                            {
+                                Ok(true) => continue,
+                                Err(refresh_error) => {
+                                    self.record_pool_refresh_failure(
+                                        &req,
+                                        coordinator,
+                                        &refresh_error,
+                                    )
+                                    .await?;
+                                    retry_scope
+                                        .mark_account_failed(coordinator.last_failed_account_key());
+                                    if allows_account_switch(&req) {
+                                        continue;
+                                    }
+                                    return Err(refresh_error.error);
+                                }
+                                Ok(false) => {}
+                            }
+                            if self
+                                .record_pool_failure(
+                                    &req,
+                                    coordinator,
+                                    &effective_err,
+                                    Self::resolve_retry_after(
+                                        &response_headers,
+                                        prepared.route.protocol,
+                                        crate::execution::response_provider_id(
+                                            &prepared.route.resolved_route.provider_id,
+                                        ),
+                                    ),
+                                )
+                                .await?
+                            {
+                                retry_scope
+                                    .mark_account_failed(coordinator.last_failed_account_key());
+                                if allows_account_switch(&req) {
+                                    continue;
+                                }
+                                return Err(effective_err);
+                            }
+                            // Unknown transport settlement cannot be replayed under a
+                            // different account or by the standalone retry driver.
+                            if matches!(
+                                effective_err.classification_source(),
+                                LlmError::Transport { .. } | LlmError::TransportTimeout { .. }
+                            ) {
+                                return Err(effective_err);
+                            }
+                        }
                         if let Some(next) = advance_connection(
                             &mut req,
                             &mut state,
@@ -10389,7 +11347,9 @@ impl ApiService {
                     // Native body-phase recovery requires a carried dispatch header
                     // and a connection failure before the first forwarded event.
                     let mut seed = None;
-                    if dispatch_attempt.value.is_some() && allow_replay {
+                    if (dispatch_attempt.value.is_some() || account_coordinator.is_some())
+                        && allow_replay
+                    {
                         let first = match stream_idle_timeout {
                             Some(t) => {
                                 // Wall clock across the same wait the monotonic
@@ -10450,6 +11410,61 @@ impl ApiService {
                         };
                         if let Err(first_err) = &first {
                             self.observe_native_thinking_resumption_refusal(first_err);
+                            if let Some(coordinator) = account_coordinator.as_mut() {
+                                match self
+                                    .refresh_pool_account(&mut req, &retry_scope, first_err)
+                                    .await
+                                {
+                                    Ok(true) => {
+                                        attempt.finish().await?;
+                                        continue;
+                                    }
+                                    Err(refresh_error) => {
+                                        self.record_pool_refresh_failure(
+                                            &req,
+                                            coordinator,
+                                            &refresh_error,
+                                        )
+                                        .await?;
+                                        retry_scope.mark_account_failed(
+                                            coordinator.last_failed_account_key(),
+                                        );
+                                        attempt.finish().await?;
+                                        if allows_account_switch(&req) {
+                                            continue;
+                                        }
+                                        return Err(refresh_error.error);
+                                    }
+                                    Ok(false) => {}
+                                }
+                                if self
+                                    .record_pool_failure(
+                                        &req,
+                                        coordinator,
+                                        first_err,
+                                        Self::resolve_retry_after(
+                                            &response_headers,
+                                            prepared.route.protocol,
+                                            crate::execution::response_provider_id(
+                                                &prepared.route.resolved_route.provider_id,
+                                            ),
+                                        ),
+                                    )
+                                    .await?
+                                {
+                                    retry_scope
+                                        .mark_account_failed(coordinator.last_failed_account_key());
+                                    attempt.finish().await?;
+                                    if allows_account_switch(&req) {
+                                        continue;
+                                    }
+                                    return Err(first_err.clone());
+                                }
+                                // Unknown execution/settlement never authorizes
+                                // the dispatch-header repair on pooled calls.
+                                attempt.finish().await?;
+                                return Err(first_err.clone());
+                            }
                             // Native x2 body classification requires a connection cause;
                             // SDK timeout/abort errors alone do not supply that cause.
                             if matches!(
@@ -10482,6 +11497,33 @@ impl ApiService {
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
                     let stream_state = StreamState {
+                        account_derived_token: req
+                            .profile
+                            .as_deref()
+                            .is_some_and(|profile| self.client().derives_account_bearer(profile)),
+                        account_authentication: req
+                            .execution
+                            .selected_account
+                            .as_ref()
+                            .and_then(|_| req.profile.as_ref())
+                            .map(|profile| {
+                                (
+                                    self.client(),
+                                    req.input.model.clone(),
+                                    profile.clone(),
+                                    Self::captured_request_credential_revision(&req, profile),
+                                    Self::captured_request_credential(&req, profile),
+                                )
+                            }),
+                        account_coordinator: account_coordinator.take(),
+                        account_retry_scope: retry_scope.clone(),
+                        account_retry_after: Self::resolve_retry_after(
+                            &response_headers,
+                            prepared.route.protocol,
+                            crate::execution::response_provider_id(
+                                &prepared.route.resolved_route.provider_id,
+                            ),
+                        ),
                         per_turn_effort: self.prepared_per_turn_effort(&prepared),
                         context_1m_latch: context_1m_scope
                             .clone()
@@ -10511,11 +11553,12 @@ impl ApiService {
                         request_id: stream_request_id,
                         started: stream_started,
                         idle_timeout: stream_idle_timeout,
-                        side_ws_lease: side_ws_lease.take(),
+                        side_ws_lease: conversation_lease.take(),
                     };
 
                     let boxed: BoxStream<'static, Result<HistoryEvent, LlmError>> = Box::pin(
                         futures::stream::unfold(stream_state, |mut s| async move {
+                            let result=async move {
                             loop {
                                 if let Some(mut event) = s.queue.pop_front() {
                                     if let HistoryEvent::MessageStart { response }
@@ -11031,6 +12074,101 @@ impl ApiService {
                                     }
                                 }
                             }
+                            }.await;
+                            match result {
+                                Some((item, mut state)) => {
+                                    if let Some(coordinator) = state.account_coordinator.as_mut() {
+                                        match &item {
+                                            Ok(event) => {
+                                                if matches!(
+                                                    event,
+                                                    HistoryEvent::ContentBlockStart { .. }
+                                                        | HistoryEvent::ContentBlockDelta { .. }
+                                                        | HistoryEvent::WebSearch { .. }
+                                                ) {
+                                                    state
+                                                        .account_retry_scope
+                                                        .record_account_output();
+                                                }
+                                                if matches!(
+                                                    event,
+                                                    HistoryEvent::MessageStop
+                                                        | HistoryEvent::Completed { .. }
+                                                ) {
+                                                    coordinator.succeeded().await;
+                                                }
+                                            }
+                                            Err(error) => {
+                                                state
+                                                    .account_retry_scope
+                                                    .record_account_stream_error(error);
+                                                let authentication_current = if matches!(
+                                                    error.classification_source(),
+                                                    LlmError::Authentication { .. }
+                                                        | LlmError::OAuthRefreshDead
+                                                ) {
+                                                    match state.account_authentication.as_ref() {
+                                                        Some((
+                                                            runtime,
+                                                            model,
+                                                            profile,
+                                                            rejected,
+                                                            material,
+                                                        )) => {
+                                                            let version_current=runtime
+                                                            .current_account_credential_revision(
+                                                                model, profile,
+                                                            )
+                                                            .await
+                                                            .is_ok_and(|current| {
+                                                                current == *rejected
+                                                            });
+                                                            version_current && match material {
+                                                                Some(material)=>runtime.rejected_account_credential_is_current(profile,material).await.unwrap_or(false),
+                                                                None=>true,
+                                                            }
+                                                        }
+                                                        None => true,
+                                                    }
+                                                } else {
+                                                    true
+                                                };
+                                                coordinator.set_rejected_credential_revision(
+                                                    state.account_authentication.as_ref().and_then(
+                                                        |(_, _, _, revision, _)| *revision,
+                                                    ),
+                                                );
+                                                let recorded = if authentication_current {
+                                                    if state.account_derived_token
+                                                        && matches!(
+                                                            error.classification_source(),
+                                                            LlmError::Authentication { .. }
+                                                        )
+                                                    {
+                                                        coordinator.derived_token_rejected().await
+                                                    } else {
+                                                        coordinator
+                                                            .failed_with_retry_after(
+                                                                error,
+                                                                state.account_retry_after,
+                                                            )
+                                                            .await
+                                                    }
+                                                } else {
+                                                    false
+                                                };
+                                                if recorded {
+                                                    state.account_retry_scope.mark_account_failed(
+                                                        coordinator.last_failed_account_key(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some((item, state))
+                                }
+                                None => None,
+                            }
                         }),
                     );
                     return Ok(boxed);
@@ -11480,6 +12618,7 @@ impl ApiService {
             }
         }
         let mut req = LlmRequest::new(model);
+        req.execution.isolated_query = crate::computer::uses_auxiliary_history_projection();
         if let Some(thinking) = main_thinking_config {
             req.execution.native_thinking_request_type_disabled =
                 crate::model::thinking_binding_controls::native_request_type_disabled(thinking);
@@ -11558,15 +12697,31 @@ impl ApiService {
             }
         }
 
+        let cache_enabled = !crate::computer::uses_auxiliary_history_projection()
+            && matches!(query_source, PromptCacheQuerySource::Named(source)
+                if query_source_category(Some(source)) == Some(QuerySourceCategory::Main));
+        let mut projection_cache = cache_enabled.then(|| {
+            self.history_projection_cache
+                .lock()
+                .expect("history projection cache")
+        });
+        let projection_started = Instant::now();
         let (input, overrides, request_content_source_ids) =
-            crate::convert::input_projection::history_input_with_sources(
+            crate::convert::input_projection::history_input_with_cached_sources(
                 model,
                 &messages,
                 &request_content_source_ids,
                 &[],
                 &tools,
                 family,
+                projection_cache.as_mut().map(|cache| &mut **cache),
             )?;
+        if let Some(cache) = &projection_cache {
+            tracing::debug!(target: "llm_runtime::history_cache", messages = messages.len(), hits = cache.hits,
+                misses = cache.misses, retained_bytes = cache.retained_bytes(),
+                projection_us = projection_started.elapsed().as_micros() as u64);
+        }
+        drop(projection_cache);
         req.input = input;
         req.execution.request_content_source_ids = request_content_source_ids;
         req.execution.input_protocol = Some(family);

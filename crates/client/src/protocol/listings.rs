@@ -28,7 +28,6 @@
 //!   MemoryEntryTier}`.
 //! - [`StatusSnapshotDto`] ← `lingxi_core::host::orchestrator::StatusSnapshot` (traits
 //!   shape canonical; status-line fields appended OPTIONAL, plan line 155).
-//! - [`AuthStateDto`] ← `Option<lingxi_core::host::auth::LoginInfo>`.
 //! - [`DoctorReportDto`]/[`DoctorCheckDto`]/[`CheckStatusDto`]/[`DoctorSummaryDto`]
 //!   ← `lingxi_core::host::orchestrator::{DoctorReport, DoctorCheck, CheckStatus,
 //!   DoctorSummary}`.
@@ -473,6 +472,10 @@ pub struct AgentDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SessionAgentSummaryDto {
+    /// Report delivery, independent of lifecycle: delivered, flagged, withheld,
+    /// or pending. None means this run did not enable the handback protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_delivery: Option<String>,
     /// Stable agent id (`agent:<uuid>`); the main conversation uses `main`.
     pub agent_id: String,
     /// Display name (the spawn name, or a short id fallback).
@@ -715,27 +718,6 @@ pub struct StatusSnapshotDto {
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
-
-/// Auth state — the lowered `Option<lingxi_core::host::auth::LoginInfo>`
-/// (`crates/core/src/host/auth.rs:13`). Carried by
-/// [`crate::protocol::events::ClientEvent::AuthState`]. Internally tagged on `type`,
-/// `snake_case`. `#[non_exhaustive]` so a future state (e.g. `LoggingIn`) is
-/// additive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AuthStateDto {
-    /// No stored credentials (`None` from `current_user`).
-    SignedOut,
-    /// A signed-in user (`Some(LoginInfo)` from `current_user`).
-    SignedIn {
-        /// Email address identifying the signed-in user.
-        email: String,
-        /// Anthropic organization id (`"org_..."` prefix).
-        org_id: String,
-    },
-}
 
 // ── Doctor ───────────────────────────────────────────────────────────────────
 

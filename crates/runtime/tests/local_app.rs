@@ -303,7 +303,6 @@ async fn mobile_assembly_passes_shared_visualizations_to_local_app() {
     let mut cfg = harness_runtime::mobile::test_support::test_config(&cwd);
     cfg.local_apps = true;
     cfg.inline_visualization = true;
-    cfg.api_key = "test-key".into();
     assert_eq!(cfg.lingxi_home, config_home);
     let platform = Arc::new(harness_runtime::mobile::test_support::HostFakePlatform::new(cwd));
     let fs = platform.filesystem();

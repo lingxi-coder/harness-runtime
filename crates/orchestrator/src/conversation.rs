@@ -362,6 +362,16 @@ pub trait OrchestratorApiClient: Send + Sync {
         Err(LlmError::ModelUnavailable)
     }
 
+    /// Validate a concrete native audio resource against its current account directory.
+    async fn audio_account_binding_is_current(
+        &self,
+        _original_profile: &str,
+        _actual_profile: &str,
+        _scope: &str,
+    ) -> bool {
+        false
+    }
+
     /// Resolve a bounded retry budget using the exact serving route. Missing
     /// accounting or route facts prohibit an invented increase.
     fn next_output_budget(
@@ -555,6 +565,9 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<(), LlmError> {
         Ok(())
     }
+
+    /// Retire derived history and remote state after a committed history rewrite.
+    fn reset_conversation_context(&self) {}
 
     /// Close any reusable Responses WebSocket session held by this API client.
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
@@ -912,6 +925,8 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
     let (error, api_error_status) = match e {
         OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => {
             match inner.classification_source() {
+                LlmError::AllAccountsUnavailable { .. } => (Some("all_accounts_unavailable"), None),
+                LlmError::AccountStorageUnavailable => (Some("account_storage_unavailable"), None),
                 LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
                     unreachable!("classification_source removes carrier wrappers")
                 }

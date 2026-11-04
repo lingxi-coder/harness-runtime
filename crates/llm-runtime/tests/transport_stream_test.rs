@@ -151,9 +151,7 @@ fn anthropic_client() -> ModelRuntime {
 fn openai_responses_client() -> ModelRuntime {
     client(
         ProtocolFamily::OpenAiResponses,
-        ProviderId::OpenAICompatible {
-            name: "openai-responses".to_string(),
-        },
+        ProviderId::OpenAI,
         "https://api.openai.com/v1",
     )
 }
@@ -875,6 +873,7 @@ async fn responses_stream_exposes_continuation_only_after_completion() {
         responses_completed("resp_scoped"),
     ));
     let mut request = streaming_request();
+    request.input.controls.responses.store = Some(true);
     request.execution.account_scope = Some("account-a".into());
     let mut stream = client
         .execute_stream(&request, transport)
@@ -940,6 +939,7 @@ async fn responses_websocket_account_change_rebinds_session() {
     ]));
     let mut session = ResponsesSession::new();
     let mut first_request = streaming_request();
+    first_request.input.controls.responses.store = Some(true);
     first_request.execution.account_scope = Some("account-a".into());
     let mut first_stream = client
         .execute_stream_with_session(&first_request, transport.clone(), &mut session)
@@ -985,6 +985,7 @@ async fn responses_websocket_preserves_explicit_continuation() {
     ]));
     let mut session = ResponsesSession::new();
     let mut first_request = streaming_request();
+    first_request.input.controls.responses.store = Some(true);
     first_request.execution.account_scope = Some("account-a".into());
     let mut first_stream = client
         .execute_stream_with_session(&first_request, transport.clone(), &mut session)

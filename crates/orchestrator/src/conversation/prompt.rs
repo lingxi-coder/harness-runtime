@@ -1691,13 +1691,18 @@ impl ConversationOrchestrator {
         // tools_block::format sorts alphabetically inside.
         let tool_names: Vec<String> = self.tools.all_names();
 
-        let shell = crate::prompt::env_meta::detect_shell();
+        let private_environment = self.prompt_runtime.host_environment_probes_disabled;
+        let shell = if private_environment {
+            "bash".to_string()
+        } else {
+            crate::prompt::env_meta::detect_shell()
+        };
 
         // DIV-1: worktree detection — `hf()!==null` in claude-code. Detect a
         // worktree by checking for the `gitdir` file that git creates in worktree
         // checkouts (a file rather than a directory at .git). Computed before `cwd`
         // is moved into the context struct below.
-        let in_worktree = probe_cwd.join(".git").is_file();
+        let in_worktree = !private_environment && probe_cwd.join(".git").is_file();
 
         Ok(SystemPromptContext {
             cwd,
@@ -1732,7 +1737,11 @@ impl ConversationOrchestrator {
             shell,
             // SYSPROMPT.1: `uname -sr` (TS getUnameSR) e.g. "Darwin 25.3.0",
             // falling back to "<os> <arch>" on Windows / spawn failure.
-            os_version: crate::prompt::env_meta::os_version_string(),
+            os_version: if private_environment {
+                format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+            } else {
+                crate::prompt::env_meta::os_version_string()
+            },
             git_status: git,
             in_worktree,
             file_tree: FileTree::default(),

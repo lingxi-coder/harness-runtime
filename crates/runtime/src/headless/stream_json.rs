@@ -995,6 +995,8 @@ pub struct StreamJsonStream {
     last_result_text: Mutex<Utf16JsonProjection>,
     structured_output: Mutex<Option<Utf16JsonProjection>>,
     result_metadata: Mutex<StreamJsonResultMetadata>,
+    account_routing:
+        StdMutex<Vec<lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent>>,
     sdk_held_results: StdMutex<SdkHeldResults>,
     text_limits: PrintTextLimits,
     response_timing: StdMutex<QueryResponseTiming>,
@@ -1073,6 +1075,7 @@ impl StreamJsonStream {
             last_result_text: Mutex::new(Utf16JsonProjection::from("")),
             structured_output: Mutex::new(None),
             result_metadata: Mutex::new(StreamJsonResultMetadata::default()),
+            account_routing: StdMutex::new(Vec::new()),
             sdk_held_results: StdMutex::new(SdkHeldResults::default()),
             text_limits: PrintTextLimits::default(),
             response_timing: StdMutex::new(QueryResponseTiming::default()),
@@ -2322,6 +2325,10 @@ impl StreamJsonStream {
     /// Begin one admitted external query before its init/status/driver setup.
     /// Internal tool-loop requests keep these first-observation markers.
     pub fn begin_query_timing(&self) {
+        self.account_routing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         *self
             .response_timing
             .lock()
@@ -2356,6 +2363,16 @@ impl StreamJsonStream {
             },
             |start| rounded_elapsed_ms(start, std::time::Instant::now()),
         )
+    }
+
+    fn append_account_routing(&self, frame: &mut serde_json::Map<String, Value>) {
+        let events = self
+            .account_routing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !events.is_empty() {
+            frame.insert("provider_account_routing".into(), json!(&*events));
+        }
     }
 
     /// Build a successful native `result` frame from response and usage data.
@@ -2470,6 +2487,7 @@ impl StreamJsonStream {
         );
         obj.insert("result_index".into(), json!(metadata.result_index));
 
+        self.append_account_routing(&mut obj);
         Value::Object(obj)
     }
 
@@ -2599,6 +2617,7 @@ impl StreamJsonStream {
         );
         obj.insert("result_index".into(), json!(metadata.result_index));
 
+        self.append_account_routing(&mut obj);
         Value::Object(obj)
     }
 
@@ -2951,6 +2970,23 @@ impl StreamJsonStream {
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
+    async fn emit_provider_account_routing(
+        &self,
+        event: &lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent,
+    ) {
+        self.account_routing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event.clone());
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(
+            &json!({"type":"system","subtype":"provider_account_routing","routing":event,
+            "session_id":session_id,"uuid":uuid::Uuid::new_v4().to_string()}),
+        );
+    }
     fn wants_response_timing(&self) -> bool {
         self.response_timing
             .lock()
@@ -7978,5 +8014,111 @@ mod verbose_json_tests {
             .await;
         assert!(stream.accum.lock().await.blocks.is_empty());
         assert!(stream.finish().await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod provider_account_routing_tests {
+    use super::*;
+    use lingxi_core::host::provider_accounts::{
+        ProviderAccountFailure, ProviderAccountRoutingEvent,
+    };
+
+    fn selected() -> ProviderAccountRoutingEvent {
+        ProviderAccountRoutingEvent {
+            logical_call_id: "call-fixture".into(),
+            model: "fixture-model".into(),
+            attempt: 2,
+            status: "selected".into(),
+            selected_account_id: Some("account-b".into()),
+            profile: Some("account.account-b".into()),
+            identity_generation: Some(3),
+            config_revision: Some(7),
+            failed_accounts: vec![ProviderAccountFailure {
+                account_id: "account-a".into(),
+                reason_code: "rate_limited".into(),
+                scope_kind: "model".into(),
+                scope_id: Some("fixture-model".into()),
+                retryable: true,
+                recovery_at_ms: Some(5000),
+            }],
+            earliest_recovery_ms: Some(5000),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_frame_publishes_account_selection_and_failure_facts() {
+        let stream = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
+        let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+        stream.emit_provider_account_routing(&selected()).await;
+        let OutboundMsg::Line(line) = receiver.try_recv().unwrap() else {
+            panic!("expected ordinary protocol frame")
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "provider_account_routing");
+        assert_eq!(frame["routing"]["selectedAccountId"], "account-b");
+        assert_eq!(
+            frame["routing"]["failedAccounts"][0]["reasonCode"],
+            "rate_limited"
+        );
+        assert_eq!(frame["routing"]["earliestRecoveryMs"], 5000);
+        assert!(frame["uuid"].is_string());
+    }
+
+    #[tokio::test]
+    async fn final_json_retains_routing_when_stream_frames_are_suppressed() {
+        let stream = StreamJsonStream::new_json_mode_placeholder(Output::new(tokio::io::sink()));
+        let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+        stream.begin_query_timing();
+        let mut event = selected();
+        stream.emit_provider_account_routing(&event).await;
+        assert!(receiver.try_recv().is_err());
+        let frame = stream
+            .build_result_success_frame(
+                "fixture-answer",
+                "end_turn",
+                &CostSnapshot::default(),
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        assert_eq!(
+            frame["provider_account_routing"][0]["selectedAccountId"],
+            "account-b"
+        );
+        event.status = "all_unavailable".into();
+        event.selected_account_id = None;
+        event.earliest_recovery_ms = None;
+        stream.emit_provider_account_routing(&event).await;
+        let frame = stream
+            .build_result_error_frame(
+                "error_during_execution",
+                vec!["all accounts unavailable".into()],
+                &CostSnapshot::default(),
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        let events = frame["provider_account_routing"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["failedAccounts"][0]["accountId"], "account-a");
+        assert_eq!(events[1]["failedAccounts"][0]["scopeKind"], "model");
+        assert_eq!(events[1]["failedAccounts"][0]["retryable"], true);
+        assert!(events[1]["earliestRecoveryMs"].is_null());
+        stream.begin_query_timing();
+        let next = stream
+            .build_result_success_frame(
+                "next",
+                "end_turn",
+                &CostSnapshot::default(),
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        assert!(next.get("provider_account_routing").is_none());
     }
 }
