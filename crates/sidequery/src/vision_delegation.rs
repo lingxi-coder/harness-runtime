@@ -398,7 +398,8 @@ impl VisionDelegationService {
             let mut bytes = Vec::new();
             let mut stream = response.stream;
             let body = async {
-                while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
+                while let Some(chunk) =
+                    std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
                 {
                     let chunk = chunk.map_err(|error| map_http_error(&error))?;
                     if bytes.len().saturating_add(chunk.len()) > MAX_DECODED_BYTES_PER_QUERY {

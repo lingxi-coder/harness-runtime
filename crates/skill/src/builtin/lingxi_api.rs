@@ -168,7 +168,7 @@ mod tests {
             let text = branding::render_namespace_template(topic.content);
             assert!(!text.contains("{{"), "unresolved namespace in {}", topic.id);
             assert!(
-                !topic.content.contains(".lingxi"),
+                !topic.content.contains(branding::DOT_DIR),
                 "hardcoded brand path in {}",
                 topic.id
             );

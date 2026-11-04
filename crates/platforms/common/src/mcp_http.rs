@@ -130,15 +130,13 @@ async fn receive_notifications<H>(
             // A silent body never ends on its own, so the reconnect below
             // would not run. Bound idle time; a later attach reconciles catalogs.
             loop {
-                let next = match tokio::time::timeout(
-                    std::time::Duration::from_secs(90),
-                    events.next(),
-                )
-                .await
-                {
-                    Ok(item) => item,
-                    Err(_) => break,
-                };
+                let next =
+                    match tokio::time::timeout(std::time::Duration::from_secs(90), events.next())
+                        .await
+                    {
+                        Ok(item) => item,
+                        Err(_) => break,
+                    };
                 let Some(event) = next else {
                     break;
                 };

@@ -382,9 +382,12 @@ fn semantic_bool(v: Option<JsonValueView<'_>>, default: bool) -> bool {
 /// `CronScheduler`, iOS/Android through their OS wake + `run_cron_task_if_due`.
 fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -> String {
     let where_ = if durable {
-        "Persisted to the branded project session-cron store"
+        "Persisted to the branded project session-cron store".to_owned()
     } else {
-        "Session-only (not written to disk, dies when LingXi exits)"
+        format!(
+            "Session-only (not written to disk, dies when {} exits)",
+            branding::PRODUCT_NAME
+        )
     };
     if recurring {
         // Claude Code 2.1.270 model-facing result, including its fixed seven-day limit.
@@ -467,7 +470,7 @@ static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
             },
             "durable": {
                 "type": "boolean",
-                "description": "true = persist to the branded project session-cron store and survive restarts. false (default) = in-memory only, dies when this LingXi session ends. Use true only when the user asks the task to survive across sessions."
+                "description": format!("true = persist to the branded project session-cron store and survive restarts. false (default) = in-memory only, dies when this {} session ends. Use true only when the user asks the task to survive across sessions.", branding::PRODUCT_NAME)
             }
         },
         "required": ["cron", "prompt"]
@@ -483,7 +486,7 @@ static SESSION_ONLY_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     schema
         .replace_pointer_projection(
             "/properties/durable/description",
-            tool_api::tool_trait::source_text_projection("Has no effect — durable persistence is not available. All jobs are session-only (in-memory, gone when this LingXi session ends)."),
+            tool_api::tool_trait::source_text_projection(&format!("Has no effect — durable persistence is not available. All jobs are session-only (in-memory, gone when this {} session ends).", branding::PRODUCT_NAME)),
         )
         .expect("generated session-only schema description exists");
     schema
@@ -528,11 +531,11 @@ fn amber_sentinel_enabled() -> bool {
 /// `cron::default_recurring_max_age`), so the model is never promised an expiry
 /// the scheduler does not enforce.
 fn build_prompt_text() -> String {
-    let durability = "## Durability\n\nBy default (durable: false) the job lives only in this LingXi session — nothing is written to disk, and the job is gone when LingXi exits. Pass durable: true to write to the branded project session-cron store so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.";
+    let product_name = branding::PRODUCT_NAME;
     let durability = if durable_enabled() {
-        durability
+        format!("## Durability\n\nBy default (durable: false) the job lives only in this {product_name} session — nothing is written to disk, and the job is gone when {product_name} exits. Pass durable: true to write to the branded project session-cron store so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.")
     } else {
-        "## Session-only\n\nJobs live only in this LingXi session — nothing is written to disk, and the job is gone when LingXi exits."
+        format!("## Session-only\n\nJobs live only in this {product_name} session — nothing is written to disk, and the job is gone when {product_name} exits.")
     };
     let durable_runtime = "Durable jobs persist to the branded project session-cron store and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. ";
     let durable_runtime = if durable_enabled() {
@@ -659,7 +662,7 @@ impl Tool for CronCreateTool {
 
     async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
         if !durable_enabled() {
-            return "Schedule a prompt to run at a future time within this LingXi session — either recurring on a cron schedule, or once at a specific time.".into();
+            return format!("Schedule a prompt to run at a future time within this {} session — either recurring on a cron schedule, or once at a specific time.", branding::PRODUCT_NAME);
         }
         // PARITY 2.1.270 durable gate on.
         "Schedule a prompt to run at a future time — either recurring on a cron schedule, or once at a specific time. Pass durable: true to persist to the branded project session-cron store; otherwise session-only.".into()
@@ -1209,7 +1212,7 @@ mod tests {
     fn result_content_variants() {
         assert_eq!(
             build_result_content("d12345678", "Every day at 9:00 AM", true, false),
-            "Scheduled recurring job d12345678 (Every day at 9:00 AM). Session-only (not written to disk, dies when LingXi exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+            format!("Scheduled recurring job d12345678 (Every day at 9:00 AM). Session-only (not written to disk, dies when {} exits). Auto-expires after 7 days. Use CronDelete to cancel sooner.", branding::PRODUCT_NAME)
         );
         assert_eq!(
             build_result_content("d87654321", "February 28 at 2:30pm", false, true),

@@ -2407,7 +2407,7 @@ impl ApiService {
             ::telemetry::feature_flags::flag_bool("tengu_foamy_spring", true);
         let session_profile_active =
             std::env::var_os("CCR_SESSION_PROFILE").is_some_and(|value| !value.is_empty());
-        let inline_tools_env = std::env::var_os("CLAUDE_CODE_INLINE_TOOLS")
+        let inline_tools_env = std::env::var_os(branding::INLINE_TOOLS_ENV)
             .map(|value| value.to_str().map(str::to_owned).unwrap_or_default());
         let brisk_meadow_enabled = if !b6_disabled
             && foamy_spring_enabled
