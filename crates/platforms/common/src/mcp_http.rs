@@ -22,7 +22,7 @@ use lingxi_core::host::mcp_result::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use lingxi_llm_client::transport::http_backend as reqwest;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;

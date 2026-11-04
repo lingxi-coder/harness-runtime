@@ -14,9 +14,7 @@ use xcb::{
     x::{Atom, InternAtom, ScreenBuf},
     ConnResult, Connection as XcbConnection, Xid,
 };
-use zbus::{
-    Connection as ZBusConnection, Proxy, Result as ZBusResult, wire::Type,
-};
+use zbus::{wire::Type, Connection as ZBusConnection, Proxy, Result as ZBusResult};
 
 use crate::{error::XCapResult, XCapError};
 
@@ -25,7 +23,8 @@ lazy_static! {
         let display_name = env::var("DISPLAY").unwrap_or("DISPLAY:1".to_string());
         XcbConnection::connect(Some(display_name.as_str()))
     };
-    static ref ZBUS_CONNECTION: ZBusResult<ZBusConnection> = block_on_dbus(ZBusConnection::session());
+    static ref ZBUS_CONNECTION: ZBusResult<ZBusConnection> =
+        block_on_dbus(ZBusConnection::session());
 }
 
 pub fn get_xcb_connection_and_index() -> XCapResult<&'static (XcbConnection, i32)> {
@@ -41,7 +40,10 @@ where
     F::Output: Send,
 {
     std::thread::scope(|scope| {
-        scope.spawn(|| zbus::block_on(future)).join().expect("D-Bus worker panicked")
+        scope
+            .spawn(|| zbus::block_on(future))
+            .join()
+            .expect("D-Bus worker panicked")
     })
 }
 
@@ -180,8 +182,7 @@ where
 {
     let mut response = block_on_dbus(request.receive_signal("Response"))?;
 
-    let message = block_on_dbus(response.next())
-        .ok_or(XCapError::new("Failed get response"))?;
+    let message = block_on_dbus(response.next()).ok_or(XCapError::new("Failed get response"))?;
 
     let body = message.body();
     let (code, body): (u32, T) = body.deserialize()?;

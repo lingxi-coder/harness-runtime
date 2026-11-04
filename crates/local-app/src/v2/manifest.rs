@@ -328,7 +328,10 @@ impl Manifest {
         }
         if !self.mcp_servers.is_empty() {
             if self.mcp_servers.len() > 16
-                || !self.capabilities.iter().any(|capability| capability == "mcp")
+                || !self
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "mcp")
                 || self.targets.iter().any(|target| {
                     !matches!(target.platform.as_str(), "macos" | "windows" | "linux")
                         || target.environment != "native"
@@ -339,19 +342,30 @@ impl Manifest {
                 ));
             }
             for (name, server) in &self.mcp_servers {
-                if name.is_empty() || name.len() > 64
-                    || !name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+                if name.is_empty()
+                    || name.len() > 64
+                    || !name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
                 {
                     return Err(AppError::Invalid("invalid MCP server name".into()));
                 }
                 match server {
-                    AppMcpServer::Stdio { command, cwd, env, venv, python } => {
+                    AppMcpServer::Stdio {
+                        command,
+                        cwd,
+                        env,
+                        venv,
+                        python,
+                    } => {
                         check_step(command, cwd, env, venv, python)?;
                     }
                     AppMcpServer::Http { process, path } => {
                         if !self.processes.iter().any(|p| &p.name == process)
-                            || !path.starts_with('/') || path.starts_with("//")
-                            || path.len() > 2048 || path.contains(['\\', '\r', '\n', '\0', '?', '#'])
+                            || !path.starts_with('/')
+                            || path.starts_with("//")
+                            || path.len() > 2048
+                            || path.contains(['\\', '\r', '\n', '\0', '?', '#'])
                             || path.split('/').any(|part| matches!(part, "." | ".."))
                             || path.contains('%')
                         {

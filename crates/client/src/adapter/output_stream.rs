@@ -519,9 +519,14 @@ impl AdapterOutputStream {
 
 #[async_trait]
 impl OutputStream for AdapterOutputStream {
-    async fn emit_provider_account_routing(&self,event:&lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent) {
-        if let Ok(event_json)=serde_json::to_string(event) {
-            self.sink.emit(ClientEvent::ProviderAccountRouting {event_json}).await;
+    async fn emit_provider_account_routing(
+        &self,
+        event: &lingxi_core::host::provider_accounts::ProviderAccountRoutingEvent,
+    ) {
+        if let Ok(event_json) = serde_json::to_string(event) {
+            self.sink
+                .emit(ClientEvent::ProviderAccountRouting { event_json })
+                .await;
         }
     }
     async fn emit_task_lifecycle(&self, event: &Utf16JsonProjection) {

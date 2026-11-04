@@ -89,11 +89,19 @@ fn app_owned_mcp_requires_desktop_targets_and_exact_release_consent() {
     source(Path::new(&request.source_path), &value);
     let published = library.publish(request).unwrap();
     let id = &published.record.app_id;
-    assert!(matches!(library.prepare_run(id, 1), Err(AppError::ConsentRequired(_))));
-    library.grant_execution(id, &published.release.digest).unwrap();
+    assert!(matches!(
+        library.prepare_run(id, 1),
+        Err(AppError::ConsentRequired(_))
+    ));
+    library
+        .grant_execution(id, &published.release.digest)
+        .unwrap();
     assert!(library.prepare_run(id, 1).is_ok());
     library.revoke_execution(id).unwrap();
-    assert!(matches!(library.require_execution_grant(id, 1), Err(AppError::ConsentRequired(_))));
+    assert!(matches!(
+        library.require_execution_grant(id, 1),
+        Err(AppError::ConsentRequired(_))
+    ));
     value["targets"] = json!([{"platform":"ios","environment":"mobile-linux"}]);
     assert!(Manifest::parse(&value.to_string()).is_err());
     value["targets"] = json!([{"platform":"macos","environment":"native"}]);
@@ -114,8 +122,12 @@ fn app_owned_mcp_endpoints_are_process_bound_and_public_exports_exclude_secrets(
     }
     value["mcpServers"] = json!({"tools":{"type":"http","process":"missing","path":"/mcp"}});
     assert!(Manifest::parse(&value.to_string()).is_err());
-    value["mcpServers"] = json!({"tools":{"type":"stdio","command":"node mcp.mjs","env":{"API_KEY":"secret"}}});
-    assert!(Manifest::parse(&value.to_string()).unwrap().validate_public_export().is_err());
+    value["mcpServers"] =
+        json!({"tools":{"type":"stdio","command":"node mcp.mjs","env":{"API_KEY":"secret"}}});
+    assert!(Manifest::parse(&value.to_string())
+        .unwrap()
+        .validate_public_export()
+        .is_err());
     value["mcpServers"]["tools"]["url"] = json!("https://example.com");
     assert!(Manifest::parse(&value.to_string()).is_err());
 }

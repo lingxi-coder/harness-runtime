@@ -28,7 +28,8 @@ use pipewire::{
 };
 use serde::Deserialize;
 use zbus::{
-    Proxy, wire::{OwnedFd, OwnedObjectPath, Type, Variant},
+    wire::{OwnedFd, OwnedObjectPath, Type, Variant},
+    Proxy,
 };
 
 use crate::{video_recorder::Frame, XCapError, XCapResult};
@@ -141,7 +142,8 @@ impl ScreenCast<'_> {
     #[allow(dead_code)]
     pub fn open_pipe_wire_remote(&self, session: &OwnedObjectPath) -> XCapResult<OwnedFd> {
         let options: HashMap<&str, Variant<'_>> = HashMap::new();
-        let fd: OwnedFd = block_on_dbus(self.proxy.call("OpenPipeWireRemote", &(session, options)))?;
+        let fd: OwnedFd =
+            block_on_dbus(self.proxy.call("OpenPipeWireRemote", &(session, options)))?;
 
         Ok(fd)
     }

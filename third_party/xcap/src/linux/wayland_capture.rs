@@ -4,12 +4,15 @@ use image::RgbaImage;
 use scopeguard::defer;
 use serde::Deserialize;
 use zbus::{
-    Connection, Proxy, wire::{Type, Variant},
+    wire::{Type, Variant},
+    Connection, Proxy,
 };
 
 use crate::{
     error::XCapResult,
-    platform::utils::{block_on_dbus, get_zbus_portal_request, safe_uri_to_path, wait_zbus_response},
+    platform::utils::{
+        block_on_dbus, get_zbus_portal_request, safe_uri_to_path, wait_zbus_response,
+    },
 };
 
 use super::utils::{get_zbus_connection, png_to_rgba_image};
