@@ -273,7 +273,10 @@ pub(crate) fn build_client_with_proxy_auth_helper(
     // reqwest's `default-features = false` still leaves automatic env-proxy
     // matching on by default. Disable it so only the Native-resolved route can
     // be used, including the direct/no-proxy case.
-    let mut builder = Client::builder().no_proxy();
+    // Bound TCP/TLS setup. This does not limit a live SSE body.
+    let mut builder = Client::builder()
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(10));
     if let Some(route) = route {
         let mut proxy = Proxy::all(&route.url)?;
         if route.proxy_auth_helper_allowed {

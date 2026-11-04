@@ -10,6 +10,29 @@ use tool_api::native_schema::{
 };
 use tool_api::Tool;
 
+fn compiled_schema_pattern(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    const MAX_CACHED: usize = 64;
+    const MAX_PATTERN_LEN: usize = 4096;
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, regex::Regex>>> =
+        std::sync::OnceLock::new();
+    if pattern.len() > MAX_PATTERN_LEN {
+        return regex::Regex::new(pattern);
+    }
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cached) = guard.get(pattern) {
+        return Ok(cached.clone());
+    }
+    let compiled = regex::Regex::new(pattern)?;
+    if guard.len() >= MAX_CACHED {
+        guard.clear();
+    }
+    guard.insert(pattern.to_string(), compiled.clone());
+    Ok(compiled)
+}
+
 fn js_keys(object: &serde_json::Map<String, serde_json::Value>) -> Vec<&String> {
     fn index(key: &str) -> Option<u32> {
         let n = key.parse::<u32>().ok()?;
@@ -667,7 +690,7 @@ fn collect_issues(
         input.as_str(),
         schema.get("pattern").and_then(Value::as_str),
     ) {
-        let Ok(regex) = regex::Regex::new(pattern) else {
+        let Ok(regex) = compiled_schema_pattern(pattern) else {
             return false;
         };
         if !regex.is_match(value) {

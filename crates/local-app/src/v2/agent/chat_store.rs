@@ -858,7 +858,7 @@ impl ChatStore {
             .chats
             .values()
             .filter(|record| include_archived || !record.summary.archived)
-            .map(|record| record.summary.clone())
+            .map(|record| &record.summary)
             .collect::<Vec<_>>();
         chats.sort_by(|left, right| {
             right
@@ -874,7 +874,7 @@ impl ChatStore {
             chats.drain(..=position);
         }
         chats.truncate(limit);
-        Ok(chats)
+        Ok(chats.into_iter().cloned().collect())
     }
 
     /// Return the private Harness session identifier associated with a chat.

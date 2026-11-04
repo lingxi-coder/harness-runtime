@@ -2,7 +2,7 @@
 //! Recovery publishes existing results; it never dispatches desktop input.
 use super::*;
 use lingxi_core::types::SessionId;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +80,32 @@ pub(super) async fn preserve_pending_compaction_tail(
         return Ok((preserved.to_vec(), false));
     }
     let exact_members = !abandoned_markers.is_empty();
+    // First binding row for each protocol/response/call. `.position` kept the
+    // earliest message, and a later duplicate must not move the compact tail.
+    let mut binding_origins: HashMap<(String, String, String), usize> = HashMap::new();
+    for (index, message) in history.iter().enumerate() {
+        for block in blocks(message) {
+            let ContentBlock::ProviderContent { protocol, value } = block else {
+                continue;
+            };
+            if value.string_at("/type") != Some("lingxi_computer_binding") {
+                continue;
+            }
+            let (Some(response_id), Some(call_id)) = (
+                value.string_at("/provider_response_id"),
+                value.string_at("/call/context/call_id"),
+            ) else {
+                continue;
+            };
+            binding_origins
+                .entry((
+                    protocol.clone(),
+                    response_id.to_string(),
+                    call_id.to_string(),
+                ))
+                .or_insert(index);
+        }
+    }
     let mut first_origin = history.len();
     for receipt in pending {
         if receipt.execution_ids.is_empty() {
@@ -91,17 +117,13 @@ pub(super) async fn preserve_pending_compaction_tail(
                 .iter()
                 .find(|record| record.execution_id() == *id)
                 .ok_or_else(|| internal("pending receipt has no durable execution facts"))?;
-            let origin = history
-                .iter()
-                .position(|message| {
-                    blocks(message).iter().any(|block| matches!(block,
-                ContentBlock::ProviderContent {protocol, value}
-                    if protocol == &receipt.binding.protocol
-                    && value.string_at("/type") == Some("lingxi_computer_binding")
-                    && value.string_at("/provider_response_id") == Some(record.identity.provider_response_id.as_str())
-                    && value.string_at("/call/context/call_id") == Some(record.identity.provider_call_id.as_str())
-            ))
-                })
+            let origin = binding_origins
+                .get(&(
+                    receipt.binding.protocol.clone(),
+                    record.identity.provider_response_id.clone(),
+                    record.identity.provider_call_id.clone(),
+                ))
+                .copied()
                 .ok_or_else(|| {
                     internal("cannot compact a pending receipt with a missing native origin")
                 })?;

@@ -47,8 +47,12 @@ impl BuiltinCommandHandler for ExportHandler {
                 display: Some("Export filename must be valid Unicode text.".into()),
             };
         };
-        let messages = self.handle.conversation_transcript().await;
-        let snap = self.handle.get_status_snapshot().await;
+        // Independent reads: the transcript is not an input to the snapshot.
+        // Neither future is a `Result`, so `join` rather than `try_join`.
+        let (messages, snap) = tokio::join!(
+            self.handle.conversation_transcript(),
+            self.handle.get_status_snapshot()
+        );
         let content = render_messages_to_plain_text(&messages);
 
         let filename_arg = raw_args.trim();
@@ -64,7 +68,7 @@ impl BuiltinCommandHandler for ExportHandler {
                 .string_units("")
                 .expect("transcript renderer returns a root string"),
         );
-        let display = match std::fs::write(&filepath, file_text) {
+        let display = match tokio::fs::write(&filepath, file_text).await {
             Ok(()) => format!("Conversation exported to: {}", filepath.display()),
             Err(e) => format!("Failed to export conversation: {e}"),
         };

@@ -862,9 +862,14 @@ async fn discover_auth_server(
                 "authServerMetadataUrl must use https:// (got: {cfg})"
             )));
         }
-        let metadata = get_json::<AuthServerMetadataDocument>(http, cfg).await?;
-        let protected_resource =
-            discover_protected_resource(http, server_url, resource_metadata_url).await?;
+        // The configured metadata document and the protected-resource probe
+        // do not use each other's results. The issuer lookup below stays
+        // sequential because it reads `authorization_servers`.
+        let protected_http = Arc::clone(http);
+        let (metadata, protected_resource) = tokio::try_join!(
+            get_json::<AuthServerMetadataDocument>(http, cfg),
+            discover_protected_resource(&protected_http, server_url, resource_metadata_url),
+        )?;
         return Ok(discovered_metadata(
             metadata,
             protected_resource.map(|(_, resource)| resource),

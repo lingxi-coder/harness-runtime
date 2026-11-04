@@ -2,7 +2,7 @@
 use crate::presentation::render::{NamedColor, StyleColor};
 
 /// One of claude-code's 6 renderable themes (`utils/theme.ts` `THEME_NAMES`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeName {
     /// Dark theme (`darkTheme`).
     Dark,
