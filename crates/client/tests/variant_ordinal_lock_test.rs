@@ -85,6 +85,7 @@ const COMMAND_ORDINALS: &[&str] = &[
     "MediaControlResponse",
     "UpdateMediaSessionModes",
     "RefreshProviderCatalog",
+    "SideChatRestore",
 ];
 
 const EVENTS_SRC: &str = include_str!("../src/protocol/events.rs");
@@ -202,6 +203,7 @@ const EVENT_ORDINALS: &[&str] = &[
     "MediaDeviceRequest",
     "MediaServiceResponse",
     "MediaControlRequest",
+    "SideChatCheckpoint",
 ];
 
 fn variants_in_declaration_order(src: &str, enum_name: &str) -> Vec<String> {

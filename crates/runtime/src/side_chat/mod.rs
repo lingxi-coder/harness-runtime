@@ -1,6 +1,7 @@
 //! Host-owned lightweight conversations. All state and replay stay in RAM.
 /// Shared lightweight factory pieces.
 pub mod composition;
+mod recovery;
 use async_trait::async_trait;
 use client::{
     adapter::{
@@ -152,10 +153,21 @@ struct ReplaySink {
     events: Mutex<Vec<ClientEvent>>,
     order: Mutex<()>,
     activity: std::sync::Mutex<Activity>,
+    recoverable: bool,
+    terminal: Mutex<Option<ClientEvent>>,
 }
 #[async_trait]
 impl ClientEventSink for ReplaySink {
     async fn emit(&self, event: ClientEvent) {
+        if self.recoverable && matches!(event, ClientEvent::TurnEnded { .. }) {
+            *self.terminal.lock().await = Some(event);
+            return;
+        }
+        self.publish(event).await;
+    }
+}
+impl ReplaySink {
+    async fn publish(&self, event: ClientEvent) {
         let _order = self.order.lock().await;
         {
             let mut activity = self
@@ -253,6 +265,7 @@ struct ManagerState {
     closed: bool,
     sides: HashMap<String, Arc<Side>>,
     requests: HashMap<String, Result<String, String>>,
+    ended_sides: std::collections::HashSet<String>,
 }
 
 /// One manager belongs to one host generation. Request tombstones survive End
@@ -264,6 +277,7 @@ pub struct SideChatManager {
     state: Mutex<ManagerState>,
     create_gate: Mutex<()>,
     ttl: Duration,
+    recoverable: bool,
 }
 impl SideChatManager {
     /// Create the owner for one host generation.
@@ -271,6 +285,24 @@ impl SideChatManager {
         parent: Arc<ConversationOrchestrator>,
         factory: Arc<dyn SideChatFactory>,
         owner: Arc<dyn ClientEventSink>,
+    ) -> Arc<Self> {
+        Self::new_with_recovery(parent, factory, owner, false)
+    }
+
+    /// Keep host-owned checkpoints for replacement bridge processes.
+    pub fn new_recoverable(
+        parent: Arc<ConversationOrchestrator>,
+        factory: Arc<dyn SideChatFactory>,
+        owner: Arc<dyn ClientEventSink>,
+    ) -> Arc<Self> {
+        Self::new_with_recovery(parent, factory, owner, true)
+    }
+
+    fn new_with_recovery(
+        parent: Arc<ConversationOrchestrator>,
+        factory: Arc<dyn SideChatFactory>,
+        owner: Arc<dyn ClientEventSink>,
+        recoverable: bool,
     ) -> Arc<Self> {
         let manager = Arc::new(Self {
             parent,
@@ -280,9 +312,11 @@ impl SideChatManager {
                 closed: false,
                 sides: HashMap::new(),
                 requests: HashMap::new(),
+                ended_sides: std::collections::HashSet::new(),
             }),
             create_gate: Mutex::new(()),
             ttl: Duration::from_secs(30 * 60),
+            recoverable,
         });
         let weak = Arc::downgrade(&manager);
         tokio::spawn(async move {
@@ -377,6 +411,8 @@ impl SideChatManager {
             events: Mutex::new(Vec::new()),
             order: Mutex::new(()),
             activity: std::sync::Mutex::new(Activity::new()),
+            recoverable: self.recoverable,
+            terminal: Mutex::new(None),
         });
         let permission = Arc::new(SidePermissionSink {
             replay: replay.clone(),
@@ -430,6 +466,7 @@ impl SideChatManager {
             .await
             .requests
             .insert(request_id.clone(), Ok(side_id.clone()));
+        self.checkpoint(&side_id, None, false).await?;
         self.owner
             .emit(ClientEvent::SideChatCreated {
                 request_id: request_id.clone(),
@@ -656,12 +693,21 @@ impl SideChatManager {
         }
         if !turn {
             drop(state);
+            let changes_context = matches!(
+                command,
+                ClientCommand::SetModel { .. }
+                    | ClientCommand::SetPermissionMode { .. }
+                    | ClientCommand::SetReasoningSelection { .. }
+            );
             dispatch(&side, id, command, CancellationToken::new(), false).await?;
             side.state
                 .lock()
                 .await
                 .submissions
                 .insert(request_id.clone(), ());
+            if changes_context {
+                self.checkpoint(id, None, false).await?;
+            }
             self.owner
                 .emit(ClientEvent::SideChatSubmitted {
                     side_id: id.to_string(),
@@ -692,14 +738,16 @@ impl SideChatManager {
                 .active = true;
         }
         state.submissions.insert(request_id.clone(), ());
+        drop(state);
+        self.checkpoint(id, Some(&command), false).await?;
         self.owner
             .emit(ClientEvent::SideChatSubmitted {
                 side_id: id.to_string(),
                 request_id,
             })
             .await;
-        drop(state);
         if turn {
+            let manager = self.clone();
             let side_id = id.to_string();
             tokio::spawn(async move {
                 let mut completion = TurnCompletionGuard {
@@ -734,6 +782,17 @@ impl SideChatManager {
                             .await;
                     }
                 }
+                if let Err(error) = manager.checkpoint(&side_id, None, true).await {
+                    side.replay
+                        .emit(ClientEvent::SystemNotice {
+                            message: error.into(),
+                            is_error: true,
+                        })
+                        .await;
+                }
+                if let Some(terminal) = side.replay.terminal.lock().await.take() {
+                    side.replay.publish(terminal).await;
+                }
                 let missing_terminal = {
                     let replay = side.replay.events.lock().await;
                     let turn = &replay[replay_start..];
@@ -745,7 +804,7 @@ impl SideChatManager {
                 };
                 if missing_terminal {
                     side.replay
-                        .emit(ClientEvent::TurnEnded {
+                        .publish(ClientEvent::TurnEnded {
                             outcome: if terminal_cancel.is_cancelled() {
                                 client::protocol::events::TurnOutcomeDto::Cancelled
                             } else {
@@ -828,7 +887,9 @@ impl SideChatManager {
                 })
                 .await;
         }
-        self.state.lock().await.sides.remove(id);
+        let mut manager = self.state.lock().await;
+        manager.sides.remove(id);
+        manager.ended_sides.insert(id.to_owned());
         Ok(())
     }
     /// Close all admissions and drain every child, collecting cleanup failures.
@@ -1658,6 +1719,8 @@ mod tests {
                 events: Mutex::new(Vec::new()),
                 order: Mutex::new(()),
                 activity: std::sync::Mutex::new(Activity::new()),
+                recoverable: false,
+                terminal: Mutex::new(None),
             }),
             child: None,
         });
@@ -2544,6 +2607,306 @@ mod tests {
             .await
             .submissions
             .is_empty());
+        manager.shutdown().await.unwrap();
+    }
+    async fn last_checkpoint(sink: &Sink, id: &str) -> (String, Vec<String>) {
+        sink.0
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::SideChatCheckpoint {
+                    side_id,
+                    checkpoint_json,
+                    events_json,
+                } if side_id == id => Some((checkpoint_json.clone(), events_json.clone())),
+                _ => None,
+            })
+            .expect("host receives a checkpoint")
+    }
+
+    #[tokio::test]
+    async fn recovery_keeps_frozen_context_identity_and_admission_tombstones() {
+        let owner = parent();
+        let sink = Arc::new(Sink::default());
+        let original =
+            SideChatManager::new_recoverable(owner.clone(), Arc::new(Factory), sink.clone());
+        let id = original
+            .create("original-create".into(), None, None, None)
+            .await
+            .unwrap();
+        let (json, events) = last_checkpoint(&sink, &id).await;
+        let mut checkpoint: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let marker = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "frozen-private-side-context".into(),
+        );
+        checkpoint["context"]["history"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(marker).unwrap());
+        checkpoint["submission_ids"] = serde_json::json!(["already-admitted"]);
+        let checkpoint = checkpoint.to_string();
+        let recovered_sink = Arc::new(Sink::default());
+        let replacement = SideChatManager::new_recoverable(
+            owner.clone(),
+            Arc::new(Factory),
+            recovered_sink.clone(),
+        );
+        replacement
+            .restore(&id, &checkpoint, events.clone())
+            .await
+            .unwrap();
+        let restored = replacement
+            .side(&id)
+            .await
+            .unwrap()
+            .session
+            .orchestrator
+            .side_chat_parent_snapshot()
+            .await;
+        assert!(serde_json::to_string(&restored.history)
+            .unwrap()
+            .contains("frozen-private-side-context"));
+        assert_eq!(
+            restored.history.len(),
+            2,
+            "restoration does not append a second child boundary"
+        );
+        assert!(
+            !serde_json::to_string(&owner.side_chat_parent_snapshot().await.history)
+                .unwrap()
+                .contains("frozen-private-side-context")
+        );
+        assert_eq!(
+            replacement
+                .create("original-create".into(), None, None, None)
+                .await
+                .unwrap(),
+            id
+        );
+        replacement
+            .submit(
+                &id,
+                "already-admitted".into(),
+                ClientCommand::SendPrompt {
+                    text: "must never execute".into(),
+                    prompt_mode: None,
+                    images: vec![],
+                    turn_id: None,
+                    visualization_context: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(replacement
+            .side(&id)
+            .await
+            .unwrap()
+            .state
+            .lock()
+            .await
+            .running
+            .is_none());
+        replacement.end(&id).await.unwrap();
+        assert!(
+            replacement.restore(&id, &checkpoint, events).await.is_err(),
+            "an ended side cannot be resurrected by a stale checkpoint"
+        );
+        original.shutdown().await.unwrap();
+        replacement.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_cancels_inflight_once_without_dispatch_and_rejects_foreign_context() {
+        let owner = parent();
+        let sink = Arc::new(Sink::default());
+        let original =
+            SideChatManager::new_recoverable(owner.clone(), Arc::new(Factory), sink.clone());
+        let id = original
+            .create("create".into(), None, None, None)
+            .await
+            .unwrap();
+        let side = original.side(&id).await.unwrap();
+        side.state.lock().await.running = Some(RunningTurn {
+            id: Some(7),
+            cancel: CancellationToken::new(),
+            done: Arc::new(Notify::new()),
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let prompt = ClientCommand::SendPrompt {
+            text: ClientTextDto::from_code_units(vec![0xd800, 65]),
+            prompt_mode: None,
+            images: vec![],
+            turn_id: Some(7),
+            visualization_context: None,
+        };
+        original
+            .checkpoint(&id, Some(&prompt), false)
+            .await
+            .unwrap();
+        let (checkpoint, events) = last_checkpoint(&sink, &id).await;
+        let recovered_sink = Arc::new(Sink::default());
+        let replacement = SideChatManager::new_recoverable(
+            owner.clone(),
+            Arc::new(Factory),
+            recovered_sink.clone(),
+        );
+        replacement
+            .restore(&id, &checkpoint, events.clone())
+            .await
+            .unwrap();
+        let replay = replacement.snapshot(&id).await.unwrap();
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    ClientEvent::TurnEnded {
+                        outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(replacement
+            .side(&id)
+            .await
+            .unwrap()
+            .state
+            .lock()
+            .await
+            .running
+            .is_none());
+        let context = replacement
+            .side(&id)
+            .await
+            .unwrap()
+            .session
+            .orchestrator
+            .side_chat_parent_snapshot()
+            .await;
+        assert!(
+            context.history.iter().any(|message| matches!(message,
+            lingxi_core::types::ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(block,
+                    lingxi_core::types::ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                        if utf16_code_units == &[0xd800, 65])))),
+            "exact source units survive the checkpoint"
+        );
+        replacement
+            .restore(&id, &checkpoint, events.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            replacement
+                .snapshot(&id)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, ClientEvent::TurnEnded { .. }))
+                .count(),
+            1
+        );
+        let foreign = SideChatManager::new_recoverable(
+            parent(),
+            Arc::new(Factory),
+            Arc::new(Sink::default()),
+        );
+        assert!(foreign.restore(&id, &checkpoint, events).await.is_err());
+        side.state.lock().await.running = None;
+        original.shutdown().await.unwrap();
+        replacement.shutdown().await.unwrap();
+        foreign.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn recoverable_turn_checkpoints_before_terminal_and_readonly_hydration_does_not_copy_history(
+    ) {
+        let sink = Arc::new(Sink::default());
+        let manager = SideChatManager::new_recoverable(parent(), Arc::new(Factory), sink.clone());
+        let id = manager
+            .create("create".into(), None, None, None)
+            .await
+            .unwrap();
+        let count = sink
+            .0
+            .lock()
+            .await
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::SideChatCheckpoint { .. }))
+            .count();
+        manager
+            .submit(&id, "list".into(), ClientCommand::ListModels)
+            .await
+            .unwrap();
+        manager
+            .submit(
+                &id,
+                "controls".into(),
+                ClientCommand::GetConversationControls,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.0
+                .lock()
+                .await
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::SideChatCheckpoint { .. }))
+                .count(),
+            count
+        );
+        manager
+            .submit(
+                &id,
+                "prompt".into(),
+                ClientCommand::SendPrompt {
+                    text: "private context".into(),
+                    prompt_mode: None,
+                    images: vec![],
+                    turn_id: Some(9),
+                    visualization_context: None,
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while manager
+                .side(&id)
+                .await
+                .unwrap()
+                .state
+                .lock()
+                .await
+                .running
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let events = sink.0.lock().await;
+        let terminal = events.iter().position(|event| matches!(event, ClientEvent::SideChatEvent { event_json, .. } if event_json.contains("turn_ended"))).unwrap();
+        let checkpoints = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(event, ClientEvent::SideChatCheckpoint { .. }).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checkpoints.len(),
+            3,
+            "only creation, admission and completion copy context"
+        );
+        assert!(
+            checkpoints[2] < terminal,
+            "the host has committed context before the user sees completion"
+        );
+        drop(events);
         manager.shutdown().await.unwrap();
     }
 }

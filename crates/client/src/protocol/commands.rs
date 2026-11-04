@@ -891,11 +891,24 @@ define_client_command! {
         // startup, foreground, background, timer, network_restored, settings, manual.
         trigger: String,
     },
+    /// Host-private restoration of one checkpoint; never executes a prompt.
+    SideChatRestore { side_id: String, checkpoint_json: String, events_json: Vec<String> },
+
 }
 
 impl From<ClientCommandWire> for ClientCommand {
     fn from(value: ClientCommandWire) -> Self {
         match value {
+            ClientCommandWire::SideChatRestore {
+                side_id,
+                checkpoint_json,
+                events_json,
+            } => Self::SideChatRestore {
+                side_id,
+                checkpoint_json,
+                events_json,
+            },
+
             ClientCommandWire::FusionAdmin { command } => Self::FusionAdmin { command },
             ClientCommandWire::SideChatCreate {
                 request_id,

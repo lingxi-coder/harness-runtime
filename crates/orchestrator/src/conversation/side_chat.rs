@@ -4,7 +4,7 @@ use lingxi_core::types::ContentBlock;
 
 /// A creation-time snapshot. Reading it never waits for the parent's turn gate
 /// and never consumes its queued peer reports.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SideChatParentSnapshot {
     /// Model and request configuration frozen at creation.
     pub config: OrchestratorConfig,
@@ -27,6 +27,9 @@ pub struct SideChatParentSnapshot {
     pub cwd: std::path::PathBuf,
     /// Fixed parent instruction-file context kept in RAM.
     pub memory_files: Vec<crate::prompt::MemoryFile>,
+    /// Recovery snapshots already contain the child context boundary.
+    #[serde(default)]
+    pub restored: bool,
 }
 
 /// Keep the longest prefix containing complete tool-use/result groups. An
@@ -133,11 +136,14 @@ impl ConversationOrchestrator {
                 .unwrap_or_else(|| "default".into()),
             cwd: self.current_cwd(),
             memory_files: Vec::new(),
+            restored: self.side_chat,
         };
         drop(session);
-        if let Some(prompt) = self.prompt_runtime.prompt_snapshot.lock().await.as_ref() {
-            snapshot.config.system_prompt_override =
-                Some(prompt_snapshot_system_source_text(prompt));
+        if !self.side_chat {
+            if let Some(prompt) = self.prompt_runtime.prompt_snapshot.lock().await.as_ref() {
+                snapshot.config.system_prompt_override =
+                    Some(prompt_snapshot_system_source_text(prompt));
+            }
         }
         snapshot.memory_files = self.memory.load(&snapshot.cwd).await;
         snapshot
@@ -154,8 +160,10 @@ impl ConversationOrchestrator {
             return Err("side context is already seeded".into());
         }
         session.history = snapshot.history.clone();
-        session.history.push(ConversationMessage::user_meta(MessageId::new(),
+        if !snapshot.restored {
+            session.history.push(ConversationMessage::user_meta(MessageId::new(),
             "This is an independent side conversation with a fixed parent context. Only this conversation's advertised tools and inline skills are available. Background tasks, agents, teams, workflows, MCP, hooks, worktrees, and nested /side are unavailable. User file changes remain after this conversation closes.".into()));
+        }
         session.model = snapshot.config.model.clone();
         session.model_profile = snapshot.model_profile.clone();
         session.user_model_setting = snapshot.user_model_setting.clone();

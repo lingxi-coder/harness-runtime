@@ -671,7 +671,7 @@ pub struct FileTreeEntry {
 ///
 /// Distinct from [`memory::lingxi_md::LoadedFile`] — the
 /// assembler retains the native sanitized acquisition body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryFile {
     /// Absolute path on disk (PII-safe — only emitted into the
     /// system prompt, never into telemetry).

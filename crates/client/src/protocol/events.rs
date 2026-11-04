@@ -823,11 +823,24 @@ define_client_event! {
     MediaControlRequest {
         request: MediaControlRequestDto,
     },
+    /// Host-private recovery state. Clients must not render or log this payload.
+    SideChatCheckpoint { side_id: String, checkpoint_json: String, events_json: Vec<String> },
+
 }
 
 impl From<ClientEventWire> for ClientEvent {
     fn from(value: ClientEventWire) -> Self {
         match value {
+            ClientEventWire::SideChatCheckpoint {
+                side_id,
+                checkpoint_json,
+                events_json,
+            } => Self::SideChatCheckpoint {
+                side_id,
+                checkpoint_json,
+                events_json,
+            },
+
             ClientEventWire::FusionCatalog { catalog_json } => Self::FusionCatalog { catalog_json },
             ClientEventWire::FusionStrategyResolved {
                 operation_id,
