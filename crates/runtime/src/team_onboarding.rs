@@ -86,19 +86,23 @@ fn build_prompt(
         .unwrap_or_else(|| cwd_basename(cwd_path));
 
     let usage_data = format_usage_data(&data);
-    // Expand only static templates. User transcript data is inserted last so
-    // text in a session can never be rewritten as a branding placeholder.
-    let guide = DEFAULT_GUIDE_TEMPLATE.replace("{{PRODUCT_NAME}}", branding::PRODUCT_NAME);
-    let prompt = DEFAULT_SYSTEM_PROMPT
-        .replace("{{PRODUCT_NAME}}", branding::PRODUCT_NAME)
-        .replace("{{MEMORY_FILE}}", branding::MEMORY_FILE)
-        .replace("{{WINDOW_DAYS}}", &WINDOW_DAYS.to_string())
-        .replace("{{GUIDE_TEMPLATE}}", &guide)
-        .replace("{{USAGE_DATA}}", &usage_data);
+    let prompt = render_prompt(&usage_data);
     let serialized = serde_json::to_string(&prompt)
         .map_err(|_| error_projection("Could not build the local onboarding prompt."))?;
     Utf16JsonProjection::parse(&serialized)
         .map_err(|_| error_projection("Could not build the local onboarding prompt."))
+}
+
+fn render_prompt(usage_data: &str) -> String {
+    // Expand only static templates. User transcript data is inserted last so
+    // text in a session can never be rewritten as a branding placeholder.
+    let guide = DEFAULT_GUIDE_TEMPLATE.replace("{{PRODUCT_NAME}}", branding::PRODUCT_NAME);
+    DEFAULT_SYSTEM_PROMPT
+        .replace("{{PRODUCT_NAME}}", branding::PRODUCT_NAME)
+        .replace("{{MEMORY_FILE}}", branding::MEMORY_FILE)
+        .replace("{{WINDOW_DAYS}}", &WINDOW_DAYS.to_string())
+        .replace("{{GUIDE_TEMPLATE}}", &guide)
+        .replace("{{USAGE_DATA}}", usage_data)
 }
 
 fn ambient_global_config_path(lingxi_home: &Path) -> Option<PathBuf> {
@@ -816,6 +820,22 @@ mod tests {
     }
 
     #[test]
+    fn template_branding_never_rewrites_inserted_usage_data() {
+        let usage = r#"{"firstMessage":"Claude {{PRODUCT_NAME}} {{WINDOW_DAYS}} {{USAGE_DATA}}"}"#;
+        let prompt = render_prompt(usage);
+        let data = prompt
+            .split_once("```json\n")
+            .unwrap()
+            .1
+            .split_once("\n```")
+            .unwrap()
+            .0;
+        assert_eq!(data, usage);
+        assert!(prompt.contains(&format!("## How We Use {}", branding::PRODUCT_NAME)));
+        assert!(prompt.contains(&format!("aren't already in {}", branding::MEMORY_FILE)));
+    }
+
+    #[test]
     fn onboarding_marker_is_persisted_before_a_failing_usage_scan() {
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join(branding::GLOBAL_CONFIG_FILE);
@@ -905,7 +925,7 @@ mod tests {
         fs::write(
             project_dir.join("recent.jsonl"),
             concat!(
-                "{\"role\":\"user\",\"content\":\"Claude {{PRODUCT_NAME}}\"}\n",
+                "{\"role\":\"user\",\"content\":\"Please fix the parser\"}\n",
                 "{\"content\":\"<command-name>/review</command-name> <command-name>/review</command-name> <command-name>/commit</command-name>\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__search\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__read\"}\n",
@@ -980,7 +1000,7 @@ mod tests {
         assert_eq!(data["sessionDescriptors"][0]["prNumbers"][0], 42);
         assert_eq!(
             data["sessionDescriptors"][0]["firstMessage"],
-            "Claude {{PRODUCT_NAME}}"
+            "Please fix the parser"
         );
         assert!(!prompt.contains("secret-token"));
         assert!(!prompt.contains("secret@example.test"));
