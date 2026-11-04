@@ -35,7 +35,7 @@ pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
     BundledSkill {
         name: "lingxi-api",
         raw: include_str!("lingxi-api/SKILL.md"),
-        triggers: &["lingxi-api", "lingxi", "灵犀"],
+        triggers: &["lingxi-api", "lingxi", branding::PRODUCT_NAME_ZH],
         references: &[],
     },
     BundledSkill {
