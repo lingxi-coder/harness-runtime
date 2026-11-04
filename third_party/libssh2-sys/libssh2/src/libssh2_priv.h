@@ -1241,7 +1241,7 @@ int _libssh2_pem_decode_integer(unsigned char **data, size_t *datalen,
                                 unsigned char **i, unsigned int *ilen);
 
 /* global.c */
-void _libssh2_init_if_needed(void);
+int _libssh2_init_if_needed(void);
 
 /* Utility function for certificate auth */
 size_t plain_method(char *method, size_t method_len);

@@ -141,7 +141,7 @@
 
 #define libssh2_hmac_ctx gcry_md_hd_t
 
-#define libssh2_crypto_init() gcry_control(GCRYCTL_DISABLE_SECMEM)
+#define libssh2_crypto_init() (gcry_control(GCRYCTL_DISABLE_SECMEM) ? -1 : 0)
 #define libssh2_crypto_exit()
 
 #define libssh2_rsa_ctx struct gcry_sexp
