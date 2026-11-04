@@ -237,6 +237,10 @@ pub const INLINE_TOOLS_ENV: &str = "LINGXI_INLINE_TOOLS";
 pub const DISABLE_REFUSAL_RETRY_ENV: &str = "LINGXI_DISABLE_REFUSAL_RETRY";
 /// Override for cross-session and agent-listing availability.
 pub const HARBOR_KITE_ENV: &str = "LINGXI_HARBOR_KITE";
+/// Desktop-owned Computer Use policy path handed to the runtime.
+pub const DESKTOP_COMPUTER_POLICY_ENV: &str = "LINGXI_DESKTOP_COMPUTER_POLICY";
+/// Desktop-owned browser bridge descriptor path handed to the runtime.
+pub const DESKTOP_BROWSER_DESCRIPTOR_ENV: &str = "LINGXI_DESKTOP_BROWSER_DESCRIPTOR";
 
 /// User config directory name under `$HOME` (e.g. `~/.lingxi`). Also the
 /// per-project config dir name (`<repo>/.lingxi/`).
@@ -419,6 +423,8 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     INLINE_TOOLS_ENV,
     DISABLE_REFUSAL_RETRY_ENV,
     HARBOR_KITE_ENV,
+    DESKTOP_COMPUTER_POLICY_ENV,
+    DESKTOP_BROWSER_DESCRIPTOR_ENV,
     DOT_DIR,
     MANAGED_PREFERENCES_DOMAIN,
     GLOBAL_CONFIG_FILE,
@@ -587,6 +593,14 @@ mod tests {
         assert_eq!(INLINE_TOOLS_ENV, "LINGXI_INLINE_TOOLS");
         assert_eq!(DISABLE_REFUSAL_RETRY_ENV, "LINGXI_DISABLE_REFUSAL_RETRY");
         assert_eq!(HARBOR_KITE_ENV, "LINGXI_HARBOR_KITE");
+        assert_eq!(
+            DESKTOP_COMPUTER_POLICY_ENV,
+            "LINGXI_DESKTOP_COMPUTER_POLICY"
+        );
+        assert_eq!(
+            DESKTOP_BROWSER_DESCRIPTOR_ENV,
+            "LINGXI_DESKTOP_BROWSER_DESCRIPTOR"
+        );
         assert_eq!(PLUGIN_ROOT_ENV, "LINGXI_PLUGIN_ROOT");
         assert_eq!(PLUGIN_DATA_ENV, "LINGXI_PLUGIN_DATA");
         assert_eq!(PROJECT_DIR_ENV, "LINGXI_PROJECT_DIR");

@@ -8,6 +8,45 @@ use std::sync::{
 };
 
 struct PolicyFile(PathBuf);
+
+#[test]
+fn desktop_policy_environment_is_read_in_child() {
+    const CHILD: &str = "HARNESS_TEST_COMPUTER_POLICY_EXPECTED";
+    const RAN: &str = "computer-policy-env-child-ran";
+    if let Ok(expected) = std::env::var(CHILD) {
+        let tool = make_tool(Arc::new(RecordingBackend::default()));
+        if expected == "present" {
+            assert_eq!(tool.policy_path.as_deref(), Some(Path::new("policy-test")));
+        } else {
+            assert!(tool.policy_path.is_none());
+        }
+        println!("{RAN}");
+        return;
+    }
+
+    for expected in ["present", "absent"] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "device_policy_tests::desktop_policy_environment_is_read_in_child",
+                "--nocapture",
+            ])
+            .env(CHILD, expected);
+        if expected == "present" {
+            command.env(branding::DESKTOP_COMPUTER_POLICY_ENV, "policy-test");
+        } else {
+            command.env_remove(branding::DESKTOP_COMPUTER_POLICY_ENV);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(RAN),
+            "{output:?}"
+        );
+    }
+}
+
 impl PolicyFile {
     fn new(value: Value) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);

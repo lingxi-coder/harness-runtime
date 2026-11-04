@@ -13,6 +13,47 @@ use tokio_util::sync::CancellationToken;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[test]
+fn desktop_descriptor_environment_is_read_in_child() {
+    const CHILD: &str = "HARNESS_TEST_BROWSER_DESCRIPTOR_EXPECTED";
+    const RAN: &str = "browser-descriptor-env-child-ran";
+    if let Ok(expected) = std::env::var(CHILD) {
+        let browser = BrowserTool::from_environment(Arc::new(crate::DenyAllResolver));
+        if expected == "present" {
+            assert_eq!(
+                browser.expect("descriptor registered").descriptor,
+                PathBuf::from("descriptor-test")
+            );
+        } else {
+            assert!(browser.is_none());
+        }
+        println!("{RAN}");
+        return;
+    }
+
+    for expected in ["present", "absent"] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "browser::tests::desktop_descriptor_environment_is_read_in_child",
+                "--nocapture",
+            ])
+            .env(CHILD, expected);
+        if expected == "present" {
+            command.env(branding::DESKTOP_BROWSER_DESCRIPTOR_ENV, "descriptor-test");
+        } else {
+            command.env_remove(branding::DESKTOP_BROWSER_DESCRIPTOR_ENV);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(RAN),
+            "{output:?}"
+        );
+    }
+}
+
 struct Host {
     path: PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
