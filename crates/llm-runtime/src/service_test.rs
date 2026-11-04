@@ -4400,6 +4400,27 @@ mod tests {
     }
 
     #[test]
+    fn stream_driver_future_footprint() {
+        fn output_size<F, T>(_: F) -> usize
+        where
+            F: FnOnce() -> T,
+        {
+            std::mem::size_of::<T>()
+        }
+
+        let adapter = make_adapter(ScriptedStreamTransport::anthropic_success());
+        let inner_bytes =
+            output_size(|| adapter.drive_stream_inner(LlmRequest::new("claude-sonnet-4-20250514")));
+        let traced_bytes = output_size(|| {
+            crate::model::request_trace::stream(
+                adapter.drive_stream_inner(LlmRequest::new("claude-sonnet-4-20250514")),
+            )
+        });
+        eprintln!("stream future sizes: inner={inner_bytes}, traced={traced_bytes}");
+        assert!(traced_bytes >= inner_bytes);
+    }
+
+    #[test]
     fn api_service_interactivity_is_session_local() {
         let prior = lingxi_core::host::session_flags::is_non_interactive_session();
         lingxi_core::host::session_flags::set_non_interactive_session(false);
