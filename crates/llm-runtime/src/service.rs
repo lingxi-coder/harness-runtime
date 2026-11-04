@@ -11516,7 +11516,7 @@ impl ApiService {
                             .execution
                             .selected_account
                             .as_ref()
-                            .and_then(|_| req.profile.as_ref())
+                            .and(req.profile.as_ref())
                             .map(|profile| {
                                 (
                                     self.client(),
@@ -12727,7 +12727,7 @@ impl ApiService {
                 &[],
                 &tools,
                 family,
-                projection_cache.as_mut().map(|cache| &mut **cache),
+                projection_cache.as_deref_mut(),
             )?;
         if let Some(cache) = &projection_cache {
             tracing::debug!(target: "llm_runtime::history_cache", messages = messages.len(), hits = cache.hits,

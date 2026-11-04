@@ -1036,7 +1036,7 @@ mod tests {
         std::fs::create_dir_all(&config.cwd).unwrap();
         std::fs::create_dir_all(&config.lingxi_home).unwrap();
         std::fs::write(
-            config.cwd.join("LINGXI.md"),
+            config.cwd.join(branding::MEMORY_FILE),
             "DO_NOT_INHERIT_PRIVATE_CONTEXT",
         )
         .unwrap();

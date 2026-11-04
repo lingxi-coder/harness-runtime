@@ -420,7 +420,7 @@ impl AppAgentFactory {
             permission::FsRoots {
                 cwd: cwd.clone(),
                 home: None,
-                lingxi_home: cwd.join(".lingxi"),
+                lingxi_home: cwd.join(branding::DOT_DIR),
             },
         ));
         let gate: Arc<dyn PermissionGate> = Arc::new(

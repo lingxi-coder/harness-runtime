@@ -55,13 +55,21 @@ pub enum RealtimeAgentInput {
 pub enum RealtimeAgentOutput {
     Provider(RealtimeEvent),
     /// A locally identified input and its Agent work have begun.
-    AgentResponseStarted { turn_id: String },
+    AgentResponseStarted {
+        turn_id: String,
+    },
     /// The input's Agent work, including tool continuations, has completed.
-    AgentTurnCompleted { turn_id: String },
+    AgentTurnCompleted {
+        turn_id: String,
+    },
 }
 
 #[derive(Clone, Copy)]
-enum ExplicitCancelTailStage { ToolCancelled, Interrupted, Raw }
+enum ExplicitCancelTailStage {
+    ToolCancelled,
+    Interrupted,
+    Raw,
+}
 
 struct ExplicitCancelTail {
     stage: ExplicitCancelTailStage,
@@ -101,12 +109,19 @@ fn deferred_input_bytes(input: &RealtimeInput) -> Result<usize, OrchestratorErro
         RealtimeInput::RetrieveItem { item_id }
         | RealtimeInput::DeleteItem { item_id }
         | RealtimeInput::TruncateAudio { item_id, .. } => Some(item_id.len()),
-        RealtimeInput::ImportHistory { .. } | RealtimeInput::ToolResult { .. }
-        | RealtimeInput::ToolResults { .. } => return Err(failure("host realtime input cannot replace Agent history or tool results")),
+        RealtimeInput::ImportHistory { .. }
+        | RealtimeInput::ToolResult { .. }
+        | RealtimeInput::ToolResults { .. } => {
+            return Err(failure(
+                "host realtime input cannot replace Agent history or tool results",
+            ))
+        }
         _ => Some(0),
     };
     let size = size.ok_or_else(|| failure("realtime deferred input size overflow"))?;
-    if size > MAX_DEFERRED_ITEM_BYTES { return Err(failure("realtime deferred input is too large")); }
+    if size > MAX_DEFERRED_ITEM_BYTES {
+        return Err(failure("realtime deferred input is too large"));
+    }
     Ok(size)
 }
 
@@ -162,7 +177,9 @@ impl AudioInputAdmissions {
     }
 
     fn bind_gemini_turn(&mut self, turn_id: &str, local_turn_active: bool) {
-        let Some(number) = turn_id.strip_prefix("gemini-turn-") else { return };
+        let Some(number) = turn_id.strip_prefix("gemini-turn-") else {
+            return;
+        };
         if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
             return;
         }
@@ -180,7 +197,10 @@ impl AudioInputAdmissions {
     }
 
     fn openai_committed(&mut self, item_id: &str) -> Option<RealtimeEvent> {
-        if item_id.is_empty() || self.openai_items.contains(item_id) || self.openai_tainted_items.contains(item_id) {
+        if item_id.is_empty()
+            || self.openai_items.contains(item_id)
+            || self.openai_tainted_items.contains(item_id)
+        {
             return None;
         }
         if self.pending_openai_commits == 0 {
@@ -189,7 +209,9 @@ impl AudioInputAdmissions {
         }
         self.pending_openai_commits -= 1;
         self.openai_items.insert(item_id.to_owned());
-        let early = self.early_openai_finals.remove(item_id)
+        let early = self
+            .early_openai_finals
+            .remove(item_id)
             .filter(|_| !self.openai_tainted_items.contains(item_id));
         // Unmatched events cannot borrow authorization from a future commit.
         if self.pending_openai_commits == 0 {
@@ -237,8 +259,12 @@ impl AudioInputAdmissions {
                 Ok((None, !final_chunk && self.streaming_audio))
             }
             RealtimeCompletionBoundary::Gemini38 => {
-                let Some(turn_id) = turn_id else { return Ok((None, false)) };
-                let Some(number) = turn_id.strip_prefix("gemini-turn-") else { return Ok((None, false)) };
+                let Some(turn_id) = turn_id else {
+                    return Ok((None, false));
+                };
+                let Some(number) = turn_id.strip_prefix("gemini-turn-") else {
+                    return Ok((None, false));
+                };
                 if item_id != format!("gemini-input-{number}") {
                     return Ok((None, false));
                 }
@@ -250,7 +276,9 @@ impl AudioInputAdmissions {
                     return Ok((final_chunk.then(|| text.to_owned()), true));
                 }
                 if self.streaming_audio {
-                    let provisional = self.gemini_provisional_turn.get_or_insert_with(|| turn_id.to_owned());
+                    let provisional = self
+                        .gemini_provisional_turn
+                        .get_or_insert_with(|| turn_id.to_owned());
                     return Ok((None, !final_chunk && provisional == turn_id));
                 }
                 // The codec accumulates interim text until turn completion. A
@@ -262,7 +290,11 @@ impl AudioInputAdmissions {
     }
 
     fn retained_identity_count(&self) -> usize {
-        self.openai_items.len() + self.openai_tainted_items.len() + self.early_openai_finals.len() + self.gemini_turns.len() + self.gemini_tainted_turns.len()
+        self.openai_items.len()
+            + self.openai_tainted_items.len()
+            + self.early_openai_finals.len()
+            + self.gemini_turns.len()
+            + self.gemini_tainted_turns.len()
     }
 }
 
@@ -285,8 +317,13 @@ struct RealtimeTurnTracker {
 
 impl RealtimeTurnTracker {
     fn begin(&mut self) -> Result<Option<String>, OrchestratorError> {
-        if self.current.is_some() { return Ok(None); }
-        self.next_id = self.next_id.checked_add(1).ok_or_else(|| failure("realtime turn identity exhausted"))?;
+        if self.current.is_some() {
+            return Ok(None);
+        }
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| failure("realtime turn identity exhausted"))?;
         let id = format!("agent-{}", self.next_id);
         self.current = Some(id.clone());
         self.response_started = false;
@@ -301,13 +338,24 @@ impl RealtimeTurnTracker {
         Ok(Some(id))
     }
 
-    fn response_started(&mut self, provider_id: &Option<String>, pending_tools: bool) -> Result<(), OrchestratorError> {
-        if provider_id.as_ref().is_some_and(|id| self.completed_provider_ids.contains(id)) {
-            return Err(failure("realtime provider reused a completed response identity"));
+    fn response_started(
+        &mut self,
+        provider_id: &Option<String>,
+        pending_tools: bool,
+    ) -> Result<(), OrchestratorError> {
+        if provider_id
+            .as_ref()
+            .is_some_and(|id| self.completed_provider_ids.contains(id))
+        {
+            return Err(failure(
+                "realtime provider reused a completed response identity",
+            ));
         }
         if self.continuation_requested && !pending_tools {
             if self.response_started && self.response_had_tool && !self.response_done {
-                return Err(failure("realtime continuation started before its prior response completed"));
+                return Err(failure(
+                    "realtime continuation started before its prior response completed",
+                ));
             }
             self.response_had_tool = false;
             self.continuation_requested = false;
@@ -318,26 +366,53 @@ impl RealtimeTurnTracker {
         Ok(())
     }
 
-    fn tool_called(&mut self) { self.response_had_tool = true; }
+    fn tool_called(&mut self) {
+        self.response_had_tool = true;
+    }
 
-    fn continued(&mut self) { self.continuation_requested = true; }
+    fn continued(&mut self) {
+        self.continuation_requested = true;
+    }
 
-    fn completed(&mut self, provider_id: &Option<String>, interrupted: bool, pending_tools: bool) -> Result<Option<String>, OrchestratorError> {
-        if !self.response_started { return Ok(None); }
+    fn completed(
+        &mut self,
+        provider_id: &Option<String>,
+        interrupted: bool,
+        pending_tools: bool,
+    ) -> Result<Option<String>, OrchestratorError> {
+        if !self.response_started {
+            return Ok(None);
+        }
         if let Some(id) = provider_id {
-            if self.completed_provider_ids.contains(id) { return Ok(None); }
-            if self.provider_id.as_ref().is_some_and(|expected| expected != id) { return Ok(None); }
+            if self.completed_provider_ids.contains(id) {
+                return Ok(None);
+            }
+            if self
+                .provider_id
+                .as_ref()
+                .is_some_and(|expected| expected != id)
+            {
+                return Ok(None);
+            }
             self.completed_provider_ids.insert(id.clone());
         } else {
             if self.provider_id.is_some() || self.completed_anonymous {
-                return Err(failure("realtime provider completion has ambiguous response identity"));
+                return Err(failure(
+                    "realtime provider completion has ambiguous response identity",
+                ));
             }
             self.completed_anonymous = true;
         }
         self.response_done = true;
-        if interrupted && pending_tools { self.cancelled_terminal = true; }
-        if interrupted && !pending_tools { return Ok(self.finish()); }
-        if pending_tools || self.response_had_tool { return Ok(None); }
+        if interrupted && pending_tools {
+            self.cancelled_terminal = true;
+        }
+        if interrupted && !pending_tools {
+            return Ok(self.finish());
+        }
+        if pending_tools || self.response_had_tool {
+            return Ok(None);
+        }
         Ok(self.finish())
     }
 
@@ -356,7 +431,11 @@ impl RealtimeTurnTracker {
     }
 
     fn cancelled_tools_drained(&mut self) -> Option<String> {
-        if self.cancelled_terminal { self.finish() } else { None }
+        if self.cancelled_terminal {
+            self.finish()
+        } else {
+            None
+        }
     }
 }
 

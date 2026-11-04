@@ -2,27 +2,99 @@
 //!
 //! Compiles the three standard mbedTLS static libraries — `mbedcrypto`,
 //! `mbedx509`, `mbedtls` — from `third_party/mbedtls/library/*.c` using the
-//! stock `include/mbedtls/mbedtls_config.h`, then exports the include dir as
-//! `DEP_MBEDTLS_INCLUDE` for the direct dependents (libgit2-sys / libssh2-sys).
+//! upstream configuration with LingXi's platform threading wrapper, then exports
+//! that same include tree as `DEP_MBEDTLS_INCLUDE` for the direct dependents
+//! (libgit2-sys / libssh2-sys).
 //!
 //! Two things matter for this seam to actually link:
 //!
-//! 1. **No bundling.** This crate's `lib.rs` is an empty doc-only stub, so
-//!    nothing in Rust references it. `cc::Build::compile(name)` would emit
-//!    `cargo:rustc-link-lib=static=<name>` (i.e. `+bundle`), which stuffs the
-//!    `.a` *inside* `libmbedtls_sys.rlib`. rustc then prunes that unreferenced
-//!    rlib from the final link and the bundled mbedTLS objects vanish with it
-//!    -> ~96 undefined `mbedtls_*` symbols in the consumers (libgit2-sys /
-//!    libssh2-sys). We therefore suppress cc's auto-emit
-//!    (`cargo_metadata(false)`) and emit `static:-bundle=<name>` ourselves so
-//!    the archives are passed straight to the final binary link, not bundled.
-//!
-//! 2. **Order: crypto LAST.** Under single-pass static-archive resolution a
-//!    definition must follow the references to it. tls/x509 and the consumer
-//!    archives all use crypto, so the emitted order is tls -> x509 -> crypto.
+//! `lib.rs` owns the `-bundle` link directives and a used link anchor. The
+//! build script must not also emit cc's default bundled link directives.
+//! Archive link order is tls, x509, crypto, as declared in `lib.rs`.
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn track_cc_environment() {
+    let target = env::var("TARGET").unwrap();
+    let host = env::var("HOST").unwrap();
+    let target_underscored = target.replace(['-', '.'], "_");
+    let kind = if target == host { "HOST" } else { "TARGET" };
+
+    // cc 1.2.x checks these four spellings, in precedence order. Watch even
+    // unset variants so that adding a higher-priority override rebuilds the C.
+    for variable in ["CC", "CFLAGS", "AR", "ARFLAGS", "RANLIB", "RANLIBFLAGS"] {
+        println!("cargo:rerun-if-env-changed={variable}_{target}");
+        println!("cargo:rerun-if-env-changed={variable}_{target_underscored}");
+        println!("cargo:rerun-if-env-changed={kind}_{variable}");
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+
+    // cc's other tool-selection and flag controls, Apple SDK selection, and
+    // the environment inherited by the supported native toolchains.
+    for variable in [
+        "CC_FORCE_DISABLE",
+        "CC_KNOWN_WRAPPER_CUSTOM",
+        "CC_SHELL_ESCAPED_FLAGS",
+        "CRATE_CC_NO_DEFAULTS",
+        "CROSS_COMPILE",
+        "RUSTC_WRAPPER",
+        "RUSTC_LINKER",
+        "ZERO_AR_DATE",
+        "PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "WASI_SDK_PATH",
+        "WASI_SYSROOT",
+        "WASM_MUSL_SYSROOT",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "IPHONEOS_DEPLOYMENT_TARGET",
+        "TVOS_DEPLOYMENT_TARGET",
+        "WATCHOS_DEPLOYMENT_TARGET",
+        "XROS_DEPLOYMENT_TARGET",
+        "VSCMD_ARG_TGT_ARCH",
+        "VSCMD_ARG_VCVARS_SPECTRE",
+        "VCINSTALLDIR",
+        "VSINSTALLDIR",
+        "VSTEL_MSBuildProjectFullPath",
+        "VCToolsVersion",
+        "WindowsSdkDir",
+        "WindowsSDKVersion",
+        "ProgramFiles(x86)",
+        "ProgramFiles",
+        "INCLUDE",
+        "LIB",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+}
+
+fn copy_include_tree(source: &Path, target: &Path) {
+    assert!(
+        fs::symlink_metadata(source).unwrap().file_type().is_dir(),
+        "mbedTLS include source is not a directory: {}",
+        source.display()
+    );
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let dest = target.join(entry.file_name());
+        if kind.is_dir() {
+            copy_include_tree(&entry.path(), &dest);
+        } else if kind.is_file() {
+            fs::copy(entry.path(), dest).unwrap();
+        } else {
+            panic!(
+                "unexpected non-file in mbedTLS include tree: {}",
+                entry.path().display()
+            );
+        }
+    }
+}
 
 /// X.509 sources (CMake `src_x509`).
 const SRC_X509: &[&str] = &[
@@ -61,29 +133,68 @@ const SRC_TLS: &[&str] = &[
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    // `cargo_metadata(false)` below intentionally suppresses cc-rs' automatic
-    // Cargo directives, including its environment invalidation hints. Keep the
-    // Apple deployment target explicit so rebuilding an iOS XCFramework after
-    // changing the minimum OS cannot silently reuse C objects stamped for the
-    // SDK's current (and potentially much newer) default deployment version.
-    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+    // `cargo_metadata(false)` suppresses all cc-rs Cargo directives, including
+    // environment invalidation. Restore the relevant hints without emitting
+    // cc-rs' conflicting native link directives.
+    track_cc_environment();
     // `third_party/mbedtls` lives next to `third_party/mbedtls-sys`.
     let src_root = manifest.parent().unwrap().join("mbedtls");
-    let include = src_root.join("include");
+    let source_include = src_root.join("include");
     let library = src_root.join("library");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let include = out.join("lingxi-mbedtls-include");
+    let wrapper = manifest.join("lingxi_config.h");
+    assert!(
+        fs::symlink_metadata(&wrapper)
+            .unwrap()
+            .file_type()
+            .is_file(),
+        "mbedTLS configuration wrapper is not a regular file"
+    );
 
     println!("cargo:rerun-if-changed={}", library.display());
-    println!("cargo:rerun-if-changed={}", include.display());
+    println!("cargo:rerun-if-changed={}", source_include.display());
+    println!("cargo:rerun-if-changed={}", wrapper.display());
+
+    // Every C consumer receives this same include tree through DEP_MBEDTLS_INCLUDE.
+    // Retain the release config unchanged and layer the platform threading choice
+    // on top, so public Mbed TLS struct layouts agree across all C objects.
+    match fs::symlink_metadata(&include) {
+        Ok(meta) => {
+            assert!(
+                meta.file_type().is_dir(),
+                "mbedTLS generated include path is not a directory"
+            );
+            fs::remove_dir_all(&include).unwrap();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("cannot inspect generated mbedTLS include directory: {error}"),
+    }
+    copy_include_tree(&source_include, &include);
+    let config = include.join("mbedtls/mbedtls_config.h");
+    fs::copy(&config, include.join("mbedtls/mbedtls_config_upstream.h")).unwrap();
+    fs::copy(&wrapper, &config).unwrap();
 
     // Partition the library *.c into the three standard mbedTLS libs.
     let mut x509_files = Vec::new();
     let mut tls_files = Vec::new();
     let mut crypto_files = Vec::new();
 
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&library)
+    assert!(
+        fs::symlink_metadata(&library).unwrap().file_type().is_dir(),
+        "mbedTLS library source is not a directory"
+    );
+    let mut entries: Vec<PathBuf> = fs::read_dir(&library)
         .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
+        .map(|entry| {
+            let entry = entry.unwrap();
+            assert!(
+                entry.file_type().unwrap().is_file(),
+                "unexpected non-file in mbedTLS library tree: {}",
+                entry.path().display()
+            );
+            entry.path()
+        })
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("c"))
         .collect();
     entries.sort();
@@ -106,10 +217,8 @@ fn main() {
             .include(&library)
             .define("MBEDTLS_CONFIG_FILE", "\"mbedtls/mbedtls_config.h\"")
             .warnings(false)
-            // Suppress cc's own `cargo:` emission: its auto `rustc-link-lib=
-            // static=<name>` is `+bundle`, which buries the `.a` in this crate's
-            // (empty, prunable) rlib. We emit `-bundle` directives ourselves
-            // below so the archives reach the final binary link instead.
+            // lib.rs declares the -bundle native links and the link anchor.
+            // cc's implicit bundled link directives must not conflict.
             .cargo_metadata(false);
         // NDK API floor: ensure --target uses API 29 (the P0a/G7 lesson).
         bump_android_api(&mut cfg);
@@ -119,13 +228,11 @@ fn main() {
         cfg
     };
 
-    // Build the three archives. Order is irrelevant to compilation; what matters
-    // is the order of the link-lib directives emitted below.
+    // Build all three archives with the same exported include tree.
     base(&tls_files).compile("mbedtls");
     base(&x509_files).compile("mbedx509");
     base(&crypto_files).compile("mbedcrypto");
 
-    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     println!("cargo:include={}", include.display());
     // Only the search path is emitted here. The `name`/`kind`/`modifiers` of the
     // three archives are declared via `#[link(..)]` in `lib.rs` (with a

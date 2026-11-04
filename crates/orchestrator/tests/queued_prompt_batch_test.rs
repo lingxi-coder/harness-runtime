@@ -984,7 +984,10 @@ async fn native_skill_batch_batched_driver_keeps_source_and_companion_rows() {
     assert_eq!(users[0].extra.string_at("/promptSource"), Some("sdk"));
     assert!(users[0].origin_projection.is_none());
     assert_eq!(users[1].turn_companion, Some(Some(true)));
-    let origin = users[1].origin_projection.as_ref().expect("directory Skill provenance");
+    let origin = users[1]
+        .origin_projection
+        .as_ref()
+        .expect("directory Skill provenance");
     assert_eq!(origin.string_at("/type"), Some("skill_activation"));
     assert_eq!(origin.string_at("/skill_name"), Some("skill"));
     assert_eq!(origin.string_at("/skill_path"), Some("/skills/skill"));
@@ -1453,31 +1456,57 @@ async fn dropped_skill_header_never_admits_or_registers_its_companion() {
     for streaming in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let module = dir.path().join("drop-skill-header.js");
-        std::fs::write(&module, r#"export function register(on) {
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
           on('prompt.submit', ($, e, next) => e.text.startsWith('<command-message>')
             ? { drop: 'header refused' } : next(e));
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("drop-skill-header", dir.path(), &module, Utf16JsonProjection::parse("{}").unwrap()).await.unwrap();
+        host.load(
+            "drop-skill-header",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::parse("{}").unwrap(),
+        )
+        .await
+        .unwrap();
         let mut hooks = hooks::HookRegistry::new();
         hooks.set_mod_host(host);
-        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(), Arc::new(MockApiClient::new(vec![])),
-            Arc::new(MockStreamingApiClient::with_turns(vec![])), Arc::new(ToolRegistry::new()),
-            orchestrator::test_support::noop_hook_executor(), Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()), Arc::new(StaticMemoryProvider::empty()), dir.path().to_path_buf(),
-        ).with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks))));
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(MockStreamingApiClient::with_turns(vec![])),
+                Arc::new(ToolRegistry::new()),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                dir.path().to_path_buf(),
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks))),
+        );
         let session_id = orch.session().lock().await.session_id.to_string();
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
         let inputs = orchestrator::skill_prompt_inputs(
-            "<command-message>review</command-message>\n<command-name>/review</command-name>".into(),
-            "must not become active".into(), Vec::new(),
-            Some(lingxi_core::host::SlashSkillIdentity { name: "review".into(), path: "/skills/review".into() }),
+            "<command-message>review</command-message>\n<command-name>/review</command-name>"
+                .into(),
+            "must not become active".into(),
+            Vec::new(),
+            Some(lingxi_core::host::SlashSkillIdentity {
+                name: "review".into(),
+                path: "/skills/review".into(),
+            }),
         );
         let result = if streaming {
-            orch.run_queued_prompt_batch(inputs, CancellationToken::new()).await
+            orch.run_queued_prompt_batch(inputs, CancellationToken::new())
+                .await
         } else {
-            orch.run_queued_prompt_batch_batched(inputs, CancellationToken::new()).await
+            orch.run_queued_prompt_batch_batched(inputs, CancellationToken::new())
+                .await
         };
         result.unwrap();
         assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());

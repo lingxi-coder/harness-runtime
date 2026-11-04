@@ -461,7 +461,9 @@ pub(super) fn process_visible_response<'a>(
                     Arc::new(publication_fence.clone());
                 let injected_ids = result_injected
                     .iter()
-                    .filter(|(message, _)| !compaction::invoked_skills::is_individual_skill_activation(message))
+                    .filter(|(message, _)| {
+                        !compaction::invoked_skills::is_individual_skill_activation(message)
+                    })
                     .map(|(message, _)| message.id())
                     .collect::<Vec<_>>();
                 let append_rows = async {
@@ -509,7 +511,8 @@ pub(super) fn process_visible_response<'a>(
                 orch.note_query_user_event();
                 for (message, _) in &result_injected {
                     if matches!(message, ConversationMessage::User { .. })
-                        && !compaction::invoked_skills::is_individual_skill_activation(message) {
+                        && !compaction::invoked_skills::is_individual_skill_activation(message)
+                    {
                         orch.note_query_user_event();
                     }
                 }
@@ -560,7 +563,14 @@ pub(super) fn process_visible_response<'a>(
                 }
                 for (message, source_id) in &result_injected {
                     if compaction::invoked_skills::is_individual_skill_activation(message) {
-                        if !orch.append_committed_tool_skill(message, source_id.clone(), Some(Arc::new(publication_fence.clone()))).await {
+                        if !orch
+                            .append_committed_tool_skill(
+                                message,
+                                source_id.clone(),
+                                Some(Arc::new(publication_fence.clone())),
+                            )
+                            .await
+                        {
                             return Ok(TurnStepOutcome::Ended {
                                 final_message_id: assistant_id,
                                 stop_reason: "end_turn".into(),

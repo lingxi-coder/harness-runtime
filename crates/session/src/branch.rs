@@ -496,7 +496,7 @@ pub async fn render_branch_from_captured(
         .instruction_epoch
         .max(copied_epoch)
         .checked_add(1)
-        .filter(|epoch| *epoch <= (1_u64 << 53) - 1)
+        .filter(|epoch| *epoch < (1_u64 << 53))
         .ok_or(BranchError::InstructionEpochExhausted)?;
 
     // 3. Base name = provided title, else the first-prompt derivation

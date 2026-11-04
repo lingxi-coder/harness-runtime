@@ -287,7 +287,7 @@ static int git_sysdir_guess_system_dirs(git_str *out)
 static int get_passwd_home(git_str *out, uid_t uid)
 {
 	struct passwd pwd, *pwdptr;
-	char *buf = NULL;
+	char *buf = NULL, *new_buf;
 	long buflen;
 	int error;
 
@@ -297,7 +297,11 @@ static int get_passwd_home(git_str *out, uid_t uid)
 		buflen = 1024;
 
 	do {
-		buf = git__realloc(buf, buflen);
+		if ((new_buf = git__realloc(buf, buflen)) == NULL) {
+			error = -1;
+			goto out;
+		}
+		buf = new_buf;
 		error = getpwuid_r(uid, &pwd, buf, buflen, &pwdptr);
 		buflen *= 2;
 	} while (error == ERANGE && buflen <= 8192);
@@ -458,10 +462,13 @@ int git_sysdir_global_init(void)
 	for (i = 0; !error && i < ARRAY_SIZE(git_sysdir__dirs); i++)
 		error = git_sysdir__dirs[i].guess(&git_sysdir__dirs[i].buf);
 
-	if (error)
-		return error;
+	if (!error)
+		error = git_runtime_shutdown_register(git_sysdir_global_shutdown);
 
-	return git_runtime_shutdown_register(git_sysdir_global_shutdown);
+	if (error)
+		git_sysdir_global_shutdown();
+
+	return error;
 }
 
 int git_sysdir_reset(void)

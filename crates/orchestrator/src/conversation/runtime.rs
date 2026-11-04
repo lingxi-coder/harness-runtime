@@ -170,7 +170,8 @@ pub(crate) struct TranscriptStore {
     /// `parentUuid` FROM this field, which is why the two are equal on all
     /// 96 794 real 2.1.220 lines that carry it.
     pub(crate) tool_source_assistant_uuids: Arc<Mutex<std::collections::HashMap<String, String>>>,
-    pub(crate) tool_persisted_origins: Arc<Mutex<std::collections::HashMap<(String, String), Result<String, String>>>>,
+    pub(crate) tool_persisted_origins:
+        Arc<Mutex<std::collections::HashMap<(String, String), Result<String, String>>>>,
     pub(crate) tool_source_assistant_notify: Arc<tokio::sync::Notify>,
     /// `tool_use_id` → hook `attachment` PAYLOADS produced while dispatching
     /// that tool, awaiting persistence.

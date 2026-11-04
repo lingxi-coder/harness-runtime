@@ -5,12 +5,12 @@ pub use lingxi_core::host::invoked_skills::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId};
-    use std::collections::HashSet;
-    use std::path::{Path, PathBuf};
     use crate::post_compact::{
         restore_post_compact_skills, AttachedSkillContent, SKILL_TRUNCATION_MARKER,
     };
+    use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId};
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
 
     // The registry is a process-global; serialize the tests that mutate it so
     // they don't race, and `reset_for_test()` at the top of each for a clean
@@ -381,7 +381,10 @@ mod tests {
         assert!(rows[0].effective);
         assert_eq!(rows[0].content_version, 2);
         assert_eq!(rows[0].definition_version, 1);
-        assert_eq!(rows[0].definition_sha256, content_sha256_for_test(&definition));
+        assert_eq!(
+            rows[0].definition_sha256,
+            content_sha256_for_test(&definition)
+        );
         assert_ne!(rows[0].content_sha256, rows[0].definition_sha256);
 
         let revised = source("Changed source body");
@@ -465,7 +468,10 @@ mod tests {
             reactivated.content_version, 1,
             "a local version restarts after eviction"
         );
-        assert_eq!(reactivated.content_sha256, content_sha256_for_test(&source("body")));
+        assert_eq!(
+            reactivated.content_sha256,
+            content_sha256_for_test(&source("body"))
+        );
     }
 
     #[test]
@@ -543,18 +549,41 @@ mod tests {
         let original = source(&"x".repeat(40_000));
         register_scoped(&source("skill"), Path::new("/s"), &original, main);
         register_scoped(&source("skill"), Path::new("/s"), &source("child"), child);
-        let (restored, writes) = crate::post_compact::stage_post_compact_skills(filter_for_scope(main), &[]);
+        let (restored, writes) =
+            crate::post_compact::stage_post_compact_skills(filter_for_scope(main), &[]);
         assert_eq!(restored.len(), 1);
         assert_eq!(writes.len(), 1);
         let write = &writes[0];
         assert!(filter_for_scope(main)[0].content.semantically_eq(&original));
         let concurrent = source("concurrent change");
-        assert!(write_back_if_current(&write.key, write.activation_id, &concurrent));
-        assert!(!write_back_if_unchanged(&write.key, write.activation_id, &write.original, &write.replacement));
-        assert!(filter_for_scope(main)[0].content.semantically_eq(&concurrent));
-        assert!(write_back_if_current(&write.key, write.activation_id, &original));
-        assert!(write_back_if_unchanged(&write.key, write.activation_id, &write.original, &write.replacement));
-        assert!(filter_for_scope(main)[0].content.semantically_eq(&restored[0].content));
+        assert!(write_back_if_current(
+            &write.key,
+            write.activation_id,
+            &concurrent
+        ));
+        assert!(!write_back_if_unchanged(
+            &write.key,
+            write.activation_id,
+            &write.original,
+            &write.replacement
+        ));
+        assert!(filter_for_scope(main)[0]
+            .content
+            .semantically_eq(&concurrent));
+        assert!(write_back_if_current(
+            &write.key,
+            write.activation_id,
+            &original
+        ));
+        assert!(write_back_if_unchanged(
+            &write.key,
+            write.activation_id,
+            &write.original,
+            &write.replacement
+        ));
+        assert!(filter_for_scope(main)[0]
+            .content
+            .semantically_eq(&restored[0].content));
         assert_eq!(text(&filter_for_scope(child)[0].content), "child");
     }
 

@@ -568,7 +568,11 @@ impl SkillTool {
             ctx.subagent_registry.clone().ok_or_else(|| {
                 ToolError::Internal("Skill: subagent tool registry is not configured".into())
             })?,
-        ).with_trusted_session(ctx.trusted_session_profile.clone(), ctx.durable_tool_origins.clone());
+        )
+        .with_trusted_session(
+            ctx.trusted_session_profile.clone(),
+            ctx.durable_tool_origins.clone(),
+        );
         // (3b) Gate the fork's tool dispatch with the same permission gate the
         // main loop and the Agent tool use (`tools/agent/src/agent.rs`). Without
         // it `RegistryToolInvoker::gate` is `None` and the ENTIRE permission
@@ -1741,7 +1745,9 @@ a topic not yet loaded retrieves new material; do not repeat a topic already pre
         let session_id = if let Some(session) = ctx.session.as_ref() {
             Some(session.lock().await.session_id.to_string())
         } else {
-            ctx.origin_session_id.or(self.ctx.session_id).map(|id| id.to_string())
+            ctx.origin_session_id
+                .or(self.ctx.session_id)
+                .map(|id| id.to_string())
         };
         let agent_id = ctx.agent_id.as_ref().map(ToString::to_string);
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(

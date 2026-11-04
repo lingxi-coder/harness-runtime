@@ -493,9 +493,12 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
     ));
 
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_source(sid_uuid, body),
+    )
+    .await
+    .unwrap();
 
     let chain = load_session(&lingxi_home, &cwd, sid_uuid, fs)
         .await
@@ -566,9 +569,12 @@ async fn no_parallel_calls_chain_is_unchanged_by_recovery() {
     ));
 
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_source(sid_uuid, body),
+    )
+    .await
+    .unwrap();
 
     let chain = load_session(&lingxi_home, &cwd, sid_uuid, fs)
         .await
@@ -694,9 +700,12 @@ async fn chain_stops_at_compact_boundary_parent_null() {
         "2026-07-13T10:00:04.000Z",
     ));
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_source(sid_uuid, body),
+    )
+    .await
+    .unwrap();
 
     let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
         .await
@@ -778,9 +787,12 @@ async fn compact_boundary_preserved_tail_resplices_after_summary() {
         "2026-07-13T10:00:06.000Z",
     ));
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_source(sid_uuid, body),
+    )
+    .await
+    .unwrap();
 
     let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
         .await
@@ -904,9 +916,12 @@ async fn preserved_tail_assistant_blocks_resolved_by_inner_message_id() {
             })
             .collect();
         let sid_uuid = Uuid::parse_str(&sid).unwrap();
-        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
-            .await
-            .unwrap();
+        tokio::fs::write(
+            subdir.join(format!("{sid}.jsonl")),
+            fixed_source(sid_uuid, body),
+        )
+        .await
+        .unwrap();
 
         let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
             .await
@@ -985,9 +1000,12 @@ async fn preserved_segment_resume_usage_and_boundary_validation() {
                 format!("{row}\n")
             })
             .collect();
-        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(Uuid::parse_str(&sid).unwrap(), body))
-            .await
-            .unwrap();
+        tokio::fs::write(
+            subdir.join(format!("{sid}.jsonl")),
+            fixed_source(Uuid::parse_str(&sid).unwrap(), body),
+        )
+        .await
+        .unwrap();
         let messages = load_session(&home, &cwd, Uuid::parse_str(&sid).unwrap(), fs)
             .await
             .unwrap();
@@ -1081,9 +1099,12 @@ async fn preserved_segment_keeps_parallel_results_and_split_blocks_only_from_lat
                 format!("{row}\n")
             })
             .collect();
-        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(Uuid::parse_str(&sid).unwrap(), body))
-            .await
-            .unwrap();
+        tokio::fs::write(
+            subdir.join(format!("{sid}.jsonl")),
+            fixed_source(Uuid::parse_str(&sid).unwrap(), body),
+        )
+        .await
+        .unwrap();
         let messages = load_session(&home, &cwd, Uuid::parse_str(&sid).unwrap(), fs)
             .await
             .unwrap();

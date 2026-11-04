@@ -324,32 +324,79 @@ impl RealtimeCodec for Codec {
             panic!("fixture")
         };
         let kind = String::from_utf8(bytes.to_vec()).unwrap();
-        if matches!(kind.as_str(), "done-cancelled" | "done-cancelled-continuation") {
-            let id = if kind == "done-cancelled" { "response-first" } else { "response-next" };
+        if matches!(
+            kind.as_str(),
+            "done-cancelled" | "done-cancelled-continuation"
+        ) {
+            let id = if kind == "done-cancelled" {
+                "response-first"
+            } else {
+                "response-next"
+            };
             return Ok(vec![
-                RealtimeEvent::TurnCompleted { turn_id: Some(id.into()), status: Some("cancelled".into()) },
-                RealtimeEvent::ToolCancelled { call_ids: vec!["call".into()] },
+                RealtimeEvent::TurnCompleted {
+                    turn_id: Some(id.into()),
+                    status: Some("cancelled".into()),
+                },
+                RealtimeEvent::ToolCancelled {
+                    call_ids: vec!["call".into()],
+                },
                 RealtimeEvent::Interrupted,
-                RealtimeEvent::ProviderEvent { name: "response.done".into(), native: json!({"type":"response.done","response":{"id":id,"status":"cancelled"}}) },
+                RealtimeEvent::ProviderEvent {
+                    name: "response.done".into(),
+                    native: json!({"type":"response.done","response":{"id":id,"status":"cancelled"}}),
+                },
             ]);
         }
-        if matches!(kind.as_str(), "gemini-progress" | "gemini-idle" | "gemini-missing") {
-            let status = match kind.as_str() { "gemini-progress" => Some("IN_PROGRESS"), "gemini-idle" => Some("IDLE"), _ => None };
+        if matches!(
+            kind.as_str(),
+            "gemini-progress" | "gemini-idle" | "gemini-missing"
+        ) {
+            let status = match kind.as_str() {
+                "gemini-progress" => Some("IN_PROGRESS"),
+                "gemini-idle" => Some("IDLE"),
+                _ => None,
+            };
             let mut content = json!({"turnComplete":true});
-            if let Some(status) = status { content["interactionStatus"] = json!(status); }
+            if let Some(status) = status {
+                content["interactionStatus"] = json!(status);
+            }
             return Ok(vec![
-                RealtimeEvent::TurnCompleted { turn_id: None, status: Some("completed".into()) },
-                RealtimeEvent::ProviderEvent { name: "generationComplete".into(), native: json!(true) },
-                RealtimeEvent::ProviderEvent { name: "serverContent".into(), native: json!({"serverContent":content}) },
+                RealtimeEvent::TurnCompleted {
+                    turn_id: None,
+                    status: Some("completed".into()),
+                },
+                RealtimeEvent::ProviderEvent {
+                    name: "generationComplete".into(),
+                    native: json!(true),
+                },
+                RealtimeEvent::ProviderEvent {
+                    name: "serverContent".into(),
+                    native: json!({"serverContent":content}),
+                },
             ]);
         }
         Ok(vec![match kind.as_str() {
-            "start" => RealtimeEvent::TurnStarted { turn_id: Some("response-first".into()) },
-            "start-continuation" => RealtimeEvent::TurnStarted { turn_id: Some("response-next".into()) },
+            "start" => RealtimeEvent::TurnStarted {
+                turn_id: Some("response-first".into()),
+            },
+            "start-continuation" => RealtimeEvent::TurnStarted {
+                turn_id: Some("response-next".into()),
+            },
             "ready" => RealtimeEvent::SessionReady,
-            "done" => RealtimeEvent::TurnCompleted { turn_id: Some("response-first".into()), status: Some("completed".into()) },
-            "done-continuation" => RealtimeEvent::TurnCompleted { turn_id: Some("response-next".into()), status: Some("completed".into()) },
-            "text-delta" => RealtimeEvent::TextDelta { text: "unsolicited".into(), item_id: None, final_chunk: false },
+            "done" => RealtimeEvent::TurnCompleted {
+                turn_id: Some("response-first".into()),
+                status: Some("completed".into()),
+            },
+            "done-continuation" => RealtimeEvent::TurnCompleted {
+                turn_id: Some("response-next".into()),
+                status: Some("completed".into()),
+            },
+            "text-delta" => RealtimeEvent::TextDelta {
+                text: "unsolicited".into(),
+                item_id: None,
+                final_chunk: false,
+            },
             "tool" => RealtimeEvent::ToolCall {
                 call_id: "call".into(),
                 name: "fixture".into(),
@@ -429,14 +476,20 @@ impl RealtimeCodec for Codec {
 
 struct RejectInputCodec;
 impl RealtimeCodec for RejectInputCodec {
-    fn capabilities(&self) -> RealtimeCapabilities { Codec.capabilities() }
+    fn capabilities(&self) -> RealtimeCapabilities {
+        Codec.capabilities()
+    }
     fn encode(&self, input: &RealtimeInput) -> Result<Vec<RealtimeFrame>, RealtimeError> {
         if matches!(input, RealtimeInput::CommitAudio | RealtimeInput::Text(_)) {
-            return Err(RealtimeError::InvalidInput { message: "fixture rejected input".into() });
+            return Err(RealtimeError::InvalidInput {
+                message: "fixture rejected input".into(),
+            });
         }
         Codec.encode(input)
     }
-    fn decode(&self, frame: RealtimeFrame) -> Result<Vec<RealtimeEvent>, RealtimeError> { Codec.decode(frame) }
+    fn decode(&self, frame: RealtimeFrame) -> Result<Vec<RealtimeEvent>, RealtimeError> {
+        Codec.decode(frame)
+    }
 }
 
 #[derive(Default)]
@@ -548,12 +601,19 @@ struct ObservedTransport {
 
 #[async_trait]
 impl RealtimeTransport for ObservedTransport {
-    async fn connect(&self, _: RealtimeConnectRequest) -> Result<RealtimeConnection, RealtimeError> {
+    async fn connect(
+        &self,
+        _: RealtimeConnectRequest,
+    ) -> Result<RealtimeConnection, RealtimeError> {
         let received = self.received.clone();
         let incoming = self.incoming.lock().unwrap().take().unwrap();
         Ok(RealtimeConnection {
             outbound: Box::new(Sink(self.sent.clone())),
-            inbound: incoming.inspect(move |_| { received.fetch_add(1, Ordering::SeqCst); }).boxed(),
+            inbound: incoming
+                .inspect(move |_| {
+                    received.fetch_add(1, Ordering::SeqCst);
+                })
+                .boxed(),
         })
     }
 }
@@ -568,9 +628,14 @@ async fn connection() -> (
     connection_with_codec(Arc::new(Codec)).await
 }
 
-fn admitted_inputs() -> (mpsc::Sender<RealtimeAgentInput>, mpsc::Receiver<RealtimeAgentInput>) {
+fn admitted_inputs() -> (
+    mpsc::Sender<RealtimeAgentInput>,
+    mpsc::Receiver<RealtimeAgentInput>,
+) {
     let (sender, receiver) = mpsc::channel(8);
-    sender.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
+    sender
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
     (sender, receiver)
 }
 
@@ -583,15 +648,25 @@ async fn gemini_connection() -> (
 ) {
     use lingxi_llm_client::providers::google::live::{GeminiLiveConfig, GeminiLiveSession};
     let (tx, rx) = futures::channel::mpsc::unbounded();
-    tx.unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#))).unwrap();
+    tx.unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#)))
+        .unwrap();
     let sent = Arc::new(std::sync::Mutex::new(vec![]));
-    let transport = Arc::new(Transport { incoming: std::sync::Mutex::new(Some(rx)), sent: sent.clone() });
+    let transport = Arc::new(Transport {
+        incoming: std::sync::Mutex::new(Some(rx)),
+        sent: sent.clone(),
+    });
     let (session, driver) = GeminiLiveSession::connect(
         transport,
-        RealtimeConnectRequest { endpoint: "wss://fixture.example/ws".into(), headers: vec![], max_frame_bytes: 4096 },
+        RealtimeConnectRequest {
+            endpoint: "wss://fixture.example/ws".into(),
+            headers: vec![],
+            max_frame_bytes: 4096,
+        },
         GeminiLiveConfig::new("gemini-3.8-live", "fixture-account").with_agent_history(),
         RealtimeLimits::default(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let (control, events) = session.into_realtime_parts();
     control.import_history(vec![]).unwrap();
     (control, events, tokio::spawn(driver.run()), tx, sent)
@@ -636,7 +711,9 @@ async fn observed_openai_connection() -> (
     Arc<std::sync::Mutex<Vec<String>>>,
     Arc<AtomicUsize>,
 ) {
-    use lingxi_llm_client::providers::openai::realtime::{OpenAiRealtimeCodec, OpenAiRealtimeConfig};
+    use lingxi_llm_client::providers::openai::realtime::{
+        OpenAiRealtimeCodec, OpenAiRealtimeConfig,
+    };
     let (tx, rx) = futures::channel::mpsc::unbounded();
     let sent = Arc::new(std::sync::Mutex::new(vec![]));
     let received = Arc::new(AtomicUsize::new(0));
@@ -645,33 +722,78 @@ async fn observed_openai_connection() -> (
         sent: sent.clone(),
         received: received.clone(),
     };
-    let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig { manual_turns: true, ..Default::default() });
+    let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig {
+        manual_turns: true,
+        ..Default::default()
+    });
     let (session, driver) = RealtimeSession::connect(
         &transport,
-        RealtimeConnectRequest { endpoint:"wss://fixture".into(), headers:vec![], max_frame_bytes:4096 },
-        Arc::new(codec), RealtimeLimits::default(),
-    ).await.unwrap();
+        RealtimeConnectRequest {
+            endpoint: "wss://fixture".into(),
+            headers: vec![],
+            max_frame_bytes: 4096,
+        },
+        Arc::new(codec),
+        RealtimeLimits::default(),
+    )
+    .await
+    .unwrap();
     let (control, events) = session.into_parts();
-    (control, events, tokio::spawn(driver.run()), tx, sent, received)
+    (
+        control,
+        events,
+        tokio::spawn(driver.run()),
+        tx,
+        sent,
+        received,
+    )
 }
 
 #[tokio::test]
 async fn unsolicited_provider_activity_never_admits_a_turn_or_executes_a_tool() {
     for kind in ["start", "tool", "audio", "text-delta", "output"] {
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, calls) = fixture(gate).await;
         let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, _) = connection().await;
         let (_input_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(16);
-        provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(2), orch.run_realtime_agent(
-            prepared, control, events, inputs, output, Default::default(), false, CancellationToken::new(),
-        )).await.unwrap().unwrap_err();
-        assert!(error.to_string().contains("without an admitted local input"), "{kind}");
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("without an admitted local input"),
+            "{kind}"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{kind}");
         while let Ok(event) = output_rx.try_recv() {
-            assert!(!matches!(event, RealtimeAgentOutput::AgentResponseStarted { .. }), "{kind}");
+            assert!(
+                !matches!(event, RealtimeAgentOutput::AgentResponseStarted { .. }),
+                "{kind}"
+            );
         }
         let _ = driver.await;
     }
@@ -679,26 +801,65 @@ async fn unsolicited_provider_activity_never_admits_a_turn_or_executes_a_tool() 
 
 #[tokio::test]
 async fn queued_provider_tool_cannot_borrow_simultaneously_ready_local_input() {
-    for input in [RealtimeInput::CommitAudio, RealtimeInput::Text("hello".into())] {
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    for input in [
+        RealtimeInput::CommitAudio,
+        RealtimeInput::Text("hello".into()),
+    ] {
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, calls) = fixture(gate).await;
         let prepared = prepare_bound(&orch).await;
-        let (control, events, driver, provider, _sent, received) = observed_openai_connection().await;
-        for frame in [json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call","name":"fixture","arguments":"{}"}}), json!({"type":"session.updated"})] {
-            provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
+        let (control, events, driver, provider, _sent, received) =
+            observed_openai_connection().await;
+        for frame in [
+            json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call","name":"fixture","arguments":"{}"}}),
+            json!({"type":"session.updated"}),
+        ] {
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text(frame.to_string())))
+                .unwrap();
         }
-        wait_until(|| received.load(Ordering::SeqCst) >= 2, "provider tool already queued").await;
+        wait_until(
+            || received.load(Ordering::SeqCst) >= 2,
+            "provider tool already queued",
+        )
+        .await;
         let (input_tx, inputs) = mpsc::channel(4);
-        input_tx.try_send(RealtimeAgentInput::Provider(input)).unwrap();
+        input_tx
+            .try_send(RealtimeAgentInput::Provider(input))
+            .unwrap();
         let (output, mut output_rx) = mpsc::channel(16);
-        let error = tokio::time::timeout(Duration::from_secs(2), orch.run_realtime_agent(
-            prepared, control, events, inputs, output, Default::default(), false, CancellationToken::new(),
-        )).await.unwrap().unwrap_err();
-        assert!(error.to_string().contains("without an admitted local input"));
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("without an admitted local input"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(orch.snapshot_history().await.is_empty());
         while let Ok(event) = output_rx.try_recv() {
-            assert!(!matches!(event, RealtimeAgentOutput::AgentResponseStarted { .. } | RealtimeAgentOutput::Provider(RealtimeEvent::ToolCall { .. })));
+            assert!(!matches!(
+                event,
+                RealtimeAgentOutput::AgentResponseStarted { .. }
+                    | RealtimeAgentOutput::Provider(RealtimeEvent::ToolCall { .. })
+            ));
         }
         let _ = driver.await;
     }
@@ -706,36 +867,101 @@ async fn queued_provider_tool_cannot_borrow_simultaneously_ready_local_input() {
 
 #[tokio::test]
 async fn queued_openai_commit_ack_cannot_claim_a_new_audio_input() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _, received) = observed_openai_connection().await;
-    for frame in [json!({"type":"input_audio_buffer.committed","item_id":"ghost"}), json!({"type":"session.updated","session":{"id":"before"}})] {
-        provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
+    for frame in [
+        json!({"type":"input_audio_buffer.committed","item_id":"ghost"}),
+        json!({"type":"session.updated","session":{"id":"before"}}),
+    ] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(frame.to_string())))
+            .unwrap();
     }
-    wait_until(|| received.load(Ordering::SeqCst) >= 2, "old commit acknowledgement already queued").await;
+    wait_until(
+        || received.load(Ordering::SeqCst) >= 2,
+        "old commit acknowledgement already queued",
+    )
+    .await;
     let (input_tx, inputs) = mpsc::channel(8);
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
-    for frame in [json!({"type":"input_audio_buffer.committed","item_id":"actual"}), json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"actual","transcript":"actual"}), json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"ghost","transcript":"forged"}), json!({"type":"session.updated","session":{"id":"after"}})] {
-        provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
+    for frame in [
+        json!({"type":"input_audio_buffer.committed","item_id":"actual"}),
+        json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"actual","transcript":"actual"}),
+        json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"ghost","transcript":"forged"}),
+        json!({"type":"session.updated","session":{"id":"after"}}),
+    ] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(frame.to_string())))
+            .unwrap();
     }
     let mut saw_actual = false;
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { item_id:Some(id), .. }) if id == "ghost" => panic!("old acknowledgement claimed the new input"),
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { item_id:Some(id), .. }) if id == "actual" => saw_actual = true,
-            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { native, .. }) if native.pointer("/session/id").and_then(serde_json::Value::as_str) == Some("after") => break,
-            _ => {},
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                item_id: Some(id), ..
+            }) if id == "ghost" => panic!("old acknowledgement claimed the new input"),
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                item_id: Some(id), ..
+            }) if id == "actual" => saw_actual = true,
+            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { native, .. })
+                if native
+                    .pointer("/session/id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("after") =>
+            {
+                break
+            }
+            _ => {}
         }
     }
     assert!(saw_actual);
-    assert_eq!(orch.snapshot_history().await.iter().map(|message| message.text_content()).collect::<Vec<_>>(), ["actual"]);
+    assert_eq!(
+        orch.snapshot_history()
+            .await
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>(),
+        ["actual"]
+    );
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -743,27 +969,74 @@ async fn queued_openai_commit_ack_cannot_claim_a_new_audio_input() {
 
 #[tokio::test]
 async fn input_transcript_before_commit_is_forwarded_without_admitting_or_persisting() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(4);
     let (output, mut output_rx) = mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-        data: bytes::Bytes::from_static(&[0, 0]),
-        format: RealtimeAudioFormat::Pcm16 { sample_rate_hz: 24_000 },
-    })).await.unwrap();
-    wait_until(|| sent.lock().unwrap().iter().any(|value| value.starts_with("Audio")), "local audio sent").await;
-    provider.unbounded_send(Ok(RealtimeFrame::text("input-partial"))).unwrap();
-    assert!(matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { direction: RealtimeTranscriptDirection::Input, .. })));
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+            data: bytes::Bytes::from_static(&[0, 0]),
+            format: RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+        }))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            sent.lock()
+                .unwrap()
+                .iter()
+                .any(|value| value.starts_with("Audio"))
+        },
+        "local audio sent",
+    )
+    .await;
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("input-partial")))
+        .unwrap();
+    assert!(matches!(
+        output_rx.recv().await.unwrap(),
+        RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+            direction: RealtimeTranscriptDirection::Input,
+            ..
+        })
+    ));
     assert!(orch.snapshot_history().await.is_empty());
     assert!(output_rx.try_recv().is_err());
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-    assert!(matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }));
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
+    assert!(matches!(
+        output_rx.recv().await.unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ));
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -772,55 +1045,143 @@ async fn input_transcript_before_commit_is_forwarded_without_admitting_or_persis
 #[tokio::test]
 async fn realtime_output_burst_waits_for_the_consumer_and_remains_cancellable() {
     for consume in [true, false] {
-        let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, _) = fixture(gate).await;
         let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = connection().await;
         let (input_tx, inputs) = mpsc::channel(8);
         let (output, mut output_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-            orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-        }});
-        input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-            data:bytes::Bytes::from_static(&[0, 0]), format:RealtimeAudioFormat::Pcm16 { sample_rate_hz:24_000 },
-        })).await.unwrap();
-        wait_until(|| sent.lock().unwrap().iter().any(|value| value.starts_with("Audio")), "burst audio sent").await;
-        for _ in 0..48 { provider.unbounded_send(Ok(RealtimeFrame::text("input-partial"))).unwrap(); }
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                orch.run_realtime_agent(
+                    prepared,
+                    control,
+                    events,
+                    inputs,
+                    output,
+                    Default::default(),
+                    false,
+                    cancel,
+                )
+                .await
+            }
+        });
+        input_tx
+            .send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+                data: bytes::Bytes::from_static(&[0, 0]),
+                format: RealtimeAudioFormat::Pcm16 {
+                    sample_rate_hz: 24_000,
+                },
+            }))
+            .await
+            .unwrap();
+        wait_until(
+            || {
+                sent.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value.starts_with("Audio"))
+            },
+            "burst audio sent",
+        )
+        .await;
+        for _ in 0..48 {
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text("input-partial")))
+                .unwrap();
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!task.is_finished(), "a temporarily full output queue ended the session");
+        assert!(
+            !task.is_finished(),
+            "a temporarily full output queue ended the session"
+        );
         if consume {
             for _ in 0..48 {
-                assert!(matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(),
-                    RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { direction:RealtimeTranscriptDirection::Input, final_chunk:false, .. })));
+                assert!(matches!(
+                    tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                        direction: RealtimeTranscriptDirection::Input,
+                        final_chunk: false,
+                        ..
+                    })
+                ));
             }
-            input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+            input_tx
+                .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+                .await
+                .unwrap();
             next_agent_started(&mut output_rx).await;
         }
         cancel.cancel();
-        assert_eq!(tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
-        let _ = tokio::time::timeout(Duration::from_secs(2), driver).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            RealtimeAgentEnd::Cancelled
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(2), driver)
+            .await
+            .unwrap();
     }
 }
 
 #[tokio::test]
 async fn rejected_local_input_never_emits_start_or_runs_provider_tool() {
-    for input in [RealtimeInput::CommitAudio, RealtimeInput::Text("hello".into())] {
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    for input in [
+        RealtimeInput::CommitAudio,
+        RealtimeInput::Text("hello".into()),
+    ] {
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, calls) = fixture(gate).await;
         let prepared = prepare_bound(&orch).await;
-        let (control, events, driver, _provider, _) = connection_with_codec(Arc::new(RejectInputCodec)).await;
+        let (control, events, driver, _provider, _) =
+            connection_with_codec(Arc::new(RejectInputCodec)).await;
         let (input_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(16);
-        input_tx.try_send(RealtimeAgentInput::Provider(input)).unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(2), orch.run_realtime_agent(
-            prepared, control, events, inputs, output, Default::default(), false, CancellationToken::new(),
-        )).await.unwrap().unwrap_err();
+        input_tx
+            .try_send(RealtimeAgentInput::Provider(input))
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
         assert!(error.to_string().contains("fixture rejected input"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(orch.snapshot_history().await.is_empty());
         while let Ok(event) = output_rx.try_recv() {
-            assert!(!matches!(event, RealtimeAgentOutput::AgentResponseStarted { .. }));
+            assert!(!matches!(
+                event,
+                RealtimeAgentOutput::AgentResponseStarted { .. }
+            ));
         }
         let _ = driver.await;
     }
@@ -828,26 +1189,81 @@ async fn rejected_local_input_never_emits_start_or_runs_provider_tool() {
 
 #[tokio::test]
 async fn admitted_audio_and_text_precede_queued_provider_work_and_keep_one_id() {
-    for input in [RealtimeInput::CommitAudio, RealtimeInput::Text("hello".into())] {
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    for input in [
+        RealtimeInput::CommitAudio,
+        RealtimeInput::Text("hello".into()),
+    ] {
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, calls) = fixture(gate).await;
         let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = connection().await;
         let (input_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        input_tx.try_send(RealtimeAgentInput::Provider(input)).unwrap();
-        let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-            orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-        }});
-        let RealtimeAgentOutput::AgentResponseStarted { turn_id: id } = output_rx.recv().await.unwrap() else { panic!("local admission must precede provider work") };
-        for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
-        wait_until(|| calls.load(Ordering::SeqCst) == 1 && sent.lock().unwrap().iter().any(|value| value == "ContinueResponse"), "admitted tool continuation").await;
-        for kind in ["done", "start-continuation", "done-continuation"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+        input_tx
+            .try_send(RealtimeAgentInput::Provider(input))
+            .unwrap();
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                orch.run_realtime_agent(
+                    prepared,
+                    control,
+                    events,
+                    inputs,
+                    output,
+                    Default::default(),
+                    false,
+                    cancel,
+                )
+                .await
+            }
+        });
+        let RealtimeAgentOutput::AgentResponseStarted { turn_id: id } =
+            output_rx.recv().await.unwrap()
+        else {
+            panic!("local admission must precede provider work")
+        };
+        for kind in ["start", "tool"] {
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text(kind)))
+                .unwrap();
+        }
+        wait_until(
+            || {
+                calls.load(Ordering::SeqCst) == 1
+                    && sent
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == "ContinueResponse")
+            },
+            "admitted tool continuation",
+        )
+        .await;
+        for kind in ["done", "start-continuation", "done-continuation"] {
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text(kind)))
+                .unwrap();
+        }
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("continuation allocated a second local turn"),
-                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, id); break; }
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                    panic!("continuation allocated a second local turn")
+                }
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                    assert_eq!(turn_id, id);
+                    break;
+                }
                 _ => {}
             }
         }
@@ -859,40 +1275,99 @@ async fn admitted_audio_and_text_precede_queued_provider_work_and_keep_one_id() 
 
 #[tokio::test]
 async fn late_and_fragmented_audio_transcripts_survive_terminal_without_a_new_turn() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (_input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
-    for kind in ["audio-committed", "input-partial", "start", "done"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
-    loop { if matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::AgentTurnCompleted { .. }) { break; } }
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
+    for kind in ["audio-committed", "input-partial", "start", "done"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
+    loop {
+        if matches!(
+            output_rx.recv().await.unwrap(),
+            RealtimeAgentOutput::AgentTurnCompleted { .. }
+        ) {
+            break;
+        }
+    }
     for kind in ["input", "input"] {
-        provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap();
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
         loop {
             match output_rx.recv().await.unwrap() {
-                RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("late transcript reopened a turn"),
-                RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { direction: RealtimeTranscriptDirection::Input, .. }) => break,
+                RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                    panic!("late transcript reopened a turn")
+                }
+                RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                    direction: RealtimeTranscriptDirection::Input,
+                    ..
+                }) => break,
                 _ => {}
             }
         }
     }
-    provider.unbounded_send(Ok(RealtimeFrame::text("input-second"))).unwrap();
-    provider.unbounded_send(Ok(RealtimeFrame::text("ready"))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("input-second")))
+        .unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("ready")))
+        .unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { item_id:Some(id), .. }) if id == "item-input-second" => panic!("uncommitted input reached the host"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                item_id: Some(id), ..
+            }) if id == "item-input-second" => panic!("uncommitted input reached the host"),
             RealtimeAgentOutput::Provider(RealtimeEvent::SessionReady) => break,
-            _ => {},
+            _ => {}
         }
     }
     let history = orch.snapshot_history().await;
-    assert_eq!(history.iter().map(|message| message.text_content()).collect::<Vec<_>>(), ["spoken input"]);
+    assert_eq!(
+        history
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>(),
+        ["spoken input"]
+    );
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -900,81 +1375,232 @@ async fn late_and_fragmented_audio_transcripts_survive_terminal_without_a_new_tu
 
 #[tokio::test]
 async fn openai_transcripts_require_a_locally_committed_audio_item() {
-    use lingxi_llm_client::providers::openai::realtime::{OpenAiRealtimeCodec, OpenAiRealtimeConfig};
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    use lingxi_llm_client::providers::openai::realtime::{
+        OpenAiRealtimeCodec, OpenAiRealtimeConfig,
+    };
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
-    let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig { manual_turns: true, ..Default::default() });
+    let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig {
+        manual_turns: true,
+        ..Default::default()
+    });
     let (control, events, driver, provider, _) = connection_with_codec(Arc::new(codec)).await;
     let (input_tx, inputs) = mpsc::channel(8);
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
 
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
     // A final can race its commit acknowledgement. It stays out of history
     // until that exact item receives the acknowledgement for a local commit.
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"audio-a","transcript":"first"}).to_string()))).unwrap();
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"session.updated"}).to_string()))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"type":"session.updated"}).to_string(),
+        )))
+        .unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { final_chunk:true, .. }) => panic!("unconfirmed final reached the host"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                final_chunk: true, ..
+            }) => panic!("unconfirmed final reached the host"),
             RealtimeAgentOutput::Provider(RealtimeEvent::SessionReady) => break,
-            _ => {},
+            _ => {}
         }
     }
     assert!(orch.snapshot_history().await.is_empty());
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"input_audio_buffer.committed","item_id":"audio-a"}).to_string()))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"type":"input_audio_buffer.committed","item_id":"audio-a"}).to_string(),
+        )))
+        .unwrap();
     let mut saw_confirmed_final = false;
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { item_id:Some(id), final_chunk:true, .. }) if id == "audio-a" => saw_confirmed_final = true,
-            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { ref name, .. }) if name == "input_audio_buffer.committed" => break,
-            _ => {},
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                item_id: Some(id),
+                final_chunk: true,
+                ..
+            }) if id == "audio-a" => saw_confirmed_final = true,
+            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { ref name, .. })
+                if name == "input_audio_buffer.committed" =>
+            {
+                break
+            }
+            _ => {}
         }
     }
-    assert!(saw_confirmed_final, "a matching acknowledgement must release the buffered final");
+    assert!(
+        saw_confirmed_final,
+        "a matching acknowledgement must release the buffered final"
+    );
     assert_eq!(orch.snapshot_history().await[0].text_content(), "first");
-    for frame in [json!({"type":"response.created","response":{"id":"response-a"}}), json!({"type":"response.done","response":{"id":"response-a","status":"completed"}})] {
-        provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
+    for frame in [
+        json!({"type":"response.created","response":{"id":"response-a"}}),
+        json!({"type":"response.done","response":{"id":"response-a","status":"completed"}}),
+    ] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(frame.to_string())))
+            .unwrap();
     }
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentTurnCompleted { .. }) {}
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentTurnCompleted { .. }
+    ) {}
 
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
-    for frame in [json!({"type":"input_audio_buffer.committed","item_id":"audio-a"}), json!({"type":"input_audio_buffer.committed","item_id":"audio-b"}), json!({"type":"response.created","response":{"id":"response-b"}}), json!({"type":"response.done","response":{"id":"response-b","status":"completed"}})] {
-        provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
+    for frame in [
+        json!({"type":"input_audio_buffer.committed","item_id":"audio-a"}),
+        json!({"type":"input_audio_buffer.committed","item_id":"audio-b"}),
+        json!({"type":"response.created","response":{"id":"response-b"}}),
+        json!({"type":"response.done","response":{"id":"response-b","status":"completed"}}),
+    ] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(frame.to_string())))
+            .unwrap();
     }
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentTurnCompleted { .. }) {}
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentTurnCompleted { .. }
+    ) {}
     for (id, text) in [("audio-b", "second"), ("audio-b", "second")] {
         provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":id,"transcript":text}).to_string()))).unwrap();
-        while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { final_chunk:true, .. })) {}
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                final_chunk: true,
+                ..
+            })
+        ) {}
     }
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"uncommitted","transcript":"forged"}).to_string()))).unwrap();
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"session.updated"}).to_string()))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"type":"session.updated"}).to_string(),
+        )))
+        .unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { item_id:Some(id), .. }) if id == "uncommitted" => panic!("uncommitted final reached the host"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                item_id: Some(id), ..
+            }) if id == "uncommitted" => panic!("uncommitted final reached the host"),
             RealtimeAgentOutput::Provider(RealtimeEvent::SessionReady) => break,
-            _ => {},
+            _ => {}
         }
     }
-    assert_eq!(orch.snapshot_history().await.iter().map(|message| message.text_content()).collect::<Vec<_>>(), ["first", "second"]);
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Text("typed".into()))).await.unwrap();
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
+    assert_eq!(
+        orch.snapshot_history()
+            .await
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Text(
+            "typed".into(),
+        )))
+        .await
+        .unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"text-turn-forgery","transcript":"forged"}).to_string()))).unwrap();
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"session.updated"}).to_string()))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"type":"session.updated"}).to_string(),
+        )))
+        .unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { item_id:Some(id), .. }) if id == "text-turn-forgery" => panic!("text-only turn admitted audio transcription"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                item_id: Some(id), ..
+            }) if id == "text-turn-forgery" => {
+                panic!("text-only turn admitted audio transcription")
+            }
             RealtimeAgentOutput::Provider(RealtimeEvent::SessionReady) => break,
-            _ => {},
+            _ => {}
         }
     }
-    assert_eq!(orch.snapshot_history().await.iter().map(|message| message.text_content()).collect::<Vec<_>>(), ["first", "second", "typed"]);
+    assert_eq!(
+        orch.snapshot_history()
+            .await
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>(),
+        ["first", "second", "typed"]
+    );
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -982,37 +1608,92 @@ async fn openai_transcripts_require_a_locally_committed_audio_item() {
 
 #[tokio::test]
 async fn openai_unowned_fragment_cannot_borrow_a_later_audio_commit() {
-    use lingxi_llm_client::providers::openai::realtime::{OpenAiRealtimeCodec, OpenAiRealtimeConfig};
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    use lingxi_llm_client::providers::openai::realtime::{
+        OpenAiRealtimeCodec, OpenAiRealtimeConfig,
+    };
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
-    let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig { manual_turns: true, ..Default::default() });
+    let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig {
+        manual_turns: true,
+        ..Default::default()
+    });
     let (control, events, driver, provider, _) = connection_with_codec(Arc::new(codec)).await;
     let (input_tx, inputs) = mpsc::channel(8);
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"conversation.item.input_audio_transcription.delta","item_id":"poisoned","delta":"forged "}).to_string()))).unwrap();
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"type":"session.updated"}).to_string()))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"type":"session.updated"}).to_string(),
+        )))
+        .unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { .. }) => panic!("unowned input reached the host"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { .. }) => {
+                panic!("unowned input reached the host")
+            }
             RealtimeAgentOutput::Provider(RealtimeEvent::SessionReady) => break,
-            _ => {},
+            _ => {}
         }
     }
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
-    for frame in [json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"poisoned","transcript":"forged real"}), json!({"type":"input_audio_buffer.committed","item_id":"poisoned"}), json!({"type":"session.updated"})] {
-        provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
+    for frame in [
+        json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"poisoned","transcript":"forged real"}),
+        json!({"type":"input_audio_buffer.committed","item_id":"poisoned"}),
+        json!({"type":"session.updated"}),
+    ] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(frame.to_string())))
+            .unwrap();
     }
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { .. }) => panic!("tainted input borrowed a later commit"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { .. }) => {
+                panic!("tainted input borrowed a later commit")
+            }
             RealtimeAgentOutput::Provider(RealtimeEvent::SessionReady) => break,
-            _ => {},
+            _ => {}
         }
     }
     assert!(orch.snapshot_history().await.is_empty());
@@ -1023,33 +1704,99 @@ async fn openai_unowned_fragment_cannot_borrow_a_later_audio_commit() {
 
 #[tokio::test]
 async fn gemini_transcripts_require_the_admitted_audio_turn() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = gemini_connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output,
-            RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
-    }});
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
-    for frame in [json!({"serverContent":{"inputTranscription":{"text":"first "}}}), json!({"serverContent":{"inputTranscription":{"text":"audio"},"turnComplete":true,"interactionStatus":"IDLE"}})] {
-        provider.unbounded_send(Ok(RealtimeFrame::text(frame.to_string()))).unwrap();
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits {
+                    completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                    ..Default::default()
+                },
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
+    for frame in [
+        json!({"serverContent":{"inputTranscription":{"text":"first "}}}),
+        json!({"serverContent":{"inputTranscription":{"text":"audio"},"turnComplete":true,"interactionStatus":"IDLE"}}),
+    ] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(frame.to_string())))
+            .unwrap();
     }
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentTurnCompleted { .. }) {}
-    assert_eq!(orch.snapshot_history().await[0].text_content(), "first audio");
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentTurnCompleted { .. }
+    ) {}
+    assert_eq!(
+        orch.snapshot_history().await[0].text_content(),
+        "first audio"
+    );
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"unadmitted"},"turnComplete":true,"interactionStatus":"IDLE"}}).to_string()))).unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { ref text, .. }) if text == "unadmitted" => panic!("unadmitted transcript reached the host"),
-            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { native, .. }) if native.pointer("/serverContent/inputTranscription/text").and_then(serde_json::Value::as_str) == Some("unadmitted") => break,
-            _ => {},
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { ref text, .. })
+                if text == "unadmitted" =>
+            {
+                panic!("unadmitted transcript reached the host")
+            }
+            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { native, .. })
+                if native
+                    .pointer("/serverContent/inputTranscription/text")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("unadmitted") =>
+            {
+                break
+            }
+            _ => {}
         }
     }
-    assert_eq!(orch.snapshot_history().await.iter().map(|message| message.text_content()).collect::<Vec<_>>(), ["first audio"]);
+    assert_eq!(
+        orch.snapshot_history()
+            .await
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>(),
+        ["first audio"]
+    );
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -1058,53 +1805,148 @@ async fn gemini_transcripts_require_the_admitted_audio_turn() {
 #[tokio::test]
 async fn gemini_precommit_fragments_need_locally_streamed_audio() {
     for poisoned in [false, true] {
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, _) = fixture(gate).await;
         let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, sent) = gemini_connection().await;
         let (input_tx, inputs) = mpsc::channel(8);
         let (output, mut output_rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-            orch.run_realtime_agent(prepared, control, events, inputs, output,
-                RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
-        }});
+        let task = tokio::spawn({
+            let orch = orch.clone();
+            let cancel = cancel.clone();
+            async move {
+                orch.run_realtime_agent(
+                    prepared,
+                    control,
+                    events,
+                    inputs,
+                    output,
+                    RealtimeAgentLimits {
+                        completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                        ..Default::default()
+                    },
+                    false,
+                    cancel,
+                )
+                .await
+            }
+        });
         if poisoned {
-            provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"forged "}}}).to_string()))).unwrap();
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text(
+                    json!({"serverContent":{"inputTranscription":{"text":"forged "}}}).to_string(),
+                )))
+                .unwrap();
             loop {
-                match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                    RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { .. }) => panic!("unowned fragment reached the host"),
-                    RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { native, .. }) if native.pointer("/serverContent/inputTranscription/text").and_then(serde_json::Value::as_str) == Some("forged ") => break,
-                    _ => {},
+                match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { .. }) => {
+                        panic!("unowned fragment reached the host")
+                    }
+                    RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent {
+                        native, ..
+                    }) if native
+                        .pointer("/serverContent/inputTranscription/text")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("forged ") =>
+                    {
+                        break
+                    }
+                    _ => {}
                 }
             }
         }
-        input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-            data: bytes::Bytes::from_static(&[0, 0]),
-            format: RealtimeAudioFormat::Pcm16 { sample_rate_hz: 16_000 },
-        })).await.unwrap();
-        wait_until(|| sent.lock().unwrap().iter().any(|value| value.contains("\"audio\"")), "Gemini local audio sent").await;
-        provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"spoken "}}}).to_string()))).unwrap();
+        input_tx
+            .send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+                data: bytes::Bytes::from_static(&[0, 0]),
+                format: RealtimeAudioFormat::Pcm16 {
+                    sample_rate_hz: 16_000,
+                },
+            }))
+            .await
+            .unwrap();
+        wait_until(
+            || {
+                sent.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value.contains("\"audio\""))
+            },
+            "Gemini local audio sent",
+        )
+        .await;
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                json!({"serverContent":{"inputTranscription":{"text":"spoken "}}}).to_string(),
+            )))
+            .unwrap();
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { ref text, .. }) if text == "spoken " => {
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { ref text, .. })
+                    if text == "spoken " =>
+                {
                     assert!(!poisoned, "tainted preview reached the host");
                     break;
                 }
-                RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { native, .. }) if poisoned && native.pointer("/serverContent/inputTranscription/text").and_then(serde_json::Value::as_str) == Some("spoken ") => break,
-                _ => {},
+                RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { native, .. })
+                    if poisoned
+                        && native
+                            .pointer("/serverContent/inputTranscription/text")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("spoken ") =>
+                {
+                    break
+                }
+                _ => {}
             }
         }
         assert!(orch.snapshot_history().await.is_empty());
-        input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-        while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
+        input_tx
+            .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+            .await
+            .unwrap();
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            RealtimeAgentOutput::AgentResponseStarted { .. }
+        ) {}
         provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"audio"},"turnComplete":true,"interactionStatus":"IDLE"}}).to_string()))).unwrap();
-        while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentTurnCompleted { .. }) {}
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            RealtimeAgentOutput::AgentTurnCompleted { .. }
+        ) {}
         let history = orch.snapshot_history().await;
         if poisoned {
-            assert!(history.is_empty(), "unowned interim text contaminated an admitted transcript");
+            assert!(
+                history.is_empty(),
+                "unowned interim text contaminated an admitted transcript"
+            );
         } else {
-            assert_eq!(history.iter().map(|message| message.text_content()).collect::<Vec<_>>(), ["spoken audio"]);
+            assert_eq!(
+                history
+                    .iter()
+                    .map(|message| message.text_content())
+                    .collect::<Vec<_>>(),
+                ["spoken audio"]
+            );
         }
         cancel.cancel();
         assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
@@ -1115,11 +1957,18 @@ async fn gemini_precommit_fragments_need_locally_streamed_audio() {
 #[tokio::test]
 async fn queued_gemini_fragment_cannot_borrow_simultaneously_ready_audio() {
     use lingxi_llm_client::providers::google::live::{GeminiLiveConfig, GeminiLiveSession};
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (provider, rx) = futures::channel::mpsc::unbounded();
-    provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#)))
+        .unwrap();
     let received = Arc::new(AtomicUsize::new(0));
     let transport = Arc::new(ObservedTransport {
         incoming: std::sync::Mutex::new(Some(rx)),
@@ -1128,38 +1977,89 @@ async fn queued_gemini_fragment_cannot_borrow_simultaneously_ready_audio() {
     });
     let (session, driver) = GeminiLiveSession::connect(
         transport,
-        RealtimeConnectRequest { endpoint: "wss://fixture.example/ws".into(), headers: vec![], max_frame_bytes: 4096 },
+        RealtimeConnectRequest {
+            endpoint: "wss://fixture.example/ws".into(),
+            headers: vec![],
+            max_frame_bytes: 4096,
+        },
         GeminiLiveConfig::new("gemini-3.8-live", "fixture-account").with_agent_history(),
         RealtimeLimits::default(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let (control, events) = session.into_realtime_parts();
     control.import_history(vec![]).unwrap();
     let driver = tokio::spawn(driver.run());
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"forged "}}}).to_string()))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"serverContent":{"inputTranscription":{"text":"forged "}}}).to_string(),
+        )))
+        .unwrap();
     // Seeing the next frame pulled proves the prior frame was decoded and its
     // normalized events were enqueued before either local input is admitted.
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"goAway":{}}).to_string()))).unwrap();
-    wait_until(|| received.load(Ordering::SeqCst) >= 3, "provider transcript already queued").await;
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(json!({"goAway":{}}).to_string())))
+        .unwrap();
+    wait_until(
+        || received.load(Ordering::SeqCst) >= 3,
+        "provider transcript already queued",
+    )
+    .await;
 
     let (input_tx, inputs) = mpsc::channel(8);
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-        data: bytes::Bytes::from_static(&[0, 0]),
-        format: RealtimeAudioFormat::Pcm16 { sample_rate_hz: 16_000 },
-    })).unwrap();
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+            data: bytes::Bytes::from_static(&[0, 0]),
+            format: RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 16_000,
+            },
+        }))
+        .unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output,
-            RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
-    }});
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentResponseStarted { .. }) {}
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits {
+                    completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                    ..Default::default()
+                },
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentResponseStarted { .. }
+    ) {}
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"real"},"turnComplete":true,"interactionStatus":"IDLE"}}).to_string()))).unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { direction:RealtimeTranscriptDirection::Input, .. }) => panic!("queued unowned transcript reached the host"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                direction: RealtimeTranscriptDirection::Input,
+                ..
+            }) => panic!("queued unowned transcript reached the host"),
             RealtimeAgentOutput::AgentTurnCompleted { .. } => break,
-            _ => {},
+            _ => {}
         }
     }
     assert!(orch.snapshot_history().await.is_empty());
@@ -1171,49 +2071,110 @@ async fn queued_gemini_fragment_cannot_borrow_simultaneously_ready_audio() {
 #[tokio::test]
 async fn undriven_gemini_frame_precedes_local_audio_admission() {
     use lingxi_llm_client::providers::google::live::{GeminiLiveConfig, GeminiLiveSession};
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (provider, rx) = futures::channel::mpsc::unbounded();
-    provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#))).unwrap();
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"forged "}}}).to_string()))).unwrap();
-    let transport = Arc::new(Transport { incoming: std::sync::Mutex::new(Some(rx)), sent: Arc::new(std::sync::Mutex::new(vec![])) });
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(r#"{"setupComplete":{}}"#)))
+        .unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"serverContent":{"inputTranscription":{"text":"forged "}}}).to_string(),
+        )))
+        .unwrap();
+    let transport = Arc::new(Transport {
+        incoming: std::sync::Mutex::new(Some(rx)),
+        sent: Arc::new(std::sync::Mutex::new(vec![])),
+    });
     let (session, driver) = GeminiLiveSession::connect(
         transport,
-        RealtimeConnectRequest { endpoint:"wss://fixture.example/ws".into(), headers:vec![], max_frame_bytes:4096 },
+        RealtimeConnectRequest {
+            endpoint: "wss://fixture.example/ws".into(),
+            headers: vec![],
+            max_frame_bytes: 4096,
+        },
         GeminiLiveConfig::new("gemini-3.8-live", "fixture-account").with_agent_history(),
         RealtimeLimits::default(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let (control, events) = session.into_realtime_parts();
     control.import_history(vec![]).unwrap();
     let (input_tx, inputs) = mpsc::channel(8);
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-        data:bytes::Bytes::from_static(&[0, 0]), format:RealtimeAudioFormat::Pcm16 { sample_rate_hz:16_000 },
-    })).unwrap();
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+            data: bytes::Bytes::from_static(&[0, 0]),
+            format: RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 16_000,
+            },
+        }))
+        .unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output,
-            RealtimeAgentLimits { completion_boundary:RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
-    }});
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits {
+                    completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                    ..Default::default()
+                },
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
     // The audio command is accepted locally, but the driver has not yet
     // started and must order the already-received raw frame before its fence.
-    wait_until(|| input_tx.capacity() == 7, "audio queued before driver start").await;
+    wait_until(
+        || input_tx.capacity() == 7,
+        "audio queued before driver start",
+    )
+    .await;
     let driver = tokio::spawn(driver.run());
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { direction:RealtimeTranscriptDirection::Input, .. }) => panic!("pre-admission raw input preview reached the host"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                direction: RealtimeTranscriptDirection::Input,
+                ..
+            }) => panic!("pre-admission raw input preview reached the host"),
             RealtimeAgentOutput::AgentResponseStarted { .. } => break,
-            _ => {},
+            _ => {}
         }
     }
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"real"},"turnComplete":true,"interactionStatus":"IDLE"}}).to_string()))).unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { direction:RealtimeTranscriptDirection::Input, .. }) => panic!("pre-admission raw input reached the host"),
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+                direction: RealtimeTranscriptDirection::Input,
+                ..
+            }) => panic!("pre-admission raw input reached the host"),
             RealtimeAgentOutput::AgentTurnCompleted { .. } => break,
-            _ => {},
+            _ => {}
         }
     }
     assert!(orch.snapshot_history().await.is_empty());
@@ -1224,45 +2185,146 @@ async fn undriven_gemini_frame_precedes_local_audio_admission() {
 
 #[tokio::test]
 async fn interrupted_gemini_audio_waits_for_the_previous_turn_to_finish() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = gemini_connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let orch = orch.clone(); let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output,
-            RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
-    }});
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits {
+                    completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                    ..Default::default()
+                },
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
     let first = loop {
-        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() { break turn_id; }
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        {
+            break turn_id;
+        }
     };
-    provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"first"}}}).to_string()))).unwrap();
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::Provider(RealtimeEvent::Transcript { direction:RealtimeTranscriptDirection::Input, .. })) {}
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text(
+            json!({"serverContent":{"inputTranscription":{"text":"first"}}}).to_string(),
+        )))
+        .unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::Provider(RealtimeEvent::Transcript {
+            direction: RealtimeTranscriptDirection::Input,
+            ..
+        })
+    ) {}
     for input in [
         RealtimeInput::Interrupt,
-        RealtimeInput::Audio { data:bytes::Bytes::from_static(&[1, 2]), format:RealtimeAudioFormat::Pcm16 { sample_rate_hz:16_000 } },
+        RealtimeInput::Audio {
+            data: bytes::Bytes::from_static(&[1, 2]),
+            format: RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 16_000,
+            },
+        },
         RealtimeInput::CommitAudio,
     ] {
-        input_tx.try_send(RealtimeAgentInput::Provider(input)).unwrap();
+        input_tx
+            .try_send(RealtimeAgentInput::Provider(input))
+            .unwrap();
     }
-    wait_until(|| input_tx.capacity() == 8 && sent.lock().unwrap().iter().any(|value| value.contains("activityStart")), "interrupted audio deferred").await;
-    assert!(!sent.lock().unwrap().iter().any(|value| value.contains("AQI=")), "new audio was sent before the old turn ended");
+    wait_until(
+        || {
+            input_tx.capacity() == 8
+                && sent
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value.contains("activityStart"))
+        },
+        "interrupted audio deferred",
+    )
+    .await;
+    assert!(
+        !sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|value| value.contains("AQI=")),
+        "new audio was sent before the old turn ended"
+    );
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"interrupted":true,"turnComplete":true,"interactionStatus":"IDLE"}}).to_string()))).unwrap();
     let mut first_finished = false;
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, first); first_finished = true; }
-            RealtimeAgentOutput::AgentResponseStarted { .. } => { assert!(first_finished); break; }
-            _ => {},
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                assert_eq!(turn_id, first);
+                first_finished = true;
+            }
+            RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                assert!(first_finished);
+                break;
+            }
+            _ => {}
         }
     }
-    wait_until(|| sent.lock().unwrap().iter().any(|value| value.contains("AQI=")), "deferred Gemini audio sent").await;
+    wait_until(
+        || {
+            sent.lock()
+                .unwrap()
+                .iter()
+                .any(|value| value.contains("AQI="))
+        },
+        "deferred Gemini audio sent",
+    )
+    .await;
     provider.unbounded_send(Ok(RealtimeFrame::text(json!({"serverContent":{"inputTranscription":{"text":"second"},"turnComplete":true,"interactionStatus":"IDLE"}}).to_string()))).unwrap();
-    while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::AgentTurnCompleted { .. }) {}
-    assert_eq!(orch.snapshot_history().await.iter().map(|message| message.text_content()).collect::<Vec<_>>(), ["first", "second"]);
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentOutput::AgentTurnCompleted { .. }
+    ) {}
+    assert_eq!(
+        orch.snapshot_history()
+            .await
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -1270,55 +2332,165 @@ async fn interrupted_gemini_audio_waits_for_the_previous_turn_to_finish() {
 
 #[tokio::test]
 async fn openai_cancelled_frame_drains_before_deferred_next_input() {
-    use lingxi_llm_client::providers::openai::realtime::{OpenAiRealtimeCodec, OpenAiRealtimeConfig};
+    use lingxi_llm_client::providers::openai::realtime::{
+        OpenAiRealtimeCodec, OpenAiRealtimeConfig,
+    };
     for with_usage in [false, true] {
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, _) = fixture(gate).await;
         let prepared = prepare_bound(&orch).await;
-        let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig { manual_turns: true, ..Default::default() });
-        let (control, events, driver, provider, sent) = connection_with_codec(Arc::new(codec)).await;
+        let codec = OpenAiRealtimeCodec::new(OpenAiRealtimeConfig {
+            manual_turns: true,
+            ..Default::default()
+        });
+        let (control, events, driver, provider, sent) =
+            connection_with_codec(Arc::new(codec)).await;
         let (input_tx, inputs) = admitted_inputs();
         let (output, mut output_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-            orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-        }});
-        let first = loop { if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; } };
-        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"type":"response.created","response":{"id":"response-a"}}"#))).unwrap();
-        loop { if matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::Provider(RealtimeEvent::TurnStarted { .. })) { break; } }
-        for input in [RealtimeInput::Interrupt, RealtimeInput::CommitAudio, RealtimeInput::ContinueResponse] {
-            input_tx.try_send(RealtimeAgentInput::Provider(input)).unwrap();
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                orch.run_realtime_agent(
+                    prepared,
+                    control,
+                    events,
+                    inputs,
+                    output,
+                    Default::default(),
+                    false,
+                    cancel,
+                )
+                .await
+            }
+        });
+        let first = loop {
+            if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+                output_rx.recv().await.unwrap()
+            {
+                break turn_id;
+            }
+        };
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                r#"{"type":"response.created","response":{"id":"response-a"}}"#,
+            )))
+            .unwrap();
+        loop {
+            if matches!(
+                output_rx.recv().await.unwrap(),
+                RealtimeAgentOutput::Provider(RealtimeEvent::TurnStarted { .. })
+            ) {
+                break;
+            }
         }
-        wait_until(|| input_tx.capacity() == 8 && sent.lock().unwrap().iter().any(|item| item.contains("response.cancel")), "next input deferred behind response A").await;
-        let mut done = json!({"type":"response.done","response":{"id":"response-a","status":"cancelled"}});
-        if with_usage { done["response"]["usage"] = json!({"input_tokens":1,"output_tokens":2,"total_tokens":3}); }
-        provider.unbounded_send(Ok(RealtimeFrame::text(done.to_string()))).unwrap();
+        for input in [
+            RealtimeInput::Interrupt,
+            RealtimeInput::CommitAudio,
+            RealtimeInput::ContinueResponse,
+        ] {
+            input_tx
+                .try_send(RealtimeAgentInput::Provider(input))
+                .unwrap();
+        }
+        wait_until(
+            || {
+                input_tx.capacity() == 8
+                    && sent
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item.contains("response.cancel"))
+            },
+            "next input deferred behind response A",
+        )
+        .await;
+        let mut done =
+            json!({"type":"response.done","response":{"id":"response-a","status":"cancelled"}});
+        if with_usage {
+            done["response"]["usage"] =
+                json!({"input_tokens":1,"output_tokens":2,"total_tokens":3});
+        }
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(done.to_string())))
+            .unwrap();
         let mut old_done = false;
         let mut saw_tool_cancelled = false;
         let mut saw_interrupted = false;
         let mut saw_raw = false;
         let second = loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::Provider(RealtimeEvent::ToolCancelled { .. }) => saw_tool_cancelled = true,
-                RealtimeAgentOutput::Provider(RealtimeEvent::Interrupted) => { assert!(saw_tool_cancelled); saw_interrupted = true; }
-                RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { name, .. }) if name == "response.done" => { assert!(saw_interrupted); saw_raw = true; }
-                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, first); assert!(saw_raw); old_done = true; }
-                RealtimeAgentOutput::AgentResponseStarted { turn_id } => { assert!(old_done); assert_ne!(turn_id, first); break turn_id; }
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::Provider(RealtimeEvent::ToolCancelled { .. }) => {
+                    saw_tool_cancelled = true
+                }
+                RealtimeAgentOutput::Provider(RealtimeEvent::Interrupted) => {
+                    assert!(saw_tool_cancelled);
+                    saw_interrupted = true;
+                }
+                RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { name, .. })
+                    if name == "response.done" =>
+                {
+                    assert!(saw_interrupted);
+                    saw_raw = true;
+                }
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                    assert_eq!(turn_id, first);
+                    assert!(saw_raw);
+                    old_done = true;
+                }
+                RealtimeAgentOutput::AgentResponseStarted { turn_id } => {
+                    assert!(old_done);
+                    assert_ne!(turn_id, first);
+                    break turn_id;
+                }
                 _ => {}
             }
         };
         // Duplicate A completion/cancellation must not affect the newly admitted B.
         let mut old_completed = done.clone();
         old_completed["response"]["status"] = json!("completed");
-        provider.unbounded_send(Ok(RealtimeFrame::text(old_completed.to_string()))).unwrap();
-        provider.unbounded_send(Ok(RealtimeFrame::text(done.to_string()))).unwrap();
-        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"type":"response.created","response":{"id":"response-b"}}"#))).unwrap();
-        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"type":"response.done","response":{"id":"response-b","status":"completed"}}"#))).unwrap();
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(old_completed.to_string())))
+            .unwrap();
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(done.to_string())))
+            .unwrap();
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                r#"{"type":"response.created","response":{"id":"response-b"}}"#,
+            )))
+            .unwrap();
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                r#"{"type":"response.done","response":{"id":"response-b","status":"completed"}}"#,
+            )))
+            .unwrap();
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::Provider(RealtimeEvent::Interrupted | RealtimeEvent::ToolCancelled { .. }) => panic!("stale A cancellation reached B"),
-                RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { turn_id: Some(id), .. }) if id == "response-a" => panic!("stale A completion reached B"),
-                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, second); break; }
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::Provider(
+                    RealtimeEvent::Interrupted | RealtimeEvent::ToolCancelled { .. },
+                ) => panic!("stale A cancellation reached B"),
+                RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted {
+                    turn_id: Some(id),
+                    ..
+                }) if id == "response-a" => panic!("stale A completion reached B"),
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                    assert_eq!(turn_id, second);
+                    break;
+                }
                 _ => {}
             }
         }
@@ -1332,59 +2504,152 @@ async fn openai_cancelled_frame_drains_before_deferred_next_input() {
 async fn provider_done_before_interrupt_waits_for_tool_drain_without_extra_cancel() {
     for gemini in [false, true] {
         let completion = Arc::new(tokio::sync::Notify::new());
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
         let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
         let prepared = prepare_bound(&orch).await;
-        let (control, events, driver, provider, sent) = if gemini { gemini_connection().await } else { connection().await };
+        let (control, events, driver, provider, sent) = if gemini {
+            gemini_connection().await
+        } else {
+            connection().await
+        };
         let (input_tx, inputs) = admitted_inputs();
         let (output, mut output_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
         let limits = RealtimeAgentLimits {
-            completion_boundary: if gemini { RealtimeCompletionBoundary::Gemini38 } else { RealtimeCompletionBoundary::ExplicitResponse },
+            completion_boundary: if gemini {
+                RealtimeCompletionBoundary::Gemini38
+            } else {
+                RealtimeCompletionBoundary::ExplicitResponse
+            },
             ..Default::default()
         };
-        let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-            orch.run_realtime_agent(prepared, control, events, inputs, output, limits, false, cancel).await
-        }});
-        let first = loop { if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; } };
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                orch.run_realtime_agent(
+                    prepared, control, events, inputs, output, limits, false, cancel,
+                )
+                .await
+            }
+        });
+        let first = loop {
+            if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+                output_rx.recv().await.unwrap()
+            {
+                break turn_id;
+            }
+        };
         if gemini {
-            provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"toolCall":{"functionCalls":[{"id":"call","name":"fixture","args":{}}]}}"#))).unwrap();
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text(
+                    r#"{"toolCall":{"functionCalls":[{"id":"call","name":"fixture","args":{}}]}}"#,
+                )))
+                .unwrap();
         } else {
-            for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+            for kind in ["start", "tool"] {
+                provider
+                    .unbounded_send(Ok(RealtimeFrame::text(kind)))
+                    .unwrap();
+            }
         }
-        wait_until(|| calls.load(Ordering::SeqCst) == 1, "tool started before provider completion").await;
-        provider.unbounded_send(Ok(RealtimeFrame::text(if gemini {
-            r#"{"serverContent":{"turnComplete":true,"interactionStatus":"IDLE"}}"#
-        } else { "done" }))).unwrap();
+        wait_until(
+            || calls.load(Ordering::SeqCst) == 1,
+            "tool started before provider completion",
+        )
+        .await;
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(if gemini {
+                r#"{"serverContent":{"turnComplete":true,"interactionStatus":"IDLE"}}"#
+            } else {
+                "done"
+            })))
+            .unwrap();
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { name, .. }) if gemini && name == "serverContent" => break,
-                RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. }) if !gemini => break,
-                RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("tool still owns the turn"),
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { name, .. })
+                    if gemini && name == "serverContent" =>
+                {
+                    break
+                }
+                RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. }) if !gemini => {
+                    break
+                }
+                RealtimeAgentOutput::AgentTurnCompleted { .. } => {
+                    panic!("tool still owns the turn")
+                }
                 _ => {}
             }
         }
-        for input in [RealtimeInput::Interrupt, RealtimeInput::CommitAudio, RealtimeInput::ContinueResponse] {
-            input_tx.try_send(RealtimeAgentInput::Provider(input)).unwrap();
+        for input in [
+            RealtimeInput::Interrupt,
+            RealtimeInput::CommitAudio,
+            RealtimeInput::ContinueResponse,
+        ] {
+            input_tx
+                .try_send(RealtimeAgentInput::Provider(input))
+                .unwrap();
         }
-        wait_until(|| input_tx.capacity() == 8, "deferred interrupted input queued").await;
-        assert!(!sent.lock().unwrap().iter().any(|item| if gemini { item.contains("activityStart") } else { item == "Interrupt" }));
+        wait_until(
+            || input_tx.capacity() == 8,
+            "deferred interrupted input queued",
+        )
+        .await;
+        assert!(!sent.lock().unwrap().iter().any(|item| if gemini {
+            item.contains("activityStart")
+        } else {
+            item == "Interrupt"
+        }));
         assert!(output_rx.try_recv().is_err());
         completion.notify_one();
         let mut old_done = false;
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, first); old_done = true; }
-                RealtimeAgentOutput::AgentResponseStarted { turn_id } => { assert!(old_done); assert_ne!(turn_id, first); break; }
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                    assert_eq!(turn_id, first);
+                    old_done = true;
+                }
+                RealtimeAgentOutput::AgentResponseStarted { turn_id } => {
+                    assert!(old_done);
+                    assert_ne!(turn_id, first);
+                    break;
+                }
                 _ => {}
             }
         }
-        wait_until(|| {
-            let sent = sent.lock().unwrap();
-            if gemini { sent.iter().filter(|item| item.contains("activityEnd")).count() == 2 }
-            else { sent.iter().filter(|item| *item == "CommitAudio").count() == 2 && sent.iter().any(|item| item == "ContinueResponse") }
-        }, "new commit and continuation sent after drain").await;
-        assert!(!sent.lock().unwrap().iter().any(|item| if gemini { item.contains("activityStart") } else { item == "Interrupt" }));
+        wait_until(
+            || {
+                let sent = sent.lock().unwrap();
+                if gemini {
+                    sent.iter()
+                        .filter(|item| item.contains("activityEnd"))
+                        .count()
+                        == 2
+                } else {
+                    sent.iter().filter(|item| *item == "CommitAudio").count() == 2
+                        && sent.iter().any(|item| item == "ContinueResponse")
+                }
+            },
+            "new commit and continuation sent after drain",
+        )
+        .await;
+        assert!(!sent.lock().unwrap().iter().any(|item| if gemini {
+            item.contains("activityStart")
+        } else {
+            item == "Interrupt"
+        }));
         cancel.cancel();
         assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
         let _ = driver.await;
@@ -1394,32 +2659,95 @@ async fn provider_done_before_interrupt_waits_for_tool_drain_without_extra_cance
 #[tokio::test]
 async fn interrupt_after_continuation_request_waits_for_new_provider_completion() {
     let completion = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
-    let first = loop { if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; } };
-    for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    let first = loop {
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            output_rx.recv().await.unwrap()
+        {
+            break turn_id;
+        }
+    };
+    for kind in ["start", "tool"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
     wait_until(|| calls.load(Ordering::SeqCst) == 1, "tool started").await;
-    provider.unbounded_send(Ok(RealtimeFrame::text("done"))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("done")))
+        .unwrap();
     loop {
-        if matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. })) { break; }
+        if matches!(
+            output_rx.recv().await.unwrap(),
+            RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. })
+        ) {
+            break;
+        }
     }
     completion.notify_one();
-    wait_until(|| sent.lock().unwrap().iter().any(|item| item == "ContinueResponse"), "continuation requested").await;
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt)).unwrap();
-    wait_until(|| sent.lock().unwrap().iter().any(|item| item == "Interrupt"), "continuation interrupted").await;
-    assert!(output_rx.try_recv().is_err(), "old provider completion cannot settle the requested continuation");
-    for kind in ["start-continuation", "done-cancelled-continuation"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    wait_until(
+        || {
+            sent.lock()
+                .unwrap()
+                .iter()
+                .any(|item| item == "ContinueResponse")
+        },
+        "continuation requested",
+    )
+    .await;
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        .unwrap();
+    wait_until(
+        || sent.lock().unwrap().iter().any(|item| item == "Interrupt"),
+        "continuation interrupted",
+    )
+    .await;
+    assert!(
+        output_rx.try_recv().is_err(),
+        "old provider completion cannot settle the requested continuation"
+    );
+    for kind in ["start-continuation", "done-cancelled-continuation"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
     loop {
-        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            assert_eq!(turn_id, first); break;
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } =
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        {
+            assert_eq!(turn_id, first);
+            break;
         }
     }
     cancel.cancel();
@@ -1429,26 +2757,73 @@ async fn interrupt_after_continuation_request_waits_for_new_provider_completion(
 
 #[tokio::test]
 async fn interrupt_after_local_terminal_does_not_cancel_a_new_response() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
     let admitted = next_agent_started(&mut output_rx).await;
-    for kind in ["start", "done"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
-    let first = loop { if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; } };
-    assert_eq!(first, admitted);
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt)).unwrap();
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
-    loop {
-        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { assert_ne!(turn_id, first); break; }
+    for kind in ["start", "done"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
     }
-    wait_until(|| sent.lock().unwrap().iter().filter(|item| *item == "CommitAudio").count() == 2, "new input sent").await;
+    let first = loop {
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap()
+        {
+            break turn_id;
+        }
+    };
+    assert_eq!(first, admitted);
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        .unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
+    loop {
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            output_rx.recv().await.unwrap()
+        {
+            assert_ne!(turn_id, first);
+            break;
+        }
+    }
+    wait_until(
+        || {
+            sent.lock()
+                .unwrap()
+                .iter()
+                .filter(|item| *item == "CommitAudio")
+                .count()
+                == 2
+        },
+        "new input sent",
+    )
+    .await;
     assert!(!sent.lock().unwrap().iter().any(|item| item == "Interrupt"));
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
@@ -1458,42 +2833,112 @@ async fn interrupt_after_local_terminal_does_not_cancel_a_new_response() {
 #[tokio::test]
 async fn interrupted_tool_drains_before_deferred_commit_and_continue_are_replayed() {
     let completion = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
-    let first = loop { if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; } };
-    for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
-    wait_until(|| calls.load(Ordering::SeqCst) == 1, "interruptible tool started").await;
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt)).unwrap();
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::ContinueResponse)).unwrap();
-    provider.unbounded_send(Ok(RealtimeFrame::text("done-cancelled"))).unwrap();
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    let first = loop {
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            output_rx.recv().await.unwrap()
+        {
+            break turn_id;
+        }
+    };
+    for kind in ["start", "tool"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
+    wait_until(
+        || calls.load(Ordering::SeqCst) == 1,
+        "interruptible tool started",
+    )
+    .await;
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        .unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(
+            RealtimeInput::ContinueResponse,
+        ))
+        .unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("done-cancelled")))
+        .unwrap();
     loop {
         match output_rx.recv().await.unwrap() {
             RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. }) => break,
-            RealtimeAgentOutput::AgentTurnCompleted { .. } | RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("old owner is not drained"),
+            RealtimeAgentOutput::AgentTurnCompleted { .. }
+            | RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                panic!("old owner is not drained")
+            }
             _ => {}
         }
     }
-    assert_eq!(sent.lock().unwrap().iter().filter(|item| *item == "CommitAudio").count(), 1);
+    assert_eq!(
+        sent.lock()
+            .unwrap()
+            .iter()
+            .filter(|item| *item == "CommitAudio")
+            .count(),
+        1
+    );
     completion.notify_one();
     let mut old_done = false;
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, first); old_done = true; }
-            RealtimeAgentOutput::AgentResponseStarted { turn_id } => { assert!(old_done); assert_ne!(turn_id, first); break; }
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                assert_eq!(turn_id, first);
+                old_done = true;
+            }
+            RealtimeAgentOutput::AgentResponseStarted { turn_id } => {
+                assert!(old_done);
+                assert_ne!(turn_id, first);
+                break;
+            }
             _ => {}
         }
     }
-    wait_until(|| { let sent = sent.lock().unwrap(); sent.iter().filter(|item| *item == "CommitAudio").count() == 2
-        && sent.iter().any(|item| item == "ContinueResponse") }, "deferred commit and continuation replayed").await;
+    wait_until(
+        || {
+            let sent = sent.lock().unwrap();
+            sent.iter().filter(|item| *item == "CommitAudio").count() == 2
+                && sent.iter().any(|item| item == "ContinueResponse")
+        },
+        "deferred commit and continuation replayed",
+    )
+    .await;
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -1501,28 +2946,75 @@ async fn interrupted_tool_drains_before_deferred_commit_and_continue_are_replaye
 
 #[tokio::test]
 async fn audio_chunk_arriving_after_commit_does_not_end_the_active_turn() {
-    let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
     let first = loop {
-        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() { break turn_id; }
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        {
+            break turn_id;
+        }
     };
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-        data:bytes::Bytes::from_static(&[1, 2]), format:RealtimeAudioFormat::Pcm16 { sample_rate_hz:24_000 },
-    })).await.unwrap();
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+            data: bytes::Bytes::from_static(&[1, 2]),
+            format: RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+        }))
+        .await
+        .unwrap();
     wait_until(|| input_tx.capacity() == 8, "late audio consumed").await;
-    for kind in ["start", "done"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
-    loop {
-        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() { assert_eq!(turn_id, first); break; }
+    for kind in ["start", "done"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
     }
-    assert!(!sent.lock().unwrap().iter().any(|value| value.starts_with("Audio")));
+    loop {
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } =
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        {
+            assert_eq!(turn_id, first);
+            break;
+        }
+    }
+    assert!(!sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|value| value.starts_with("Audio")));
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -1531,50 +3023,127 @@ async fn audio_chunk_arriving_after_commit_does_not_end_the_active_turn() {
 #[tokio::test]
 async fn interrupted_audio_applies_backpressure_until_the_old_tool_drains() {
     let completion = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
-    let first = loop {
-        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() { break turn_id; }
-    };
-    for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
-    wait_until(|| calls.load(Ordering::SeqCst) == 1, "old tool started").await;
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt)).await.unwrap();
-    let sent_chunks = Arc::new(AtomicUsize::new(0));
-    let producer = tokio::spawn({ let tx = input_tx.clone(); let sent_chunks = sent_chunks.clone(); async move {
-        for _ in 0..40 {
-            tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-                data:bytes::Bytes::from(vec![0; 64 * 1024]),
-                format:RealtimeAudioFormat::Pcm16 { sample_rate_hz:24_000 },
-            })).await.unwrap();
-            sent_chunks.fetch_add(1, Ordering::SeqCst);
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
         }
-        tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-    }});
-    provider.unbounded_send(Ok(RealtimeFrame::text("done-cancelled"))).unwrap();
-    wait_until(|| sent_chunks.load(Ordering::SeqCst) >= 20, "deferred audio reached its high-water mark").await;
+    });
+    let first = loop {
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        {
+            break turn_id;
+        }
+    };
+    for kind in ["start", "tool"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
+    wait_until(|| calls.load(Ordering::SeqCst) == 1, "old tool started").await;
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        .await
+        .unwrap();
+    let sent_chunks = Arc::new(AtomicUsize::new(0));
+    let producer = tokio::spawn({
+        let tx = input_tx.clone();
+        let sent_chunks = sent_chunks.clone();
+        async move {
+            for _ in 0..40 {
+                tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+                    data: bytes::Bytes::from(vec![0; 64 * 1024]),
+                    format: RealtimeAudioFormat::Pcm16 {
+                        sample_rate_hz: 24_000,
+                    },
+                }))
+                .await
+                .unwrap();
+                sent_chunks.fetch_add(1, Ordering::SeqCst);
+            }
+            tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+                .await
+                .unwrap();
+        }
+    });
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("done-cancelled")))
+        .unwrap();
+    wait_until(
+        || sent_chunks.load(Ordering::SeqCst) >= 20,
+        "deferred audio reached its high-water mark",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(sent_chunks.load(Ordering::SeqCst) < 40, "producer bypassed bounded backpressure");
-    assert!(!sent.lock().unwrap().iter().any(|value| value.starts_with("Audio")), "new audio reached the provider while the old tool was active");
+    assert!(
+        sent_chunks.load(Ordering::SeqCst) < 40,
+        "producer bypassed bounded backpressure"
+    );
+    assert!(
+        !sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|value| value.starts_with("Audio")),
+        "new audio reached the provider while the old tool was active"
+    );
     completion.notify_one();
     let mut first_finished = false;
     loop {
-        match tokio::time::timeout(Duration::from_secs(5), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, first); first_finished = true; }
-            RealtimeAgentOutput::AgentResponseStarted { .. } => { assert!(first_finished); break; }
-            _ => {},
+        match tokio::time::timeout(Duration::from_secs(5), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                assert_eq!(turn_id, first);
+                first_finished = true;
+            }
+            RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                assert!(first_finished);
+                break;
+            }
+            _ => {}
         }
     }
     producer.await.unwrap();
-    assert_eq!(sent.lock().unwrap().iter().filter(|value| value.starts_with("Audio")).count(), 40);
+    assert_eq!(
+        sent.lock()
+            .unwrap()
+            .iter()
+            .filter(|value| value.starts_with("Audio"))
+            .count(),
+        40
+    );
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
@@ -1583,75 +3152,196 @@ async fn interrupted_audio_applies_backpressure_until_the_old_tool_drains() {
 #[tokio::test]
 async fn deferred_images_share_the_payload_backpressure_limit() {
     let completion = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
     let (output, mut output_rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), true, cancel).await
-    }});
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                true,
+                cancel,
+            )
+            .await
+        }
+    });
     next_agent_started(&mut output_rx).await;
-    for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    for kind in ["start", "tool"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
     wait_until(|| calls.load(Ordering::SeqCst) == 1, "old tool started").await;
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt)).await.unwrap();
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-        data:bytes::Bytes::from_static(&[1, 2]), format:RealtimeAudioFormat::Pcm16 { sample_rate_hz:24_000 },
-    })).await.unwrap();
-    let mut png = base64::engine::general_purpose::STANDARD.decode(VISUAL_TEST_PNG_BASE64).unwrap();
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        .await
+        .unwrap();
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+            data: bytes::Bytes::from_static(&[1, 2]),
+            format: RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+        }))
+        .await
+        .unwrap();
+    let mut png = base64::engine::general_purpose::STANDARD
+        .decode(VISUAL_TEST_PNG_BASE64)
+        .unwrap();
     png.resize(600 * 1024, 0);
     let png = bytes::Bytes::from(png);
     let sent_images = Arc::new(AtomicUsize::new(0));
-    let producer = tokio::spawn({ let tx = input_tx.clone(); let sent_images = sent_images.clone(); async move {
-        for _ in 0..20 {
-            if tx.send(RealtimeAgentInput::Provider(RealtimeInput::Image { data:png.clone(), mime_type:"image/png".into() })).await.is_err() { break; }
-            sent_images.fetch_add(1, Ordering::SeqCst);
+    let producer = tokio::spawn({
+        let tx = input_tx.clone();
+        let sent_images = sent_images.clone();
+        async move {
+            for _ in 0..20 {
+                if tx
+                    .send(RealtimeAgentInput::Provider(RealtimeInput::Image {
+                        data: png.clone(),
+                        mime_type: "image/png".into(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                sent_images.fetch_add(1, Ordering::SeqCst);
+            }
         }
-    }});
-    wait_until(|| sent_images.load(Ordering::SeqCst) >= 9, "deferred image producer reached backpressure").await;
+    });
+    wait_until(
+        || sent_images.load(Ordering::SeqCst) >= 9,
+        "deferred image producer reached backpressure",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(sent_images.load(Ordering::SeqCst) < 20, "images bypassed the deferred payload bound");
-    assert!(!sent.lock().unwrap().iter().any(|value| value.starts_with("Image")));
+    assert!(
+        sent_images.load(Ordering::SeqCst) < 20,
+        "images bypassed the deferred payload bound"
+    );
+    assert!(!sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|value| value.starts_with("Image")));
     cancel.cancel();
     completion.notify_one();
-    assert_eq!(tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        RealtimeAgentEnd::Cancelled
+    );
     producer.await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(2), driver).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), driver)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn deferred_images_count_toward_the_session_limit_before_replay() {
     let completion = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(Gate { calls:AtomicUsize::new(0), deny:false, release:None, approved:AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, calls) = fixture_with_completion(gate, Some(completion.clone())).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = connection().await;
     let (input_tx, inputs) = mpsc::channel(8);
-    input_tx.try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).unwrap();
+    input_tx
+        .try_send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .unwrap();
     let (output, mut output_rx) = mpsc::channel(64);
-    let png = bytes::Bytes::from(base64::engine::general_purpose::STANDARD.decode(VISUAL_TEST_PNG_BASE64).unwrap());
-    let limits = RealtimeAgentLimits { max_image_bytes_per_session:png.len() + 1, ..Default::default() };
+    let png = bytes::Bytes::from(
+        base64::engine::general_purpose::STANDARD
+            .decode(VISUAL_TEST_PNG_BASE64)
+            .unwrap(),
+    );
+    let limits = RealtimeAgentLimits {
+        max_image_bytes_per_session: png.len() + 1,
+        ..Default::default()
+    };
     let task = tokio::spawn(async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, limits, true, CancellationToken::new()).await
+        orch.run_realtime_agent(
+            prepared,
+            control,
+            events,
+            inputs,
+            output,
+            limits,
+            true,
+            CancellationToken::new(),
+        )
+        .await
     });
     next_agent_started(&mut output_rx).await;
-    for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    for kind in ["start", "tool"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
     wait_until(|| calls.load(Ordering::SeqCst) == 1, "old tool started").await;
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt)).await.unwrap();
-    input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
-        data:bytes::Bytes::from_static(&[1, 2]), format:RealtimeAudioFormat::Pcm16 { sample_rate_hz:24_000 },
-    })).await.unwrap();
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Interrupt))
+        .await
+        .unwrap();
+    input_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::Audio {
+            data: bytes::Bytes::from_static(&[1, 2]),
+            format: RealtimeAudioFormat::Pcm16 {
+                sample_rate_hz: 24_000,
+            },
+        }))
+        .await
+        .unwrap();
     for _ in 0..2 {
-        input_tx.send(RealtimeAgentInput::Provider(RealtimeInput::Image { data:png.clone(), mime_type:"image/png".into() })).await.unwrap();
+        input_tx
+            .send(RealtimeAgentInput::Provider(RealtimeInput::Image {
+                data: png.clone(),
+                mime_type: "image/png".into(),
+            }))
+            .await
+            .unwrap();
     }
     completion.notify_one();
-    let error = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap_err();
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
     assert!(error.to_string().contains("image session byte limit"));
-    assert!(!sent.lock().unwrap().iter().any(|value| value.starts_with("Image")));
-    let _ = tokio::time::timeout(Duration::from_secs(2), driver).await.unwrap();
+    assert!(!sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|value| value.starts_with("Image")));
+    let _ = tokio::time::timeout(Duration::from_secs(2), driver)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1829,10 +3519,7 @@ async fn realtime_running_turn_rejects_mode_change_without_interrupting_owner() 
         .ensure_conversation_mode(ConversationMode::Chat)
         .await
         .is_err());
-    assert_eq!(
-        orch.conversation_mode().await.mode,
-        ConversationMode::Code
-    );
+    assert_eq!(orch.conversation_mode().await.mode, ConversationMode::Code);
     cancel.cancel();
     release.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), first)
@@ -1840,10 +3527,7 @@ async fn realtime_running_turn_rejects_mode_change_without_interrupting_owner() 
         .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
 
-    assert_eq!(
-        orch.conversation_mode().await.mode,
-        ConversationMode::Code
-    );
+    assert_eq!(orch.conversation_mode().await.mode, ConversationMode::Code);
 }
 
 #[tokio::test]
@@ -1919,7 +3603,9 @@ async fn agent_terminal_waits_for_permission_tools_and_the_continuation() {
     for release_before_done in [false, true] {
         let release = Arc::new(tokio::sync::Notify::new());
         let gate = Arc::new(Gate {
-            calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()),
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: Some(release.clone()),
             approved: AtomicBool::new(false),
         });
         let (orch, _) = fixture(gate.clone()).await;
@@ -1930,36 +3616,95 @@ async fn agent_terminal_waits_for_permission_tools_and_the_continuation() {
         let cancel = CancellationToken::new();
         let task = tokio::spawn({
             let cancel = cancel.clone();
-            async move { orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await }
+            async move {
+                orch.run_realtime_agent(
+                    prepared,
+                    control,
+                    events,
+                    inputs,
+                    output,
+                    Default::default(),
+                    false,
+                    cancel,
+                )
+                .await
+            }
         });
         let id = Some(next_agent_started(&mut output_rx).await);
         for kind in ["start", "tool"] {
-            provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap();
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text(kind)))
+                .unwrap();
         }
-        wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "permission requested").await;
+        wait_until(
+            || gate.calls.load(Ordering::SeqCst) > 0,
+            "permission requested",
+        )
+        .await;
         if release_before_done {
             release.notify_one();
-            wait_until(|| sent.lock().unwrap().iter().any(|value| value == "ContinueResponse"), "continuation requested").await;
+            wait_until(
+                || {
+                    sent.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == "ContinueResponse")
+                },
+                "continuation requested",
+            )
+            .await;
         }
-        provider.unbounded_send(Ok(RealtimeFrame::text("done"))).unwrap();
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text("done")))
+            .unwrap();
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("unexpected second admission"),
-                RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("tool response cannot finish the Agent input"),
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                    panic!("unexpected second admission")
+                }
+                RealtimeAgentOutput::AgentTurnCompleted { .. } => {
+                    panic!("tool response cannot finish the Agent input")
+                }
                 RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. }) => break,
                 _ => {}
             }
         }
         assert!(output_rx.try_recv().is_err());
-        if !release_before_done { release.notify_one(); }
-        wait_until(|| sent.lock().unwrap().iter().any(|value| value == "ContinueResponse"), "continuation requested").await;
+        if !release_before_done {
+            release.notify_one();
+        }
+        wait_until(
+            || {
+                sent.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == "ContinueResponse")
+            },
+            "continuation requested",
+        )
+        .await;
         for kind in ["start-continuation", "done-continuation"] {
-            provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap();
+            provider
+                .unbounded_send(Ok(RealtimeFrame::text(kind)))
+                .unwrap();
         }
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(Some(turn_id), id); break; }
-                RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("continuation changed the local input identity"),
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                    assert_eq!(Some(turn_id), id);
+                    break;
+                }
+                RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                    panic!("continuation changed the local input identity")
+                }
                 _ => {}
             }
         }
@@ -1972,39 +3717,94 @@ async fn agent_terminal_waits_for_permission_tools_and_the_continuation() {
 #[tokio::test]
 async fn agent_terminal_supports_automatic_continuation_without_provider_start() {
     let release = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: Some(release.clone()),
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate.clone()).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, sent) = gemini_connection().await;
     let (inputs_tx, inputs) = mpsc::channel(4);
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output,
-            RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
-    }});
-    inputs_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits {
+                    completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                    ..Default::default()
+                },
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    inputs_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
     let id = loop {
-        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; }
+        if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+            output_rx.recv().await.unwrap()
+        {
+            break turn_id;
+        }
     };
     provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"turnComplete":true,"generationComplete":true,"interactionStatus":"IN_PROGRESS"}}"#))).unwrap();
     loop {
         match output_rx.recv().await.unwrap() {
             RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("IN_PROGRESS is not final"),
-            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { name, .. }) if name == "serverContent" => break,
+            RealtimeAgentOutput::Provider(RealtimeEvent::ProviderEvent { name, .. })
+                if name == "serverContent" =>
+            {
+                break
+            }
             _ => {}
         }
     }
     provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"toolCall":{"functionCalls":[{"id":"call","name":"fixture","args":{}},{"id":"call-second","name":"fixture","args":{}}]}}"#))).unwrap();
-    wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "Gemini permission requested").await;
+    wait_until(
+        || gate.calls.load(Ordering::SeqCst) > 0,
+        "Gemini permission requested",
+    )
+    .await;
     assert!(output_rx.try_recv().is_ok());
     release.notify_one();
-    wait_until(|| sent.lock().unwrap().iter().filter(|value| value.contains("toolResponse")).count() == 2, "both tool results").await;
+    wait_until(
+        || {
+            sent.lock()
+                .unwrap()
+                .iter()
+                .filter(|value| value.contains("toolResponse"))
+                .count()
+                == 2
+        },
+        "both tool results",
+    )
+    .await;
     provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"turnComplete":true,"generationComplete":true,"interactionStatus":"IDLE"}}"#))).unwrap();
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("continuation changed the local input identity"),
-            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, id); break; }
+        match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                panic!("continuation changed the local input identity")
+            }
+            RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                assert_eq!(turn_id, id);
+                break;
+            }
             _ => {}
         }
     }
@@ -2016,32 +3816,70 @@ async fn agent_terminal_supports_automatic_continuation_without_provider_start()
 #[tokio::test]
 async fn cancelled_provider_waits_for_cancelled_tool_cleanup_before_local_terminal() {
     let release = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: Some(release.clone()),
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate.clone()).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (_inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
     let id = Some(next_agent_started(&mut output_rx).await);
-    for kind in ["start", "tool"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
-    wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "permission requested").await;
-    provider.unbounded_send(Ok(RealtimeFrame::text("done-cancelled"))).unwrap();
+    for kind in ["start", "tool"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
+    wait_until(
+        || gate.calls.load(Ordering::SeqCst) > 0,
+        "permission requested",
+    )
+    .await;
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("done-cancelled")))
+        .unwrap();
     loop {
         match output_rx.recv().await.unwrap() {
-            RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("unexpected second admission"),
+            RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                panic!("unexpected second admission")
+            }
             RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { .. }) => break,
-            RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("terminal before provider cancellation"),
+            RealtimeAgentOutput::AgentTurnCompleted { .. } => {
+                panic!("terminal before provider cancellation")
+            }
             _ => {}
         }
     }
     release.notify_one();
     loop {
-        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-            assert_eq!(Some(turn_id), id); break;
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } =
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        {
+            assert_eq!(Some(turn_id), id);
+            break;
         }
     }
     cancel.cancel();
@@ -2053,32 +3891,95 @@ async fn cancelled_provider_waits_for_cancelled_tool_cleanup_before_local_termin
 async fn gemini_interruption_in_a_separate_frame_waits_for_tool_drain() {
     for release_before_done in [false, true] {
         let release = Arc::new(tokio::sync::Notify::new());
-        let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: Some(release.clone()), approved: AtomicBool::new(false) });
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: Some(release.clone()),
+            approved: AtomicBool::new(false),
+        });
         let (orch, _) = fixture(gate.clone()).await;
         let prepared = prepare_bound(&orch).await;
         let (control, events, driver, provider, _) = gemini_connection().await;
         let (inputs_tx, inputs) = mpsc::channel(4);
         let (output, mut output_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-            orch.run_realtime_agent(prepared, control, events, inputs, output,
-                RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, cancel).await
-        }});
-        inputs_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
-        let id = loop { if let RealtimeAgentOutput::AgentResponseStarted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; } };
-        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"toolCall":{"functionCalls":[{"id":"call","name":"fixture","args":{}}]}}"#))).unwrap();
-        wait_until(|| gate.calls.load(Ordering::SeqCst) > 0, "Gemini permission requested").await;
-        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"interrupted":true}}"#))).unwrap();
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                orch.run_realtime_agent(
+                    prepared,
+                    control,
+                    events,
+                    inputs,
+                    output,
+                    RealtimeAgentLimits {
+                        completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                        ..Default::default()
+                    },
+                    false,
+                    cancel,
+                )
+                .await
+            }
+        });
+        inputs_tx
+            .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+            .await
+            .unwrap();
+        let id = loop {
+            if let RealtimeAgentOutput::AgentResponseStarted { turn_id } =
+                output_rx.recv().await.unwrap()
+            {
+                break turn_id;
+            }
+        };
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                r#"{"toolCall":{"functionCalls":[{"id":"call","name":"fixture","args":{}}]}}"#,
+            )))
+            .unwrap();
+        wait_until(
+            || gate.calls.load(Ordering::SeqCst) > 0,
+            "Gemini permission requested",
+        )
+        .await;
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                r#"{"serverContent":{"interrupted":true}}"#,
+            )))
+            .unwrap();
         loop {
-            if matches!(output_rx.recv().await.unwrap(), RealtimeAgentOutput::Provider(RealtimeEvent::Interrupted)) { break; }
+            if matches!(
+                output_rx.recv().await.unwrap(),
+                RealtimeAgentOutput::Provider(RealtimeEvent::Interrupted)
+            ) {
+                break;
+            }
         }
-        if release_before_done { release.notify_one(); }
-        provider.unbounded_send(Ok(RealtimeFrame::text(r#"{"serverContent":{"turnComplete":true,"interactionStatus":"IDLE"}}"#))).unwrap();
-        if !release_before_done { release.notify_one(); }
+        if release_before_done {
+            release.notify_one();
+        }
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(
+                r#"{"serverContent":{"turnComplete":true,"interactionStatus":"IDLE"}}"#,
+            )))
+            .unwrap();
+        if !release_before_done {
+            release.notify_one();
+        }
         loop {
-            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap() {
-                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => { assert_eq!(turn_id, id); break; }
-                RealtimeAgentOutput::AgentResponseStarted { .. } => panic!("interruption created another input"),
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                RealtimeAgentOutput::AgentTurnCompleted { turn_id } => {
+                    assert_eq!(turn_id, id);
+                    break;
+                }
+                RealtimeAgentOutput::AgentResponseStarted { .. } => {
+                    panic!("interruption created another input")
+                }
                 _ => {}
             }
         }
@@ -2090,41 +3991,87 @@ async fn gemini_interruption_in_a_separate_frame_waits_for_tool_drain() {
 
 #[tokio::test]
 async fn stale_provider_completion_cannot_finish_new_local_input() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (inputs_tx, inputs) = admitted_inputs();
     let (output, mut output_rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn({ let cancel = cancel.clone(); async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output, Default::default(), false, cancel).await
-    }});
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                Default::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
     next_agent_started(&mut output_rx).await;
-    for kind in ["start", "done"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    for kind in ["start", "done"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
     let first = loop {
-        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap() { break turn_id; }
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap()
+        {
+            break turn_id;
+        }
     };
-    inputs_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+    inputs_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
     let second = loop {
         match output_rx.recv().await.unwrap() {
-            RealtimeAgentOutput::AgentResponseStarted { turn_id } => { assert_ne!(turn_id, first); break turn_id; }
+            RealtimeAgentOutput::AgentResponseStarted { turn_id } => {
+                assert_ne!(turn_id, first);
+                break turn_id;
+            }
             _ => {}
         }
     };
-    for kind in ["start-continuation", "done", "ready"] { provider.unbounded_send(Ok(RealtimeFrame::text(kind))).unwrap(); }
+    for kind in ["start-continuation", "done", "ready"] {
+        provider
+            .unbounded_send(Ok(RealtimeFrame::text(kind)))
+            .unwrap();
+    }
     loop {
         match output_rx.recv().await.unwrap() {
             RealtimeAgentOutput::Provider(RealtimeEvent::SessionReady) => break,
-            RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted { turn_id: Some(id), .. }) if id == "response-first" => panic!("old response reached new playback"),
-            RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("old response finished the new input"),
+            RealtimeAgentOutput::Provider(RealtimeEvent::TurnCompleted {
+                turn_id: Some(id),
+                ..
+            }) if id == "response-first" => panic!("old response reached new playback"),
+            RealtimeAgentOutput::AgentTurnCompleted { .. } => {
+                panic!("old response finished the new input")
+            }
             _ => {}
         }
     }
     assert!(output_rx.try_recv().is_err());
-    provider.unbounded_send(Ok(RealtimeFrame::text("done-continuation"))).unwrap();
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("done-continuation")))
+        .unwrap();
     loop {
-        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap() { assert_eq!(turn_id, second); break; }
+        if let RealtimeAgentOutput::AgentTurnCompleted { turn_id } = output_rx.recv().await.unwrap()
+        {
+            assert_eq!(turn_id, second);
+            break;
+        }
     }
     cancel.cancel();
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
@@ -2133,23 +4080,54 @@ async fn stale_provider_completion_cannot_finish_new_local_input() {
 
 #[tokio::test]
 async fn gemini_missing_idle_status_fails_closed_without_a_terminal() {
-    let gate = Arc::new(Gate { calls: AtomicUsize::new(0), deny: false, release: None, approved: AtomicBool::new(false) });
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
     let (orch, _) = fixture(gate).await;
     let prepared = prepare_bound(&orch).await;
     let (control, events, driver, provider, _) = connection().await;
     let (inputs_tx, inputs) = mpsc::channel(4);
     let (output, mut output_rx) = mpsc::channel(32);
     let task = tokio::spawn(async move {
-        orch.run_realtime_agent(prepared, control, events, inputs, output,
-            RealtimeAgentLimits { completion_boundary: RealtimeCompletionBoundary::Gemini38, ..Default::default() }, false, CancellationToken::new()).await
+        orch.run_realtime_agent(
+            prepared,
+            control,
+            events,
+            inputs,
+            output,
+            RealtimeAgentLimits {
+                completion_boundary: RealtimeCompletionBoundary::Gemini38,
+                ..Default::default()
+            },
+            false,
+            CancellationToken::new(),
+        )
+        .await
     });
-    inputs_tx.send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio)).await.unwrap();
+    inputs_tx
+        .send(RealtimeAgentInput::Provider(RealtimeInput::CommitAudio))
+        .await
+        .unwrap();
     next_agent_started(&mut output_rx).await;
-    provider.unbounded_send(Ok(RealtimeFrame::text("gemini-missing"))).unwrap();
-    let error = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap_err();
-    assert!(error.to_string().contains("cannot confirm interactionStatus IDLE"));
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("gemini-missing")))
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("cannot confirm interactionStatus IDLE"));
     while let Ok(event) = output_rx.try_recv() {
-        assert!(!matches!(event, RealtimeAgentOutput::AgentTurnCompleted { .. }));
+        assert!(!matches!(
+            event,
+            RealtimeAgentOutput::AgentTurnCompleted { .. }
+        ));
     }
     let _ = driver.await;
 }
@@ -2447,7 +4425,13 @@ async fn realtime_transcripts_commit_after_playback_ack_and_skip_interrupted_aud
         events_tx
             .unbounded_send(Ok(RealtimeFrame::text(event)))
             .unwrap();
-        while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::Provider(_)) {}
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            RealtimeAgentOutput::Provider(_)
+        ) {}
     }
     assert_eq!(orch.snapshot_history().await.len(), 1);
     inputs_tx
@@ -2457,13 +4441,23 @@ async fn realtime_transcripts_commit_after_playback_ack_and_skip_interrupted_aud
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
-        while orch.snapshot_history().await.len() < 2 { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while orch.snapshot_history().await.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     for event in ["output", "audio-unheard", "interrupt", "output-unheard"] {
         events_tx
             .unbounded_send(Ok(RealtimeFrame::text(event)))
             .unwrap();
-        while !matches!(tokio::time::timeout(Duration::from_secs(2), output_rx.recv()).await.unwrap().unwrap(), RealtimeAgentOutput::Provider(_)) {}
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            RealtimeAgentOutput::Provider(_)
+        ) {}
     }
     inputs_tx
         .send(RealtimeAgentInput::PlaybackCompleted {
@@ -2492,10 +4486,16 @@ async fn wait_until(condition: impl Fn() -> bool, label: &str) {
 
 async fn next_agent_started(output: &mut mpsc::Receiver<RealtimeAgentOutput>) -> String {
     loop {
-        match tokio::time::timeout(Duration::from_secs(2), output.recv()).await.unwrap().unwrap() {
+        match tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
             RealtimeAgentOutput::AgentResponseStarted { turn_id } => return turn_id,
-            RealtimeAgentOutput::AgentTurnCompleted { .. } => panic!("turn completed before admission"),
-            _ => {},
+            RealtimeAgentOutput::AgentTurnCompleted { .. } => {
+                panic!("turn completed before admission")
+            }
+            _ => {}
         }
     }
 }
@@ -2613,10 +4613,7 @@ async fn default_session_audio_uses_authoritative_registry_profile_and_unresolve
         session.model_profile = None;
     }
     assert_eq!(orch.current_audio_profile().await.unwrap(), expected);
-    assert_eq!(
-        prepare_bound(&orch).await.profile_name,
-        Some(expected)
-    );
+    assert_eq!(prepare_bound(&orch).await.profile_name, Some(expected));
     let (unresolved, _) = fixture(Arc::new(Gate {
         calls: AtomicUsize::new(0),
         deny: false,

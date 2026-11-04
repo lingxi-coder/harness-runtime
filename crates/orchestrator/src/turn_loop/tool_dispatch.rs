@@ -3885,10 +3885,12 @@ pub(crate) async fn streaming_tool_context_base(
         messages,
         tool_use_id: None,
         assistant_message_id: None,
-            trusted_session_profile: Some(orch.conversation_profile().await),
-        durable_tool_origins: orch.transcript.jsonl_writer.as_ref().map(|_| tool_api::context::DurableToolOrigins {
-            sources: orch.transcript.tool_persisted_origins.clone(),
-            changed: orch.transcript.tool_source_assistant_notify.clone(),
+        trusted_session_profile: Some(orch.conversation_profile().await),
+        durable_tool_origins: orch.transcript.jsonl_writer.as_ref().map(|_| {
+            tool_api::context::DurableToolOrigins {
+                sources: orch.transcript.tool_persisted_origins.clone(),
+                changed: orch.transcript.tool_source_assistant_notify.clone(),
+            }
         }),
         assistant_message: None,
         same_turn_tool_uses: Vec::new(),
@@ -5560,7 +5562,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         .map(|context| context.traceparent.as_str()),
                 );
                 if let Some(assistant) = ctx.assistant_message_id {
-                    attachment.set_field("assistantMessageId", source_from_value(&serde_json::json!(assistant.as_uuid().to_string())))
+                    attachment
+                        .set_field(
+                            "assistantMessageId",
+                            source_from_value(&serde_json::json!(assistant.as_uuid().to_string())),
+                        )
                         .expect("deferred attachment is a host-generated object");
                 }
                 let persistence = orch.persist_hook_attachment_to_jsonl(attachment);
@@ -7093,17 +7099,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // `tagMessagesWithToolUseID` stamps the Skill tool's own block
                 // id as `sourceToolUseID`) for the caller's in-memory
                 // `injected_message_sources` side-table.
-                injected_messages.extend(
-                    result
-                        .new_messages
-                        .into_iter()
-                        .map(|mut m| {
-                            if name != "Skill" {
-                                compaction::invoked_skills::clear_untrusted_skill_origin(&mut m);
-                            }
-                            (m, tool_use_id.clone())
-                        }),
-                );
+                injected_messages.extend(result.new_messages.into_iter().map(|mut m| {
+                    if name != "Skill" {
+                        compaction::invoked_skills::clear_untrusted_skill_origin(&mut m);
+                    }
+                    (m, tool_use_id.clone())
+                }));
                 // SKILLEXEC.3 (model scope): stash any one-shot `context_modifier`
                 // for the caller to fold POST-BATCH. NOT applied to the per-tool
                 // `ctx` here (which is discarded at loop end) and NOT applied

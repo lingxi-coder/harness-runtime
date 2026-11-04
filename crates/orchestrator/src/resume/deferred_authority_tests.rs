@@ -11,18 +11,32 @@ fn deferred_tool_origin_requires_the_exact_captured_assistant_row() {
     let session = Uuid::new_v4().to_string();
     let logical = Uuid::new_v4().to_string();
     let physical = Uuid::new_v4().to_string();
-    let row = |value: serde_json::Value| JsonlMessage::from_projection(
-        &Utf16JsonProjection::from_serde_value(&value).unwrap()).unwrap();
-    let assistant = row(serde_json::json!({"type":"assistant","uuid":physical,"parentUuid":null,"sessionId":session,
-        "message":{"id":logical,"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"LocalApp","input":{}}]}}));
-    let attachment = row(serde_json::json!({"type":"attachment","uuid":Uuid::new_v4().to_string(),"parentUuid":physical,"sessionId":session,
-        "attachment":{"type":"hook_deferred_tool","toolUseID":"call-1","toolName":"LocalApp","toolInput":{},"assistantMessageId":logical}}));
+    let row = |value: serde_json::Value| {
+        JsonlMessage::from_projection(&Utf16JsonProjection::from_serde_value(&value).unwrap())
+            .unwrap()
+    };
+    let assistant = row(
+        serde_json::json!({"type":"assistant","uuid":physical,"parentUuid":null,"sessionId":session,
+        "message":{"id":logical,"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"LocalApp","input":{}}]}}),
+    );
+    let attachment = row(
+        serde_json::json!({"type":"attachment","uuid":Uuid::new_v4().to_string(),"parentUuid":physical,"sessionId":session,
+        "attachment":{"type":"hook_deferred_tool","toolUseID":"call-1","toolName":"LocalApp","toolInput":{},"assistantMessageId":logical}}),
+    );
     let loaded = deferred_tool_replays_from_messages(&[assistant.clone(), attachment.clone()]);
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].assistant_message_id.unwrap().as_uuid().to_string(), physical);
+    assert_eq!(
+        loaded[0]
+            .assistant_message_id
+            .unwrap()
+            .as_uuid()
+            .to_string(),
+        physical
+    );
     let missing = deferred_tool_replays_from_messages(&[attachment.clone()]);
     assert_eq!(missing[0].assistant_message_id, None);
-    let duplicated = deferred_tool_replays_from_messages(&[assistant.clone(), assistant, attachment]);
+    let duplicated =
+        deferred_tool_replays_from_messages(&[assistant.clone(), assistant, attachment]);
     assert_eq!(duplicated[0].assistant_message_id, None);
 }
 

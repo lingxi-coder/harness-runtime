@@ -40,9 +40,58 @@ re-vendor: `rg '[^:]str::from_utf8' third_party/libssh2-sys/*.rs` should be empt
 Built with `vendored-libgit2 + https + ssh` — TLS + crypto backend is **mbedTLS**
 (M-a swap; see below). `vendored-openssl` is dropped from `tools/git-mobile`.
 
+## libgit2 runtime initialization failure rollback
+
+`libgit2-sys/libgit2/src/util/runtime.c` rolls back registered shutdown handlers
+and the initialization reference count when a subsystem initializer returns a
+nonzero result. A retry then runs the initializers again; an unmatched shutdown
+returns an error without decrementing the count below zero. Re-apply this change
+after re-vendoring and run `scripts/tests/test_git_runtime_lifecycle.py` from
+the workspace root. The test compiles the actual runtime with native pthreads,
+while substituting controlled subsystem initializers and error recording.
+
+This rollback covers only cleanup handlers registered before failure. An
+initializer remains responsible for resources it acquired before registering a
+handler. After rollback, `git_error_last()` reports that the library is not
+initialized rather than retaining the original initializer diagnostic; these
+boundaries require separate fixes and are not covered by this patch.
+
+### Initializer-owned resources on failure
+
+The following local libgit2 changes release partially acquired resources before
+returning an error, allowing the runtime's failure rollback to retry them:
+
+- `src/util/rand.c` destroys its initialized mutex if entropy acquisition,
+  nonzero seed validation or shutdown registration fails, and detects nonzero
+  pthread-style lock initialization errors.
+- `src/libgit2/filter.c` propagates attribute-buffer allocation failures,
+  releases partially constructed definitions and filters, and disposes its
+  vector and rwlock if registration or initialization fails.
+- `src/libgit2/merge_driver.c` frees an entry when insertion fails and releases
+  its vector and rwlock on initialization or shutdown-registration failure.
+- `src/libgit2/sysdir.c` disposes guessed directory buffers on failure and
+  retains the old passwd buffer if a growth allocation fails.
+
+Re-apply these changes on re-vendor and run
+`scripts/tests/test_git_runtime_lifecycle.py`. The additional component tests
+compile the actual initializers, runtime and relevant vector/string/allocator
+sources with injected failures; they use controlled inputs or substitutes for
+some dependencies and do not constitute a full libgit2 or device test. They do
+not establish cleanup for unrelated initializers or preserve the original
+error diagnostic after runtime rollback.
+
+### Windows socket initialization failure
+
+`src/libgit2/streams/socket.c` balances a successful `WSAStartup` with
+`WSACleanup` if Winsock 2.2 is unavailable or shutdown registration fails.
+Re-apply this on re-vendor; the runtime lifecycle test compiles those exact
+initializer functions with a controlled Winsock substitute to check failure,
+repeated retry and balanced startup/cleanup. That component test is not a real
+Windows API or device test.
+
 ## mbedTLS swap (M-a)
 
-OpenSSL is fully replaced by **mbedTLS 3.6.2 LTS** for libgit2 TLS+SHA256 AND
+OpenSSL is fully replaced by **mbedTLS 3.6.7 LTS** for libgit2 TLS+SHA256 AND
 libssh2 crypto. mbedTLS is vendored at `third_party/mbedtls/` (library `*.c` +
 private `*.h`, `include/mbedtls`, `include/psa`, LICENSE; everest/p256-m 3rdparty
 dropped — off in stock config) and cc-built by `third_party/mbedtls-sys/` (a

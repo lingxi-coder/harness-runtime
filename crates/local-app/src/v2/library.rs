@@ -51,6 +51,7 @@ struct NativeSourceCreation {
     target_app_id: Option<String>,
 }
 #[derive(Debug, Clone)]
+/// Durable schema-2 app records, immutable releases, execution grants, and run history.
 pub struct AppLibrary {
     config_home: PathBuf,
     root: PathBuf,
@@ -403,6 +404,7 @@ fn native_canonical_matches(canonical: &Path, supplied: &Path) -> bool {
     }
 }
 
+/// Validate a canonical real authoring directory and capture its filesystem identity.
 pub fn native_source_identity(source: &str) -> Result<rooted_fs::RootIdentity, AppError> {
     validate_native_absolute_path(source, "authoring sourceDirectory")?;
     if source.contains("//") || source.ends_with('/') {
@@ -505,6 +507,7 @@ fn authoring_with_owner(mut authoring: AuthoringRef, app_id: &str) -> AuthoringR
     authoring
 }
 impl AppLibrary {
+    /// Open or create the device library below an absolute configuration directory.
     pub fn open(config_home: impl AsRef<Path>) -> Result<Self, AppError> {
         let supplied = config_home.as_ref();
         if !supplied.is_absolute() {
@@ -519,6 +522,7 @@ impl AppLibrary {
         ensure_directory(&root.join("pending-authoring"))?;
         Ok(Self { config_home, root })
     }
+    /// Return the canonical library directory used for records and immutable releases.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -570,6 +574,7 @@ impl AppLibrary {
             acquired_at_ms,
         })
     }
+    /// Return the host configuration directory reserved for authoring source trees.
     pub fn default_authoring_root(&self) -> PathBuf {
         self.config_home.join(".apps")
     }
@@ -609,6 +614,7 @@ impl AppLibrary {
         }
         Ok(record)
     }
+    /// Read an app record, rejecting removed apps and mismatched stored identities.
     pub fn get(&self, app_id: &str) -> Result<AppRecord, AppError> {
         let record = self.get_any(app_id)?;
         if record.removed {
@@ -616,6 +622,7 @@ impl AppLibrary {
         }
         Ok(record)
     }
+    /// List nonremoved app records from real library directories.
     pub fn list(&self) -> Result<Vec<AppRecord>, AppError> {
         let mut result = vec![];
         for entry in fs::read_dir(self.root.join("apps"))? {
@@ -1251,6 +1258,7 @@ impl AppLibrary {
             .map(|(_, authoring, _)| authoring)
     }
 
+    /// Validate native source and authoring receipts, returning source ID, binding, and optional owning app ID.
     pub fn resolve_native_authoring_with_source_id<F>(
         &self,
         source: &str,
@@ -1287,6 +1295,7 @@ impl AppLibrary {
         let owner = self.find_native_source_owner_locked(&receipt.source_id)?;
         Ok((receipt.source_id, receipt.authoring, owner))
     }
+    /// Derive the source directory for a positive revision without verifying that it exists.
     pub fn source_path(&self, app_id: &str, revision: u64) -> Result<PathBuf, AppError> {
         if revision == 0 {
             return Err(AppError::Invalid("revision must be positive".into()));
@@ -1297,10 +1306,12 @@ impl AppLibrary {
             .join(revision.to_string())
             .join("source"))
     }
+    /// Return the retained data directory of an existing nonremoved app.
     pub fn data_path(&self, app_id: &str) -> Result<PathBuf, AppError> {
         self.get(app_id)?;
         Ok(self.app_path(app_id)?.join("data"))
     }
+    /// Read a release, validating its app identity, revision, and manifest.
     pub fn release(&self, app_id: &str, revision: u64) -> Result<AppRelease, AppError> {
         let record = self.get(app_id)?;
         if revision == 0 || revision > record.latest_revision {
@@ -1319,12 +1330,14 @@ impl AppLibrary {
         release.manifest.validate()?;
         Ok(release)
     }
+    /// Read all published revisions in ascending revision order.
     pub fn releases(&self, app_id: &str) -> Result<Vec<AppRelease>, AppError> {
         let record = self.get(app_id)?;
         (1..=record.latest_revision)
             .map(|revision| self.release(app_id, revision))
             .collect()
     }
+    /// Resolve the source, data, releases, and runs directories for a validated release.
     pub fn layout(&self, app_id: &str, revision: u64) -> Result<AppLayout, AppError> {
         self.release(app_id, revision)?;
         let app = self.app_path(app_id)?;
@@ -1335,6 +1348,7 @@ impl AppLibrary {
             runs_path: app.join("runs").to_string_lossy().into(),
         })
     }
+    /// Publish an unbound source tree; authoring ownership requires the native receipt APIs.
     pub fn publish(&self, request: PublishRequest) -> Result<PublishResult, AppError> {
         self.publish_unbound(request)
     }
@@ -2286,6 +2300,7 @@ impl AppLibrary {
             release,
         })
     }
+    /// Verify the release file list, contents, executable flags, and aggregate digest against disk.
     pub fn verify_release(&self, app_id: &str, revision: u64) -> Result<AppRelease, AppError> {
         let release = self.release(app_id, revision)?;
         let root = self.source_path(app_id, revision)?;
@@ -2319,6 +2334,7 @@ impl AppLibrary {
         }
         Ok(release)
     }
+    /// Verify and activate a release only when its data schema matches retained app data.
     pub fn activate_release(&self, app_id: &str, revision: u64) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -2347,6 +2363,7 @@ impl AppLibrary {
         self.save(&record)?;
         Ok(record)
     }
+    /// Record execution consent for a known, verified release digest.
     pub fn grant_execution(&self, app_id: &str, digest_value: &str) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -2363,6 +2380,7 @@ impl AppLibrary {
         self.save(&record)?;
         Ok(record)
     }
+    /// Remove all recorded execution grants for an app.
     pub fn revoke_execution(&self, app_id: &str) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -2371,6 +2389,7 @@ impl AppLibrary {
         self.save(&record)?;
         Ok(record)
     }
+    /// Verify the release and reject execution when its manifest requires unrecorded consent.
     pub fn require_execution_grant(&self, app_id: &str, revision: u64) -> Result<(), AppError> {
         let record = self.get(app_id)?;
         let release = self.verify_release(app_id, revision)?;
@@ -2381,9 +2400,11 @@ impl AppLibrary {
         }
         Ok(())
     }
+    /// Prepare a fresh run, reusing a matching previously prepared environment when available.
     pub fn prepare_run(&self, app_id: &str, revision: u64) -> Result<RunPreparation, AppError> {
         self.prepare_run_with_options(app_id, revision, false)
     }
+    /// Verify consent and data schema, then stage a run; `rebuild` bypasses the cached environment.
     pub fn prepare_run_with_options(
         &self,
         app_id: &str,
@@ -2486,6 +2507,7 @@ impl AppLibrary {
         valid_id(run_id)?;
         Ok(self.app_path(app_id)?.join("runs").join(run_id))
     }
+    /// Read validated run records for an app, sorted by their start time.
     pub fn runs(&self, app_id: &str) -> Result<Vec<AppRun>, AppError> {
         self.get(app_id)?;
         let root = self.app_path(app_id)?.join("runs");
@@ -2510,6 +2532,7 @@ impl AppLibrary {
         runs.sort_by_key(|r| r.started_at_ms);
         Ok(runs)
     }
+    /// Persist a run transition while enforcing immutable identity and preventing resurrection of terminal runs.
     pub fn update_run(&self, mut run: AppRun) -> Result<(), AppError> {
         let _lock = self.lock()?;
         self.get(&run.app_id)?;
@@ -2569,6 +2592,7 @@ impl AppLibrary {
         }
         Ok(())
     }
+    /// Append run output, retaining only the latest bounded log bytes.
     pub fn append_log(&self, app_id: &str, run_id: &str, text: &str) -> Result<(), AppError> {
         let _lock = self.lock()?;
         self.get(app_id)?;
@@ -2582,6 +2606,7 @@ impl AppLibrary {
         }
         atomic_bytes(&log, &old)
     }
+    /// Read a run log with lossy UTF-8 decoding, or an empty string if no log exists.
     pub fn logs(&self, app_id: &str, run_id: &str) -> Result<String, AppError> {
         self.get(app_id)?;
         let path = self.run_path(app_id, run_id)?;
@@ -2610,6 +2635,7 @@ impl AppLibrary {
         }
         Ok(count)
     }
+    /// Mark an app removed and clear its grants, rejecting removal while any run is live.
     pub fn remove(&self, app_id: &str) -> Result<AppRecord, AppError> {
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
@@ -2682,6 +2708,7 @@ impl AppLibrary {
             authoring_session_id: session_id,
         })
     }
+    /// Copy a verified public file allowlist to a new absolute directory without exporting retained app data.
     pub fn export(
         &self,
         app_id: &str,
@@ -2876,6 +2903,7 @@ impl AppLibrary {
         });
         Ok((digest, origin))
     }
+    /// Decode a typed library request from JSON and dispatch it through the host library interface.
     pub fn request_json(&self, request: &str) -> Result<serde_json::Value, AppError> {
         let request: LibraryRequest = serde_json::from_str(request)?;
         self.dispatch(request)
@@ -2947,6 +2975,7 @@ impl AppLibrary {
         Ok(())
     }
 
+    /// Execute a typed host library request and encode its result as JSON.
     pub fn dispatch(&self, request: LibraryRequest) -> Result<serde_json::Value, AppError> {
         use LibraryRequest::*;
         Ok(match request {

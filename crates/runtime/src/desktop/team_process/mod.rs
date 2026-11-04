@@ -475,7 +475,7 @@ pub(super) fn environment(scope: &Path) -> [(String, std::ffi::OsString); 8] {
     [
         ("HOME".into(), scope.join("home").into_os_string()),
         (
-            "LINGXI_CONFIG_DIR".into(),
+            branding::CONFIG_DIR_ENV.into(),
             scope.join("home").into_os_string(),
         ),
         ("TMPDIR".into(), scope.join("tmp").into_os_string()),

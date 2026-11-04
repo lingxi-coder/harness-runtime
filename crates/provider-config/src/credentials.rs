@@ -10,6 +10,7 @@ use llm_runtime::{
     LlmError,
 };
 
+/// Resolves credentials for exact accounts without provider-wide fallback.
 pub struct MultiCredentialProvider {
     account_version_root: Option<std::path::PathBuf>,
     account_directory: Option<lingxi_core::host::provider_accounts::SharedAccountDirectory>,
@@ -27,6 +28,7 @@ impl std::fmt::Debug for MultiCredentialProvider {
 }
 
 impl MultiCredentialProvider {
+    /// Create a provider using the supplied secure credential manager.
     #[must_use]
     pub fn new(credentials: Arc<secret::CredentialManager>) -> Self {
         Self {
@@ -49,6 +51,7 @@ impl MultiCredentialProvider {
             .collect();
         self
     }
+    /// Resolve account references from a shared live directory when present.
     #[must_use]
     pub fn with_account_directory(
         mut self,
@@ -57,6 +60,7 @@ impl MultiCredentialProvider {
         self.account_directory = Some(directory);
         self
     }
+    /// Verify account credential revisions against the ledger under this root.
     #[must_use]
     pub fn with_account_version_root(mut self, root: std::path::PathBuf) -> Self {
         self.account_version_root = Some(root);

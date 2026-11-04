@@ -426,7 +426,9 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
 
         handle
             .submit(ClientCommand::ListSessions {
-                mode: None, limit: None })
+                mode: None,
+                limit: None,
+            })
             .await
             .expect("list persisted sessions");
         let listed = listener

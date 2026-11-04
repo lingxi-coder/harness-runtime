@@ -33,7 +33,7 @@ async fn dataviz_dispatches_bundled_body_and_optional_user_request() {
         command,
         body,
         hook_messages,
-            ..
+        ..
     } = outcome
     else {
         panic!("expected /dataviz to run as a prompt turn, got {outcome:?}");
@@ -114,7 +114,7 @@ async fn native_doctor_dispatches_the_bundled_prompt() {
         command,
         body,
         hook_messages,
-            ..
+        ..
     } = outcome
     else {
         panic!("expected /doctor bundled prompt turn, got {outcome:?}");

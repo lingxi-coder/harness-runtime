@@ -287,7 +287,7 @@ fn entry() -> Result<(), Error> {
     }
     let keys = [
         "HOME",
-        "LINGXI_CONFIG_DIR",
+        branding::CONFIG_DIR_ENV,
         "TMPDIR",
         "PATH",
         "LANG",
@@ -334,7 +334,7 @@ fn entry() -> Result<(), Error> {
     let tmp = PathBuf::from(std::env::var_os("TMPDIR").ok_or(Error::Configuration)?);
     super::journal::private_dir(&home)?;
     super::journal::private_dir(&tmp)?;
-    if std::env::var_os("LINGXI_CONFIG_DIR") != Some(home.clone().into_os_string())
+    if std::env::var_os(branding::CONFIG_DIR_ENV) != Some(home.clone().into_os_string())
         || std::env::var_os("CFFIXED_USER_HOME") != Some(home.clone().into_os_string())
         || std::env::var("PATH").ok().as_deref() != Some("/usr/bin:/bin:/usr/sbin:/sbin")
         || std::env::var("LANG").ok().as_deref() != Some("C")
