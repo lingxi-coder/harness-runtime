@@ -57,12 +57,18 @@ class LockGuardTests(unittest.TestCase):
     def test_rejects_changed_version(self):
         self.tamper(EXPECTED.replace('version = "2.0.1"', 'version = "2.0.2"'))
 
-    def test_rejects_changed_identity_if_production_drops_package(self):
+    def remove_production_quick_error(self):
         root_lock = self.fork.parents[1] / "Cargo.lock"
         original = root_lock.read_text()
-        marker = 'name = "quick-error"\nversion = "1.2.3"'
-        self.assertEqual(original.count(marker), 1)
-        root_lock.write_text(original.replace(marker, 'name = "other-quick-error"\nversion = "1.2.3"', 1))
+        root_lock.write_text(original.replace('name = "quick-error"', 'name = "other-quick-error"'))
+
+    def test_accepts_exact_identity_if_production_drops_package(self):
+        self.remove_production_quick_error()
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_changed_identity_if_production_drops_package(self):
+        self.remove_production_quick_error()
         self.tamper(EXPECTED.replace("a993555f", "00000000"))
 
 
