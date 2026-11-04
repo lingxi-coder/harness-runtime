@@ -258,9 +258,16 @@ The build is now aborting. To disable, unset the variable or use `LIBGIT2_NO_VEN
         } else {
             // LingXi (M-a): mbedTLS backend (size-opt) instead of OpenSSL.
             features.push_str("#define GIT_MBEDTLS 1\n");
-            if let Some(path) = env::var_os("DEP_MBEDTLS_INCLUDE") {
-                cfg.include(path);
-            }
+            println!("cargo:rerun-if-env-changed=DEP_MBEDTLS_INCLUDE");
+            let mbedtls_include = env::var_os("DEP_MBEDTLS_INCLUDE")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .expect("vendored libgit2 with Mbed TLS requires DEP_MBEDTLS_INCLUDE");
+            assert!(
+                mbedtls_include.join("mbedtls/mbedtls_config.h").is_file(),
+                "DEP_MBEDTLS_INCLUDE does not contain mbedtls/mbedtls_config.h"
+            );
+            cfg.include(&mbedtls_include);
             // No explicit cfg.file for streams/mbedtls.c: add_c_files(streams)
             // above already compiles every streams/*.c (openssl.c, mbedtls.c,
             // stransport.c, ...). Each body is #ifdef-guarded on its backend

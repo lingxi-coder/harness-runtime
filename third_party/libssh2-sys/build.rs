@@ -163,15 +163,15 @@ fn main() {
 
     // LingXi (M-a): mbedTLS include (from the links="mbedtls" seam) not OpenSSL.
     println!("cargo:rerun-if-env-changed=DEP_MBEDTLS_INCLUDE");
-    if let Some(path) = env::var_os("DEP_MBEDTLS_INCLUDE") {
-        if let Some(path) = env::split_paths(&path).next() {
-            if let Some(path) = path.to_str() {
-                if path.len() > 0 {
-                    cfg.include(path);
-                }
-            }
-        }
-    }
+    let mbedtls_include = env::var_os("DEP_MBEDTLS_INCLUDE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .expect("vendored libssh2 requires DEP_MBEDTLS_INCLUDE from mbedtls-sys");
+    assert!(
+        mbedtls_include.join("mbedtls/mbedtls_config.h").is_file(),
+        "DEP_MBEDTLS_INCLUDE does not contain mbedtls/mbedtls_config.h"
+    );
+    cfg.include(&mbedtls_include);
 
     let libssh2h = fs::read_to_string("libssh2/include/libssh2.h").unwrap();
     let version_line = libssh2h
