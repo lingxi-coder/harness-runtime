@@ -71,6 +71,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
         // Only this fresh, validated broker-enabled worker can route private
         // Bash through a crash-safe per-command helper. Its lease closes even
         // after abrupt worker death; the helper receives no model credential.
+        #[cfg(unix)]
         platform_posix::process::team_guardian::enable_team_guardian(
             std::env::current_exe()?,
             profile.scope_root().to_owned(),
@@ -78,6 +79,8 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
             cancel.clone(),
         )
         .map_err(|_| TeamProcessError::Worker)?;
+        #[cfg(not(unix))]
+        return Err(TeamProcessError::Environment);
     }
     let bridge = ChildInteraction::start(cancel.clone())?;
     let (sender, questions) = tokio::sync::mpsc::channel(4);
@@ -387,4 +390,15 @@ impl OutputStream for BoundedOutput {
     async fn emit_tool_result(&self, _: &ToolUseId, _: &str, _: &Json, _: &Json, _: Option<&Json>) {
     }
     async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {}
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod unsupported_platform_tests {
+    #[test]
+    fn worker_rejects_unsupported_platform_before_reading_bootstrap() {
+        assert!(matches!(
+            super::main(),
+            Err(super::TeamProcessError::Environment)
+        ));
+    }
 }
