@@ -2,6 +2,8 @@
 services:
   turn:
     image: coturn/coturn:4.18.0-r0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e
+    # Preserve the exact arguments, including -n, instead of expanding them in the image entrypoint.
+    entrypoint: ["turnserver"]
     command:
       - -n
       - -v
