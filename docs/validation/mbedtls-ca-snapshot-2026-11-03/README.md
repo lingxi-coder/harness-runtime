@@ -1,0 +1,24 @@
+# CA snapshot lifecycle checkpoint — 2026-11-03
+
+This checkpoint replaces the mutable global libgit2 Mbed TLS CA/configuration with a ref-counted publication template and independent per-stream DER, public-key and configuration copies. Active streams retain their chosen trust set until freed. Parsing runs outside the publication lock; a detected parse, allocation or lock error retains the previous published template. Explicit empty, all-invalid and partly invalid trust sets are rejected. Concurrent setters take effect in publication order. The libgit2 runtime must outlive all calls and streams; concurrent final shutdown remains unsupported.
+
+Source SHA-256: `4311d2be5662e2f1c495091ee5e7fc3d5f9c88e91530450d5f67f1d83ecfce67`. This is a native WIP checkpoint, not the currently pinned integrated App/Harness runtime. It does not certify the remaining Mbed TLS source, prove all concurrency schedules, or complete product acceptance.
+
+## Verification
+
+- Persistent `scripts/tests/test_mbedtls_stream_ownership.py` passes the allocation/setup/acquisition/free cases against extracted current wrapper bodies with mocked Git/Mbed TLS boundaries.
+- Persistent `scripts/tests/test_mbedtls_ca_snapshot.py` passes both component tests for RSA and ECDSA under AddressSanitizer and ThreadSanitizer (four runs, exit 0). All three linked native libraries are independently instrumented for the selected sanitizer; initial harness-only ASan runs are supplementary, not this result. No sanitizer suppressions were used.
+- The configuration test covers distinct DER/PK objects, concurrent readers/writer, failed allocation, missing/empty/invalid/mixed directories, partially invalid PEM plus empty directory, retaining existing stream state, balanced owned wrapper allocations, and normal shutdown/reinit.
+- The handshake test uses four simultaneous local socket pairs per TLS version (1.3 and 1.2), a concurrently publishing CA updater, correct hostnames accepted and incorrect hostnames rejected. Each server owns separate configuration/certificate/key state. It extracts actual CA helpers and `verify_server_cert`; Git allocation/error/mutex/atomic/runtime adapters are test substitutes. It does not build the full Git transport, invoke product certificate callbacks, validate every verification failure, or rotate between distinct CA authorities.
+- Android API 29 aarch64 compilation of final `streams/mbedtls.c` and `transports/httpclient.c` passes `-std=c99 -Wall -Wextra -Werror` with the actual native headers/configuration. This is object compilation, not a linked Android product.
+- A USB-connected physical Samsung SM-S9310 component executable loaded each device CA directory: `/apex/com.android.conscrypt/cacerts` and `/system/etc/security/cacerts`, 143 certificates each. Measured load times were 25.986/49.693 ms; mean of ten per-stream copies was 0.604/0.683 ms. This ran an earlier source differing only in error-message formatting, using actual Android native libraries plus Git adapters; it made no network connection and is not App/device TLS acceptance. The temporary executable was removed after testing. Other Android physical devices must use USB; emulators remain allowed.
+
+Results and log hashes are in `results.json`; `source-review.md` is an independent read-only review. Its earlier ASan limitation describes the pre-instrumented-native runs; the four fully instrumented logs supersede that limitation. The original expired certificate failures remain in local validation evidence. Fresh short-lived fixtures were used without disabling date or hostname verification; no private key is committed.
+
+## Reproduction
+
+Build Mbed TLS from this exact checkout with `third_party/mbedtls-sys/lingxi_config.h` and the same generated include layout as its build script. Use `-fsanitize=address` or `-fsanitize=thread` for **every** native object and the test executable; do not mix native builds. Set `MBEDTLS_TEST_INCLUDE`, `MBEDTLS_TEST_LIB_DIR`, `MBEDTLS_TEST_CERT`, `MBEDTLS_TEST_KEY`, and `MBEDTLS_TEST_SANITIZER=address` (or `thread`), then run `python3 scripts/tests/test_mbedtls_ca_snapshot.py`. Supply a currently valid matching RSA or ECDSA CA certificate/key with SAN `expected.test`. Missing explicit inputs cause a reported skip, not acceptance. Local fixture keys are intentionally outside Git.
+
+## Remaining limits
+
+Upstream directory enumeration can return success without detecting every concurrent filesystem change or enumeration failure; detected parser errors are handled atomically, not an atomic filesystem view. Deep copies cost memory/time per connection; only the specified device/component measurements were made. Pre-existing libgit2 initialization-failure retry behavior and the separately recorded PSA post-fork RNG candidate remain outside this patch. Integrated runtime pins, native source audit inventory, full Rust build, remote CI and product live TLS validation still need completion before main delivery.

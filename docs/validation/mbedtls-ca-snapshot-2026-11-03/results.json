@@ -1,0 +1,94 @@
+[
+  {
+    "kind": "rsa",
+    "sanitizer": "address",
+    "exit": 0,
+    "seconds": 1.279500708,
+    "command": [
+      "python3",
+      "scripts/tests/test_mbedtls_ca_snapshot.py"
+    ],
+    "native_libraries": {
+      "libmbedtls.a": "0be63d6470a0809a17cd26e49e55a8bea4c857ece7a376504328fcb965d90af4",
+      "libmbedx509.a": "c8c3d2927caf5a831bfbe5b93c995aa848fae762d72b22104687598f9550542e",
+      "libmbedcrypto.a": "0618d3f3a8082ffdd11c8611bdc2887fd61f8abc973c50d4b042a6f6ccb98343"
+    },
+    "source_hashes": {
+      "third_party/git2-rs/libgit2-sys/libgit2/src/libgit2/streams/mbedtls.c": "4311d2be5662e2f1c495091ee5e7fc3d5f9c88e91530450d5f67f1d83ecfce67",
+      "scripts/tests/test_mbedtls_ca_snapshot.py": "bc0e43138024b6a6120b780815305f49b41cddb82349106dd983f2267df1ddf5",
+      "scripts/tests/fixtures/mbedtls_ca_handshake.c": "f9514d39c9b9c829e4fd71f199fac15ec7e0ed19dedf52aeaa7a4faae3f12ce2",
+      "scripts/tests/test_mbedtls_stream_ownership.py": "6a1a9a35a3498209a71f1d4e996073a11fb363a1e761b2f2dd03e2a673995e38"
+    },
+    "log": "fully-instrumented-rsa-address.log",
+    "log_sha256": "0d955d5b2fe01c32e8b80b8f64f02e08d578fe9965b481f4ed3be7f84c00dfa8"
+  },
+  {
+    "kind": "rsa",
+    "sanitizer": "thread",
+    "exit": 0,
+    "seconds": 1.266591708,
+    "command": [
+      "python3",
+      "scripts/tests/test_mbedtls_ca_snapshot.py"
+    ],
+    "native_libraries": {
+      "libmbedtls.a": "7505b6094fc67fc3cf2c94d58bec3c7974e83de3845c3757176476593b878966",
+      "libmbedx509.a": "dbcc1c9ec94db74f02d630283e932ba9bc53eeddf231ff6457dc96b5c26508e0",
+      "libmbedcrypto.a": "4b9f21cbebf1dd3d9a56307d85df881a3d93ce96b57b7197e5e05c0d530dafc8"
+    },
+    "source_hashes": {
+      "third_party/git2-rs/libgit2-sys/libgit2/src/libgit2/streams/mbedtls.c": "4311d2be5662e2f1c495091ee5e7fc3d5f9c88e91530450d5f67f1d83ecfce67",
+      "scripts/tests/test_mbedtls_ca_snapshot.py": "bc0e43138024b6a6120b780815305f49b41cddb82349106dd983f2267df1ddf5",
+      "scripts/tests/fixtures/mbedtls_ca_handshake.c": "f9514d39c9b9c829e4fd71f199fac15ec7e0ed19dedf52aeaa7a4faae3f12ce2",
+      "scripts/tests/test_mbedtls_stream_ownership.py": "6a1a9a35a3498209a71f1d4e996073a11fb363a1e761b2f2dd03e2a673995e38"
+    },
+    "log": "fully-instrumented-rsa-thread.log",
+    "log_sha256": "a100df45e34dacc6e84094b4d092cd0d898ef782900bb0a33f11842006dc4ae8"
+  },
+  {
+    "kind": "ec",
+    "sanitizer": "address",
+    "exit": 0,
+    "seconds": 1.266791916,
+    "command": [
+      "python3",
+      "scripts/tests/test_mbedtls_ca_snapshot.py"
+    ],
+    "native_libraries": {
+      "libmbedtls.a": "0be63d6470a0809a17cd26e49e55a8bea4c857ece7a376504328fcb965d90af4",
+      "libmbedx509.a": "c8c3d2927caf5a831bfbe5b93c995aa848fae762d72b22104687598f9550542e",
+      "libmbedcrypto.a": "0618d3f3a8082ffdd11c8611bdc2887fd61f8abc973c50d4b042a6f6ccb98343"
+    },
+    "source_hashes": {
+      "third_party/git2-rs/libgit2-sys/libgit2/src/libgit2/streams/mbedtls.c": "4311d2be5662e2f1c495091ee5e7fc3d5f9c88e91530450d5f67f1d83ecfce67",
+      "scripts/tests/test_mbedtls_ca_snapshot.py": "bc0e43138024b6a6120b780815305f49b41cddb82349106dd983f2267df1ddf5",
+      "scripts/tests/fixtures/mbedtls_ca_handshake.c": "f9514d39c9b9c829e4fd71f199fac15ec7e0ed19dedf52aeaa7a4faae3f12ce2",
+      "scripts/tests/test_mbedtls_stream_ownership.py": "6a1a9a35a3498209a71f1d4e996073a11fb363a1e761b2f2dd03e2a673995e38"
+    },
+    "log": "fully-instrumented-ec-address.log",
+    "log_sha256": "846187e36e3aaee5a565bad1c8aaabb8dec8189e82ac90e92a1a1da3627862e1"
+  },
+  {
+    "kind": "ec",
+    "sanitizer": "thread",
+    "exit": 0,
+    "seconds": 1.090124458,
+    "command": [
+      "python3",
+      "scripts/tests/test_mbedtls_ca_snapshot.py"
+    ],
+    "native_libraries": {
+      "libmbedtls.a": "7505b6094fc67fc3cf2c94d58bec3c7974e83de3845c3757176476593b878966",
+      "libmbedx509.a": "dbcc1c9ec94db74f02d630283e932ba9bc53eeddf231ff6457dc96b5c26508e0",
+      "libmbedcrypto.a": "4b9f21cbebf1dd3d9a56307d85df881a3d93ce96b57b7197e5e05c0d530dafc8"
+    },
+    "source_hashes": {
+      "third_party/git2-rs/libgit2-sys/libgit2/src/libgit2/streams/mbedtls.c": "4311d2be5662e2f1c495091ee5e7fc3d5f9c88e91530450d5f67f1d83ecfce67",
+      "scripts/tests/test_mbedtls_ca_snapshot.py": "bc0e43138024b6a6120b780815305f49b41cddb82349106dd983f2267df1ddf5",
+      "scripts/tests/fixtures/mbedtls_ca_handshake.c": "f9514d39c9b9c829e4fd71f199fac15ec7e0ed19dedf52aeaa7a4faae3f12ce2",
+      "scripts/tests/test_mbedtls_stream_ownership.py": "6a1a9a35a3498209a71f1d4e996073a11fb363a1e761b2f2dd03e2a673995e38"
+    },
+    "log": "fully-instrumented-ec-thread.log",
+    "log_sha256": "a1c2b5a538147272f765baba83ad4e7ca0990231d3de9763e27a20ec3bbb250c"
+  }
+]

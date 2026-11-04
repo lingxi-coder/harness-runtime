@@ -1,0 +1,15 @@
+CA updates=399
+TLS 0x304 pair=0 hostname=expected.test client=0 flags=0x0 server=0 PASS
+TLS 0x304 pair=1 hostname=wrong.test client=-17 flags=0x4 server=0 PASS
+TLS 0x304 pair=2 hostname=expected.test client=0 flags=0x0 server=0 PASS
+TLS 0x304 pair=3 hostname=wrong.test client=-17 flags=0x4 server=0 PASS
+CA updates=335
+TLS 0x303 pair=0 hostname=expected.test client=0 flags=0x0 server=0 PASS
+TLS 0x303 pair=1 hostname=wrong.test client=-17 flags=0x4 server=0 PASS
+TLS 0x303 pair=2 hostname=expected.test client=0 flags=0x0 server=0 PASS
+TLS 0x303 pair=3 hostname=wrong.test client=-17 flags=0x4 server=0 PASS
+..
+----------------------------------------------------------------------
+Ran 2 tests in 1.184s
+
+OK
