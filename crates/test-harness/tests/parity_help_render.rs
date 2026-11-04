@@ -20,6 +20,9 @@ fn product_branded_golden() -> String {
     const NATIVE_TEAM_DESCRIPTION: &str =
         "Help teammates ramp on Claude Code with a guide from your usage";
     assert_eq!(GOLDEN.matches(NATIVE_TEAM_DESCRIPTION).count(), 1);
+    const NATIVE_COPY_DESCRIPTION: &str =
+        "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)";
+    assert_eq!(GOLDEN.matches(NATIVE_COPY_DESCRIPTION).count(), 1);
     let mut projected = GOLDEN
         .replace(
             NATIVE_AGENTS_DESCRIPTION,
@@ -33,6 +36,13 @@ fn product_branded_golden() -> String {
             NATIVE_TEAM_DESCRIPTION,
             &format!(
                 "Help teammates ramp on {} with a guide from your usage",
+                branding::PRODUCT_NAME
+            ),
+        )
+        .replace(
+            NATIVE_COPY_DESCRIPTION,
+            &format!(
+                "Copy {}'s last response to clipboard (or /copy N for the Nth-latest)",
                 branding::PRODUCT_NAME
             ),
         );

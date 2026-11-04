@@ -616,7 +616,7 @@ pub fn core_description(name: &str) -> &'static str {
         "commit" => "Create a git commit",
         "commit-push-pr" => "Commit, push, and open a PR",
         "context" => "Visualize current context usage as a colored grid",
-        "copy" => "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)",
+        "copy" => branded_description!("Copy {}'s last response to clipboard (or /copy N for the Nth-latest)", branding::PRODUCT_NAME),
         "desktop" => "Continue the current session in Claude Desktop",
         "diff" => "View uncommitted changes and per-turn diffs",
         "effort" => "Set effort level for model usage",
@@ -709,6 +709,17 @@ mod tests {
     #[test]
     fn total_count_locked_at_81() {
         assert_eq!(BUILTIN_COMMAND_NAMES.len(), 81);
+    }
+
+    #[test]
+    fn copy_description_names_the_current_product() {
+        assert_eq!(
+            core_description("copy"),
+            format!(
+                "Copy {}'s last response to clipboard (or /copy N for the Nth-latest)",
+                branding::PRODUCT_NAME
+            )
+        );
     }
 
     #[test]
