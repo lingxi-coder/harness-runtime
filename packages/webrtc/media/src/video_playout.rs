@@ -206,7 +206,7 @@ mod tests {
                     .handle_read(TaggedPacket {
                         now: Instant::now(),
                         transport: Default::default(),
-                        message: Packet::Rtp(packet),
+                        message: Packet::Rtp(packet).into(),
                     })
                     .unwrap();
                 playout.push(incoming.take().unwrap().unwrap()).unwrap();
