@@ -184,6 +184,7 @@ static int merge_driver_registry_insert(
 	const char *name, git_merge_driver *driver)
 {
 	git_merge_driver_entry *entry;
+	int error;
 
 	entry = git__calloc(1, sizeof(git_merge_driver_entry) + strlen(name) + 1);
 	GIT_ERROR_CHECK_ALLOC(entry);
@@ -191,15 +192,18 @@ static int merge_driver_registry_insert(
 	strcpy(entry->name, name);
 	entry->driver = driver;
 
-	return git_vector_insert_sorted(
-		&merge_driver_registry.drivers, entry, NULL);
+	error = git_vector_insert_sorted(&merge_driver_registry.drivers, entry, NULL);
+	if (error < 0)
+		git__free(entry);
+
+	return error;
 }
 
 int git_merge_driver_global_init(void)
 {
 	int error;
 
-	if (git_rwlock_init(&merge_driver_registry.lock) < 0)
+	if (git_rwlock_init(&merge_driver_registry.lock) != 0)
 		return -1;
 
 	if ((error = git_vector_init(&merge_driver_registry.drivers, 3,
@@ -217,8 +221,10 @@ int git_merge_driver_global_init(void)
 	error = git_runtime_shutdown_register(git_merge_driver_global_shutdown);
 
 done:
-	if (error < 0)
+	if (error) {
 		git_vector_dispose_deep(&merge_driver_registry.drivers);
+		git_rwlock_free(&merge_driver_registry.lock);
+	}
 
 	return error;
 }
