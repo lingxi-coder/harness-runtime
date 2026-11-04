@@ -350,23 +350,47 @@ mod tests {
 
     #[tokio::test]
     async fn armed_payload_job_drop_still_terminates_its_child() {
-        let mut command = tokio::process::Command::new("cmd.exe");
-        command
-            .args(["/D", "/S", "/C", "more"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x4)
-            .kill_on_drop(true);
-        let mut child = command.spawn().unwrap();
-        let job = CommandJob::assign_suspended(&child).unwrap();
-        release(suspended_thread(&child).unwrap()).unwrap();
-        drop(job);
-        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!status.success());
+        for armed in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([DETACHED_HELPER, "--exact", "--nocapture"])
+                .env("LINGXI_DETACHED_JOB_TEST_DIR", directory.path())
+                .env("LINGXI_DETACHED_JOB_CHILD", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x4)
+                .kill_on_drop(true);
+            let mut child = command.spawn().unwrap();
+            let job = CommandJob::assign_suspended(&child).unwrap();
+            release(suspended_thread(&child).unwrap()).unwrap();
+            await_file(&directory.path().join("started")).await;
+            assert!(child.try_wait().unwrap().is_none());
+            if !armed {
+                job.disarm_on_close().unwrap();
+            }
+            drop(job);
+            if armed {
+                // Windows does not promise a nonzero process status when the
+                // final kill-on-close job handle is closed. The helper cannot
+                // finish normally until its release file exists instead.
+                tokio::time::timeout(Duration::from_secs(5), child.wait())
+                    .await
+                    .expect("armed job must terminate its live child")
+                    .unwrap();
+                assert!(!directory.path().join("finished").exists());
+            } else {
+                assert!(child.try_wait().unwrap().is_none());
+                std::fs::write(directory.path().join("release"), "release").unwrap();
+                let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                    .await
+                    .expect("disarmed child must complete when released")
+                    .unwrap();
+                assert!(status.success());
+                assert!(directory.path().join("finished").exists());
+            }
+        }
     }
 
     #[tokio::test]
