@@ -489,7 +489,9 @@ mod tests {
             let roots = permission::FsRoots {
                 cwd: input["current_dir"].as_str().unwrap().into(),
                 home: Some("/home/test".into()),
-                lingxi_home: "/home/test/.claude".into(),
+                // These cases do not supply a config home; use the product's
+                // real default while keeping their requested paths unchanged.
+                lingxi_home: std::path::Path::new("/home/test").join(branding::DOT_DIR),
             };
             let actual = check_cd_permission_with_paths(&deny_paths, &allow_paths, &rules, &roots);
             let expected = &case["expected"];

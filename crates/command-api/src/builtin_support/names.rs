@@ -1,4 +1,4 @@
-//! Locked constant tables of the 83 builtin command names + the 18 core names.
+//! Locked constant tables of the 81 builtin command names + the 16 core names.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 0 step 2 (name list) + Task 0 step 3 (18 core list).
@@ -93,10 +93,9 @@
 /// catalog; `/commit-push-pr`, `/files`, and `/init-verifiers` have no reachable
 /// default command producer in the pinned source and are not registered here.
 ///
-/// Changing the count or membership requires bumping the parity fixture
-/// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
-/// (fixture filename retained for git-history continuity; the counts inside
-/// reflect the current membership lock).
+/// The immutable source fixture still has the two account commands removed by
+/// per-provider authentication. Its test projects those two rows before the
+/// order-sensitive comparison against this product catalog.
 pub const BUILTIN_COMMAND_NAMES: &[&str; 81] = &[
     "add-dir",
     "advisor",
@@ -529,15 +528,24 @@ pub fn is_command_env_disabled(name: &str) -> bool {
         .is_some_and(|(_, var)| std::env::var(var).is_ok_and(|v| !v.is_empty()))
 }
 
+// Command metadata is borrowed for the lifetime of the registry. Keep the
+// public `&'static str` contract while deriving product names at first use.
+macro_rules! branded_description {
+    ($($arg:tt)*) => {{
+        static DESCRIPTION: std::sync::LazyLock<String> =
+            std::sync::LazyLock::new(|| format!($($arg)*));
+        DESCRIPTION.as_str()
+    }};
+}
+
 /// One-line descriptions for the builtin commands, used for slash-palette +
-/// `/help` rendering. The first 19 are the M5-10 core set; the remainder
+/// `/help` rendering. The first entries are the M5-10 core set; the remainder
 /// (cp-01) are the real per-command `description:` strings ported from each
 /// claude-code `commands/<name>` object so no VISIBLE palette row shows the
 /// `"(unimplemented in v0.6.0)"` placeholder. Commands that are hidden/disabled
 /// (internal/dev/entitlement-gated) or LingXi-specific with no claude-code
-/// analogue keep the placeholder fallback. Descriptions retain the "Claude
-/// Code" product noun verbatim (1:1 with the oracle — the branding judgment
-/// applies to screen titles, not command help strings).
+/// analogue keep the placeholder fallback. Product-facing labels use the
+/// product namespace; third-party integration names retain their identity.
 #[must_use]
 pub fn core_description(name: &str) -> &'static str {
     match name {
@@ -545,10 +553,7 @@ pub fn core_description(name: &str) -> &'static str {
         // returns static guidance. Description verbatim from the 2.1.198
         // binary command object (`name:"agents"`, description `(removed) …`).
         "agents" => {
-            static DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-                format!("(removed) Ask {} to create/manage subagents, or edit {}/agents/", branding::PRODUCT_NAME, branding::DOT_DIR)
-            });
-            DESCRIPTION.as_str()
+            branded_description!("(removed) Ask {} to create/manage subagents, or edit {}/agents/", branding::PRODUCT_NAME, branding::DOT_DIR)
         },
         // WIZARD-06. SLASH-03: re-worded upstream between 2.1.220 and 2.1.238.
         // Byte-exact from BOTH 2.1.238 twins (oracle @294963678):
@@ -569,15 +574,15 @@ pub fn core_description(name: &str) -> &'static str {
         "exit" => "Exit the CLI",
         "help" => "Show help and available commands",
         "hooks" => "View hook configurations for tool events",
-        "init" => "Initialize a new LINGXI.md file with codebase documentation",
+        "init" => branded_description!("Initialize a new {} file with codebase documentation", branding::MEMORY_FILE),
         "mcp" => "Manage MCP servers",
-        "memory" => "Edit LINGXI.md files and memory settings",
-        "model" => "Set the AI model for LingXi",
+        "memory" => branded_description!("Edit {} files and memory settings", branding::MEMORY_FILE),
+        "model" => branded_description!("Set the AI model for {}", branding::PRODUCT_NAME),
         // Byte-exact from the 2.1.270 command object `QNt`.
         "output-style" => "List output styles or switch to one",
         "permissions" => "Manage allow and deny tool permission rules",
         "status" => {
-            "Show LingXi status including version, model, account, API connectivity, and tool statuses"
+            branded_description!("Show {} status including version, model, account, API connectivity, and tool statuses", branding::PRODUCT_NAME)
         }
         // claude-code v2.1.183 live `usage` command object
         // (`name:"usage",aliases:["cost","stats"],...`).
@@ -617,21 +622,21 @@ pub fn core_description(name: &str) -> &'static str {
         "effort" => "Set effort level for model usage",
         "export" => "Export the current conversation to a file or clipboard",
         "fast" => "Toggle fast mode",
-        "feedback" => "Submit feedback about LingXi",
+        "feedback" => branded_description!("Submit feedback about {}", branding::PRODUCT_NAME),
         "files" => "List all files currently in context",
         "focus" => "Toggle focus view: just your prompt, summary, and response",
         "ide" => "Manage IDE integrations and show status",
         "init-verifiers" => "Create verifier skill(s) for automated verification of code changes",
-        "insights" => "Generate a report analyzing your LingXi sessions",
-        "team-onboarding" => "Help teammates ramp on Claude Code with a guide from your usage",
-        "install" => "Install LingXi native build",
+        "insights" => branded_description!("Generate a report analyzing your {} sessions", branding::PRODUCT_NAME),
+        "team-onboarding" => branded_description!("Help teammates ramp on {} with a guide from your usage", branding::PRODUCT_NAME),
+        "install" => branded_description!("Install {} native build", branding::PRODUCT_NAME),
         "install-github-app" => "Set up Claude GitHub Actions for a repository",
         "install-slack-app" => "Install the Claude Slack app",
         "keybindings" => "Open your keyboard shortcuts file",
         "mobile" => "Show QR code to download the Claude mobile app",
-        "passes" => "Share a free week of LingXi with friends and earn extra usage",
+        "passes" => branded_description!("Share a free week of {} with friends and earn extra usage", branding::PRODUCT_NAME),
         "plan" => "Enable plan mode or view the current session plan",
-        "plugin" => "Manage LingXi plugins",
+        "plugin" => branded_description!("Manage {} plugins", branding::PRODUCT_NAME),
         // SLASH-13. Oracle 2.1.238 @296124285:
         //   Rkl={type:"local-jsx",name:"powerup",description:"Discover Claude
         //        Code features through quick interactive lessons",
@@ -640,7 +645,7 @@ pub fn core_description(name: &str) -> &'static str {
         // ("Order Claude Code stickers" -> "Order LingXi stickers", "Generate a
         // report analyzing your Claude Code sessions" -> "... your LingXi
         // sessions"), both of which are 2 / 4 raw hits in the same binary.
-        "powerup" => "Discover LingXi features through quick interactive lessons",
+        "powerup" => branded_description!("Discover {} features through quick interactive lessons", branding::PRODUCT_NAME),
         "privacy-settings" => "View and update your privacy settings",
         "release-notes" => "View release notes",
         "reload-plugins" => "Activate pending plugin changes in the current session",
@@ -653,13 +658,13 @@ pub fn core_description(name: &str) -> &'static str {
         }
         "session" => "Show remote session URL and QR code",
         "skills" => "List available skills",
-        "statusline" => "Set up LingXi's status line UI",
-        "stickers" => "Order LingXi stickers",
+        "statusline" => branded_description!("Set up {}'s status line UI", branding::PRODUCT_NAME),
+        "stickers" => branded_description!("Order {} stickers", branding::PRODUCT_NAME),
         "tasks" => "View and manage everything running in the background",
         "terminal-setup" => "Install Shift+Enter key binding for newlines",
         "theme" => "Change the theme",
         "tui" => "Set the terminal UI renderer (default | fullscreen)",
-        "ultraplan" => "LingXi on the web drafts an advanced plan you can edit and approve",
+        "ultraplan" => branded_description!("{} on the web drafts an advanced plan you can edit and approve", branding::PRODUCT_NAME),
         "upgrade" => "Upgrade to Max for higher rate limits and more Opus",
         "usage-credits" => {
             "Configure usage credits or request them from your admin when you hit a limit"
@@ -692,7 +697,7 @@ pub fn core_description(name: &str) -> &'static str {
 /// in-process and in parallel, so without ONE shared lock a mutation here can
 /// race a concurrent render in another module and intermittently drop a command
 /// (e.g. `/doctor`) — the latent flake behind `every_visible_command_appears_once`
-/// / `output_has_exactly_77_lines_at_default_native_factory_gates`. `pub(crate)` so
+/// / `output_has_exactly_75_lines_at_default_native_factory_gates`. `pub(crate)` so
 /// help_render can lock it too.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -852,7 +857,10 @@ mod tests {
         assert!(!is_palette_hidden("powerup"));
         assert_eq!(
             core_description("powerup"),
-            "Discover LingXi features through quick interactive lessons"
+            format!(
+                "Discover {} features through quick interactive lessons",
+                branding::PRODUCT_NAME
+            )
         );
         assert!(!BUILTIN_COMMAND_NAMES.contains(&"scroll-speed"));
         assert!(!BUILTIN_COMMAND_NAMES.contains(&"daemon"));
@@ -868,7 +876,7 @@ mod tests {
         // 220 -> 238 description changes (LingXi brands CLAUDE.md as LINGXI.md).
         assert_eq!(
             core_description("memory"),
-            "Edit LINGXI.md files and memory settings"
+            format!("Edit {} files and memory settings", branding::MEMORY_FILE)
         );
         // Agent view is on by default, so `/fork` advertises `b$m`, the twin
         // `register_core_batch_8` actually registers.
@@ -1136,7 +1144,7 @@ mod tests {
 
     #[test]
     fn intentionally_disabled_is_disjoint_from_core() {
-        // Bucket (d) commands are NOT implemented; the 18 core names ARE wired
+        // Bucket (d) commands are NOT implemented; the 16 core names ARE wired
         // to real handlers. The two sets must never overlap, otherwise a name is
         // both "implemented" and "intentionally stubbed" — a contradiction.
         let core: std::collections::HashSet<&str> = BUILTIN_CORE_NAMES.iter().copied().collect();

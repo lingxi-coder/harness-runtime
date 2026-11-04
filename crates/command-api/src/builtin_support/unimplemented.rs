@@ -1,7 +1,7 @@
 //! Shared stub handler used for every slash command that lingxi-core has not
 //! yet implemented in v0.6.0 (M5).
 //!
-//! The current registry advertises 86 builtin names. The 19 core commands
+//! The current registry advertises 81 builtin names. The 16 core commands
 //! point at per-name placeholder structs (see `builtin/core_placeholders.rs`)
 //! so M5-10 / M5-11 can swap each one's body independently. Both kinds return
 //! the same locked literal until the real bodies land.

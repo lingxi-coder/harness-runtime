@@ -213,7 +213,8 @@ mod tests {
         };
         let value: serde_json::Value =
             serde_json::from_str(display.string_at("").unwrap()).unwrap();
-        assert_eq!(value["session"]["active"], "code");
+        assert_eq!(value["session"]["mode"], "code");
+        assert!(value["session"]["session_id"].is_string());
         assert_eq!(value["projected"], false);
         assert!(value["blocks"].is_array());
     }
@@ -240,7 +241,7 @@ mod tests {
         };
         let value: serde_json::Value =
             serde_json::from_str(display.string_at("").unwrap()).unwrap();
-        assert_eq!(value["session"]["active"], "code");
+        assert_eq!(value["session"]["mode"], "code");
     }
 
     #[test]

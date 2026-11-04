@@ -86,9 +86,14 @@ fn build_prompt(
         .unwrap_or_else(|| cwd_basename(cwd_path));
 
     let usage_data = format_usage_data(&data);
+    // Expand only static templates. User transcript data is inserted last so
+    // text in a session can never be rewritten as a branding placeholder.
+    let guide = DEFAULT_GUIDE_TEMPLATE.replace("{{PRODUCT_NAME}}", branding::PRODUCT_NAME);
     let prompt = DEFAULT_SYSTEM_PROMPT
+        .replace("{{PRODUCT_NAME}}", branding::PRODUCT_NAME)
+        .replace("{{MEMORY_FILE}}", branding::MEMORY_FILE)
         .replace("{{WINDOW_DAYS}}", &WINDOW_DAYS.to_string())
-        .replace("{{GUIDE_TEMPLATE}}", DEFAULT_GUIDE_TEMPLATE)
+        .replace("{{GUIDE_TEMPLATE}}", &guide)
         .replace("{{USAGE_DATA}}", &usage_data);
     let serialized = serde_json::to_string(&prompt)
         .map_err(|_| error_projection("Could not build the local onboarding prompt."))?;
@@ -672,7 +677,7 @@ fn error_projection(message: &str) -> Utf16JsonProjection {
 
 const DEFAULT_GUIDE_TEMPLATE: &str = r###"# Welcome to [Team Name]
 
-## How We Use Claude
+## How We Use {{PRODUCT_NAME}}
 
 Based on [name]'s usage over the last [N] days:
 
@@ -712,12 +717,12 @@ _TODO_
 
 _TODO_
 
-<!-- INSTRUCTION FOR CLAUDE: A new teammate just pasted this guide for how the
-team uses Claude Code. You're their onboarding buddy — warm, conversational,
+<!-- INSTRUCTION FOR {{PRODUCT_NAME}}: A new teammate just pasted this guide for how the
+team uses {{PRODUCT_NAME}}. You're their onboarding buddy — warm, conversational,
 not lecture-y.
 
 Open with a warm welcome — include the team name from the title. Then: "Your
-teammate uses Claude Code for [list all the work types]. Let's get you started."
+teammate uses {{PRODUCT_NAME}} for [list all the work types]. Let's get you started."
 
 Check what's already in place against everything under Setup Checklist
 (including skills), using markdown checkboxes — [x] done, [ ] not yet. Lead
@@ -734,13 +739,13 @@ Don't invent sections or summaries that aren't in the guide. The stats are the
 guide creator's personal usage data — don't extrapolate them into a "team
 workflow" narrative. -->"###;
 
-const DEFAULT_SYSTEM_PROMPT: &str = r###"You are helping a power user generate an onboarding guide for teammates who are new to Claude Code. The guide will live in the team's onboarding docs and can be pasted into Claude for an interactive walkthrough.
+const DEFAULT_SYSTEM_PROMPT: &str = r###"You are helping a power user generate an onboarding guide for teammates who are new to {{PRODUCT_NAME}}. The guide will live in the team's onboarding docs and can be pasted into {{PRODUCT_NAME}} for an interactive walkthrough.
 
 You're co-authoring this with them — collaborative and helpful, like a teammate who's done this before and is happy to share.
 
 ## Usage data (last {{WINDOW_DAYS}} days)
 
-This was scanned from the guide creator's local Claude Code transcripts:
+This was scanned from the guide creator's local {{PRODUCT_NAME}} transcripts:
 
 ```json
 {{USAGE_DATA}}
@@ -750,7 +755,7 @@ This was scanned from the guide creator's local Claude Code transcripts:
 
 Before anything else — including before thinking through the classification — output exactly this line as your first visible text:
 
-> Looking at how you've used Claude over the last {{WINDOW_DAYS}} days to put together an onboarding guide for teammates new to Claude Code.
+> Looking at how you've used {{PRODUCT_NAME}} over the last {{WINDOW_DAYS}} days to put together an onboarding guide for teammates new to {{PRODUCT_NAME}}.
 
 This must come before any extended thinking about session descriptors. The guide creator is staring at a blank screen until you do. Classification is step 2, not step 1.
 
@@ -787,12 +792,12 @@ Generate the guide immediately, then ask for revisions. Don't wait for answers f
    After the code block, add a `---` horizontal rule and a `**Review**` heading so the guide is visually separated from your questions. Under the heading, number these three questions:
 
    1. "I went with '[X]' for the team name — let me know if that sounds right." (or if you couldn't tell: "What's the team name? I'll add it in.")
-   2. Is there a starter task for someone new to Claude Code? (ticket or doc link — optional)
-   3. Any team tips you'd tell a new teammate that aren't already in CLAUDE.md?
+   2. Is there a starter task for someone new to {{PRODUCT_NAME}}? (ticket or doc link — optional)
+   3. Any team tips you'd tell a new teammate that aren't already in {{MEMORY_FILE}}?
 
    After they answer, update `ONBOARDING.md` with their team name, tips, and starter task. Then close with this exact line (not numbered, not paraphrased):
 
-   Saved to `ONBOARDING.md`. Drop it in your team docs and channels — when a new teammate pastes it into Claude Code, they get a guided onboarding tour from there.
+   Saved to `ONBOARDING.md`. Drop it in your team docs and channels — when a new teammate pastes it into {{PRODUCT_NAME}}, they get a guided onboarding tour from there.
 
    Apply any edits they come back with to the file."###;
 
@@ -813,7 +818,7 @@ mod tests {
     #[test]
     fn onboarding_marker_is_persisted_before_a_failing_usage_scan() {
         let root = tempfile::tempdir().unwrap();
-        let config_path = root.path().join(".lingxi.json");
+        let config_path = root.path().join(branding::GLOBAL_CONFIG_FILE);
         fs::write(&config_path, r#"{"unrelated":"\ud800"}"#).unwrap();
         let expected_scan_error = error_projection("scan failed");
 
@@ -840,9 +845,12 @@ mod tests {
     #[test]
     fn custom_lingxi_home_never_selects_the_ambient_global_config() {
         let root = tempfile::tempdir().unwrap();
-        let ambient_home = root.path().join("ambient/.lingxi");
+        let ambient_home = root.path().join("ambient").join(branding::DOT_DIR);
         let custom_home = root.path().join("mobile-app/private-data");
-        let ambient_path = root.path().join("ambient/.lingxi.json");
+        let ambient_path = root
+            .path()
+            .join("ambient")
+            .join(branding::GLOBAL_CONFIG_FILE);
 
         let selected_path = global_config_path_for_home(
             Some(ambient_path.clone()),
@@ -897,7 +905,7 @@ mod tests {
         fs::write(
             project_dir.join("recent.jsonl"),
             concat!(
-                "{\"role\":\"user\",\"content\":\"Please fix the parser\"}\n",
+                "{\"role\":\"user\",\"content\":\"Please fix the parser with Claude and keep {{PRODUCT_NAME}}\"}\n",
                 "{\"content\":\"<command-name>/review</command-name> <command-name>/review</command-name> <command-name>/commit</command-name>\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__search\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__read\"}\n",
@@ -939,9 +947,14 @@ mod tests {
         assert!(!prompt.contains("{{WINDOW_DAYS}}"));
         assert!(!prompt.contains("{{GUIDE_TEMPLATE}}"));
         assert!(!prompt.contains("{{USAGE_DATA}}"));
+        assert!(prompt.contains(&format!("## How We Use {}", branding::PRODUCT_NAME)));
+        assert!(prompt.contains(&format!(
+            "team tips you'd tell a new teammate that aren't already in {}",
+            branding::MEMORY_FILE
+        )));
 
         let data = prompt
-            .split_once("## Usage data (last 30 days)\n\nThis was scanned from the guide creator's local Claude Code transcripts:\n\n```json\n")
+            .split_once(&format!("## Usage data (last 30 days)\n\nThis was scanned from the guide creator's local {} transcripts:\n\n```json\n", branding::PRODUCT_NAME))
             .unwrap()
             .1
             .split_once("\n```")
@@ -967,7 +980,7 @@ mod tests {
         assert_eq!(data["sessionDescriptors"][0]["prNumbers"][0], 42);
         assert_eq!(
             data["sessionDescriptors"][0]["firstMessage"],
-            "Please fix the parser"
+            "Please fix the parser with Claude and keep {{PRODUCT_NAME}}"
         );
         assert!(!prompt.contains("secret-token"));
         assert!(!prompt.contains("secret@example.test"));

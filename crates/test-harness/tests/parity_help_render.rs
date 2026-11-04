@@ -7,7 +7,8 @@ use command_api::builtin_support::help_render::render_help_screen;
 
 const GOLDEN: &str = include_str!("../src/parity/fixtures/parity_help_screen.txt");
 
-// 2.1.295 HSo in acceptance/rea-evaluation-20261011/native-chunks/src_194447854.js uses Claude/.claude; `/agents` is product-branded here.
+// Project only the documented product differences from the immutable Native
+// screen: the two account commands and product-facing descriptions.
 fn product_branded_golden() -> String {
     const NATIVE_AGENTS_DESCRIPTION: &str =
         "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/";
@@ -16,23 +17,58 @@ fn product_branded_golden() -> String {
         1,
         "the source baseline contains one versioned /agents description"
     );
-    GOLDEN.replace(
-        NATIVE_AGENTS_DESCRIPTION,
-        &format!(
-            "(removed) Ask {} to create/manage subagents, or edit {}/agents/",
-            branding::PRODUCT_NAME,
-            branding::DOT_DIR
+    const NATIVE_TEAM_DESCRIPTION: &str =
+        "Help teammates ramp on Claude Code with a guide from your usage";
+    assert_eq!(GOLDEN.matches(NATIVE_TEAM_DESCRIPTION).count(), 1);
+    let mut projected = GOLDEN
+        .replace(
+            NATIVE_AGENTS_DESCRIPTION,
+            &format!(
+                "(removed) Ask {} to create/manage subagents, or edit {}/agents/",
+                branding::PRODUCT_NAME,
+                branding::DOT_DIR
+            ),
+        )
+        .replace(
+            NATIVE_TEAM_DESCRIPTION,
+            &format!(
+                "Help teammates ramp on {} with a guide from your usage",
+                branding::PRODUCT_NAME
+            ),
+        );
+    for (name, source_row) in [
+        (
+            "login",
+            "  /login                Sign in with your Anthropic account",
         ),
-    )
+        (
+            "logout",
+            "  /logout               Sign out from your Anthropic account",
+        ),
+    ] {
+        let prefix = format!("  /{name} ");
+        let rows: Vec<_> = projected
+            .lines()
+            .filter(|line| line.starts_with(&prefix))
+            .collect();
+        assert_eq!(
+            rows,
+            [source_row],
+            "the Native /{name} row must match exactly"
+        );
+        let row = format!("{source_row}\n");
+        projected = projected.replacen(&row, "", 1);
+    }
+    projected
 }
 
 #[test]
-fn render_help_screen_matches_native_golden_with_product_agents_identity() {
+fn render_help_screen_matches_native_golden_with_product_projection() {
     let actual = render_help_screen();
     assert_eq!(
         actual,
         product_branded_golden(),
-        "/help output drifted outside the approved /agents branding projection"
+        "/help output drifted outside the product branding and account-command projection"
     );
 }
 
@@ -53,6 +89,20 @@ fn golden_has_77_lines_and_native_team_onboarding() {
         "the source-visible Native team-onboarding row must be in the golden"
     );
     assert_eq!(GOLDEN.matches('\n').count(), 77);
+}
+
+#[test]
+fn product_projection_removes_only_the_two_account_rows() {
+    let projected = product_branded_golden();
+    assert_eq!(projected.lines().count(), 75);
+    for name in ["login", "logout"] {
+        assert!(!projected
+            .lines()
+            .any(|line| line.starts_with(&format!("  /{name} "))));
+    }
+    assert!(projected
+        .lines()
+        .any(|line| line.starts_with("  /team-onboarding ")));
 }
 
 #[test]
