@@ -1,0 +1,166 @@
+{
+  "image_id": "sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+  "path": "turnserver",
+  "args": [
+    "-n",
+    "-v",
+    "--pidfile=/tmp/turnserver.pid",
+    "--log-file=stdout",
+    "--listening-port=3478",
+    "--external-ip=127.0.0.1",
+    "--min-port=50100",
+    "--max-port=50115",
+    "--realm=lingxi-local-test",
+    "--lt-cred-mech",
+    "--user=lingxi-test:local-turn-test-password",
+    "--fingerprint",
+    "--no-tls",
+    "--no-multicast-peers",
+    "--allow-loopback-peers"
+  ],
+  "entrypoint": [
+    "turnserver"
+  ],
+  "cmd": [
+    "-n",
+    "-v",
+    "--pidfile=/tmp/turnserver.pid",
+    "--log-file=stdout",
+    "--listening-port=3478",
+    "--external-ip=127.0.0.1",
+    "--min-port=50100",
+    "--max-port=50115",
+    "--realm=lingxi-local-test",
+    "--lt-cred-mech",
+    "--user=lingxi-test:local-turn-test-password",
+    "--fingerprint",
+    "--no-tls",
+    "--no-multicast-peers",
+    "--allow-loopback-peers"
+  ],
+  "port_bindings": {
+    "3478/tcp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "3478"
+      }
+    ],
+    "3478/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "3478"
+      }
+    ],
+    "50100/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50100"
+      }
+    ],
+    "50101/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50101"
+      }
+    ],
+    "50102/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50102"
+      }
+    ],
+    "50103/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50103"
+      }
+    ],
+    "50104/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50104"
+      }
+    ],
+    "50105/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50105"
+      }
+    ],
+    "50106/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50106"
+      }
+    ],
+    "50107/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50107"
+      }
+    ],
+    "50108/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50108"
+      }
+    ],
+    "50109/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50109"
+      }
+    ],
+    "50110/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50110"
+      }
+    ],
+    "50111/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50111"
+      }
+    ],
+    "50112/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50112"
+      }
+    ],
+    "50113/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50113"
+      }
+    ],
+    "50114/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50114"
+      }
+    ],
+    "50115/udp": [
+      {
+        "HostIp": "127.0.0.1",
+        "HostPort": "50115"
+      }
+    ]
+  },
+  "readonly_rootfs": true,
+  "cap_add": [
+    "CAP_NET_BIND_SERVICE"
+  ],
+  "cap_drop": [
+    "ALL"
+  ],
+  "security_opt": [
+    "no-new-privileges:true"
+  ],
+  "tmpfs": {
+    "/tmp": "",
+    "/var/lib/coturn": "",
+    "/var/run": ""
+  }
+}
