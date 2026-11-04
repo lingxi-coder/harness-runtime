@@ -56,22 +56,34 @@ extern int _libssh2_mbedtls_random(unsigned char *buffer, size_t length);
 
 static int allocations;
 static int frees;
+static int allocator_cookie;
+static void *tracked_pointer;
 static void *tracked_alloc(size_t count, void **abstract)
 {
-    (void)abstract;
+    assert(abstract && *abstract == &allocator_cookie);
+    assert(tracked_pointer == NULL);
     allocations++;
-    return malloc(count);
+    tracked_pointer = malloc(count);
+    assert(tracked_pointer != NULL);
+    return tracked_pointer;
 }
 static void tracked_free(void *ptr, void **abstract)
 {
-    (void)abstract;
+    assert(abstract && *abstract == &allocator_cookie);
+    assert(ptr != NULL && ptr == tracked_pointer);
     frees++;
+    tracked_pointer = NULL;
     free(ptr);
 }
 static void *tracked_realloc(void *ptr, size_t count, void **abstract)
 {
-    (void)abstract;
-    return realloc(ptr, count);
+    void *resized;
+    assert(abstract && *abstract == &allocator_cookie);
+    assert(ptr == tracked_pointer);
+    resized = realloc(ptr, count);
+    if(resized)
+        tracked_pointer = resized;
+    return resized;
 }
 static void test_real_entropy_control(int expect_failure)
 {
@@ -126,9 +138,11 @@ int main(void)
     /* An exit after either failed init must not consume a later reference. */
     libssh2_exit();
     allocations = frees = 0;
+    tracked_pointer = NULL;
     session = libssh2_session_init_ex(tracked_alloc, tracked_free,
-                                      tracked_realloc, NULL);
-    assert(session == NULL && allocations == 1 && frees == 1);
+                                      tracked_realloc, &allocator_cookie);
+    assert(session == NULL && allocations == 1 && frees == 1 &&
+           tracked_pointer == NULL);
     set_entropy_failure(0);
     test_real_entropy_control(0);
 
