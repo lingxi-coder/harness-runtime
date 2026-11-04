@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   diagnose:
+    if: ${{ !contains(github.event.head_commit.message, 'OWNER_DIAG_ONLY') }}
     runs-on: windows-2025
     timeout-minutes: 25
     env:

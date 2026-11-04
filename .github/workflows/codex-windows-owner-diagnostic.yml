@@ -1,0 +1,19 @@
+name: Windows supervisor owner diagnostic (temporary)
+on:
+  push:
+    branches: [codex/windows-process-failures-round8]
+
+permissions:
+  contents: read
+
+jobs:
+  owner-diagnostic:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - name: Enable long Git paths on the ephemeral runner
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v4
+      - name: Compare default and explicit Windows owners
+        shell: pwsh
+        run: .github/scripts/windows_owner_diagnostic.ps1
