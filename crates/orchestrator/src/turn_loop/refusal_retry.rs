@@ -5,8 +5,6 @@ use std::ffi::OsStr;
 use crate::conversation::ConversationOrchestrator;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage, MessageId};
 
-const DISABLE_REFUSAL_RETRY_ENV: &str = "CLAUDE_CODE_DISABLE_REFUSAL_RETRY";
-
 pub(crate) const NATIVE_REFUSAL_SAFETY_RETRY_USER_MESSAGE: &str = "Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.";
 const NATIVE_REFUSAL_RUNNING_TOOL_EXCEPTION: &str = " Exception: a tool call whose result reads \"Interrupted\" was already running when the response was stopped; it may have partially or fully completed.";
 
@@ -41,7 +39,7 @@ pub(crate) fn native_refusal_retry_enabled(query_source: &str, refusal_retry_spe
     retry_allowed(
         Some(query_source),
         refusal_retry_spent,
-        std::env::var_os(DISABLE_REFUSAL_RETRY_ENV).as_deref(),
+        std::env::var_os(branding::DISABLE_REFUSAL_RETRY_ENV).as_deref(),
     )
 }
 
@@ -115,7 +113,7 @@ pub(crate) async fn inject_native_refusal_safety_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::{retry_allowed, DISABLE_REFUSAL_RETRY_ENV};
+    use super::{native_refusal_retry_enabled, retry_allowed};
     use std::ffi::OsStr;
 
     #[test]
@@ -144,9 +142,37 @@ mod tests {
         assert!(!retry_allowed(Some("sdk"), false, Some(OsStr::new("1"))));
         assert!(!retry_allowed(Some("sdk"), false, Some(OsStr::new(" "))));
         assert!(retry_allowed(Some("sdk"), false, Some(OsStr::new(""))));
-        assert_eq!(
-            DISABLE_REFUSAL_RETRY_ENV,
-            "CLAUDE_CODE_DISABLE_REFUSAL_RETRY"
-        );
+    }
+
+    #[test]
+    fn product_disable_flag_controls_retry_in_child() {
+        const CHILD: &str = "HARNESS_TEST_REFUSAL_RETRY_EXPECTED";
+        const RAN: &str = "refusal-retry-product-env-child-ran";
+        if let Ok(expected) = std::env::var(CHILD) {
+            assert_eq!(
+                native_refusal_retry_enabled("sdk", false),
+                expected == "true"
+            );
+            println!("{RAN}");
+            return;
+        }
+
+        for (value, expected) in [("", "true"), ("1", "false"), (" ", "false")] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "turn_loop::refusal_retry::tests::product_disable_flag_controls_retry_in_child",
+                    "--nocapture",
+                ])
+                .env(CHILD, expected)
+                .env(branding::DISABLE_REFUSAL_RETRY_ENV, value)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(RAN),
+                "{output:?}"
+            );
+        }
     }
 }

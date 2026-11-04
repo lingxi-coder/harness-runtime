@@ -1852,7 +1852,7 @@ fn refusal_safety_retry_respects_disable_environment_flag() {
             "--nocapture",
         ])
         .env(CHILD_MARKER, "1")
-        .env("CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "1")
+        .env(branding::DISABLE_REFUSAL_RETRY_ENV, "1")
         .status()
         .expect("launch isolated test child with Native refusal-retry disable env");
     assert!(
