@@ -51,15 +51,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Build native libraries and test CA rotation
+        env:
+          CA_SANITIZER: ${{ matrix.sanitizer }}
+        run: python3 scripts/tests/run_mbedtls_ca.py --sanitizer "$CA_SANITIZER" --output-dir "$RUNNER_TEMP/mbedtls-ca-logs"
       - name: Test native configuration and include contracts
         if: matrix.sanitizer == 'none'
         run: |
           python3 scripts/tests/test_mbedtls_build_env.py
           python3 scripts/tests/test_mbedtls_consumer_include.py
-      - name: Build native libraries and test CA rotation
-        env:
-          CA_SANITIZER: ${{ matrix.sanitizer }}
-        run: python3 scripts/tests/run_mbedtls_ca.py --sanitizer "$CA_SANITIZER" --output-dir "$RUNNER_TEMP/mbedtls-ca-logs"
       - name: Preserve CA test evidence
         if: always()
         uses: actions/upload-artifact@v4
