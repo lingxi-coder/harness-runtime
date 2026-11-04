@@ -2111,6 +2111,7 @@ mod prompt_suggestion_background;
 pub(crate) use context_announcements_impl::PreparedContextAnnouncements;
 #[path = "conversation/context_state.rs"]
 mod context_state_impl;
+pub(crate) use context_state_impl::obsolete_skill_activation;
 #[path = "conversation/prompt_cache.rs"]
 mod prompt_cache_impl;
 #[path = "conversation/prompt.rs"]

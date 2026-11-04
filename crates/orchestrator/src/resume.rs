@@ -725,7 +725,7 @@ pub fn replay_captured_session(
     loaded: LoadedTranscript,
     session_id: Uuid,
 ) -> Result<ReplayedSession, ResumeError> {
-    replay_captured_session_with_text_projection(transcript_path, source, loaded, session_id, true)
+    replay_captured_session_inner(transcript_path, source, loaded, session_id, false)
 }
 
 /// App Chat checkpoints replay exact source units in both canonical and display
@@ -736,15 +736,15 @@ pub(crate) fn replay_persistent_app_chat_session(
     loaded: LoadedTranscript,
     session_id: Uuid,
 ) -> Result<ReplayedSession, ResumeError> {
-    replay_captured_session_with_text_projection(transcript_path, source, loaded, session_id, false)
+    replay_captured_session_inner(transcript_path, source, loaded, session_id, true)
 }
 
-fn replay_captured_session_with_text_projection(
+fn replay_captured_session_inner(
     transcript_path: PathBuf,
     source: String,
     loaded: LoadedTranscript,
     session_id: Uuid,
-    project_assistant_text: bool,
+    persistent_app_chat: bool,
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid_str);
@@ -760,8 +760,8 @@ fn replay_captured_session_with_text_projection(
     let worktree_session = loaded.worktree_states.get(&sid_str).cloned();
     let transcript_metadata = JsonlWriter::capture_session_metadata_source(&source, &sid_str);
     let transcript_entries = loaded.messages_in_order;
-    let (state, last_uuid, mut runtime_metadata) =
-        build_state_from_jsonl_with_text_projection(session_id, &messages, project_assistant_text);
+    let (mut state, last_uuid, mut runtime_metadata) =
+        build_state_from_jsonl_with_text_projection(session_id, &messages, !persistent_app_chat);
     let display_entries = transcript_entries
         .iter()
         .filter(|message| !message.is_sidechain)
@@ -770,7 +770,7 @@ fn replay_captured_session_with_text_projection(
     let (display_state, _, _) = build_state_from_jsonl_with_text_projection(
         session_id,
         &display_entries,
-        project_assistant_text,
+        !persistent_app_chat,
     );
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
@@ -781,6 +781,19 @@ fn replay_captured_session_with_text_projection(
     let profile_epoch = JsonlWriter::fixed_session_profile_from_source(&source, &sid_str)
         .map_err(ResumeError::Profile)?
         .instruction_epoch;
+    if persistent_app_chat {
+        // The live owner applies this same epoch projection when it resumes.
+        // Keep canonical history intact while every App Chat replay consumer
+        // observes the same model-visible context.
+        let obsolete = state
+            .history
+            .iter()
+            .filter_map(|message| {
+                crate::conversation::obsolete_skill_activation(message, profile_epoch)
+            })
+            .collect::<Vec<_>>();
+        state.model_context_excluded_messages.extend(obsolete);
+    }
     let (snapshot, rendering) =
         prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
     runtime_metadata.prompt_snapshot = snapshot;
