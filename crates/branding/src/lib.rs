@@ -247,6 +247,8 @@ pub const MANAGED_PREFERENCES_DOMAIN: &str = "com.lingxi.code";
 
 /// Global config file, a sibling of [`DOT_DIR`] in `$HOME` (e.g. `~/.lingxi.json`).
 pub const GLOBAL_CONFIG_FILE: &str = ".lingxi.json";
+/// Desktop Local App preparation marker, excluded from published source.
+pub const LOCAL_APP_PREPARATION_MARKER: &str = ".lingxi-prepared.json";
 
 /// Append-only sidecar suffix holding durable session-message identities.
 pub const SESSION_MESSAGE_IDENTITY_LOG_SUFFIX: &str = ".lingxi-message-identities";
@@ -420,6 +422,7 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     DOT_DIR,
     MANAGED_PREFERENCES_DOMAIN,
     GLOBAL_CONFIG_FILE,
+    LOCAL_APP_PREPARATION_MARKER,
     SESSION_MESSAGE_IDENTITY_LOG_SUFFIX,
     SESSION_MESSAGE_IDENTITY_LOCK_SUFFIX,
     CONFIG_DIR_ENV,
@@ -559,6 +562,7 @@ mod tests {
     fn namespace_values_are_lingxi() {
         assert_eq!(DOT_DIR, ".lingxi");
         assert_eq!(GLOBAL_CONFIG_FILE, ".lingxi.json");
+        assert_eq!(LOCAL_APP_PREPARATION_MARKER, ".lingxi-prepared.json");
         assert_eq!(CONFIG_DIR_ENV, "LINGXI_CONFIG_DIR");
         assert_eq!(MEMORY_FILE, "LINGXI.md");
         assert_eq!(MEMORY_LOCAL_FILE, "LINGXI.local.md");

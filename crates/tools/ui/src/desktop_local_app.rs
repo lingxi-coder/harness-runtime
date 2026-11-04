@@ -68,6 +68,20 @@ fn io(error: impl ToString) -> ToolError {
     ToolError::Io(error.to_string().into())
 }
 
+fn excluded_staging_entry(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "node_modules"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".DS_Store"
+            | branding::LOCAL_APP_PREPARATION_MARKER
+    ) || name == ".env"
+        || (name.starts_with(".env.") && name != ".env.example")
+}
+
 fn request_body(input: &Value, limit: usize) -> Result<String, ToolError> {
     let body = input.to_string();
     if body.len() > limit {
@@ -461,18 +475,7 @@ impl DesktopLocalAppTool {
                 check_cancelled(ctx)?;
                 let name = entry.file_name();
                 let name_text = name.to_string_lossy();
-                if matches!(
-                    name_text.as_ref(),
-                    ".git"
-                        | "node_modules"
-                        | ".venv"
-                        | "venv"
-                        | "__pycache__"
-                        | ".DS_Store"
-                        | ".lingxi-prepared.json"
-                ) || name_text == ".env"
-                    || (name_text.starts_with(".env.") && name_text != ".env.example")
-                {
+                if excluded_staging_entry(name_text.as_ref()) {
                     continue;
                 }
                 let kind = entry.file_type().await.map_err(io)?;
@@ -511,7 +514,7 @@ impl DesktopLocalAppTool {
             return Ok(ToolCallResult::from_data(generated_builtin_result(&result)));
         }
         let discovery: Value = serde_json::from_slice(&tokio::fs::read(self.config_home.join("desktop-local-app-host.json")).await
-            .map_err(|_| invalid("Desktop Local App host is unavailable. Open or restart the LingXi desktop application."))?).map_err(io)?;
+            .map_err(|_| invalid(format!("Desktop Local App host is unavailable. Open or restart the {} desktop application.", branding::PRODUCT_NAME)))?).map_err(io)?;
         let port = discovery["port"]
             .as_u64()
             .filter(|p| *p > 0 && *p <= 65535)
@@ -1028,6 +1031,32 @@ mod tests {
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
+    #[test]
+    fn staging_filter_keeps_examples_and_omits_private_entries() {
+        for name in [
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            ".DS_Store",
+            branding::LOCAL_APP_PREPARATION_MARKER,
+            ".env",
+            ".env.production",
+            ".env.example.local",
+        ] {
+            assert!(excluded_staging_entry(name), "{name}");
+        }
+        for name in [
+            "index.html".to_owned(),
+            ".env.example".to_owned(),
+            ".envish".to_owned(),
+            format!("{}.backup", branding::LOCAL_APP_PREPARATION_MARKER),
+        ] {
+            assert!(!excluded_staging_entry(&name), "{name}");
+        }
+    }
+
     struct ReadGate {
         deny: bool,
         replace: Option<(PathBuf, PathBuf)>,
@@ -1286,7 +1315,7 @@ mod tests {
             ("pyvenv.cfg", "project-owned root file"),
             (".env", "secret"),
             (".env.example", "TOKEN="),
-            (".lingxi-prepared.json", "{\"revision\":1}"),
+            (branding::LOCAL_APP_PREPARATION_MARKER, "{\"revision\":1}"),
             ("node_modules/cache", "dependency"),
         ] {
             std::fs::write(source.join(file), text).unwrap();
@@ -1307,7 +1336,7 @@ mod tests {
         );
         assert!(dest.join(".env.example").exists());
         assert!(!dest.join(".env").exists());
-        assert!(!dest.join(".lingxi-prepared.json").exists());
+        assert!(!dest.join(branding::LOCAL_APP_PREPARATION_MARKER).exists());
         assert!(!dest.join("node_modules").exists());
         assert!(!dest.join(".python-env").exists());
         assert!(dest.join("pyvenv.cfg").exists());
