@@ -216,7 +216,7 @@ mod tests {
         let context = guide_context(root.clone());
         let text = context.string_at("").unwrap();
         for fact in [
-            "LINGXI_DISABLE_AGENT_VIEW",
+            branding::DISABLE_AGENT_VIEW_ENV,
             "runs only after the first assistant turn",
             "`/subtask` is not registered",
             "`lingxi agents --json` prints that listing",

@@ -419,7 +419,7 @@ fn visit_jsonl_lines_newest_first(
                     buf.drain(..=index);
                     head
                 }
-                None => std::mem::replace(&mut buf, Vec::new()),
+                None => std::mem::take(&mut buf),
             }
         } else {
             Vec::new()
