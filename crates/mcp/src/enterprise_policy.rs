@@ -1711,7 +1711,9 @@ fn cached_policy_regex(pattern: &str) -> Option<regex::Regex> {
         return regex::Regex::new(pattern).ok();
     }
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(cached) = guard.get(pattern) {
         return Some(cached.clone());
     }

@@ -395,9 +395,7 @@ where
             match response {
                 Err(_) => {
                     tracing::warn!("mcp sse: POST timed out");
-                    if let Some(error) =
-                        transport_error_message(&frame, "MCP SSE POST timed out")
-                    {
+                    if let Some(error) = transport_error_message(&frame, "MCP SSE POST timed out") {
                         if inbound_tx.send(error).is_err() {
                             break;
                         }

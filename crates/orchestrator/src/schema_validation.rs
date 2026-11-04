@@ -21,7 +21,9 @@ fn compiled_schema_pattern(pattern: &str) -> Result<regex::Regex, regex::Error> 
         return regex::Regex::new(pattern);
     }
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(cached) = guard.get(pattern) {
         return Ok(cached.clone());
     }

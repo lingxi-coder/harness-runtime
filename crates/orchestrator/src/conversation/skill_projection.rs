@@ -183,9 +183,7 @@ impl ConversationOrchestrator {
                 if origin.string_at("/type") != Some("skill_activation") {
                     return None;
                 }
-                origin
-                    .string_units("/skill_name")
-                    .map(|skill| (*id, skill))
+                origin.string_units("/skill_name").map(|skill| (*id, skill))
             })
             .collect::<HashSet<_>>();
         for entry in metadata.iter().filter(|entry| entry.effective) {
