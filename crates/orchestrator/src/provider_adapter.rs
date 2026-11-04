@@ -894,6 +894,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             .await
     }
 
+    fn reset_conversation_context(&self) {
+        self.service.reset_conversation_context();
+    }
+
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         self.service.close_responses_websocket_session().await
     }

@@ -569,6 +569,9 @@ pub trait OrchestratorApiClient: Send + Sync {
         Ok(())
     }
 
+    /// Retire derived history and remote state after a committed history rewrite.
+    fn reset_conversation_context(&self) {}
+
     /// Close any reusable Responses WebSocket session held by this API client.
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         Ok(())

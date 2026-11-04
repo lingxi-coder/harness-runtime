@@ -4636,7 +4636,9 @@ fn message_id(m: &JsonlMessage) -> Option<&str> {
 /// uuids; this engine merges assistant blocks in memory and splits them
 /// per-block on write, so a preserved id that matches no outer `uuid` is
 /// resolved to every assistant line sharing that inner `message.id`, in file
-/// order (the write-side split invariant). Unresolvable ids are skipped
+/// order (the write-side split invariant). Streamed rows also retain their
+/// host UUID in `logicalMessageId` when `message.id` belongs to the provider.
+/// Unresolvable ids are skipped
 /// (best-effort, like the tolerant walk).
 #[derive(Default)]
 struct PreservedTailState {
@@ -4959,8 +4961,18 @@ fn preserved_tail_state(
                     }
                 }
             }
+            let logical_ids = ids
+                .iter()
+                .filter_map(|id| loaded.by_uuid.get(*id))
+                .filter_map(|message| message.extra.string_at("/logicalMessageId"))
+                .collect::<Vec<_>>();
+            ids.extend(logical_ids);
             for message in &loaded.messages_in_order[..latest_index] {
                 if ids.contains(message.uuid.as_str())
+                    || message
+                        .extra
+                        .string_at("/logicalMessageId")
+                        .is_some_and(|id| ids.contains(id))
                     || (message.message_type == "assistant"
                         && message_id(message)
                             .is_some_and(|id| ids.contains(id) && !loaded.by_uuid.contains_key(id)))
@@ -4987,14 +4999,25 @@ fn preserved_tail_state(
 }
 
 fn preserved_endpoint_uuid<'a>(loaded: &'a LoadedTranscript, id: &'a str, last: bool) -> &'a str {
-    if loaded.by_uuid.contains_key(id) {
+    let logical_id = loaded
+        .by_uuid
+        .get(id)
+        .and_then(|message| message.extra.string_at("/logicalMessageId"));
+    if loaded.by_uuid.contains_key(id) && logical_id.is_none() {
         return id;
     }
+    let id = logical_id.unwrap_or(id);
     let mut rows = loaded
         .messages_in_order
         .iter()
-        .filter(|message| message.message_type == "assistant" && message_id(message) == Some(id));
+        .filter(|message| preserved_assistant_matches_id(message, id));
     if last { rows.next_back() } else { rows.next() }.map_or(id, |message| message.uuid.as_str())
+}
+
+fn preserved_assistant_matches_id(message: &JsonlMessage, id: &str) -> bool {
+    message.message_type == "assistant"
+        && (message_id(message) == Some(id)
+            || message.extra.string_at("/logicalMessageId") == Some(id))
 }
 
 fn legacy_preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String, String> {
@@ -5034,11 +5057,16 @@ fn legacy_preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String,
             // first; else the per-block assistant siblings sharing this inner
             // `message.id`, in file order.
             let mut resolved: Vec<&str> = Vec::new();
-            if loaded.by_uuid.contains_key(preserved) {
+            let logical_id = loaded
+                .by_uuid
+                .get(preserved)
+                .and_then(|message| message.extra.string_at("/logicalMessageId"));
+            if loaded.by_uuid.contains_key(preserved) && logical_id.is_none() {
                 resolved.push(preserved);
             } else {
+                let preserved = logical_id.unwrap_or(preserved);
                 for m in &loaded.messages_in_order {
-                    if m.message_type == "assistant" && message_id(m) == Some(preserved) {
+                    if preserved_assistant_matches_id(m, preserved) {
                         resolved.push(m.uuid.as_str());
                     }
                 }
@@ -5313,6 +5341,44 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn exact_native_members_do_not_expand_shared_stream_message_ids() {
+        let (mut rows, ids) = native_exact_fixture();
+        for index in [0, 1] {
+            let parent = rows[index].parent_uuid.clone();
+            rows[index] = assistant_line(
+                &ids[index],
+                parent.as_deref(),
+                "2026-07-13T10:00:00.000Z",
+                false,
+            );
+            rows[index]
+                .extra
+                .set_field("logicalMessageId", projection(json!("host-message")))
+                .unwrap();
+            rows[index]
+                .message
+                .set_field("id", projection(json!("provider-message")))
+                .unwrap();
+        }
+        let owner = rows[0].session_id.clone();
+        let loaded = loaded_transcript(rows);
+        let chain = build_conversation_chain(&loaded, &owner).0;
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                ids[3].as_str(),
+                ids[4].as_str(),
+                ids[0].as_str(),
+                ids[2].as_str(),
+                ids[5].as_str()
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn exact_native_missing_member_rejects_the_transcript_load() {
         let (mut rows, _) = native_exact_fixture();
@@ -5457,6 +5523,71 @@ mod tests {
             loaded.messages_in_order[0].message.string_units("/content"),
             Some(vec![0xd800])
         );
+    }
+
+    #[test]
+    fn compact_tail_resolves_logical_stream_message_ids() {
+        for (legacy, preserved_id) in [
+            (false, "host-message"),
+            (true, "host-message"),
+            (false, "text-row"),
+            (true, "text-row"),
+        ] {
+            let root = user_line("old-root");
+            let mut text = assistant_line(
+                "text-row",
+                Some("old-root"),
+                "2026-10-03T12:00:01.000Z",
+                false,
+            );
+            let mut phase = assistant_line(
+                "phase-row",
+                Some("text-row"),
+                "2026-10-03T12:00:02.000Z",
+                false,
+            );
+            for row in [&mut text, &mut phase] {
+                row.message
+                    .set_field("id", projection(json!("resp-provider")))
+                    .unwrap();
+                row.extra
+                    .set_field("logicalMessageId", projection(json!("host-message")))
+                    .unwrap();
+            }
+            let mut boundary = boundary_line("boundary", None);
+            boundary.extra.set_field("compactMetadata", projection(json!({
+                "trigger":"manual", "preTokens":1234,
+                "preservedMessages":{"anchorUuid":"summary", "uuids":[preserved_id], "allUuids":[preserved_id]}
+            }))).unwrap();
+            if !legacy {
+                let mut metadata = boundary.extra.subprojection("/compactMetadata").unwrap();
+                metadata.set_field("preservedSegment", projection(json!({"headUuid":preserved_id, "tailUuid":preserved_id, "anchorUuid":"summary"}))).unwrap();
+                boundary
+                    .extra
+                    .set_field("compactMetadata", metadata)
+                    .unwrap();
+            }
+            let mut summary = user_line("summary");
+            summary.parent_uuid = Some("boundary".into());
+            let mut after = user_line("after");
+            after.parent_uuid = Some("phase-row".into());
+            after.timestamp = "2026-10-03T12:00:05.000Z".into();
+            let session_id = after.session_id.clone();
+            let loaded = loaded_transcript(vec![root, text, phase, boundary, summary, after]);
+            let (chain, _) = build_conversation_chain(&loaded, &session_id);
+            assert_eq!(
+                chain
+                    .iter()
+                    .map(|row| row.uuid.as_str())
+                    .collect::<Vec<_>>(),
+                ["boundary", "summary", "text-row", "phase-row", "after"],
+                "streaming provider IDs must not reconnect the summarized prefix (legacy={legacy})"
+            );
+            assert_eq!(
+                loaded.by_uuid["text-row"].message.string_at("/id"),
+                Some("resp-provider")
+            );
+        }
     }
 
     fn user_with_content(uuid: &str, content: Value) -> JsonlMessage {

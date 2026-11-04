@@ -578,7 +578,7 @@ async fn consume(received: sdk::ReceivedCall) {
 async fn send_draft(
     client: &ModelRuntime,
     transport: Arc<dyn Transport>,
-    session: &mut ResponsesSession,
+    session: &mut lingxi_llm_client::ConversationSession,
     request: &LlmRequest,
     observations: &Arc<RaceObservations>,
     expected_authorization: &str,
@@ -600,7 +600,7 @@ async fn send_draft(
         observations.dispatches.fetch_add(1, Ordering::SeqCst);
         Ok(())
     };
-    let (_, received) = tokio::time::timeout(
+    let (_, received, _) = tokio::time::timeout(
         WAIT,
         client.open_shared_stream(prepared, session, &mut mark),
     )
@@ -623,7 +623,7 @@ async fn websocket_handshake_and_seal_share_credentials_and_next_draft_rebinds()
         profile(ProtocolFamily::OpenAiResponses, AuthStrategy::Bearer, true),
         store.clone(),
     );
-    let mut session = ResponsesSession::new();
+    let mut session = lingxi_llm_client::ConversationSession::new();
     let mut request = LlmRequest::new("snapshot-model").with_user_text("original");
     request.stream = true;
     request.execution.account_scope = Some("trusted-snapshot-scope".into());
@@ -699,7 +699,7 @@ async fn upgrade_required_http_fallback_retains_draft_credentials_then_refreshes
         profile(ProtocolFamily::OpenAiResponses, AuthStrategy::Bearer, true),
         store.clone(),
     );
-    let mut session = ResponsesSession::new();
+    let mut session = lingxi_llm_client::ConversationSession::new();
     let mut request = LlmRequest::new("snapshot-model").with_user_text("original");
     request.stream = true;
     send_draft(
@@ -711,7 +711,7 @@ async fn upgrade_required_http_fallback_retains_draft_credentials_then_refreshes
         &format!("Bearer {TOKEN_A}"),
     )
     .await;
-    assert!(session.fallback_to_http());
+    assert!(session.responses_transport_mut().fallback_to_http());
     assert_eq!(store.loads.load(Ordering::SeqCst), 1);
     assert_eq!(observations.http_sends.lock().unwrap().len(), 1);
     assert_eq!(
@@ -731,7 +731,7 @@ async fn upgrade_required_http_fallback_retains_draft_credentials_then_refreshes
     )
     .await;
     assert!(
-        !session.fallback_to_http(),
+        !session.responses_transport_mut().fallback_to_http(),
         "new credentials clear the old account's cached HTTP fallback"
     );
     assert_eq!(store.loads.load(Ordering::SeqCst), 2);

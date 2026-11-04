@@ -325,6 +325,12 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         })
         .expect("a compact_boundary system line must be persisted");
     let boundary = &lines[boundary_idx];
+    let session_uuid = orch.session().lock().await.session_id.as_uuid();
+    assert_eq!(
+        boundary.session_id,
+        session_uuid.to_string(),
+        "compact boundary must belong to the same canonical UUID chain as ordinary turns"
+    );
     assert!(boundary_idx > 0, "boundary follows the pre-compact lines");
     // Chain reset: parentUuid null; the real parent (the last pre-compact
     // on-disk line) rides in logicalParentUuid.
@@ -545,13 +551,13 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     // ---- Cold reload == hot state ---------------------------------------- //
     let (_, _, loaded) = session::jsonl::loader::load_routed_session_from_path_with_source(
         &session_path,
-        session_id.as_uuid(),
+        session_uuid,
         fs.clone(),
     )
     .await
     .expect("strict cold session load");
-    let (chain, _tip_sid) = build_conversation_chain(&loaded, &session_id.as_uuid().to_string());
-    let cold_state = state_from_messages(session_id.as_uuid(), &chain);
+    let (chain, _tip_sid) = build_conversation_chain(&loaded, &session_uuid.to_string());
+    let cold_state = state_from_messages(session_uuid, &chain);
 
     let post_attachment_range = if manual {
         boundary_idx + 3..boundary_idx + 8

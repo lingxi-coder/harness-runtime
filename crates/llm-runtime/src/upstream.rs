@@ -56,7 +56,7 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
         "regions":profile.regions,"connection":profile.connection,
         "supports_websockets":profile.supports_websockets,
         "websocket_connect_timeout_ms":profile.websocket_connect_timeout_ms,
-        "extra":{"supports_previous_response_id":true},
+        "extra":{},
         "models":profile.models.iter().map(|model| {
             let caps=model.capabilities;
             let support=|enabled| if enabled {"supported"} else {"unsupported"};
@@ -827,6 +827,67 @@ mod upgrade_tests {
             metadata["provider_events"][0]["payload"]["container"]["id"],
             "container-1"
         );
+    }
+
+    #[test]
+    fn responses_message_phases_survive_stream_accumulation_and_durable_replay() {
+        let mut decoder =
+            Decoder::projection(wire::ProtocolFamily::OpenAiResponses, payload(Value::Null))
+                .unwrap();
+        let mut source = Vec::new();
+        for (block, text, phase) in [(0, "checking", "commentary"), (1, "4921", "final_answer")] {
+            source.push(Ok(wire::StreamEvent::TextDelta {
+                block,
+                text: text.into(),
+            }));
+            source.push(Ok(wire::StreamEvent::BlockEnd { block }));
+            source.push(Ok(wire::StreamEvent::ProviderContent {
+                block,
+                protocol: wire::ProtocolFamily::OpenAiResponses,
+                value: payload(json!({"type":"responses_message_phase", "phase":phase})),
+            }));
+        }
+        source.push(Ok(wire::StreamEvent::End {
+            stop_reason: wire::StopReason::EndTurn,
+            usage: Default::default(),
+            inference: Default::default(),
+        }));
+        let mut accumulator = crate::stream_accumulator::ResponseAccumulator::default();
+        let mut completed = None;
+        for event in decoder.events(source).unwrap() {
+            if let crate::stream_accumulator::ResponseAccumulatorUpdate::Completed(response) =
+                accumulator.observe(event).unwrap()
+            {
+                completed = Some(response);
+            }
+        }
+        let response = completed.expect("terminal response");
+        let persisted = serde_json::to_string(&response.content).unwrap();
+        let content = serde_json::from_str(&persisted).unwrap();
+        let message = Message {
+            api_output_config: None,
+            role: "assistant".into(),
+            content,
+        };
+        let replay = message_content(&message, wire::ProtocolFamily::OpenAiResponses).unwrap();
+        assert_eq!(replay.len(), 4);
+        assert!(matches!(&replay[0], wire::ContentBlock::Text { text, .. } if text == "checking"));
+        assert!(
+            matches!(&replay[1], wire::ContentBlock::ProviderContent { value, .. } if value.string_at("/phase").as_deref() == Some("commentary"))
+        );
+        assert!(matches!(&replay[2], wire::ContentBlock::Text { text, .. } if text == "4921"));
+        assert!(
+            matches!(&replay[3], wire::ContentBlock::ProviderContent { value, .. } if value.string_at("/phase").as_deref() == Some("final_answer"))
+        );
+        let foreign = message_content(&message, wire::ProtocolFamily::OpenAiChat).unwrap();
+        assert_eq!(
+            foreign.len(),
+            2,
+            "cross-provider replay keeps visible text and omits Responses-only phase metadata"
+        );
+        assert!(foreign
+            .iter()
+            .all(|block| matches!(block, wire::ContentBlock::Text { .. })));
     }
 
     #[test]

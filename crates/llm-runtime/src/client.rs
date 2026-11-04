@@ -2033,6 +2033,23 @@ impl ModelRuntime {
             }
         }
 
+        // Implicit conversation references use the same captured credentials
+        // as sealing. A profile label alone is never an account identity.
+        if request.execution.account_scope.is_none()
+            && lingxi_llm_client::ContinuationCapability::for_profile(&entry.profile)
+                != lingxi_llm_client::ContinuationCapability::Unsupported
+            && self.account_pool.is_none()
+        {
+            if let Some(credential) = authenticator.captured_credential().await? {
+                owned
+                    .get_or_insert_with(|| request.clone())
+                    .execution
+                    .account_scope = Some(crate::computer::credential_account_scope(Some(
+                    &credential,
+                ))?);
+            }
+        }
+
         let mut prepared_prompt_cache = None;
         if let Some((context, account_epoch_before)) = request
             .execution
@@ -3491,6 +3508,13 @@ impl ModelRuntime {
         &self,
         prepared: &mut PreparedLlmCall,
     ) -> Result<(), LlmError> {
+        self.seal_prepared_with_session(prepared, None).await
+    }
+    pub(crate) async fn seal_prepared_with_session(
+        &self,
+        prepared: &mut PreparedLlmCall,
+        session: Option<&mut lingxi_llm_client::ConversationSession>,
+    ) -> Result<(), LlmError> {
         let mut draft = prepared
             .wire_draft
             .take()
@@ -3500,10 +3524,11 @@ impl ModelRuntime {
         draft.set_native_anthropic_thinking_binding_controls_beta_requested(
             prepared.native_thinking_binding_controls_beta_requested,
         );
-        let call = crate::execution::seal(
+        let call = crate::execution::seal_with_session(
             draft,
             &prepared.provider_request,
             Some(&prepared.route.resolved_route.provider_id),
+            session,
         )
         .await
         .map_err(|error| {
@@ -3533,12 +3558,8 @@ impl ModelRuntime {
     pub(crate) async fn prepare_shared_stream(
         &self,
         mut prepared: PreparedLlmCall,
-        session: &mut ResponsesSession,
+        session: &mut lingxi_llm_client::ConversationSession,
     ) -> Result<PreparedLlmCall, LlmError> {
-        let websocket = matches!(
-            prepared.provider_request.stream_transport,
-            ProviderStreamTransport::ResponsesWebSocket
-        );
         let mut draft = prepared
             .wire_draft
             .take()
@@ -3562,12 +3583,22 @@ impl ModelRuntime {
         draft.set_native_anthropic_thinking_binding_controls_beta_requested(
             prepared.native_thinking_binding_controls_beta_requested,
         );
-        if websocket {
-            session
-                .prepare(&mut draft, false, true)
-                .await
-                .map_err(crate::upstream::error)?;
+        session
+            .prepare(&mut draft)
+            .await
+            .map_err(crate::upstream::error)?;
+        {
+            let snapshot = session.last_request();
+            let transport = session.responses_transport();
+            tracing::debug!(target: "llm_runtime::continuation", mode = ?snapshot.mode,
+                logical_bytes = snapshot.logical_bytes, wire_bytes = snapshot.wire_bytes,
+                new_items = snapshot.new_items,
+                websocket_enabled = draft.profile().supports_websockets,
+                websocket_prepared = transport.is_some(),
+                http_fallback = transport.is_some_and(|transport| transport.fallback_to_http()),
+                previous_response_present = transport.is_some_and(|transport| transport.last_response_id().is_some()));
         }
+
         let call = draft
             .seal()
             .await
@@ -3588,13 +3619,16 @@ impl ModelRuntime {
     pub(crate) async fn open_shared_stream(
         &self,
         mut prepared: PreparedLlmCall,
-        session: &mut ResponsesSession,
+        session: &mut lingxi_llm_client::ConversationSession,
         on_dispatch: &mut (dyn FnMut() -> Result<(), LlmError> + Send),
-    ) -> Result<(PreparedLlmCall, lingxi_llm_client::ReceivedCall), LlmError> {
-        let websocket = matches!(
-            prepared.provider_request.stream_transport,
-            ProviderStreamTransport::ResponsesWebSocket
-        );
+    ) -> Result<
+        (
+            PreparedLlmCall,
+            lingxi_llm_client::ReceivedCall,
+            Option<lingxi_llm_client::HttpResponse>,
+        ),
+        LlmError,
+    > {
         let call = prepared
             .wire_call
             .take()
@@ -3611,19 +3645,19 @@ impl ModelRuntime {
             })
         };
         prepared.before_computer_submit().await?;
-        let received = if websocket {
-            session.dispatch(call, mark).await
-        } else {
-            call.dispatch_once_with(mark).await
-        };
+        let received = session.dispatch(call, mark).await;
         if callback_rejected {
             if let Some(submission) = prepared.computer_submission.as_ref() {
                 submission.not_submitted().await?;
             }
         }
-        let received = received
+        let mut received = received
             .map_err(|error| callback_error.unwrap_or_else(|| crate::upstream::error(error)))?;
-        Ok((prepared, received))
+        let rejection = session
+            .preflight_rejection(&mut received)
+            .await
+            .map_err(crate::upstream::error)?;
+        Ok((prepared, received, rejection))
     }
 }
 
