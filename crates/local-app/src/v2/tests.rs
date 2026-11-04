@@ -1905,6 +1905,27 @@ fn public_export_without_allowlist_and_secret_allowlist_fail() {
     fs::write(Path::new(&req.source_path).join(".env"), "secret").unwrap();
     assert!(lib.publish(req).is_err());
 }
+
+#[test]
+fn publication_rejects_config_directory_in_explicit_allowlist() {
+    for directory in [
+        branding::DOT_DIR.to_owned(),
+        branding::DOT_DIR.to_ascii_uppercase(),
+    ] {
+        let (_dir, lib, req) = setup();
+        let source_root = Path::new(&req.source_path);
+        let private_file = format!("{directory}/private.json");
+        fs::create_dir_all(source_root.join(&directory)).unwrap();
+        fs::write(source_root.join(&private_file), "secret").unwrap();
+        let mut m = manifest();
+        m["package"]["files"] = json!(["index.html", private_file]);
+        source(source_root, &m);
+        let error = lib.publish(req).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("private/generated file cannot be packaged"));
+    }
+}
 #[cfg(unix)]
 #[test]
 fn source_symlink_and_traversal_rejected() {

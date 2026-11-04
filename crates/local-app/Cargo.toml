@@ -7,6 +7,7 @@ license.workspace = true
 description = "Schema-2 Local App source library, Agent and Chat contracts, and the local-app skill."
 
 [dependencies]
+branding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

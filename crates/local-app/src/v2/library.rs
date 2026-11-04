@@ -234,31 +234,32 @@ fn atomic_bytes(path: &Path, data: &[u8]) -> Result<(), AppError> {
 fn excluded(path: &str) -> bool {
     path.split('/').any(|part| {
         let p = part.to_ascii_lowercase();
-        matches!(
-            p.as_str(),
-            ".git"
-                | ".hg"
-                | ".svn"
-                | "node_modules"
-                | ".venv"
-                | "venv"
-                | "__pycache__"
-                | ".ssh"
-                | ".aws"
-                | ".codex"
-                | ".lingxi"
-                | ".npmrc"
-                | ".pypirc"
-                | "credentials"
-                | "credentials.json"
-                | "secrets"
-                | "secrets.json"
-                | "browser-data"
-                | "sessions"
-                | "transcripts"
-                | "runtime-data"
-                | ".ds_store"
-        ) || p == ".env"
+        p.eq_ignore_ascii_case(branding::DOT_DIR)
+            || matches!(
+                p.as_str(),
+                ".git"
+                    | ".hg"
+                    | ".svn"
+                    | "node_modules"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
+                    | ".ssh"
+                    | ".aws"
+                    | ".codex"
+                    | ".npmrc"
+                    | ".pypirc"
+                    | "credentials"
+                    | "credentials.json"
+                    | "secrets"
+                    | "secrets.json"
+                    | "browser-data"
+                    | "sessions"
+                    | "transcripts"
+                    | "runtime-data"
+                    | ".ds_store"
+            )
+            || p == ".env"
             || p.starts_with(".env.")
             || p.ends_with(".pem")
             || p.ends_with(".key")
@@ -269,6 +270,25 @@ fn excluded(path: &str) -> bool {
             || p.ends_with(".db-shm")
     })
 }
+
+#[cfg(test)]
+mod excluded_tests {
+    use super::excluded;
+
+    #[test]
+    fn current_config_directory_is_private_case_insensitively() {
+        for directory in [
+            branding::DOT_DIR.to_owned(),
+            branding::DOT_DIR.to_ascii_uppercase(),
+        ] {
+            assert!(excluded(&format!("{directory}/private.json")));
+            assert!(!excluded(&format!("{directory}-backup/index.html")));
+        }
+        assert!(excluded(".env.production"));
+        assert!(!excluded("assets/index.html"));
+    }
+}
+
 fn enumerate(root: &Path, dir: &Path, result: &mut Vec<String>) -> Result<(), AppError> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
