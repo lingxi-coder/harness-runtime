@@ -133,6 +133,7 @@ fn builder(
         root.to_path_buf(),
     )
     .with_session_id(session_id)
+    .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
     .with_jsonl_writer(writer)
     .with_persistent_app_chat()
 }
@@ -217,6 +218,7 @@ async fn fixture_seed_contents(
         main.clone(),
         budget,
     );
+    seed.initialize_conversation_mode().await.unwrap();
     for round in 0..6 {
         let user_len = if thinking_only_tail && round == 4 {
             5000
@@ -334,8 +336,29 @@ async fn fixture_seed_contents(
         assert_eq!(live.len(), replayed.state.history.len());
     }
     let source = seed.verify_persistent_chat_checkpoint(true).await.unwrap();
+    let inner_owner = seed_writer.diagnostic_chat_owner().unwrap();
+    let lease_dropped = seed_writer.diagnostic_chat_lease_drop().unwrap();
     drop(seed);
+    assert_eq!(
+        Arc::strong_count(&seed_writer),
+        1,
+        "seed kept an unexpected writer owner"
+    );
+    let released_writer = Arc::downgrade(&seed_writer);
     drop(seed_writer);
+    assert!(
+        released_writer.upgrade().is_none(),
+        "seed writer was not dropped"
+    );
+    assert_eq!(
+        inner_owner.strong_count(),
+        0,
+        "strict writer owner remains alive"
+    );
+    assert!(
+        lease_dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "lease field drop has not finished"
+    );
     let writer = Arc::new(
         JsonlWriter::open_persistent_chat(
             path.clone(),

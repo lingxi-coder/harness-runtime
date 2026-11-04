@@ -81,6 +81,14 @@ pub(super) struct PersistentChatWriter {
     // This is the SAME sidecar used by ordinary non-durable JsonlWriters.
     // Keep it until the writer is dropped, including after terminal sealing.
     lease: RootedFileLock,
+    diagnostic_after_lease: DiagnosticAfterLease,
+}
+
+struct DiagnosticAfterLease(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for DiagnosticAfterLease {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn unavailable(reason: &str) -> WriterError {
@@ -261,6 +269,9 @@ impl PersistentChatWriter {
             #[cfg(test)]
             context_fail_before_sync: false,
             lease,
+            diagnostic_after_lease: DiagnosticAfterLease(Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )),
         };
         if let Some(expected) = expected {
             if expected.byte_len == 0 {
@@ -630,6 +641,18 @@ impl JsonlWriter {
     /// Whether this writer owns the dedicated, physically pinned Chat path.
     pub fn is_persistent_chat(&self) -> bool {
         self.persistent_chat.is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn diagnostic_chat_owner(&self) -> Option<std::sync::Weak<dyn Send + Sync>> {
+        let owner: Arc<dyn Send + Sync> = self.persistent_chat.as_ref()?.clone();
+        Some(Arc::downgrade(&owner))
+    }
+
+    #[doc(hidden)]
+    pub fn diagnostic_chat_lease_drop(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        let owner = self.persistent_chat.as_ref()?.lock().ok()?;
+        Some(owner.diagnostic_after_lease.0.clone())
     }
 
     /// Append one private model-context receipt and synchronize its exact

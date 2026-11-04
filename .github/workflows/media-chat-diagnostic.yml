@@ -1,0 +1,62 @@
+# TEMPORARY DIAGNOSTIC ONLY. This workflow and its companion ownership
+# instrumentation must not be merged to main as a product fix.
+name: media-chat-diagnostic
+on:
+  push:
+    branches:
+      - codex/media-chat-diagnostic-20261104
+
+permissions:
+  contents: read
+
+jobs:
+  persistent-chat:
+    name: Persistent Chat diagnostic (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    env:
+      RUST_MIN_STACK: "16777216"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Record diagnostic source and toolchain
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/media-chat-diagnostic"
+          {
+            git rev-parse HEAD
+            rustc -vV
+            cargo --version
+            uname -a
+          } | tee "$RUNNER_TEMP/media-chat-diagnostic/environment.log"
+      - name: Test repeated default-parallel persistent Chat recovery
+        shell: bash
+        run: |
+          set -o pipefail
+          for round in 1 2 3 4 5; do
+            echo "Diagnostic round $round"
+            if cargo test --locked -p orchestrator --lib persistent_chat 2>&1 | tee "$RUNNER_TEMP/media-chat-diagnostic/round-$round.log"; then
+              :
+            else
+              result=$?
+              echo "Diagnostic round $round failed with status $result"
+              exit "$result"
+            fi
+          done
+      - name: Preserve diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-chat-diagnostic-${{ matrix.os }}
+          path: ${{ runner.temp }}/media-chat-diagnostic
+          if-no-files-found: ignore
+          retention-days: 7
