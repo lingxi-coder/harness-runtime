@@ -320,6 +320,7 @@ int git_error_save(git_error **out)
 	dup->message = git__strdup(error->message);
 
 	if (!dup->message) {
+		git__free(dup);
 		*out = &oom_error;
 		return -1;
 	}
