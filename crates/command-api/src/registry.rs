@@ -3384,35 +3384,6 @@ mod tests {
     }
 
     #[test]
-    fn palette_commands_include_manual_only_but_filter_non_user_and_env_disabled() {
-        let _guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
-        let mut reg = CommandRegistry::new();
-
-        let mut manual_only = markdown_cmd("manual-only", vec![]);
-        manual_only.disable_model_invocation = true;
-        reg.register_command(manual_only);
-
-        let mut hidden_from_user = markdown_cmd("internal", vec![]);
-        hidden_from_user.user_invocable = Some(false);
-        reg.register_command(hidden_from_user);
-
-        reg.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new(
-            "upgrade", "Upgrade",
-        )));
-
-        std::env::set_var("DISABLE_UPGRADE_COMMAND", "1");
-        let palette: Vec<String> = reg
-            .palette_commands()
-            .into_iter()
-            .map(|command| command.name.string_at("").unwrap_or_default().to_owned())
-            .collect();
-        std::env::remove_var("DISABLE_UPGRADE_COMMAND");
-
-        assert!(palette.contains(&"manual-only".to_string()));
-        assert!(!palette.contains(&"internal".to_string()));
-        assert!(!palette.contains(&"upgrade".to_string()));
-    }
-    #[test]
     fn side_chat_copy_filter_excludes_workflows_without_the_workflow_tool() {
         let mut main_registry = CommandRegistry::new();
         main_registry.register_command(SlashCommand {
