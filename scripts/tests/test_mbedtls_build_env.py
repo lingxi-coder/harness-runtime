@@ -40,8 +40,8 @@ class MbedtlsBuildEnvironmentTest(unittest.TestCase):
             upstream_config.write_text("#define FIXTURE_LAYOUT 1\n")
             (include / "fixture.h").write_text(
                 '#include "mbedtls/mbedtls_config.h"\n'
-                '#ifndef LINGXI_FIXTURE_OFFSET\n#define LINGXI_FIXTURE_OFFSET 0\n#endif\n'
-                'struct fixture_abi { char bytes[FIXTURE_LAYOUT + LINGXI_FIXTURE_OFFSET]; };\n'
+                '#ifndef FIXTURE_OFFSET\n#define FIXTURE_OFFSET 0\n#endif\n'
+                'struct fixture_abi { char bytes[FIXTURE_LAYOUT + FIXTURE_OFFSET]; };\n'
             )
             (library / "x509.c").write_text(
                 '#include "mbedtls/fixture.h"\n'
@@ -126,9 +126,11 @@ class MbedtlsBuildEnvironmentTest(unittest.TestCase):
             upstream_config.write_text("#define FIXTURE_LAYOUT 7\n")
             build(2, layout=7)
             wrapper_config = seam / "lingxi_config.h"
-            wrapper_config.write_text(wrapper_config.read_text().replace(
-                '#endif /* LINGXI_MBEDTLS_CONFIG_H */',
-                '#define LINGXI_FIXTURE_OFFSET 3\n#endif /* LINGXI_MBEDTLS_CONFIG_H */'))
+            before_guard_end, guard_end, trailing_comment = wrapper_config.read_text().rpartition("#endif")
+            self.assertTrue(guard_end, "configuration wrapper must close its include guard")
+            wrapper_config.write_text(
+                before_guard_end + "#define FIXTURE_OFFSET 3\n" + guard_end + trailing_comment
+            )
             build(2, layout=10)
 
             output_files = list(target_dir.glob("debug/build/mbedtls-sys-*/output"))
@@ -147,12 +149,12 @@ class MbedtlsBuildEnvironmentTest(unittest.TestCase):
                 # A real compiler and archiver wrapper show that both selected
                 # target-specific tools are executed after an incremental change.
                 wrapper = root / "tool-wrapper"
-                wrapper.write_text('#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$LINGXI_TEST_LOG"\n'
-                                   'exec "$LINGXI_TEST_TOOL" "$@"\n')
+                wrapper.write_text('#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$FIXTURE_TEST_LOG"\n'
+                                   'exec "$FIXTURE_TEST_TOOL" "$@"\n')
                 wrapper.chmod(0o755)
                 marker = root / "tool-log"
-                environment["LINGXI_TEST_LOG"] = str(marker)
-                environment["LINGXI_TEST_TOOL"] = shutil.which("cc")
+                environment["FIXTURE_TEST_LOG"] = str(marker)
+                environment["FIXTURE_TEST_TOOL"] = shutil.which("cc")
                 environment["CC_" + normalized] = str(wrapper)
                 build(2, layout=10)
                 self.assertTrue(any(" -c " in line for line in marker.read_text().splitlines()))
@@ -164,7 +166,7 @@ class MbedtlsBuildEnvironmentTest(unittest.TestCase):
                 marker.unlink()
                 del environment["CC_" + target]
                 del environment["CC_" + normalized]
-                environment["LINGXI_TEST_TOOL"] = shutil.which("ar")
+                environment["FIXTURE_TEST_TOOL"] = shutil.which("ar")
                 environment["AR_" + normalized] = str(wrapper)
                 build(2, layout=10)
                 self.assertTrue(marker.exists())
