@@ -14267,7 +14267,7 @@ async fn accepted_agent_skill_publication_preserves_scope_and_rejects_failed_or_
     let (out_tx, mut out_rx) = mpsc::channel(8);
     append_live_stream_rows(
         vec![message.clone()],
-        &[message.clone()],
+        std::slice::from_ref(&message),
         &mut [],
         Some(&writer),
         &mut history,
@@ -14290,7 +14290,7 @@ async fn accepted_agent_skill_publication_preserves_scope_and_rejects_failed_or_
     ctx.cancellation_token.cancel();
     append_live_stream_rows(
         vec![message.clone()],
-        &[message.clone()],
+        std::slice::from_ref(&message),
         &mut [],
         None,
         &mut history,
@@ -14310,7 +14310,7 @@ async fn accepted_agent_skill_publication_preserves_scope_and_rejects_failed_or_
     ctx.cancellation_token = lingxi_core::host::CancellationToken::new();
     append_live_stream_rows(
         vec![message.clone()],
-        &[message.clone()],
+        std::slice::from_ref(&message),
         &mut [],
         None,
         &mut history,
@@ -14386,7 +14386,7 @@ async fn precommitted_skill_remains_in_history_after_owner_cancellation() {
     let (out_tx, mut out_rx) = mpsc::channel(8);
     precommit_local_app_prefix(
         &ordered,
-        &[skill.clone()],
+        std::slice::from_ref(&skill),
         &mut rows,
         &writer,
         &origins,
@@ -14403,7 +14403,7 @@ async fn precommitted_skill_remains_in_history_after_owner_cancellation() {
     let mut written = 0;
     append_live_stream_rows(
         ordered,
-        &[skill.clone()],
+        std::slice::from_ref(&skill),
         &mut rows,
         Some(&writer),
         &mut history,

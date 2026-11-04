@@ -33,7 +33,7 @@ fn deferred_tool_origin_requires_the_exact_captured_assistant_row() {
             .to_string(),
         physical
     );
-    let missing = deferred_tool_replays_from_messages(&[attachment.clone()]);
+    let missing = deferred_tool_replays_from_messages(std::slice::from_ref(&attachment));
     assert_eq!(missing[0].assistant_message_id, None);
     let duplicated =
         deferred_tool_replays_from_messages(&[assistant.clone(), assistant, attachment]);

@@ -326,12 +326,12 @@ async fn fixture_seed_contents(
         .unwrap();
         let live = seed.snapshot_history().await;
         for (current, restored) in live.iter().zip(&replayed.state.history) {
-            if current != restored {
-                panic!(
-                    "tool fixture mismatch: live={:?}, restored={:?}",
-                    current, restored
-                );
-            }
+            assert!(
+                current == restored,
+                "tool fixture mismatch: live={:?}, restored={:?}",
+                current,
+                restored
+            );
         }
         assert_eq!(live.len(), replayed.state.history.len());
     }
