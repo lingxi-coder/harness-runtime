@@ -556,8 +556,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 fresh_tx(),
             )
             .await
-            .err()
-            .expect("provider failure");
+            .expect_err("provider failure");
         assert!(error.to_string().contains("fetch denied"));
         assert_eq!(provider.seen.lock().unwrap().len(), 1);
         assert!(http.received_requests().is_empty());
