@@ -10,6 +10,7 @@ struct Checkpoint {
     side_id: String,
     context: SideChatParentSnapshot,
     submission_ids: Vec<String>,
+    cancelled_turn_ids: Vec<u64>,
     creation_ids: Vec<String>,
     interrupted: bool,
     turn_id: Option<u64>,
@@ -81,6 +82,7 @@ impl SideChatManager {
         let interrupted = !turn_complete && state.running.is_some();
         let active_id = state.running.as_ref().and_then(|running| running.id);
         let submission_ids = state.submissions.keys().cloned().collect();
+        let cancelled_turn_ids = state.cancelled_turn_ids.iter().copied().collect();
         drop(state);
         let creation_ids = self
             .state
@@ -98,6 +100,7 @@ impl SideChatManager {
             side_id: id.to_owned(),
             context,
             submission_ids,
+            cancelled_turn_ids,
             creation_ids,
             interrupted,
             turn_id: turn_id.or(active_id),
@@ -183,6 +186,13 @@ impl SideChatManager {
             .factory
             .build(checkpoint.context, replay.clone(), permission)
             .await?;
+        let mut cancelled_turn_ids = checkpoint
+            .cancelled_turn_ids
+            .into_iter()
+            .collect::<HashSet<_>>();
+        if checkpoint.interrupted {
+            cancelled_turn_ids.extend(checkpoint.turn_id);
+        }
         let side = Arc::new(Side {
             session,
             replay,
@@ -194,6 +204,7 @@ impl SideChatManager {
                     .map(|id| (id, ()))
                     .collect(),
                 running: None,
+                cancelled_turn_ids,
             }),
         });
         {

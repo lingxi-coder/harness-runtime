@@ -654,6 +654,7 @@ impl SideChatManager {
                     notified.await;
                 }
             }
+            self.checkpoint(id, None, false).await?;
             self.owner
                 .emit(ClientEvent::SideChatSubmitted {
                     side_id: id.to_string(),
@@ -2645,6 +2646,51 @@ mod tests {
                 _ => None,
             })
             .expect("host receives a checkpoint")
+    }
+
+    #[tokio::test]
+    async fn recovery_retains_cancellation_before_prompt_admission() {
+        let owner = parent();
+        let sink = Arc::new(Sink::default());
+        let original =
+            SideChatManager::new_recoverable(owner.clone(), Arc::new(Factory), sink.clone());
+        let id = original
+            .create("cancel-create".into(), None, None, None)
+            .await
+            .unwrap();
+        original
+            .submit(
+                &id,
+                "cancel-request".into(),
+                ClientCommand::Cancel { turn_id: Some(42) },
+            )
+            .await
+            .unwrap();
+        let (checkpoint, events) = last_checkpoint(&sink, &id).await;
+        let restored = SideChatManager::new_recoverable(owner, Arc::new(Factory), sink);
+        restored.restore(&id, &checkpoint, events).await.unwrap();
+        let result = restored
+            .submit(
+                &id,
+                "late-prompt".into(),
+                ClientCommand::SendPrompt {
+                    text: "must not execute".into(),
+                    images: Vec::new(),
+                    turn_id: Some(42),
+                },
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), TURN_CANCELLED_BEFORE_ADMISSION);
+        restored
+            .submit(
+                &id,
+                "cancel-request".into(),
+                ClientCommand::Cancel { turn_id: Some(42) },
+            )
+            .await
+            .unwrap();
+        original.shutdown().await.unwrap();
+        restored.shutdown().await.unwrap();
     }
 
     #[tokio::test]
