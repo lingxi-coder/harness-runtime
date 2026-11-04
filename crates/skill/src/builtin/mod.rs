@@ -138,7 +138,11 @@ mod tests {
         assert!(skill
             .description
             .string_at("")
-            .is_some_and(|description| description.contains("LingXi (灵犀)")));
+            .is_some_and(|description| description.contains(&format!(
+                "{} ({})",
+                branding::PRODUCT_NAME,
+                branding::PRODUCT_NAME_ZH
+            ))));
         assert!(skill
             .content
             .string_at("")
@@ -150,12 +154,12 @@ mod tests {
         let mut r = SkillRegistry::new();
         register_desktop(&mut r);
         for query in [
-            "/lingxi-api media",
-            "Configure LingXi MCP",
-            "灵犀的 Bot 如何使用",
+            "/lingxi-api media".to_owned(),
+            "Configure LingXi MCP".to_owned(),
+            format!("{}的 Bot 如何使用", branding::PRODUCT_NAME_ZH),
         ] {
             assert!(r
-                .discover(query)
+                .discover(&query)
                 .iter()
                 .any(|skill| skill.name == "lingxi-api"));
         }

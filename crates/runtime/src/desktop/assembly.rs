@@ -3104,8 +3104,8 @@ pub async fn build_with_credential_stack(
         transport: cfg.session_composition() == super::DesktopSessionComposition::Transport,
         access_resolver: cfg.computer_access_tx.is_some(),
         native_control: desktop_computer_control.is_some(),
-        computer_policy: absolute_host_path("LINGXI_DESKTOP_COMPUTER_POLICY"),
-        browser_descriptor: absolute_host_path("LINGXI_DESKTOP_BROWSER_DESCRIPTOR"),
+        computer_policy: absolute_host_path(branding::DESKTOP_COMPUTER_POLICY_ENV),
+        browser_descriptor: absolute_host_path(branding::DESKTOP_BROWSER_DESCRIPTOR_ENV),
     };
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →

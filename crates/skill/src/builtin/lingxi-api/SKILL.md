@@ -1,77 +1,81 @@
 ---
 name: lingxi-api
-description: Explain, configure, troubleshoot or integrate LingXi (灵犀) product capabilities and host APIs. App authoring uses local-app; ordinary coding uses its own tools.
+description: Use when explaining, configuring, troubleshooting, or integrating LingXi (灵犀) CLI, sessions, settings, MCP, skills, hooks, subagents, models, or host APIs. App building uses local-app; ordinary coding uses its own tools.
 ---
 
 # LingXi API guide
 
 Help the user understand or use LingXi, in their language. This guide ships
-offline with the runtime. It describes product capabilities; the current host,
-session, tool schemas, and returned status determine what can run here.
+offline. It describes product capabilities. The current host, session, tool
+schemas, and returned status decide what can run here.
 
-## Read the relevant topic
+## Read the matching topic before answering
 
-In a bundled host, call `Skill` with `skill: "lingxi-api"` and `args: "<topic>"`
-to load one topic, for example `args: "bots"` or `args: "media"`. A user can
-also enter `/lingxi-api <topic> [question]`. For a file-based installation, read the
-linked reference relative to this file. Load another topic when the task crosses
-domains; do not load every reference for a general question.
+The first argument is one topic id. In a bundled host, call `Skill` with
+`skill: "lingxi-api"` and `args: "<topic>"`, for example `args: "bots"`. A user
+can enter `/lingxi-api <topic> [question]`. For a file-based installation, read
+the linked reference next to this file. Answer from that topic. Do not answer
+a product question from memory, and do not load every topic for a general
+question. Load a second topic only when the task crosses domains.
 
 | Topic | Read when the question concerns |
 | --- | --- |
-| [overview](references/overview.md) | Product surfaces, capability discovery, platform differences, offline use |
-| [teams](references/teams.md) | Teams identity, membership, connectors and Bot boundaries |
-| [accounts](references/accounts.md) | Host-global provider accounts, model permissions, execution routing |
-| [configuration](references/configuration.md) | Settings, MCP, permissions, hooks, plugins, skill customization |
-| [media](references/media.md) | Camera, microphone, audio, transcription, speech, live assistance |
-| [webrtc](references/webrtc.md) | Remote Control, device connections, media transport |
-| [local-app](references/local-app.md) | Desktop/Mobile Local Apps, publication, retained data, MCP, WebMCP and AG-UI |
-| [bots](references/bots.md) | Persistent Bots, Bot memory, routines, delegation, remote Bot chats |
-| [devices](references/devices.md) | Computer Use, Browser, Android automation, native device tools |
-| [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs, runtime availability |
-| [sessions](references/sessions.md) | History, resume, forks, Chat/Code, context and memory |
-| [automation](references/automation.md) | Scheduled work, wakeups, Workflow, background tasks |
-| [agents](references/agents.md) | Subagents, Fusion, collaboration, task ownership |
-| [models](references/models.md) | Provider profiles, model selection, credentials, model API boundaries |
-| [integrations](references/integrations.md) | Rust SDKs, native hosts, Bridge, App SDK, protocol ownership |
-| [troubleshooting](references/troubleshooting.md) | Version checks, logs, failed tools, unavailable features |
+| [overview](references/overview.md) | Product surfaces, installable builds, command names |
+| [teams](references/teams.md) | Teams identity, membership, connectors, Bot boundaries |
+| [accounts](references/accounts.md) | Host-global provider accounts and execution routing |
+| [configuration](references/configuration.md) | Settings, permission mode, MCP, hooks, plugins, skills, slash commands |
+| [media](references/media.md) | Camera, microphone, transcription, speech, live assistance |
+| [webrtc](references/webrtc.md) | Browser Remote Control. The CLI remote-control handler is not that page |
+| [local-app](references/local-app.md) | Local Apps, publication, app-owned MCP, WebMCP, and AG-UI |
+| [bots](references/bots.md) | Persistent Bots, Bot memory, routines, delegation |
+| [devices](references/devices.md) | Computer Use, browser, Android automation, native device tools |
+| [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs |
+| [sessions](references/sessions.md) | Resume, instruction files, config home, history, memory |
+| [automation](references/automation.md) | Schedules, wakeups, Workflow, background tasks |
+| [agents](references/agents.md) | Subagents, agent view, /fork, /subtask, Fusion |
+| [models](references/models.md) | Model choice, provider profiles, credentials |
+| [integrations](references/integrations.md) | Rust SDKs, native hosts, Bridge, protocol ownership |
+| [troubleshooting](references/troubleshooting.md) | Version, logs, failed tools, unavailable features |
+
+## Stale training prior
+
+A remembered Claude Code or other-product path is not LingXi behavior. The
+loaded topic wins. Do not send the user to another product's docs. Anthropic
+identifiers stay valid only on an actual Anthropic backend.
+
+| Prior | Read |
+| --- | --- |
+| `CLAUDE.md` or a `.claude` directory is the instruction home | sessions |
+| `claude mcp`, or a desktop import, is how you add a server | configuration |
+| `/agents` opens a manager | agents |
+| `/fork` always starts an in-session subagent | agents |
+| `remote-control` opens the browser remote page | webrtc |
+| `settings.local.json` changes the permission mode | configuration |
 
 ## Apply the guide to this session
 
-Distinguish an implemented product feature from a tool visible to this caller,
-permission to use it, resource readiness, and a successful operation. An absent
-tool can still have a native UI or SDK entry. Explain that entry without
-inventing a model-callable command. Unknown readiness remains unknown.
+Distinguish an implemented feature, a tool this caller can see, permission to
+use it, resource readiness, and a successful result. An absent tool can still
+have a native UI or SDK entry. Explain that entry. Do not invent a
+model-callable command. Unknown readiness stays unknown.
 
-For an action, use the existing domain skill if it is in the current catalog,
-then the live tool schema. `media`, `local-app`, `visualize`, `workflow-authoring`,
-`update-config`, and mobile device skills are useful only where registered.
-External builder plugins are optional; do not assume one is installed. This
-guide does not extend the caller's tools, permissions, workspace, or Bot grants.
+For an action, use the domain skill when it is registered, then the live tool
+schema. `media`, `local-app`, `visualize`, `workflow-authoring`,
+`update-config`, and mobile device skills apply only where registered. This
+guide does not add tools, permissions, workspace, or Bot grants.
 
-For Local Apps, explain platform support here; route build, modify or publish
-requests to the registered `local-app` skill. Product discussion does not start
-publication. Reuse loaded guidance without recursive skill calls, retaining
-the execution host, source Project, app ID/revision and known permissions.
-Do not require both skills for a self-contained task or repeat resolved questions.
-App-owned Desktop MCP servers use the App lifecycle; separate MCP services use
-the configuration topic. Do not route an App declaration into global settings.
+Route Local App build, modify, or publish work to the registered `local-app`
+skill. Explaining an app does not publish it. App-owned Desktop MCP uses the
+App lifecycle. Other MCP servers use configuration. Do not write an App
+declaration into global settings.
 
-Read-only product questions require no device activation, connection changes,
-configuration writes, or model requests. When the user requests an action,
-perform it through its existing authorized entry and verify its actual result.
-For configuration, distinguish saved settings, authentication, connection, and
-discovered tools. For media, distinguish returned content from metadata. For
-background work, distinguish acceptance, execution, and completion.
+Read-only questions do not activate devices, change connections, write
+settings, or call a model. For an action, use its authorized entry and check
+the result. Saved settings, authentication, connection, and discovered tools
+are separate facts. Media bytes and metadata are separate. Accepted, running,
+and finished background work are separate.
 
-Use the current host's version/status entry when an exact build matters. These
-references are not live availability snapshots or an up-to-date online catalog.
-For SDK symbols and parameters, inspect the selected revision's schema/source
-or compiler-generated documentation instead of guessing from another release.
-
-This is product documentation, not a model-provider API. LingXi configuration
-uses its resolved branded paths. Claude Code conventions are not a substitute
-for LingXi source/schema. Anthropic identifiers remain legitimate only for an
-actual Anthropic backend. Label evidence as bundled documentation, inspected
-source/schema, host status, test result or live operation. Do not present a
-second answer from the same bundled guide as independent verification.
+These references are not a live catalog. For SDK symbols, read the selected
+revision. Label evidence as bundled documentation, inspected source, host
+status, a test, or a live operation. Another answer from this same guide is
+not independent verification.

@@ -1658,9 +1658,8 @@ pub fn url_matches(url_str: &str, pattern: &str) -> bool {
             js_search(&r)
         );
         let d = escape_re(pattern).replace('*', "[^/]*");
-        return regex::Regex::new(&format!("^{d}$"))
-            .map(|re| re.is_match(&reconstructed))
-            .unwrap_or(false);
+        return cached_policy_regex(&format!("^{d}$"))
+            .is_some_and(|re| re.is_match(&reconstructed));
     };
 
     // Protocol must match (or be the sentinel wildcard scheme).
@@ -1680,10 +1679,7 @@ pub fn url_matches(url_str: &str, pattern: &str) -> bool {
         .to_lowercase()
         .replace(WILDCARD_SENTINEL, "*");
     let host_re = escape_re(&pat_host).replace('*', "[^/]*");
-    if !regex::Regex::new(&format!("^{host_re}$"))
-        .map(|re| re.is_match(&host))
-        .unwrap_or(false)
-    {
+    if !cached_policy_regex(&format!("^{host_re}$")).is_some_and(|re| re.is_match(&host)) {
         return false;
     }
     // A wildcard in the hostname with an empty pattern port ⇒ port wildcard too.
@@ -1701,9 +1697,32 @@ pub fn url_matches(url_str: &str, pattern: &str) -> bool {
     // Otherwise the path+search must match, `*` → `.*`.
     let pat_path = format!("{}{}", i.path(), js_search(&i)).replace(WILDCARD_SENTINEL, "*");
     let path_re = escape_re(&pat_path).replace('*', ".*");
-    regex::Regex::new(&format!("^{path_re}$"))
-        .map(|re| re.is_match(&format!("{}{}", r.path(), js_search(&r))))
-        .unwrap_or(false)
+    cached_policy_regex(&format!("^{path_re}$"))
+        .is_some_and(|re| re.is_match(&format!("{}{}", r.path(), js_search(&r))))
+}
+
+fn cached_policy_regex(pattern: &str) -> Option<regex::Regex> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    const MAX_CACHED: usize = 128;
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, regex::Regex>>> =
+        std::sync::OnceLock::new();
+    if pattern.len() > 2048 {
+        return regex::Regex::new(pattern).ok();
+    }
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cached) = guard.get(pattern) {
+        return Some(cached.clone());
+    }
+    let compiled = regex::Regex::new(pattern).ok()?;
+    if guard.len() >= MAX_CACHED {
+        guard.clear();
+    }
+    guard.insert(pattern.to_string(), compiled.clone());
+    Some(compiled)
 }
 
 // ────────────────────────────────────────────────────────────────────────────

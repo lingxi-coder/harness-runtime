@@ -240,7 +240,7 @@ typedef struct {        /* Diffie-Hellman context. */
  *
  *******************************************************************/
 
-#define libssh2_crypto_init()
+#define libssh2_crypto_init() 0
 #define libssh2_crypto_exit()
 
 #define libssh2_sha1_ctx        Qc3_Format_ALGD0100_T

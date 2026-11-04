@@ -2,6 +2,10 @@
 (() => {
   if (window.top !== window || window.localApp) return;
   const config = __LINGXI_APP_CONFIGURATION__;
+  const productName = config.productName;
+  if (typeof productName !== 'string' || !productName) {
+    throw new TypeError('The Local App host must provide a product name.');
+  }
   const agui = window.LingxiLocalAppAGUI;
   if (!agui || typeof agui.installBrowserAgent !== 'function') {
     throw new Error('The pinned AG-UI browser bundle must load before the Local App SDK.');
@@ -651,20 +655,20 @@
         const panel = document.createElement('section');
         panel.setAttribute('role', 'status');
         panel.setAttribute('aria-live', 'polite');
-        panel.setAttribute('aria-label', 'LingXi connection recovery');
+        panel.setAttribute('aria-label', `${productName} connection recovery`);
         panel.style.cssText = 'box-sizing:border-box;max-width:36rem;margin:auto;padding:14px;border:1px solid #777;border-radius:12px;background:#fff;color:#111;box-shadow:0 3px 16px #0004;font:16px/1.4 system-ui,sans-serif;';
         const message = document.createElement('p');
         message.style.cssText = 'margin:0 0 8px;';
         const open = document.createElement('button');
         open.type = 'button';
-        open.textContent = 'Open LingXi';
+        open.textContent = `Open ${productName}`;
         open.style.cssText = 'min-height:44px;padding:8px 12px;margin-right:8px;cursor:pointer;';
         open.addEventListener('click', event => {
           // Browser-generated clicks include keyboard and accessibility actions;
           // synthetic page events must never initiate the return navigation.
           if (!event.isTrusted) return;
           try { host.open(); }
-          catch { message.textContent = 'Could not open LingXi. Switch to LingXi and reopen this App.'; }
+          catch { message.textContent = `Could not open ${productName}. Switch to ${productName} and reopen this App.`; }
         });
         const dismiss = document.createElement('button');
         dismiss.type = 'button';
@@ -697,8 +701,8 @@
       const messageText = [...pendingChatRecovery].some(attempt => attempt.confirmRetry)
         ? 'A previous Chat creation may still complete. Confirm before sending the same request again.'
         : hostRecoveryUnavailable
-          ? 'LingXi is unavailable or paused. Open LingXi, then reopen this App. Earlier requests may still complete.'
-          : 'Chat creation is still waiting. It may already have been received. Open LingXi if the host is paused.';
+          ? `${productName} is unavailable or paused. Open ${productName}, then reopen this App. Earlier requests may still complete.`
+          : `Chat creation is still waiting. It may already have been received. Open ${productName} if the host is paused.`;
       if (hostRecoveryPanel.message.textContent !== messageText) hostRecoveryPanel.message.textContent = messageText;
       if (hostRecoveryPanel.retryRevision !== pendingChatRecoveryRevision) {
         hostRecoveryPanel.retries.replaceChildren();
@@ -862,8 +866,8 @@
     const transportError = (message, code, reason, cause) => annotateTransport(makeError(message, code, cause), reason);
     const isSubmission = method === 'agent.tasks.start' || method === 'agent.chats.send';
     const unavailableMessage = isSubmission
-      ? 'LingXi is unavailable or paused. The run is saved for an explicit retry.'
-      : 'LingXi is unavailable or paused; open LingXi to reconnect.';
+      ? `${productName} is unavailable or paused. The run is saved for an explicit retry.`
+      : `${productName} is unavailable or paused; open ${productName} to reconnect.`;
     let timer;
     const deadline = new Promise((_, reject) => {
       timer = setTimeout(() => {
@@ -901,7 +905,7 @@
         } catch { /* HTTP status is diagnostic only. */ }
         if (!response.ok) {
           controller.abort();
-          const error = transportError('The application run is unavailable. Return to LingXi to resume.', 'host_unavailable', 'http_error');
+          const error = transportError(`The application run is unavailable. Return to ${productName} to resume.`, 'host_unavailable', 'http_error');
           error.definitive = true;
           throw error;
         }
@@ -926,7 +930,7 @@
       })()];
       if (cancelWaiting) requests.push(cancelWaiting.then(() => {
         // Aborting the browser wait does not prove the host did not create it.
-        const error = makeError('The earlier request may still complete in LingXi.', 'host_unavailable');
+        const error = makeError(`The earlier request may still complete in ${productName}.`, 'host_unavailable');
         error.definitive = false;
         controller.abort();
         throw annotateTransport(error, 'wait_cancelled');
@@ -988,7 +992,7 @@
     const promise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         handoffWaiters.delete(runId);
-        reject(makeError('Return to this app after LingXi confirms the Agent handoff.', 'handoff_timeout'));
+        reject(makeError(`Return to this app after ${productName} confirms the Agent handoff.`, 'handoff_timeout'));
       }, 120000);
       waiter = {
         identity: {key: requestKey(runId), appId: config.appId, revision: config.revision,
@@ -1067,7 +1071,7 @@
       const pending = waitForHandoff(record, normalized.threadId, method);
       try { location.assign(wakeLink(normalized.runId)); }
       catch (cause) {
-        handoffWaiters.get(normalized.runId)?.reject(makeError('Could not open LingXi for the Agent handoff.', 'handoff_unavailable', cause));
+        handoffWaiters.get(normalized.runId)?.reject(makeError(`Could not open ${productName} for the Agent handoff.`, 'handoff_unavailable', cause));
       }
       return pending;
     }

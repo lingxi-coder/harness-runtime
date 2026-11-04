@@ -287,11 +287,11 @@ function runEvents(runInput, result = 'answer') {
   ];
 }
 
-function browser({child = false, existing = false, hostPlatform = 'android', appId = 'app-one', revision = 3, pendingRecords = [], initialWakeRunId, clock, indexedDb: sharedIndexedDb} = {}) {
+function browser({child = false, existing = false, hostPlatform = 'android', productName = 'Host Product', appId = 'app-one', revision = 3, pendingRecords = [], initialWakeRunId, clock, indexedDb: sharedIndexedDb} = {}) {
   const requests = [];
   const inputs = [];
   const listeners = [];
-  const config = {appId, name: 'Meal', revision, runId: 'epoch-one',
+  const config = {appId, name: 'Meal', productName, revision, runId: 'epoch-one',
     hostPlatform, services: ['api']};
   const window = eventTarget();
   window.top = child ? {} : window;
@@ -609,7 +609,7 @@ test('read-only facade calls time out waiting for headers after five seconds', a
     await assert.rejects(promise, error => {
       assert.equal(error.code, 'host_unavailable');
       assert.equal(error.definitive, undefined);
-      assert.equal(error.message, 'LingXi is unavailable or paused; open LingXi to reconnect.');
+      assert.equal(error.message, 'Host Product is unavailable or paused; open Host Product to reconnect.');
       return true;
     });
     assert.equal(request.options.signal.aborted, true, method);
@@ -1325,7 +1325,7 @@ test('read-only host failures share one dismissible recovery UI and a trusted op
     assert.ok(view, method);
     assert.match(view.message.textContent, /unavailable or paused/i);
     assert.equal(view.panel.attributes.role, 'status');
-    assert.equal(view.open.textContent, 'Open LingXi');
+    assert.equal(view.open.textContent, 'Open Host Product');
     await assert.rejects(call(), error => error.code === 'host_unavailable');
     assert.equal(recoveryPanel(b).container, view.container, 'repeated failure must not stack prompts');
     const before = b.location.href;
@@ -1336,6 +1336,20 @@ test('read-only host failures share one dismissible recovery UI and a trusted op
     assert.equal(b.location.href, 'lingxi://apps/app-two?review=agent');
     assert.equal(b.requests.length, count, 'opening LingXi must not submit or retry any request');
   }
+});
+
+test('recovery labels and errors use the host-provided product name', async () => {
+  const b = browser({productName: 'Atlas <Host>'});
+  b.setFetchHandler(() => { throw new Error('host unavailable'); });
+  await assert.rejects(b.api.agent.chats.list(), error => {
+    assert.equal(error.message, 'Atlas <Host> is unavailable or paused; open Atlas <Host> to reconnect.');
+    return error.code === 'host_unavailable';
+  });
+  const view = recoveryPanel(b);
+  assert.equal(view.panel.attributes['aria-label'], 'Atlas <Host> connection recovery');
+  assert.equal(view.open.textContent, 'Open Atlas <Host>');
+  assert.match(view.message.textContent, /Atlas <Host>/);
+  assert.throws(() => browser({productName: null}), /must provide a product name/);
 });
 
 test('dismissed recovery UI does not loop on repeated failures and can return after a healthy read', async () => {
@@ -1396,7 +1410,7 @@ test('subscription polling does not re-expand a minimized prompt and a later use
   assert.equal(recoveryPanel(b).message.hidden, true);
   await assert.rejects(chat.history(), error => error.code === 'host_unavailable');
   assert.equal(recoveryPanel(b).message.hidden, true);
-  assert.equal(recoveryPanel(b).open.textContent, 'Open LingXi');
+  assert.equal(recoveryPanel(b).open.textContent, 'Open Host Product');
   recoveryPanel(b).expand.dispatchEvent({type: 'click', isTrusted: true});
   assert.equal(recoveryPanel(b).message.hidden, false);
   unsubscribe();
@@ -1780,7 +1794,7 @@ test('iOS wake reconnects an accepted cross-tab run only when its full identity 
 
 test('iOS offline recovery offers native review only for waking records',
   {timeout: 5000}, async () => {
-  const config = {appId: 'app-one', revision: 3, hostPlatform: 'ios'};
+  const config = {appId: 'app-one', revision: 3, hostPlatform: 'ios', productName: 'Host Product'};
   const workerListeners = new Map();
   let recoveryHtml;
   const self = {
@@ -1837,6 +1851,7 @@ test('iOS offline recovery offers native review only for waking records',
     const links = row.children.filter(child => child && typeof child === 'object' && child.tag === 'a');
     if (state === 'waking') {
       assert.equal(links.length, 1);
+      assert.equal(links[0].textContent, ' Review this run in Host Product');
       const link = new URL(links[0].href);
       assert.equal(link.protocol, 'lingxi:');
       assert.equal(link.searchParams.get('review'), 'agent');

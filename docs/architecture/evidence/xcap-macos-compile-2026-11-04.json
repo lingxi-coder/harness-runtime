@@ -1,0 +1,62 @@
+{
+  "description": "Real native macOS Rust checks for the xcap package and its actual Harness consumer. These are cargo check results, not linked binaries or live screenshot/TCC tests.",
+  "source_commit": "5f668a7e59e659c3436daa82fecccc5b095175fd",
+  "host": "aarch64-apple-darwin",
+  "macos": "27.0.1 build 26A434",
+  "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+  "subsequent_main_merge": "daa2f802867adc559ab6038af800a36d86ec2933",
+  "relevant_source_diff_after_merge": "No changes to Cargo.toml, Cargo.lock, crates/platforms/macos-computer-control, or third_party/xcap-macos.",
+  "records": [
+    {
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "xcap"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104",
+      "environment": {
+        "CARGO_TARGET_DIR": "/private/tmp/xcap-macos-consumer-target-20261104",
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0"
+      },
+      "min_free_bytes": 10076160000,
+      "peak_target_bytes": 268416925,
+      "aborted": null,
+      "elapsed_seconds": 28.26,
+      "exit_code": 0,
+      "output_path": "/private/tmp/xcap-macos-check-original.log",
+      "output_sha256": "ef95f938646bac31359e57e48b80606ec80a8924814b7ef5c3336ba631d922f6",
+      "output": "   Compiling objc2 v0.6.4\n    Checking bitflags v2.13.2\n    Checking objc2-encode v4.1.0\n   Compiling libc v0.2.186\n    Checking block2 v0.6.2\n   Compiling proc-macro2 v1.0.106\n    Checking dispatch2 v0.3.1\n    Checking objc2-core-foundation v0.3.2\n    Checking objc2-foundation v0.3.2\n   Compiling crc32fast v1.5.0\n    Checking simd-adler32 v0.3.9\n   Compiling unicode-ident v1.0.24\n   Compiling autocfg v1.5.1\n   Compiling quote v1.0.45\n   Compiling num-traits v0.2.19\n    Checking cfg-if v1.0.4\n    Checking adler2 v2.0.1\n    Checking miniz_oxide v0.8.9\n    Checking objc2-metal v0.3.2\n    Checking zlib-rs v0.6.8\n    Checking objc2-core-graphics v0.3.2\n    Checking flate2 v1.1.9\n    Checking objc2-core-video v0.3.2\n    Checking objc2-core-image v0.3.2\n    Checking objc2-quartz-core v0.3.2\n   Compiling syn v2.0.117\n    Checking fdeflate v0.3.7\n    Checking objc2-core-audio-types v0.3.2\n   Compiling thiserror v2.0.18\n    Checking pxfm v0.1.29\n    Checking moxcms v0.8.1\n   Compiling thiserror-impl v2.0.18\n    Checking png v0.18.1\n    Checking objc2-core-data v0.3.2\n    Checking objc2-avf-audio v0.3.2\n    Checking objc2-cloud-kit v0.3.2\n    Checking objc2-core-text v0.3.2\n    Checking objc2-image-io v0.3.2\n    Checking objc2-core-audio v0.3.2\n    Checking objc2-media-toolbox v0.3.2\n    Checking bytemuck v1.25.0\n    Checking byteorder-lite v0.1.0\n    Checking objc2-av-foundation v0.3.2\n    Checking image v0.25.10\n    Checking objc2-core-media v0.3.2\n    Checking objc2-app-kit v0.3.2\n    Checking scopeguard v1.2.0\n    Checking log v0.4.29\n    Checking xcap v0.9.8 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/third_party/xcap-macos)\nwarning: use of deprecated function `objc2_core_graphics::CGWindowListCreateImage`: Please use ScreenCaptureKit instead.\n --> third_party/xcap-macos/src/macos/capture.rs:4:63\n  |\n4 |     CGDataProvider, CGImage, CGWindowID, CGWindowImageOption, CGWindowListCreateImage,\n  |                                                               ^^^^^^^^^^^^^^^^^^^^^^^\n  |\n  = note: `#[warn(deprecated)]` on by default\n\nwarning: use of deprecated function `objc2_core_graphics::CGWindowListCreateImage`: Please use ScreenCaptureKit instead.\n  --> third_party/xcap-macos/src/macos/capture.rs:15:20\n   |\n15 |     let cg_image = CGWindowListCreateImage(\n   |                    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: use of deprecated method `objc2_app_kit::NSWorkspace::activeApplication`: Use -[NSWorkspace frontmostApplication] instead.\n   --> third_party/xcap-macos/src/macos/impl_window.rs:361:47\n    |\n361 |         let active_app_dictionary = workspace.activeApplication();\n    |                                               ^^^^^^^^^^^^^^^^^\n\nwarning: `xcap` (lib) generated 3 warnings\n    Finished `dev` profile [unoptimized] target(s) in 27.85s\n"
+    },
+    {
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "platform-macos-computer-control"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104",
+      "environment": {
+        "CARGO_TARGET_DIR": "/private/tmp/xcap-macos-consumer-target-20261104",
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0"
+      },
+      "initial_target_bytes": 268416925,
+      "min_free_bytes": 9748480000,
+      "peak_target_bytes": 440429884,
+      "aborted": null,
+      "elapsed_seconds": 39.8,
+      "exit_code": 0,
+      "output_path": "/private/tmp/xcap-macos-consumer-check-original.log",
+      "output_sha256": "51a49ac58f1e012e0583c68852b281b41084c2991d503c364793ea74cfc9621a",
+      "output": "   Compiling syn v2.0.117\n   Compiling serde_core v1.0.228\n   Compiling serde v1.0.228\n   Compiling version_check v0.9.5\n    Checking memchr v2.8.0\n   Compiling serde_derive v1.0.228\n    Checking equivalent v1.0.2\n    Checking hashbrown v0.17.1\n    Checking indexmap v2.14.2\n   Compiling thiserror-impl v2.0.18\n    Checking thiserror v2.0.18\n    Checking errno v0.3.14\n    Checking pin-project-lite v0.2.17\n   Compiling zmij v1.0.21\n   Compiling serde_json v1.0.150\n    Checking futures-core v0.3.32\n    Checking futures-sink v0.3.32\n    Checking futures-channel v0.3.32\n   Compiling futures-macro v0.3.32\n   Compiling generic-array v0.14.7\n    Checking slab v0.4.12\n    Checking futures-task v0.3.32\n    Checking itoa v1.0.18\n    Checking futures-io v0.3.32\n   Compiling unicode-joining-type v1.0.0\n    Checking futures-util v0.3.32\n   Compiling async-trait v0.1.89\n    Checking getrandom v0.2.17\n   Compiling proc-macro2-diagnostics v0.10.1\n    Checking typenum v1.20.0\n   Compiling objc-sys v0.3.5\n    Checking smallvec v1.15.1\n    Checking once_cell v1.21.4\n    Checking tinyvec_macros v0.1.1\n    Checking tinyvec v1.11.0\n   Compiling num-traits v0.2.19\n    Checking uuid v1.10.0\n    Checking signal-hook-registry v1.4.8\n   Compiling tokio-macros v2.7.0\n    Checking mio v1.2.0\n   Compiling parking_lot_core v0.9.12\n   Compiling crossbeam-utils v0.8.21\n    Checking bytes v1.11.1\n   Compiling rustix v0.38.44\n   Compiling yansi v1.0.1\n    Checking tokio v1.53.3\n    Checking idna_mapping v1.1.0\n    Checking unicode-normalization v0.1.25\n    Checking serde_spanned v0.6.9\n    Checking toml_datetime v0.6.11\n   Compiling uncased v0.9.10\n   Compiling syn v3.0.3\n    Checking ryu-js v1.0.3\n    Checking core-foundation-sys v0.8.7\n    Checking toml_write v0.1.2\n    Checking winnow v0.7.15\n    Checking unicode-bidi v0.3.18\n    Checking idna_adapter v1.1.0\n   Compiling foreign-types-macros v0.2.4\n    Checking core-foundation v0.10.1\n    Checking toml_edit v0.22.27\n    Checking json-projection v0.12.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/json-projection)\n    Checking flate2 v1.1.9\n    Checking objc2 v0.5.2\n   Compiling pear_codegen v0.2.9\n    Checking lock_api v0.4.14\n    Checking crypto-common v0.1.7\n    Checking block-buffer v0.10.4\n    Checking tracing-core v0.1.36\n    Checking futures-executor v0.3.32\n    Checking aho-corasick v1.1.4\n   Compiling tracing-attributes v0.1.31\n   Compiling figment v0.10.19\n   Compiling serde_derive_internals v0.29.1\n    Checking inlinable_string v0.1.15\n    Checking bit-vec v0.8.0\n    Checking hashbrown v0.14.5\n    Checking utf8_iter v1.0.4\n   Compiling unicode-general-category v1.1.0\n    Checking regex-syntax v0.8.10\n    Checking foreign-types-shared v0.3.1\n    Checking percent-encoding v2.3.2\n   Compiling schemars v0.8.22\n    Checking form_urlencoded v1.2.2\n    Checking regex-automata v0.4.14\n    Checking foreign-types v0.5.0\n    Checking dashmap v6.2.1\n    Checking idna v1.1.0\n    Checking bit-set v0.8.0\n   Compiling schemars_derive v0.8.22\n    Checking pear v0.2.9\n    Checking moxcms v0.8.1\n    Checking tracing v0.1.44\n    Checking futures v0.3.32\n    Checking png v0.18.1\n    Checking digest v0.10.7\n    Checking objc2-foundation v0.2.2\n    Checking toml v0.8.23\n    Checking core-graphics-types v0.2.0\n    Checking tokio-util v0.7.18\n    Checking media-api v0.1.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/media-api)\n    Checking fs2 v0.4.3\n    Checking cpufeatures v0.2.17\n    Checking powerfmt v0.2.0\n    Checking dyn-clone v1.0.20\n    Checking deranged v0.5.8\n    Checking zeroize v1.8.2\n    Checking num-conv v0.2.2\n    Checking time-core v0.1.9\n    Checking fastrand v2.4.1\n    Checking time v0.3.55\n    Checking tempfile v3.13.0\n    Checking secrecy v0.10.3\n    Checking device-api v0.12.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/device-api)\n    Checking image v0.25.10\n    Checking sha2 v0.10.9\n    Checking rooted-fs v0.12.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/rooted-fs)\n    Checking jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/jsonrpc)\n    Checking core-graphics v0.24.0\n    Checking objc2-app-kit v0.2.2\n    Checking fancy-regex v0.18.0\n    Checking url v2.5.8\n    Checking mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/mcp-wire)\n    Checking mobile-linux-api v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=43382a20161e371a0a31526412164b3d35545ab5#43382a20)\n    Checking quick-xml v0.42.0\n    Checking unicode-segmentation v1.12.0\n    Checking unicode-width v0.1.14\n    Checking base64 v0.23.1\n    Checking branding v0.1.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/branding)\n    Checking core v0.12.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/core)\n    Checking plist v1.10.1\n    Checking enigo v0.3.0\n    Checking xcap v0.9.8 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/third_party/xcap-macos)\nwarning: use of deprecated function `objc2_core_graphics::CGWindowListCreateImage`: Please use ScreenCaptureKit instead.\n --> third_party/xcap-macos/src/macos/capture.rs:4:63\n  |\n4 |     CGDataProvider, CGImage, CGWindowID, CGWindowImageOption, CGWindowListCreateImage,\n  |                                                               ^^^^^^^^^^^^^^^^^^^^^^^\n  |\n  = note: `#[warn(deprecated)]` on by default\n\nwarning: use of deprecated function `objc2_core_graphics::CGWindowListCreateImage`: Please use ScreenCaptureKit instead.\n  --> third_party/xcap-macos/src/macos/capture.rs:15:20\n   |\n15 |     let cg_image = CGWindowListCreateImage(\n   |                    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: use of deprecated method `objc2_app_kit::NSWorkspace::activeApplication`: Use -[NSWorkspace frontmostApplication] instead.\n   --> third_party/xcap-macos/src/macos/impl_window.rs:361:47\n    |\n361 |         let active_app_dictionary = workspace.activeApplication();\n    |                                               ^^^^^^^^^^^^^^^^^\n\nwarning: `xcap` (lib) generated 3 warnings\n    Checking arboard v3.6.1\n    Checking platform-macos-computer-control v0.12.0 (/Users/luolingfeng/lingxi/worktrees/media-round5-xcap-upstream-20261104/crates/platforms/macos-computer-control)\n    Finished `dev` profile [unoptimized] target(s) in 39.70s\n"
+    }
+  ]
+}

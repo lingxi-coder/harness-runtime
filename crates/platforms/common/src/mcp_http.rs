@@ -127,7 +127,19 @@ async fn receive_notifications<H>(
                 }
             }
             let mut events = response.bytes_stream().eventsource();
-            while let Some(event) = events.next().await {
+            // A silent body never ends on its own, so the reconnect below
+            // would not run. Bound idle time; a later attach reconciles catalogs.
+            loop {
+                let next =
+                    match tokio::time::timeout(std::time::Duration::from_secs(90), events.next())
+                        .await
+                    {
+                        Ok(item) => item,
+                        Err(_) => break,
+                    };
+                let Some(event) = next else {
+                    break;
+                };
                 let Ok(event) = event else {
                     break;
                 };
@@ -433,7 +445,7 @@ where
                                 tracing::warn!(
                                     "mcp http: POST timed out awaiting response headers"
                                 );
-                                if let Some(error) = probe_transport_error(
+                                if let Some(error) = outbound_transport_error(
                                     &frame,
                                     "POST timed out awaiting response headers",
                                 ) {
@@ -448,7 +460,7 @@ where
                         Ok(r) => r,
                         Err(e) => {
                             tracing::warn!(error = %e, "mcp http: POST failed");
-                            if let Some(error) = probe_transport_error(&frame, &e.to_string()) {
+                            if let Some(error) = outbound_transport_error(&frame, &e.to_string()) {
                                 let _ = inbound_tx.send(error);
                             }
                             return;
@@ -781,6 +793,26 @@ fn probe_error(
 
 fn probe_transport_error(request: &JsonRpcMessage, message: &str) -> Option<JsonRpcMessage> {
     probe_error(request, message, true)
+}
+
+/// Fail the in-flight JSON-RPC id immediately. Discovery keeps its probe
+/// payload; every other request still gets an error instead of sitting out
+/// the caller's full RPC timer.
+fn outbound_transport_error(request: &JsonRpcMessage, message: &str) -> Option<JsonRpcMessage> {
+    if let Some(error) = probe_transport_error(request, message) {
+        return Some(error);
+    }
+    let request = serde_json::to_value(request).ok()?;
+    let id = request.get("id")?.clone();
+    if id.is_null() {
+        return None;
+    }
+    serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": -32001, "message": message }
+    }))
+    .ok()
 }
 
 fn probe_compatibility_error(request: &JsonRpcMessage, message: &str) -> Option<JsonRpcMessage> {

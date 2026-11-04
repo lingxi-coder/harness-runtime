@@ -240,6 +240,24 @@ fn build_reqwest_stream(client: &reqwest::Client, req: HttpRequest) -> reqwest::
     build_reqwest_inner(client, req, false)
 }
 
+/// `reqwest`'s request timeout covers the body, which would cut off SSE.
+/// Honor `HttpRequest::timeout` only until response headers arrive.
+async fn send_until_headers(
+    builder: reqwest::RequestBuilder,
+    header_timeout: Option<std::time::Duration>,
+    detailed: bool,
+) -> Result<reqwest::Response, HttpError> {
+    let pending = builder.send();
+    let result = match header_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, pending).await {
+            Ok(result) => result,
+            Err(_) => return Err(HttpError::Timeout(timeout)),
+        },
+        None => pending.await,
+    };
+    result.map_err(|error| map_reqwest_connection_error(error, detailed))
+}
+
 fn build_reqwest_inner(
     client: &reqwest::Client,
     req: HttpRequest,
@@ -321,10 +339,13 @@ impl HttpTransport for ReqwestHttp {
     }
 
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
-        let resp = build_reqwest_stream(&self.client, req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
+        let header_timeout = req.timeout;
+        let resp = send_until_headers(
+            build_reqwest_stream(&self.client, req),
+            header_timeout,
+            self.detailed_connection_errors,
+        )
+        .await?;
         let status = resp.status().as_u16();
         if status >= 400 {
             // Surface the status to the caller — claude-code returns this as
@@ -362,10 +383,13 @@ impl HttpTransport for ReqwestHttp {
     /// implementation in `traits`). Those callers produce empty headers as
     /// before — no behaviour change for default-impl transports.
     async fn stream_sse_with_meta(&self, req: HttpRequest) -> Result<SseStreamWithMeta, HttpError> {
-        let resp = build_reqwest_stream(&self.client, req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
+        let header_timeout = req.timeout;
+        let resp = send_until_headers(
+            build_reqwest_stream(&self.client, req),
+            header_timeout,
+            self.detailed_connection_errors,
+        )
+        .await?;
         let status = resp.status().as_u16();
         // Capture headers (lowercased) BEFORE consuming the body, whether the
         // response is a success or an error — this is the key improvement over
@@ -406,10 +430,13 @@ impl HttpTransport for ReqwestHttp {
     }
 
     async fn stream_raw_bytes(&self, req: HttpRequest) -> Result<RawByteStream, HttpError> {
-        let resp = build_reqwest_stream(&self.client, req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
+        let header_timeout = req.timeout;
+        let resp = send_until_headers(
+            build_reqwest_stream(&self.client, req),
+            header_timeout,
+            self.detailed_connection_errors,
+        )
+        .await?;
         let status = resp.status().as_u16();
         if status >= 400 {
             let body = resp.text().await.unwrap_or_default();
@@ -442,10 +469,13 @@ impl HttpTransport for ReqwestHttp {
         &self,
         req: HttpRequest,
     ) -> Result<RawByteStreamWithMeta, HttpError> {
-        let resp = build_reqwest_stream(&self.client, req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
+        let header_timeout = req.timeout;
+        let resp = send_until_headers(
+            build_reqwest_stream(&self.client, req),
+            header_timeout,
+            self.detailed_connection_errors,
+        )
+        .await?;
         let status = resp.status().as_u16();
         // Capture headers (lowercased) BEFORE consuming the body.
         let headers: Vec<(String, String)> = resp
@@ -499,10 +529,13 @@ impl HttpTransport for ReqwestHttp {
             Some(resolved) => self.client_for_resolved_request(resolved, true)?,
             _ => self.no_redirect_client.clone(),
         };
-        let resp = build_reqwest_stream(&client, req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
+        let header_timeout = req.timeout;
+        let resp = send_until_headers(
+            build_reqwest_stream(&client, req),
+            header_timeout,
+            self.detailed_connection_errors,
+        )
+        .await?;
         let status = resp.status().as_u16();
         let headers: Vec<(String, String)> = resp
             .headers()

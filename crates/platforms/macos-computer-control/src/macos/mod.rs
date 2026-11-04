@@ -1,8 +1,8 @@
 //! Real macOS `ComputerControl` implementation.
 //!
 //! Backed entirely by pure-Rust crates rather than a bundled Swift module:
-//! `enigo` (mouse/keyboard), `xcap` (screen capture — `ScreenCaptureKit`
-//! under the hood), `arboard` (clipboard, functionally the same `pbcopy`/
+//! `enigo` (mouse/keyboard), `xcap` (CoreGraphics screen capture),
+//! `arboard` (clipboard, functionally the same `pbcopy`/
 //! `pbpaste` round trip claude-code's own executor uses), and
 //! `objc2-app-kit` (`NSWorkspace`/`NSRunningApplication` for app
 //! enumeration, frontmost detection, and hide/unhide).
@@ -592,9 +592,7 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn zoom(&self, x: u32, y: u32, w: u32, h: u32) -> Result<Screenshot, ComputerError> {
-        // xcap 0.5's `Monitor` has no `capture_region` — crop the full-display
-        // capture instead (still a single native capture call, just cropped
-        // client-side rather than by the OS).
+        // Crop in capture pixels after one full-display native capture.
         let monitor = target_monitor(self.pinned_display())?;
         let full = monitor.capture_image().map_err(|e| monitor_error(&e))?;
         let (full_w, full_h) = (full.width(), full.height());
@@ -693,7 +691,9 @@ impl ComputerControl for MacosComputerControl {
             let geometry = monitor_geometry(m)?;
             out.push(DisplayInfo {
                 id: geometry.display_id,
-                name: m.name().unwrap_or_else(|_| "Unknown Display".into()),
+                name: m
+                    .friendly_name()
+                    .unwrap_or_else(|_| "Unknown Display".into()),
                 width: geometry.pixel_width,
                 height: geometry.pixel_height,
                 is_primary: m.is_primary().unwrap_or(false),

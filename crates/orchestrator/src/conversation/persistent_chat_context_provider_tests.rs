@@ -476,6 +476,7 @@ async fn real_chat_orchestrator_with_client(
         root.to_path_buf(),
     )
     .with_session_id(session_id)
+    .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
     .with_jsonl_writer(writer)
     .with_persistent_app_chat()
     .with_persistent_chat_context(PersistentChatContextConfig {

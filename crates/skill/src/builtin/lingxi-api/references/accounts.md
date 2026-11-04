@@ -18,6 +18,15 @@ Desktop owns credential capture and supplies request credentials to Bridge over
 the trusted host channel. Apps only receive their approved model/tool catalog.
 SDK capabilities do not prove native UI/device rollout or a real inference pass.
 
+On the CLI, an account is added with
+`lingxi provider accounts add PROVIDER --name NAME` and either
+`--api-key-stdin` or `--api-key-secret-ref`. The key is never an argument and
+is not printed back. OAuth uses `lingxi provider accounts login PROVIDER
+--name NAME`, with `--no-browser` to print the address and `--callback-stdin`
+for a remote shell. `list`, `logout`, and `remove` are the other account
+commands. This does not create a LingXi subscription, and the key is not a
+LingXi password.
+
 Source anchors: product apps/electron/src/main/provider-accounts.ts; Harness
 crates/runtime/src/provider_accounts.rs, crates/llm-runtime/src/accounts,
 crates/llm-runtime/src/service.rs and client.rs.

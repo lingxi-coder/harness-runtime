@@ -1,17 +1,25 @@
 /* SDK-owned per-App-origin offline page. Never caches application or Agent data. */
 (() => {
   const config = __LOCAL_APP_RECOVERY_CONFIGURATION__;
+  if (typeof config.productName !== 'string' || !config.productName) {
+    throw new TypeError('The Local App host must provide a product name.');
+  }
+  const htmlProductName = config.productName.replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[character]);
+  // This JSON is embedded in an HTML script element, not just a JS response.
+  const pageConfig = JSON.stringify(config).replaceAll('<', '\\u003c');
   const cacheName = `lingxi-local-app-recovery:${config.appId}`;
   const recoveryUrl = new URL('/__lingxi-offline-recovery', self.location.origin).href;
   const diagnosticPlaceholder = '<div id="recovery-diagnostic" data-reason="" data-ready-marker="unavailable" hidden></div>';
   const recoveryDocument = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'">
-<title>LingXi app paused</title><style>
+<title>${htmlProductName} app paused</title><style>
 body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding:0 1.25rem;color:#17202a;background:#f6f8fa}main{background:white;border:1px solid #d9e0e7;border-radius:16px;padding:1.4rem}h1{font-size:1.4rem}p{color:#425466}button,a.return{display:inline-block;padding:.7rem 1rem;border:0;border-radius:9px;background:#155eef;color:white;font:inherit;text-decoration:none}li{margin:.55rem 0;overflow-wrap:anywhere}code{font-size:.92em}
-</style></head><body><main><h1>LingXi is paused or unavailable</h1>
-<p>This saved page contains no prompt, files, or Agent result. Return to LingXi, then reopen this app in the external browser. Pending runs expire after 24 hours; accepted run receipts expire after 7 days. Expired records are deleted and are never sent again automatically.</p>
-<p><a class="return" id="return" href="#">Return to LingXi</a></p>
+</style></head><body><main><h1>${htmlProductName} is paused or unavailable</h1>
+<p>This saved page contains no prompt, files, or Agent result. Return to ${htmlProductName}, then reopen this app in the external browser. Pending runs expire after 24 hours; accepted run receipts expire after 7 days. Expired records are deleted and are never sent again automatically.</p>
+<p><a class="return" id="return" href="#">Return to ${htmlProductName}</a></p>
 <h2>Recovery diagnostics</h2><dl>
 <dt>Reason</dt><dd id="recovery-reason">Not available for this cached page.</dd>
 <dt>App ID</dt><dd id="recovery-app-id"></dd>
@@ -21,7 +29,7 @@ body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding
 <h2>Runs saved in this browser</h2><p id="status">Checking this app's saved run IDs…</p><ul id="runs"></ul>
 <div id="recovery-diagnostic" data-reason="" data-ready-marker="unavailable" hidden></div>
 <script>
-const config=__LOCAL_APP_RECOVERY_CONFIGURATION__;
+const config=${pageConfig};
 const returnUrl='lingxi://apps/'+encodeURIComponent(config.appId);
 document.querySelector('#return').href=returnUrl;
 document.querySelector('#recovery-app-id').textContent=String(config.appId);
@@ -67,7 +75,7 @@ else{
        &&new URLSearchParams({runId:record.runId}).get('runId')===record.runId){
      const query=new URLSearchParams({review:'agent',runId:record.runId,revision:String(config.revision)});
      const review=document.createElement('a');review.className='return';review.href=returnUrl+'?'+query.toString();
-     review.textContent=' Review this run in LingXi';row.append(' ',review);
+     review.textContent=' Review this run in '+config.productName;row.append(' ',review);
     }else{
      row.append(' — Reopen the app and check this run’s status before choosing an explicit same-ID retry.');
     }
@@ -75,7 +83,7 @@ else{
    }
    item.continue();
   };
-  tx.oncomplete=()=>{db.close();showMessage((count?String(count)+' run ID(s) are saved. Return to LingXi to reopen the app or review an eligible run.':'There are no saved run IDs.')+(expired?' '+String(expired)+' expired record(s) were deleted.':''));};
+  tx.oncomplete=()=>{db.close();showMessage((count?String(count)+' run ID(s) are saved. Return to '+config.productName+' to reopen the app or review an eligible run.':'There are no saved run IDs.')+(expired?' '+String(expired)+' expired record(s) were deleted.':''));};
   tx.onerror=()=>{db.close();showMessage('Saved run IDs are unavailable in this browser.');};
  };
 }

@@ -143,7 +143,7 @@ impl ComputerTool {
     ) -> Self {
         Self {
             os_permissions_revoked: Default::default(),
-            policy_path: std::env::var_os("LINGXI_DESKTOP_COMPUTER_POLICY")
+            policy_path: std::env::var_os(branding::DESKTOP_COMPUTER_POLICY_ENV)
                 .map(std::path::PathBuf::from),
             ctx,
             state: std::sync::Arc::new(Mutex::new(SessionState::default())),

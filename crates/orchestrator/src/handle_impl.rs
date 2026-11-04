@@ -4277,41 +4277,51 @@ impl OrchestratorHandle for ConversationOrchestrator {
                     .join(session::project_dir_name(&cwd))
             });
         let mode = self.conversation_profile().await.mode;
-        let Ok(entries) = std::fs::read_dir(&project_dir) else {
-            return Vec::new();
-        };
-        let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if uuid::Uuid::parse_str(stem).is_err()
-                || !entry.file_type().is_ok_and(|kind| kind.is_file())
-            {
-                continue;
-            }
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !session::JsonlWriter::fixed_session_mode_from_source(&source, stem)
-                .is_ok_and(|profile| profile == mode)
-            {
-                continue;
-            }
-            let mtime = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            found.push((mtime, stem.to_string()));
-        }
-        // Newest-first by modification time.
-        found.sort_by(|a, b| b.0.cmp(&a.0));
-        found.into_iter().map(|(_, id)| (id.clone(), id)).collect()
+        // Directory reads and transcript scans are blocking. Keep them off the
+        // runtime worker; the mode check still reads each file.
+        tokio::task::spawn_blocking(move || list_resumable_session_ids(project_dir, mode))
+            .await
+            .unwrap_or_default()
     }
+}
+
+fn list_resumable_session_ids(
+    project_dir: std::path::PathBuf,
+    mode: lingxi_core::host::session_context::ConversationMode,
+) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(&project_dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(stem).is_err()
+            || !entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !session::JsonlWriter::fixed_session_mode_from_source(&source, stem)
+            .is_ok_and(|profile| profile == mode)
+        {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        found.push((mtime, stem.to_string()));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().map(|(_, id)| (id.clone(), id)).collect()
 }
 
 fn estimate_bytes_as_tokens(bytes: usize) -> u64 {

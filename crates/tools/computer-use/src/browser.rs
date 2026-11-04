@@ -174,7 +174,7 @@ pub(crate) struct BrowserTool {
 
 impl BrowserTool {
     pub(crate) fn from_environment(resolver: Arc<dyn ComputerAccessResolver>) -> Option<Self> {
-        let descriptor = std::env::var_os("LINGXI_DESKTOP_BROWSER_DESCRIPTOR")?;
+        let descriptor = std::env::var_os(branding::DESKTOP_BROWSER_DESCRIPTOR_ENV)?;
         Some(Self {
             descriptor: descriptor.into(),
             resolver,

@@ -5,17 +5,32 @@ result. It is not a persistent Bot, an App Agent, a remote host or a durable
 schedule. Use the available Agent/collaboration schema and current catalog;
 custom agent types and tools can differ by host and session.
 
+Definitions are Markdown files in project `{{config_dir}}/agents/` or user
+`~/{{config_dir}}/agents/`, including nested directories. A deeper project file
+wins over a shallower one, and a project file wins over the user file.
+`/agents` tells the user to create or edit those files. It does not open a
+manager. `lingxi agents` opens the background-session view in a terminal.
+`lingxi agents --json` prints that listing. `--agent NAME` selects the
+agent for one launch. `--agents` takes JSON that overrides the files for that
+launch; safe mode ignores that JSON.
+
+Agent view is on unless settings set `disableAgentView` to true or
+`LINGXI_DISABLE_AGENT_VIEW` is `1`, `true`, `yes`, or `on`. Either one is
+enough. While it is on, `/fork` copies this conversation into a background
+session. `/subtask` needs a task, runs only after the first assistant turn,
+and is unavailable in a coordinator session. The command returns when the
+spawn is accepted; the subagent result comes back to this session later.
+While agent view is off, `/fork` is the in-session spawn and `/subtask` is not registered.
+
 Delegate a specific goal and required context. The child receives its permitted
 tools and workspace; do not assume it has all parent capabilities, credentials,
 OS permission or files. A skill describing a tool does not add that tool to a
 child. A live Media conversation belongs to its interactive main-session
 handoff, not an arbitrary child or scheduled turn.
 
-Fusion, where offered, is the `fusion` Agent type with multiple configured
-executors plus its recorder/analysis machinery. Check the actual catalog and
-configured model profiles; do not infer readiness from the type's presence.
-Its extra model work consumes additional usage. Treat panels' claims as results
-to evaluate, not independent proof that an external action occurred.
+Fusion, where offered, is the `fusion` Agent type. Check the catalog before
+calling it ready. Its extra model work costs more usage, and a panel result is
+not proof that an external action happened.
 
 Preserve agent, session, task and Bot identities and use the relevant service
 for continuation/cancellation. A turn being interrupted does not prove all

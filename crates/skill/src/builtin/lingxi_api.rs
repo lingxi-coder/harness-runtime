@@ -157,7 +157,9 @@ mod tests {
         for topic in TOPICS {
             assert!(text.contains(&branding::render_namespace_template(topic.content)));
         }
-        assert!(text.chars().count() < 50_000);
+        // The public handbook facts live in these same topics. Keep the
+        // isolated guide under one bounded prompt.
+        assert!(text.chars().count() < 56_000, "guide context grew past 56k");
     }
 
     #[test]
@@ -166,7 +168,7 @@ mod tests {
             let text = branding::render_namespace_template(topic.content);
             assert!(!text.contains("{{"), "unresolved namespace in {}", topic.id);
             assert!(
-                !topic.content.contains(".lingxi"),
+                !topic.content.contains(branding::DOT_DIR),
                 "hardcoded brand path in {}",
                 topic.id
             );
@@ -201,6 +203,92 @@ mod tests {
             assert!(!text.contains("## Bundled resource:"));
             assert!(text.ends_with(request));
         }
+    }
+
+    #[test]
+    fn guide_answers_shipped_behavior_that_claude_priors_get_wrong() {
+        let root = body();
+        let root_text = root.string_at("").unwrap();
+        assert!(
+            root_text.contains("Read the matching topic before answering"),
+            "entrypoint must route before answering from memory"
+        );
+        let context = guide_context(root.clone());
+        let text = context.string_at("").unwrap();
+        for fact in [
+            branding::DISABLE_AGENT_VIEW_ENV,
+            "runs only after the first assistant turn",
+            "`/subtask` is not registered",
+            "`lingxi agents --json` prints that listing",
+            "add-from-claude-desktop",
+            "--disable-slash-commands",
+            "then `settings.local.json`, then `--settings`, then managed policy",
+            "They cannot grant `auto` or `bypassPermissions`.",
+            "User settings, `--settings`, and managed policy can.",
+            "`--bare` and `--safe-mode` both disable settings hooks, plugins, skills, and custom agents.",
+            "`--bare` skips instruction auto-discovery unless `--add-dir` is set",
+            "still runs managed policy hooks",
+            "ends at the git root when that root is below the home directory, and at the home directory when there is no such root",
+        ] {
+            assert!(text.contains(fact), "guide missing {fact}");
+        }
+        let agents = render(root.clone(), &"agents".into());
+        let agents_text = agents.string_at("").unwrap();
+        assert!(
+            agents_text.contains("runs only after the first assistant turn"),
+            "agents topic missing the /subtask first-turn gate"
+        );
+        assert!(
+            agents_text.contains("`/subtask` is not registered"),
+            "agents topic missing the agent-view-off /subtask absence"
+        );
+        assert!(
+            agents_text.contains("`lingxi agents --json` prints that listing"),
+            "agents topic missing the non-interactive agents listing"
+        );
+        assert!(
+            !agents_text.contains("is not that command"),
+            "agents topic still describes /subtask as some other command"
+        );
+        let configuration = render(root, &"configuration".into());
+        let configuration_text = configuration.string_at("").unwrap();
+        assert!(
+            configuration_text
+                .contains("then `settings.local.json`, then `--settings`, then managed policy"),
+            "configuration topic missing the boot permission fold"
+        );
+        assert!(
+            configuration_text.contains("They cannot grant `auto` or `bypassPermissions`."),
+            "configuration topic missing the project and local grant limit"
+        );
+        assert!(
+            configuration_text.contains("User settings, `--settings`, and managed policy can."),
+            "configuration topic missing the trusted permission grantors"
+        );
+        assert!(
+            configuration_text.contains(
+                "`--bare` and `--safe-mode` both disable settings hooks, plugins, skills, and custom agents."
+            ),
+            "configuration topic missing the shared bare and safe-mode disables"
+        );
+        assert!(
+            configuration_text.contains("still runs managed policy hooks"),
+            "configuration topic missing the safe-mode policy-hook exception"
+        );
+        assert!(
+            configuration_text.contains(
+                "ends at the git root when that root is below the home directory, and at the home directory when there is no such root"
+            ),
+            "configuration topic missing the skill-walk bound"
+        );
+        assert!(
+            !configuration_text.contains("permission-mode reader does not load"),
+            "configuration topic still denies that settings.local.json can set the mode"
+        );
+        assert!(
+            !configuration_text.contains("Only the user tier can grant"),
+            "configuration topic still hides flag and managed grants"
+        );
     }
 
     #[test]

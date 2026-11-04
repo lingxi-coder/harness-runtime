@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,21 +97,30 @@ fn force_flush_runtime(runtime: &OtelRuntime) -> Result<(), String> {
     let timeout = duration_ms(runtime.config.timeouts.flush_timeout_ms);
     if let Some(metrics) = &runtime.metrics {
         let provider = metrics.provider.clone();
-        run_with_timeout("metrics.force_flush", timeout, move || {
-            provider.force_flush().map_err(|err| err.to_string())
-        })?;
+        run_with_timeout(
+            "metrics.force_flush",
+            timeout,
+            &runtime.http_clients,
+            move || provider.force_flush().map_err(|err| err.to_string()),
+        )?;
     }
     if let Some(logs) = &runtime.logs {
         let provider = logs.clone();
-        run_with_timeout("logs.force_flush", timeout, move || {
-            provider.force_flush().map_err(|err| err.to_string())
-        })?;
+        run_with_timeout(
+            "logs.force_flush",
+            timeout,
+            &runtime.http_clients,
+            move || provider.force_flush().map_err(|err| err.to_string()),
+        )?;
     }
     if let Some(traces) = &runtime.traces {
         let provider = traces.clone();
-        run_with_timeout("traces.force_flush", timeout, move || {
-            provider.force_flush().map_err(|err| err.to_string())
-        })?;
+        run_with_timeout(
+            "traces.force_flush",
+            timeout,
+            &runtime.http_clients,
+            move || provider.force_flush().map_err(|err| err.to_string()),
+        )?;
     }
     Ok(())
 }
@@ -177,6 +187,9 @@ struct OtelRuntime {
     traces: Option<SdkTracerProvider>,
     shutdown: AtomicBool,
     policy: Arc<ExportPolicy>,
+    /// Extra owners of OTLP HTTP clients. Flush drops these so a blocked send
+    /// can return when this runtime is the last owner.
+    http_clients: Mutex<Vec<reqwest::blocking::Client>>,
     #[cfg(test)]
     debug: Mutex<DebugMirrorState>,
 }
@@ -272,10 +285,12 @@ impl OtelRuntime {
         entrypoint: &'static str,
         policy: Arc<ExportPolicy>,
     ) -> Result<Self, String> {
+        let _clear_partial_http_clients = ClearBuiltHttpClients;
         let resource = build_resource(&config);
         let metrics = build_metrics_runtime(&config, resource.clone(), &policy)?;
         let logs = build_logger_provider(&config, resource.clone(), &policy)?;
         let traces = build_tracer_provider(&config, resource.clone(), &policy)?;
+        let http_clients = Mutex::new(take_built_http_clients());
 
         let runtime = OtelRuntime {
             config,
@@ -287,6 +302,7 @@ impl OtelRuntime {
             traces,
             shutdown: AtomicBool::new(false),
             policy,
+            http_clients,
             #[cfg(test)]
             debug: Mutex::new(DebugMirrorState::default()),
         };
@@ -340,40 +356,58 @@ impl OtelRuntime {
 
         if let Some(metrics) = &self.metrics {
             let provider = metrics.provider.clone();
-            let _ = run_with_timeout("metrics.force_flush", flush_timeout, move || {
-                provider.force_flush().map_err(|err| err.to_string())
-            });
+            let _ = run_with_timeout(
+                "metrics.force_flush",
+                flush_timeout,
+                &self.http_clients,
+                move || provider.force_flush().map_err(|err| err.to_string()),
+            );
         }
         if let Some(logs) = &self.logs {
             let provider = logs.clone();
-            let _ = run_with_timeout("logs.force_flush", flush_timeout, move || {
-                provider.force_flush().map_err(|err| err.to_string())
-            });
+            let _ = run_with_timeout(
+                "logs.force_flush",
+                flush_timeout,
+                &self.http_clients,
+                move || provider.force_flush().map_err(|err| err.to_string()),
+            );
         }
         if let Some(traces) = &self.traces {
             let provider = traces.clone();
-            let _ = run_with_timeout("traces.force_flush", flush_timeout, move || {
-                provider.force_flush().map_err(|err| err.to_string())
-            });
+            let _ = run_with_timeout(
+                "traces.force_flush",
+                flush_timeout,
+                &self.http_clients,
+                move || provider.force_flush().map_err(|err| err.to_string()),
+            );
         }
 
         if let Some(metrics) = &self.metrics {
             let provider = metrics.provider.clone();
-            let _ = run_with_timeout("metrics.shutdown", shutdown_timeout, move || {
-                provider.shutdown().map_err(|err| err.to_string())
-            });
+            let _ = run_with_timeout(
+                "metrics.shutdown",
+                shutdown_timeout,
+                &self.http_clients,
+                move || provider.shutdown().map_err(|err| err.to_string()),
+            );
         }
         if let Some(logs) = &self.logs {
             let provider = logs.clone();
-            let _ = run_with_timeout("logs.shutdown", shutdown_timeout, move || {
-                provider.shutdown().map_err(|err| err.to_string())
-            });
+            let _ = run_with_timeout(
+                "logs.shutdown",
+                shutdown_timeout,
+                &self.http_clients,
+                move || provider.shutdown().map_err(|err| err.to_string()),
+            );
         }
         if let Some(traces) = &self.traces {
             let provider = traces.clone();
-            let _ = run_with_timeout("traces.shutdown", shutdown_timeout, move || {
-                provider.shutdown().map_err(|err| err.to_string())
-            });
+            let _ = run_with_timeout(
+                "traces.shutdown",
+                shutdown_timeout,
+                &self.http_clients,
+                move || provider.shutdown().map_err(|err| err.to_string()),
+            );
         }
     }
 
@@ -2123,26 +2157,53 @@ where
     Ok(builder)
 }
 
+thread_local! {
+    static BUILT_HTTP_CLIENTS: RefCell<Vec<reqwest::blocking::Client>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn remember_built_http_client(client: &reqwest::blocking::Client) {
+    BUILT_HTTP_CLIENTS.with(|slot| slot.borrow_mut().push(client.clone()));
+}
+
+fn take_built_http_clients() -> Vec<reqwest::blocking::Client> {
+    BUILT_HTTP_CLIENTS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+/// Drops clients left on this thread when exporter setup fails before
+/// [`OtelRuntime`] takes ownership.
+struct ClearBuiltHttpClients;
+
+impl Drop for ClearBuiltHttpClients {
+    fn drop(&mut self) {
+        drop(take_built_http_clients());
+    }
+}
+
 fn build_http_client(config: &OtlpExporterConfig) -> Result<reqwest::blocking::Client, String> {
-    if tokio::runtime::Handle::try_current().is_ok() {
+    let client = if tokio::runtime::Handle::try_current().is_ok() {
         let config = config.clone();
-        return thread::Builder::new()
+        thread::Builder::new()
             .name("lingxi-otel-http-init".into())
             .spawn(move || build_http_client_blocking(&config))
             .map_err(|_| "failed to spawn OTLP HTTP initialization worker".to_string())?
             .join()
-            .map_err(|_| "OTLP HTTP initialization worker failed".to_string())?;
-    }
-    build_http_client_blocking(config)
+            .map_err(|_| "OTLP HTTP initialization worker failed".to_string())??
+    } else {
+        build_http_client_blocking(config)?
+    };
+    // Remember on the caller thread. The init worker's locals die with it.
+    remember_built_http_client(&client);
+    Ok(client)
 }
 
 fn build_http_client_blocking(
     config: &OtlpExporterConfig,
 ) -> Result<reqwest::blocking::Client, String> {
-    let mut builder = reqwest::blocking::Client::builder();
-    if let Some(timeout_ms) = config.timeout_ms {
-        builder = builder.timeout(duration_ms(timeout_ms));
-    }
+    let timeout = otlp_timeout(config);
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout);
     if config.insecure {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -2462,6 +2523,14 @@ fn duration_ms(ms: i64) -> Duration {
     Duration::from_millis(ms.max(0) as u64)
 }
 
+/// `OTEL_EXPORTER_OTLP_TIMEOUT` when set, otherwise the OTLP spec default.
+fn otlp_timeout(config: &OtlpExporterConfig) -> Duration {
+    config
+        .timeout_ms
+        .map(duration_ms)
+        .unwrap_or(Duration::from_secs(10))
+}
+
 fn duration_ms_opt(ms: Option<i64>) -> Duration {
     duration_ms(ms.unwrap_or(0))
 }
@@ -2469,6 +2538,7 @@ fn duration_ms_opt(ms: Option<i64>) -> Duration {
 fn run_with_timeout(
     label: &'static str,
     timeout: Duration,
+    http_clients: &Mutex<Vec<reqwest::blocking::Client>>,
     f: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
     let (tx, rx) = mpsc::sync_channel(1);
@@ -2477,12 +2547,30 @@ fn run_with_timeout(
     });
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "{label} timed out after {} ms",
-            timeout.as_millis()
-        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Last-client drop joins the reqwest runtime and is what lets a
+            // blocked send return. Do that off the flush caller.
+            release_http_clients(http_clients);
+            Err(format!(
+                "{label} timed out after {} ms",
+                timeout.as_millis()
+            ))
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!("{label} worker disconnected")),
     }
+}
+
+fn release_http_clients(http_clients: &Mutex<Vec<reqwest::blocking::Client>>) {
+    let clients = {
+        let mut guard = http_clients.lock().unwrap_or_else(|err| err.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    if clients.is_empty() {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("lingxi-otel-http-drop".into())
+        .spawn(move || drop(clients));
 }
 
 fn emit_diag(error: bool, message: &str, stderr_gate: bool) {

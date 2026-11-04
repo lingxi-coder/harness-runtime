@@ -45,7 +45,7 @@ fn markdown_cache_key(text: &str, theme: &MarkdownTheme, width: usize) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     width.hash(&mut hasher);
-    format!("{theme:?}").hash(&mut hasher);
+    theme.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -118,7 +118,7 @@ fn map_alignment(a: Alignment) -> ColumnAlign {
 
 /// Theme colors the markdown renderer needs. Kept minimal and decoupled
 /// from iocraft so the renderer is a pure value function.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash)]
 pub struct MarkdownTheme {
     /// Inline-code (`codespan`) foreground — claude-code uses the
     /// `permission` theme color here.

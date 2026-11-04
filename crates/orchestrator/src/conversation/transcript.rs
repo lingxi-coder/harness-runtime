@@ -4155,7 +4155,9 @@ impl ConversationOrchestrator {
         if state.session_id != expected_session {
             return;
         }
-        ranges.retain(|id, _| state.history.iter().any(|message| message.id() == *id));
+        let history_ids: std::collections::HashSet<_> =
+            state.history.iter().map(|message| message.id()).collect();
+        ranges.retain(|id, _| history_ids.contains(id));
         if !ranges.iter().any(|(id, from)| {
             state
                 .thinking_stripped_messages

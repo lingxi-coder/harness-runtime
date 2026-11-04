@@ -4829,13 +4829,7 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
                 .and_then(|s| s.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("md"))
             {
-                let Ok(metadata) = std::fs::symlink_metadata(&p) else {
-                    continue;
-                };
-                let Ok(canonical) = std::fs::canonicalize(&p) else {
-                    continue;
-                };
-                if metadata.file_type().is_symlink() || !canonical.starts_with(&canonical_root) {
+                if skipped_symlink_or_escape(&p, &canonical_root).await {
                     continue;
                 }
                 out.push(ComponentPath {
@@ -4847,6 +4841,18 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// `true` when `path` must be skipped: lstat/canonicalize failed, the path is a
+/// symlink (do not follow), or the canonical path escapes `canonical_root`.
+async fn skipped_symlink_or_escape(path: &Path, canonical_root: &Path) -> bool {
+    let Ok(metadata) = tokio::fs::symlink_metadata(path).await else {
+        return true;
+    };
+    let Ok(canonical) = tokio::fs::canonicalize(path).await else {
+        return true;
+    };
+    metadata.file_type().is_symlink() || !canonical.starts_with(canonical_root)
 }
 
 /// Collect every file directly under `dir` whose extension matches `ext`
@@ -4873,13 +4879,7 @@ async fn glob_ext_flat(dir: &Path, ext: &str) -> Vec<ComponentPath> {
             .and_then(|s| s.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case(ext))
         {
-            let Ok(metadata) = std::fs::symlink_metadata(&p) else {
-                continue;
-            };
-            let Ok(canonical) = std::fs::canonicalize(&p) else {
-                continue;
-            };
-            if metadata.file_type().is_symlink() || !canonical.starts_with(&canonical_root) {
+            if skipped_symlink_or_escape(&p, &canonical_root).await {
                 continue;
             }
             out.push(ComponentPath {

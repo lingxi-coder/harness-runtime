@@ -3529,7 +3529,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let mut session = self.session.lock().await;
             // Desktop shares one service with workers and side queries. A
             // worker-only rejection must not write a marker on the main chain.
-            messages.retain(|id, _| session.history.iter().any(|message| message.id() == *id));
+            let history_ids: std::collections::HashSet<_> =
+                session.history.iter().map(|message| message.id()).collect();
+            messages.retain(|id, _| history_ids.contains(id));
             let changed = messages.iter().any(|(id, from)| {
                 session
                     .thinking_stripped_messages

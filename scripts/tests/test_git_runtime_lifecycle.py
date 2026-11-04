@@ -126,7 +126,10 @@ class RuntimeLifecycle(unittest.TestCase):
                                         capture_output=True, text=True)
                 allocations = int(result.stdout.strip().split("=")[1])
                 self.assertGreater(allocations, 0)
-                for case in ("register", *(str(i) for i in range(1, allocations + 1))):
+                cases = ["register", *(str(i) for i in range(1, allocations + 1))]
+                if mode == "passwd":
+                    cases.append("no-entry")
+                for case in cases:
                     with self.subTest(mode=mode, case=case):
                         subprocess.run([str(binary), mode, case], check=True, timeout=30)
 

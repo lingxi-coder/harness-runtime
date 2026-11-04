@@ -17,9 +17,15 @@ opening local hardware when the request names a remote device. A connected
 phone does not automatically grant camera, microphone, screen or file access.
 
 The current CLI `remote-control` handler can report `NOT_IMPLEMENTED`; do not
-recommend it as an established remote hosting service. Desktop/native settings
-are the product route when available. Connection loss, revocation and host
-shutdown must be reported as availability changes, not successful continuation.
+recommend it as an established remote hosting service. The product route is
+Desktop: sign in, enable Remote control in desktop settings, then open the
+remote page in a browser with the same account. The first connection compares
+a pairing code and is allowed on the computer. The browser connects to that
+running desktop app. The computer must be on, online, and have remote control
+enabled. This is not a cloud virtual machine. Private browsing may drop the
+pairing. Forgetting the computer in the browser does not remove it from the
+desktop app. Connection loss, revocation and host shutdown must be reported as
+availability changes, not successful continuation.
 
 Bot-capable viewers can list enabled Desktop Bots and open their chats through
 the approved connection. They execute on that computer, not on the phone or in

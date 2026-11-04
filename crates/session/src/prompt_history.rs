@@ -305,22 +305,22 @@ impl PromptHistoryStore {
     pub fn recall_displays(&self) -> Vec<String> {
         let mut session_first: Vec<String> = Vec::new();
         let mut rest: Vec<String> = Vec::new();
-        for entry in self.read_merged() {
+        // Same cutoff as walking the merged list: the newest 100 rows for
+        // this project, then current-session rows in that window move first.
+        self.visit_merged_newest(|entry| {
             let Some(project) = &entry.project else {
-                continue; // `typeof o.project !== "string"` guard
+                return true;
             };
             if project != &self.project {
-                continue;
+                return true;
             }
             if entry.session_id.is_some() && entry.session_id == self.session_id {
-                session_first.push(entry.display);
+                session_first.push(entry.display.clone());
             } else {
-                rest.push(entry.display);
+                rest.push(entry.display.clone());
             }
-            if session_first.len() + rest.len() >= MAX_RECALL_ENTRIES {
-                break;
-            }
-        }
+            session_first.len() + rest.len() < MAX_RECALL_ENTRIES
+        });
         session_first.extend(rest);
         session_first.truncate(MAX_RECALL_ENTRIES);
         session_first
@@ -330,12 +330,112 @@ impl PromptHistoryStore {
     /// `"{y} prompt(s) typed in this project"` source, `$Fd` with no filter).
     #[must_use]
     pub fn project_prompt_count(&self) -> usize {
-        self.read_merged()
-            .iter()
-            .filter(|entry| entry.project.as_deref() == Some(self.project.as_str()))
-            .take(MAX_RECALL_ENTRIES)
-            .count()
+        let mut count = 0;
+        self.visit_merged_newest(|entry| {
+            if entry.project.as_deref() == Some(self.project.as_str()) {
+                count += 1;
+                return count < MAX_RECALL_ENTRIES;
+            }
+            true
+        });
+        count
     }
+
+    /// Queue newest-first, then on-disk rows newest-first, with the same
+    /// queue-key suppression as [`Self::read_merged`]. `visit` returns false
+    /// to stop. A missing history file yields the queue only.
+    fn visit_merged_newest(&self, mut visit: impl FnMut(&PromptHistoryEntry) -> bool) {
+        let mut queued: HashSet<String> = HashSet::new();
+        {
+            let pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for entry in pending.queue.iter().rev() {
+                queued.insert(entry.dedupe_key());
+                if !visit(entry) {
+                    return;
+                }
+            }
+        }
+        let _ = visit_jsonl_lines_newest_first(&self.path, |line| {
+            if line.trim().is_empty() {
+                return true;
+            }
+            match serde_json::from_str::<PromptHistoryEntry>(line) {
+                Ok(entry) => {
+                    if queued.contains(&entry.dedupe_key()) {
+                        return true;
+                    }
+                    visit(&entry)
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to parse history line: {err}");
+                    true
+                }
+            }
+        });
+    }
+}
+
+/// Yield JSONL lines newest-first without reading a large history file into
+/// one string. Windows match the transcript tail size. A line split by a
+/// window is joined with the next older window before it is yielded.
+fn visit_jsonl_lines_newest_first(
+    path: &Path,
+    mut visit: impl FnMut(&str) -> bool,
+) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const WINDOW: u64 = 65_536;
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    if len <= WINDOW {
+        let mut source = String::new();
+        file.read_to_string(&mut source)?;
+        for line in source.lines().rev() {
+            if !visit(line) {
+                return Ok(());
+            }
+        }
+        return Ok(());
+    }
+    let mut end = len;
+    let mut carry: Vec<u8> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(WINDOW);
+        let read_len = usize::try_from(end - start)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        file.seek(SeekFrom::Start(start))?;
+        let mut buf = vec![0u8; read_len];
+        file.read_exact(&mut buf)?;
+        let head = if start > 0 {
+            match buf.iter().position(|byte| *byte == b'\n') {
+                Some(index) => {
+                    let head = buf[..index].to_vec();
+                    buf.drain(..=index);
+                    head
+                }
+                None => std::mem::take(&mut buf),
+            }
+        } else {
+            Vec::new()
+        };
+        buf.extend_from_slice(&carry);
+        let text = String::from_utf8(buf)
+            .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned());
+        for line in text.lines().rev() {
+            if !visit(line) {
+                return Ok(());
+            }
+        }
+        carry = head;
+        end = start;
+    }
+    Ok(())
 }
 
 impl Drop for PromptHistoryStore {
