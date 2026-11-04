@@ -39,5 +39,13 @@
       ]
     }
   ],
-  "note": "This is a reduced extract of the all-target Product graph. Target conditions are on edges; their intersection is empty."
+  "note": "This is a reduced extract of the all-target Product graph. Target conditions are on edges; their intersection is empty.",
+  "current_product_repeat": {
+    "product_commit": "5ce972b8c1a547f54808114681327cb731155fcf",
+    "cwd": "/Users/luolingfeng/lingxi/worktrees/media-round5-crypto-audit-20261104",
+    "command": "cargo metadata --format-version 1 --all-features --locked --frozen",
+    "raw_metadata_path": "/private/tmp/round5-crypto-metadata-5ce972.json",
+    "raw_sha256": "6a77b416f67387d7fb385648e754237bb13fdc2e0f9ff84aca4445515102e811",
+    "result": "1052 packages; byte-identical to the 17d987 metadata output"
+  }
 }
