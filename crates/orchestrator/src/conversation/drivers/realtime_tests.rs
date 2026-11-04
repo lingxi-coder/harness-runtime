@@ -75,7 +75,7 @@ async fn media_handoff_commit_matches_successful_json_tool_result_text() {
         provider_id: None,
     };
     let assistant_provenance = ConversationMessage::Assistant {
-        id: assistant_message_id.clone(),
+        id: assistant_message_id,
         content: vec![tool_use.clone()],
         stop_reason: Some("tool_use".into()),
         per_turn_effort: None,
@@ -155,7 +155,7 @@ async fn media_handoff_commit_matches_successful_json_tool_result_text() {
     );
 
     let mismatched_source = ConversationMessage::Assistant {
-        id: assistant_message_id.clone(),
+        id: assistant_message_id,
         content: vec![ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "media_session_start".into(),
