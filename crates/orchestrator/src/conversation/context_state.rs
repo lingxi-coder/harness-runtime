@@ -397,6 +397,7 @@ impl ConversationOrchestrator {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn restore_conversation_profile(
         &self,
         mode: ConversationMode,

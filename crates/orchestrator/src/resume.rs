@@ -972,19 +972,16 @@ pub fn prompt_state_for_epoch_from_source(
         {
             continue;
         }
-        match row.string_at("/type") {
-            Some("attachment") => {
-                // A fork copies source attachments for audit, but its new
-                // instruction epoch must assemble a fresh prompt. Branch
-                // records carry their source in `forkedFrom`.
-                if row.string_at("/attachment/type") == Some("prompt_snapshot")
-                    && row.string_at("/forkedFrom/sessionId").is_none()
-                {
-                    matching.push_str(line);
-                    matching.push('\n');
-                }
+        if let Some("attachment") = row.string_at("/type") {
+            // A fork copies source attachments for audit, but its new
+            // instruction epoch must assemble a fresh prompt. Branch
+            // records carry their source in `forkedFrom`.
+            if row.string_at("/attachment/type") == Some("prompt_snapshot")
+                && row.string_at("/forkedFrom/sessionId").is_none()
+            {
+                matching.push_str(line);
+                matching.push('\n');
             }
-            _ => {}
         }
     }
     let entries = session::jsonl::route_lines(&matching).messages_in_order;

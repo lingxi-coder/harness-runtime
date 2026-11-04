@@ -2123,9 +2123,9 @@ pub(crate) async fn has_pending_receipts(orch: &ConversationOrchestrator) -> boo
         .is_empty()
 }
 
-/// Check durable ownership before a profile boundary; this does not replay or
-/// change a receipt. A cold owner may not have reconstructed its in-memory
-/// native state yet.
+/// Inspect fixture receipt ownership without replaying or changing a receipt.
+/// A cold owner may not have reconstructed its in-memory native state yet.
+#[cfg(test)]
 pub(crate) async fn has_unsettled_profile_receipts(
     orch: &ConversationOrchestrator,
 ) -> Result<bool, OrchestratorError> {
