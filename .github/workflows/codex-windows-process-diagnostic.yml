@@ -51,6 +51,8 @@ jobs:
           if ($status -ne 101 -or -not $output.Contains('supervisor directory owner differs from current user')) {
             throw "Baseline owner test did not reproduce the expected failure (status $status)"
           }
+          # GitHub's PowerShell wrapper otherwise exits with cargo's expected 101.
+          exit 0
       - name: Restore the candidate behavior on the runner
         run: python .github/scripts/windows_process_diagnostic.py fixed
       - name: Verify rooted append access and pinned-root safety
