@@ -157,7 +157,9 @@ mod tests {
         for topic in TOPICS {
             assert!(text.contains(&branding::render_namespace_template(topic.content)));
         }
-        assert!(text.chars().count() < 50_000);
+        // The public handbook facts live in these same topics. Keep the
+        // isolated guide under one bounded prompt.
+        assert!(text.chars().count() < 56_000, "guide context grew past 56k");
     }
 
     #[test]

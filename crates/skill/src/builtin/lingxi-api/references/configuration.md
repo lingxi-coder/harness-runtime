@@ -60,4 +60,23 @@ appearance preferences. Do not infer .claude or CLAUDE.md paths from code ancest
 authentication variables apply only to the selected provider; actual Anthropic
 protocol identifiers and credentials remain valid on an Anthropic route.
 A host-pinned session config-home/global-config path takes priority over ambient
-process variables. Empty {{config_dir_env}} is treated as unset.
+process variables. For the user config home, a set `{{config_dir_env}}` wins
+verbatim, including an empty value; the CLI then resolves a relative or empty
+value against the working directory. Only an unset variable falls back to
+`~/{{config_dir}}`. The global `~/{{global_config_file}}` resolver treats an
+empty override as unset. Do not collapse those two rules.
+
+Permission mode decides whether an unmatched tool call asks. It does not start
+an operating-system sandbox. The starting mode is manual (ask first) and prints
+no mode line. Shift+Tab cycles modes in the terminal. `--permission-mode`
+selects one launch. Help shows `manual`; `default` is a hidden alias of that
+same mode. `acceptEdits` allows file edits without asking. `plan` stays
+read-only. `dontAsk` denies anything without an allow rule.
+`bypassPermissions` allows actions unless its kill switch is on;
+`--dangerously-skip-permissions` selects it. `auto` lets the classifier decide
+and can be selected for one launch.
+
+In `settings.json` the field is `permissions.defaultMode`, not a top-level
+`permissionMode`. User settings may store `auto`; the session stays manual
+when auto mode is unavailable. A project settings file cannot grant `auto` or
+`bypassPermissions`. Internal modes are not user settings.

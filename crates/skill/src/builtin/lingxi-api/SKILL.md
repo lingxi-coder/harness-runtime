@@ -19,17 +19,17 @@ domains; do not load every reference for a general question.
 
 | Topic | Read when the question concerns |
 | --- | --- |
-| [overview](references/overview.md) | Product surfaces, capability discovery, platform differences, offline use |
+| [overview](references/overview.md) | Product surfaces, what can be installed, command names, platform differences |
 | [teams](references/teams.md) | Teams identity, membership, connectors and Bot boundaries |
 | [accounts](references/accounts.md) | Host-global provider accounts, model permissions, execution routing |
-| [configuration](references/configuration.md) | Settings, MCP, permissions, hooks, plugins, skill customization |
+| [configuration](references/configuration.md) | Settings layers, permission modes, MCP, hooks, plugins |
 | [media](references/media.md) | Camera, microphone, audio, transcription, speech, live assistance |
 | [webrtc](references/webrtc.md) | Remote Control, device connections, media transport |
 | [local-app](references/local-app.md) | Desktop/Mobile Local Apps, publication, retained data, MCP, WebMCP and AG-UI |
 | [bots](references/bots.md) | Persistent Bots, Bot memory, routines, delegation, remote Bot chats |
 | [devices](references/devices.md) | Computer Use, Browser, Android automation, native device tools |
 | [mobile-linux](references/mobile-linux.md) | Mobile Shell/Git, guest paths, rootfs, runtime availability |
-| [sessions](references/sessions.md) | History, resume, forks, Chat/Code, context and memory |
+| [sessions](references/sessions.md) | CLI continue/resume, instruction files, history, forks, memory |
 | [automation](references/automation.md) | Scheduled work, wakeups, Workflow, background tasks |
 | [agents](references/agents.md) | Subagents, Fusion, collaboration, task ownership |
 | [models](references/models.md) | Provider profiles, model selection, credentials, model API boundaries |

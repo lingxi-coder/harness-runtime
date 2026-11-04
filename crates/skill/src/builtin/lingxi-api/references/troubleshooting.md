@@ -18,9 +18,18 @@ error need different remedies.
 | Version-specific SDK error | Locked source revision, Cargo features, actual type/signature |
 
 Where available, `/doctor`, `/debug`, version and settings are native product
-entries. `/debug` can describe logs from runs started with debug enabled; do
-not claim prompt expansion enabled logging in an already running process.
-An executable slash handler cannot automatically be invoked as a prompt Skill.
+entries. `/doctor` prints the `lingxi-cli` version, the config home, the
+working directory, and how many MCP servers are configured and connected. If
+that home is unexpected, check `{{config_dir_env}}` in the environment that
+launched LingXi. A model failure before any work starts is an account or model
+selection problem; read the accounts and models topics. `/debug` can describe
+logs from runs started with debug enabled; do not claim prompt expansion
+enabled logging in an already running process. An executable slash handler
+cannot automatically be invoked as a prompt Skill.
+
+Product help and privacy requests use the address published on the product
+privacy page. A screen that links to another product's website is not LingXi
+support. Do not send the user there.
 
 Use a targeted reversible remedy justified by the evidence. Do not clear user
 data, reset rootfs, loosen permissions, recreate credentials, re-pair devices,
