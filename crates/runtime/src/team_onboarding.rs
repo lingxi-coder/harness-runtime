@@ -905,7 +905,7 @@ mod tests {
         fs::write(
             project_dir.join("recent.jsonl"),
             concat!(
-                "{\"role\":\"user\",\"content\":\"Please fix the parser with Claude and keep {{PRODUCT_NAME}}\"}\n",
+                "{\"role\":\"user\",\"content\":\"Claude {{PRODUCT_NAME}}\"}\n",
                 "{\"content\":\"<command-name>/review</command-name> <command-name>/review</command-name> <command-name>/commit</command-name>\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__search\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__read\"}\n",
@@ -980,7 +980,7 @@ mod tests {
         assert_eq!(data["sessionDescriptors"][0]["prNumbers"][0], 42);
         assert_eq!(
             data["sessionDescriptors"][0]["firstMessage"],
-            "Please fix the parser with Claude and keep {{PRODUCT_NAME}}"
+            "Claude {{PRODUCT_NAME}}"
         );
         assert!(!prompt.contains("secret-token"));
         assert!(!prompt.contains("secret@example.test"));
