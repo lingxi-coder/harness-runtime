@@ -450,10 +450,11 @@ fn restore_skills_impl(
             continue;
         }
         // `n+=d;` then `if(!c&&u!==a.content)n_n(s,u)` — persist truncation.
-        if !is_body && !truncated.semantically_eq(&skill.content) {
-            if !apply_or_stage(&skill, &truncated) {
-                continue;
-            }
+        if !is_body
+            && !truncated.semantically_eq(&skill.content)
+            && !apply_or_stage(&skill, &truncated)
+        {
+            continue;
         }
         if !skill_activation_is_current(&skill) {
             continue;

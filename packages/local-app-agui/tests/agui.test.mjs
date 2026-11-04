@@ -8,11 +8,13 @@ import {browserAgentSource} from '../dist/browser.source.js';
 import {
   createLocalAppAgent,
   fileToContentPart,
+  LOCAL_APP_EXTENSION_KEY,
   validateEvent,
   validateLocalAppRunInput,
   validateRunAgentInput,
 } from '../src/index.js';
 import {preflightJson} from '../src/preflight.js';
+import * as builtSdk from '../dist/client.bundle.js';
 
 if (!globalThis.File) globalThis.File = File;
 
@@ -138,6 +140,26 @@ test('Local App options are limited to the versioned forwardedProps namespace', 
   assert.throws(() => validateLocalAppRunInput({...runInput(), forwardedProps: {other: {version: 1}}}), /only forwardedProps/);
   assert.throws(() => validateLocalAppRunInput({...runInput(), forwardedProps: {'com.lingxi.localApp': {version: 1, privateTools: []}}}), /unsupported field/);
   assert.throws(() => validateLocalAppRunInput({...runInput(), forwardedProps: {'com.lingxi.localApp': {version: 1, maxTurns: 101}}}), /maxTurns/);
+});
+
+test('source and built SDK use one fixed extension key for options and attachments', async () => {
+  assert.equal(LOCAL_APP_EXTENSION_KEY, 'com.lingxi.localApp');
+  assert.equal(builtSdk.LOCAL_APP_EXTENSION_KEY, LOCAL_APP_EXTENSION_KEY);
+  const input = runInput();
+  input.forwardedProps = {[LOCAL_APP_EXTENSION_KEY]: {version: 1, maxTurns: 3}};
+  const file = new File(['hello'], 'notes.txt', {type: 'text/plain'});
+  for (const sdk of [
+    {fileToContentPart, validateLocalAppRunInput},
+    builtSdk,
+  ]) {
+    assert.equal(sdk.validateLocalAppRunInput(input).forwardedProps[LOCAL_APP_EXTENSION_KEY].maxTurns, 3);
+    const part = await sdk.fileToContentPart(file);
+    assert.deepEqual(part.metadata[LOCAL_APP_EXTENSION_KEY], {version: 1, filename: 'notes.txt'});
+    assert.throws(
+      () => sdk.validateLocalAppRunInput({...runInput(), forwardedProps: {other: {version: 1}}}),
+      {message: `This Local App host supports only forwardedProps.${LOCAL_APP_EXTENSION_KEY}.`},
+    );
+  }
 });
 
 test('pinned SDK prepareRunAgentInput reproduces the native AG-UI fixture', () => {

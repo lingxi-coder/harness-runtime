@@ -3,6 +3,7 @@
 //! check step disappears when it does not.
 
 const SKILL: &str = include_str!("../assets/skill/SKILL.md");
+const AGUI_EXTENSION_KEY_TOKEN: &str = "{{LOCAL_APP_AGUI_EXTENSION_KEY}}";
 const SHELL_TOOL: &str = "{{SHELL_TOOL}}";
 const IF_SHELL: &str = "<!-- if-shell -->\n";
 const END_IF_SHELL: &str = "<!-- end-if-shell -->\n";
@@ -14,8 +15,14 @@ pub const SKILL_NAME: &str = "local-app";
 /// `shell_tool` (`Bash` on desktop, `Shell` on mobile), or none.
 #[must_use]
 pub fn skill_markdown(shell_tool: Option<&str>) -> String {
-    let mut out = String::with_capacity(SKILL.len());
-    let mut rest = SKILL;
+    // Render the fixed wire identity before inserting host-provided tool names,
+    // so a tool name containing a template marker is kept verbatim.
+    let source = SKILL.replace(
+        AGUI_EXTENSION_KEY_TOKEN,
+        branding::LOCAL_APP_AGUI_EXTENSION_KEY,
+    );
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source.as_str();
     while let Some(start) = rest.find(IF_SHELL) {
         out.push_str(&rest[..start]);
         let after = &rest[start + IF_SHELL.len()..];
@@ -90,6 +97,20 @@ mod tests {
         assert!(!none.contains("file_path"));
         assert!(!none.contains("if-shell") && !none.contains("{{"));
         assert!(none.contains("4. Write the current schema-2 manifest"));
+    }
+
+    #[test]
+    fn all_hosts_render_the_fixed_agui_extension_key() {
+        for shell in [Some("Bash"), Some("Shell"), None] {
+            let markdown = skill_markdown(shell);
+            let key = branding::LOCAL_APP_AGUI_EXTENSION_KEY;
+            assert!(markdown.contains(&format!("\"{key}\": {{version: 1")));
+            assert!(markdown.contains(&format!("`forwardedProps[\"{key}\"]`")));
+            assert!(!markdown.contains(AGUI_EXTENSION_KEY_TOKEN));
+        }
+
+        let tool = format!("prefix{AGUI_EXTENSION_KEY_TOKEN}suffix");
+        assert!(skill_markdown(Some(&tool)).contains(&tool));
     }
 
     #[test]

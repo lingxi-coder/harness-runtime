@@ -931,7 +931,9 @@ mod imp {
             parent,
             file_name,
             relative,
-            desired_access,
+            // Every regular handle is checked with metadata before it is
+            // returned, including append-only handles used for task output.
+            desired_access | FILE_READ_ATTRIBUTES,
             share_access,
             disposition,
             FILE_NON_DIRECTORY_FILE,
@@ -5201,6 +5203,29 @@ mod tests {
             open_append_file_pinned(&task_dir, Path::new("second.output"), Some(&identity));
         assert!(result.is_err(), "a replacement directory must fail the pin");
         assert!(!task_dir.join("second.output").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pinned_append_handles_keep_append_and_metadata_access() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = Path::new("task.output");
+        let pin = root_identity(root.path()).unwrap();
+        let mut first = open_append_file_pinned(root.path(), path, Some(&pin)).unwrap();
+        let mut second = open_append_file_pinned(root.path(), path, Some(&pin)).unwrap();
+        first.write_all(b"first").unwrap();
+        second.write_all(b" second").unwrap();
+        first.write_all(b" third").unwrap();
+        first.flush().unwrap();
+        second.flush().unwrap();
+        assert_eq!(first.metadata().unwrap().len(), 18);
+        drop((first, second));
+        assert_eq!(
+            std::fs::read(root.path().join(path)).unwrap(),
+            b"first second third"
+        );
     }
 
     #[cfg(unix)]
