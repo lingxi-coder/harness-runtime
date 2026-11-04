@@ -32,8 +32,10 @@ pub struct PolicySource {
 
 impl DevicePolicy {
     pub fn denies(&self, id: &str, name: &str) -> bool {
-        id == "com.lingxi.code"
-            || id.starts_with("com.lingxi.code.")
+        id == branding::MANAGED_PREFERENCES_DOMAIN
+            || id
+                .strip_prefix(branding::MANAGED_PREFERENCES_DOMAIN)
+                .is_some_and(|suffix| suffix.starts_with('.'))
             || app_policy::blocked(Some(id), name)
             || self
                 .apps
@@ -52,6 +54,27 @@ impl DevicePolicy {
                     app_policy::maximum_tier(Some(&app.bundle_id), &app.display_name),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DevicePolicy;
+
+    #[test]
+    fn desktop_bundle_and_children_are_denied_without_matching_sibling_ids() {
+        let policy = DevicePolicy {
+            revision: "test".into(),
+            enabled: true,
+            apps: Vec::new(),
+            source: None,
+            owner_pid: None,
+        };
+        let bundle = branding::MANAGED_PREFERENCES_DOMAIN;
+        assert!(policy.denies(bundle, "Example"));
+        assert!(policy.denies(&format!("{bundle}.helper"), "Example"));
+        assert!(!policy.denies(&format!("{bundle}other"), "Example"));
+        assert!(!policy.denies("org.example.target", "Example"));
     }
 }
 
