@@ -70,7 +70,8 @@ returning an error, allowing the runtime's failure rollback to retry them:
 - `src/libgit2/merge_driver.c` frees an entry when insertion fails and releases
   its vector and rwlock on initialization or shutdown-registration failure.
 - `src/libgit2/sysdir.c` disposes guessed directory buffers on failure and
-  retains the old passwd buffer if a growth allocation fails.
+  retains the old passwd buffer if a growth allocation fails. A successful
+  passwd lookup with no matching entry returns an error rather than success.
 
 Re-apply these changes on re-vendor and run
 `scripts/tests/test_git_runtime_lifecycle.py`. The additional component tests

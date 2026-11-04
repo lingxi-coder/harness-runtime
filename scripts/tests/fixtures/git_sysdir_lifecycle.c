@@ -12,7 +12,7 @@
 
 #include "git_initializer_allocator.h"
 
-static int use_passwd;
+static int use_passwd, no_passwd_entry;
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -53,6 +53,10 @@ int audit_sysdir_getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer,
         return ENOMEM;
     if (size < 2048)
         return ERANGE;
+    if (no_passwd_entry) {
+        *result = NULL;
+        return 0;
+    }
     pwd->pw_dir = "/audit/passwd";
     *result = pwd;
     return 0;
@@ -77,7 +81,8 @@ int main(int argc, char **argv)
     use_passwd = !strcmp(argv[1], "passwd");
     success = !strcmp(argv[2], "success");
     registration = !strcmp(argv[2], "register");
-    if (!success && !registration)
+    no_passwd_entry = !strcmp(argv[2], "no-entry");
+    if (!success && !registration && !no_passwd_entry)
         fail_allocation = atoi(argv[2]);
     git__allocator = (git_allocator){ audit_malloc, audit_realloc, audit_free };
 
@@ -93,6 +98,7 @@ int main(int argc, char **argv)
             CHECK(observed_calls >= fail_allocation);
         CHECK(live_allocations == 0);
         fail_allocation = 0;
+        no_passwd_entry = 0;
         CHECK(git_runtime_init(fns, ARRAY_SIZE(fns)) == 1);
         CHECK(git_runtime_shutdown() == 0);
     }

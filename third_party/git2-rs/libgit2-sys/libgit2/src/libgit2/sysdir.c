@@ -313,6 +313,7 @@ static int get_passwd_home(git_str *out, uid_t uid)
 
 	if (!pwdptr) {
 		git_error_set(GIT_ERROR_OS, "no passwd entry found for user");
+		error = -1;
 		goto out;
 	}
 
