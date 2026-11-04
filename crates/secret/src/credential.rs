@@ -129,26 +129,42 @@ struct OpenAiOAuthSessionMeta {
 /// One atomic account credential record. Debug output redacts all tokens.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AccountCredential {
+    /// Revision of this account's stored credential material.
     pub credential_revision: u64,
+    /// Account identity generation to which this credential belongs.
     pub identity_generation: u64,
+    /// Authentication material for this account.
     pub kind: AccountCredentialKind,
 }
+/// Authentication material stored for one provider account.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AccountCredentialKind {
+    /// A provider-issued API key.
     ApiKey {
+        /// API key, redacted in debug output.
         key: Secret<String>,
     },
+    /// An OAuth grant and its associated account metadata.
     #[serde(rename = "oauth")]
     OAuth {
+        /// Bearer access token, redacted in debug output.
         access_token: Secret<String>,
+        /// Refresh token when one was issued by the provider.
         refresh_token: Option<Secret<String>>,
+        /// Wall-clock expiry of the access token.
         expires_at: SystemTime,
+        /// Scopes granted by the provider.
         scopes: Vec<String>,
+        /// Issuer of the OAuth grant.
         issuer: String,
+        /// Provider subject identifier, when supplied.
         subject: Option<String>,
+        /// Provider organization identifier, when supplied.
         organization_id: Option<String>,
+        /// Account email for display, when supplied.
         email: Option<String>,
+        /// Whether the account uses the provider's `FedRAMP` environment.
         #[serde(default)]
         fedramp: bool,
     },
@@ -182,6 +198,8 @@ pub fn masked_credential_preview(value: &str) -> String {
 /// Account refresh authority installed by the actual credential owner.
 #[async_trait::async_trait]
 pub trait AccountCredentialRefresher: Send + Sync {
+    /// Ask the credential owner to replace a rejected account revision.
+    /// Returns `None` when the owner cannot provide a replacement.
     async fn refresh(
         &self,
         account: lingxi_core::host::provider_accounts::AccountMetadata,
@@ -189,6 +207,7 @@ pub trait AccountCredentialRefresher: Send + Sync {
     ) -> Result<Option<AccountCredential>, CredentialError>;
 }
 
+/// Manages host secure-storage credentials and injected account grants.
 pub struct CredentialManager {
     account_refresher: std::sync::RwLock<Option<Arc<dyn AccountCredentialRefresher>>>,
     storage: Arc<dyn SecureStorage>,
@@ -235,18 +254,22 @@ impl CredentialManager {
         }
     }
 
+    /// Whether a host authority can refresh account credentials.
     pub fn has_account_credential_refresher(&self) -> bool {
         self.account_refresher
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
     }
+    /// Install the host authority that owns account credential refreshes.
     pub fn set_account_credential_refresher(&self, authority: Arc<dyn AccountCredentialRefresher>) {
         *self
             .account_refresher
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(authority);
     }
+    /// Delegate a rejected credential revision to the installed host authority.
+    /// Returns `None` if no authority is installed or no replacement is available.
     pub async fn refresh_account_credential(
         &self,
         account: lingxi_core::host::provider_accounts::AccountMetadata,
