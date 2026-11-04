@@ -2359,11 +2359,12 @@ impl AgentStore {
             .ok_or_else(|| invalid("Agent task is not an AG-UI run"))?;
         validate_event_identity(&event, thread_id, &record.task.request_id)?;
         let file_len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
-        let cached = self
-            .protocol_log_tails
-            .lock()
-            .ok()
-            .and_then(|tails| tails.get(&path).filter(|tail| tail.bytes == file_len).cloned());
+        let cached = self.protocol_log_tails.lock().ok().and_then(|tails| {
+            tails
+                .get(&path)
+                .filter(|tail| tail.bytes == file_len)
+                .cloned()
+        });
         let (event_count, terminal) = if let Some(tail) = cached {
             (tail.count, tail.terminal)
         } else {
