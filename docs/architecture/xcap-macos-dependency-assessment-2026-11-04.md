@@ -127,3 +127,24 @@ records the commands, complete output, toolchain, and disk guard measurements.
 These checks are not evidence of a linked build, live capture, permission
 behavior, the final Product graph, or final CI. Those checks remain necessary
 before considering the dependency migration complete.
+
+## Native test execution and permission boundary
+
+On the same candidate libtest binary, the event-construction test exceeded
+eight seconds in the restricted tool environment but passed in 0.03 seconds
+in the normal native environment. The entire unmodified test binary then
+passed 20/20 in the native environment. The earlier restricted full run was
+terminated after the event test exceeded 60 seconds; it was not a full pass.
+The event-source function, mouse-event constructor, and test body are
+byte-identical to baseline Harness main `d10fac5d`; no separate baseline binary
+was run, and the individual blocking OS call was not isolated.
+
+The actual backend's read-only permission query returned accessibility and
+screen recording `false/false` in the restricted environment and
+`true/true` in the normal native environment. These values apply to that
+probe process and execution context; they do not establish a different
+product process's TCC state. No permission request, input posting, or screenshot
+was performed during these checks. The
+[commands and raw results](evidence/xcap-macos-native-validation-2026-11-04.json)
+retain both environments and the initially interrupted result. The declared
+`mask` capability is not itself evidence of pixel filtering.
