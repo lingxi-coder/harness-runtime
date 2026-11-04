@@ -2379,8 +2379,11 @@ pub async fn build_with_credential_stack(
     } else {
         mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd)
     };
-    if cfg.local_apps && !cfg.strict_mcp_config && !cfg.customization_gates.disables_mcp_discovery()
-        && cfg.app_invocation.is_none() && cfg.team_invocation.is_none()
+    if cfg.local_apps
+        && !cfg.strict_mcp_config
+        && !cfg.customization_gates.disables_mcp_discovery()
+        && cfg.app_invocation.is_none()
+        && cfg.team_invocation.is_none()
     {
         mcp::local_apps::append(&mut mcp_configs, &cfg.lingxi_home);
     }

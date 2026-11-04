@@ -10,7 +10,10 @@ pub mod kinds;
 pub mod redaction;
 pub mod scanner;
 
-pub use credential::{AccountCredential, AccountCredentialKind, AccountCredentialRefresher, masked_credential_preview, CredentialError, CredentialManager, OAuthTokens};
+pub use credential::{
+    masked_credential_preview, AccountCredential, AccountCredentialKind,
+    AccountCredentialRefresher, CredentialError, CredentialManager, OAuthTokens,
+};
 pub use keychain_prefetch::KeychainPrefetch;
 pub use kinds::SecretKind;
 pub use redaction::{BoundaryPolicy, RedactionBoundary, RedactionOutcome, RedactionPolicy};

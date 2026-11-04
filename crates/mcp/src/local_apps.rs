@@ -143,7 +143,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn shared_or_symlinked_descriptor_is_not_discovered() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
         let home = tempfile::tempdir().unwrap();
         write(home.path(), descriptor());
         let path = home.path().join("desktop-local-app-mcp.json");

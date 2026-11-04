@@ -1,22 +1,22 @@
 use axum::{
-    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response, Sse, sse::Event},
+    response::{sse::Event, IntoResponse, Response, Sse},
     routing::post,
+    Json, Router,
 };
 use lingxi_core::host::McpTransportSpec;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, McpServerMetadata};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     convert::Infallible,
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{broadcast, Mutex};
 
 struct StateData {
     running: AtomicBool,
