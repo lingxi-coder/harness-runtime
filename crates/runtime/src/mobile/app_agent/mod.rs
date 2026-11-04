@@ -1049,6 +1049,15 @@ mod history_model_capability_tests {
         mode: lingxi_core::host::session_context::ConversationMode,
         epoch: u64,
     ) -> (tempfile::TempDir, AppAgentChatResume, Vec<u8>) {
+        cold_chat_with_profile_capture(history, mode, epoch, false).await
+    }
+
+    async fn cold_chat_with_profile_capture(
+        history: Vec<ConversationMessage>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+        epoch: u64,
+        raw_fixture: bool,
+    ) -> (tempfile::TempDir, AppAgentChatResume, Vec<u8>) {
         let root = tempfile::tempdir().unwrap();
         let chat_id = uuid::Uuid::new_v4().to_string();
         let session_id = SessionId::new();
@@ -1090,7 +1099,13 @@ mod history_model_capability_tests {
         for message in &history {
             orch.append_external_history_message(message.clone()).await;
         }
-        let captured = orch.verify_persistent_chat_checkpoint(true).await.unwrap();
+        let captured = if raw_fixture {
+            // The fixture deliberately injects an older Skill epoch into a
+            // captured source; strict replay below still validates the source.
+            writer.capture_persistent_chat_snapshot(true).await.unwrap()
+        } else {
+            orch.verify_persistent_chat_checkpoint(true).await.unwrap()
+        };
         drop(orch);
         drop(writer);
         let writer = Arc::new(
@@ -1315,6 +1330,155 @@ mod history_model_capability_tests {
             .await
             .unwrap();
         assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn factory_cold_resume_restores_nonzero_instruction_epoch() {
+        use lingxi_core::host::invoked_skills::{
+            context_epoch, filter_for_scope, skill_activation_origin_with_skill,
+            InvokedSkillScopeRef,
+        };
+        use lingxi_core::host::session_context::ConversationMode;
+
+        let old = ConversationMessage::user_meta(MessageId::new(), "old guidance".into())
+            .with_origin(skill_activation_origin_with_skill(
+                6,
+                &"old".into(),
+                std::path::Path::new("/skills/old"),
+            ));
+        let current = ConversationMessage::user_meta(MessageId::new(), "current guidance".into())
+            .with_origin(skill_activation_origin_with_skill(
+                7,
+                &"current".into(),
+                std::path::Path::new("/skills/current"),
+            ));
+        let history = vec![
+            old,
+            current,
+            ConversationMessage::user(MessageId::new(), "hello".into()),
+        ];
+        let (root, chat, original) =
+            cold_chat_with_profile_capture(history.clone(), ConversationMode::Chat, 7, true).await;
+        let old_id = history[0].id();
+        let current_id = history[1].id();
+        let session_id = chat.session_id;
+        let scoped_id = session_id.to_string();
+        let scope = InvokedSkillScopeRef::new(Some(&scoped_id), None);
+        let path = chat.transcript_path.clone();
+        let writer = chat.writer.clone();
+        let normalized = local_app::v2::agent::protocol::normalize_run_input(
+            &json!({"threadId":chat.chat_id,"runId":"resume-epoch","messages":[{
+                "id":"next-user","role":"user","content":"continue"
+            }]}),
+            &[],
+        )
+        .unwrap();
+        let owner = Owner {
+            app_id: format!("a{}", "1".repeat(32)),
+            release_digest: "2".repeat(64),
+            invocation_id: "factory-epoch-test".into(),
+        };
+        let store = local_app::v2::agent::AgentStore::open(&root.path().join("tasks")).unwrap();
+        store
+            .configure(
+                owner.clone(),
+                Some(local_app::v2::agent::Settings {
+                    model: local_app::v2::agent::Model {
+                        provider_id: "provider".into(),
+                        model_id: "claude-sonnet-4-6".into(),
+                    },
+                    tools: BTreeMap::new(),
+                    skills: vec![],
+                    background: false,
+                    max_turns: 1,
+                    timeout_ms: 1000,
+                }),
+            )
+            .unwrap();
+        let admission = store
+            .admit_scoped(
+                &owner,
+                &normalized.input,
+                &[],
+                &[],
+                Some(&chat.chat_id),
+                true,
+            )
+            .unwrap();
+        let (factory, transport) = ready_factory(root.path());
+        let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
+        let resumed = factory
+            .build(
+                &owner,
+                &admission,
+                &normalized.input,
+                root.path().to_path_buf(),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(NoOpPermissionGate),
+                tokio_util::sync::CancellationToken::new(),
+                question_tx,
+                Some(chat),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("nonzero-epoch App Chat resume failed: {error}"));
+
+        resumed
+            .orchestrator
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .unwrap();
+        assert_eq!(context_epoch(scope), 7);
+        let skills = filter_for_scope(scope);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name.string_at(""), Some("current"));
+        assert_eq!(resumed.orchestrator.snapshot_history().await, history);
+        let projected = resumed
+            .orchestrator
+            .side_chat_parent_snapshot()
+            .await
+            .history;
+        assert!(!projected.iter().any(|message| message.id() == old_id));
+        assert!(projected.iter().any(|message| message.id() == current_id));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+
+        resumed
+            .orchestrator
+            .append_external_history_message(ConversationMessage::user(
+                MessageId::new(),
+                "continue".into(),
+            ))
+            .await;
+        let synchronized = writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .unwrap();
+        let replayed =
+            ConversationOrchestrator::replay_persistent_chat_snapshot(&synchronized).unwrap();
+        let projected = resumed
+            .orchestrator
+            .side_chat_parent_snapshot()
+            .await
+            .history;
+        assert_eq!(
+            replayed.state.model_context_history(),
+            projected,
+            "cold replay must project the same instruction epoch as the live owner"
+        );
+        let captured = resumed
+            .orchestrator
+            .verify_persistent_chat_checkpoint(false)
+            .await
+            .unwrap();
+        let profile = session::JsonlWriter::fixed_session_profile_from_source(
+            captured.source(),
+            &session_id.as_uuid().to_string(),
+        )
+        .unwrap();
+        assert_eq!(profile.instruction_epoch, 7);
+        assert_eq!(context_epoch(scope), 7);
+        assert_eq!(filter_for_scope(scope).len(), 1);
     }
 
     async fn assert_factory_preflight(
