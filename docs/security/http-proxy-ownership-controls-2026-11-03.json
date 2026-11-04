@@ -1,0 +1,20 @@
+{
+  "scope": "Exact connection body; mocked streams and errors. Only an unused mock helper was annotated unused for negative compilation. No CA or real TLS run.",
+  "results": [
+    {
+      "mutation": "proxy-first",
+      "rejected_by_runtime_assertion": true,
+      "returncode": -6
+    },
+    {
+      "mutation": "drop-diagnostic-clear",
+      "rejected_by_runtime_assertion": true,
+      "returncode": -6
+    },
+    {
+      "mutation": "save-no-error",
+      "rejected_by_runtime_assertion": true,
+      "returncode": -6
+    }
+  ]
+}

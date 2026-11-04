@@ -1069,6 +1069,7 @@ static int http_client_connect(
 	git_http_request *request)
 {
 	bool use_proxy = false;
+	git_error *last_error = NULL;
 	int error;
 
 	if ((error = setup_hosts(client, request)) < 0)
@@ -1113,10 +1114,17 @@ static int http_client_connect(
 	return error;
 
 on_error:
+	if (git_error_exists())
+		git_error_save(&last_error);
+	/* The server TLS wrapper may still borrow the proxy stream for shutdown. */
+	close_stream(&client->server);
 	if (error != GIT_RETRY)
 		close_stream(&client->proxy);
 
-	close_stream(&client->server);
+	if (last_error)
+		git_error_restore(last_error);
+	else
+		git_error_clear();
 	return error;
 }
 
