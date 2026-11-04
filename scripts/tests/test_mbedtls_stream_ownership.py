@@ -330,6 +330,105 @@ int main(void) {
 }
 '''
 
+CIPHER_HEADER = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+'''
+
+CIPHER_PREFIX = r'''
+typedef struct { int unused; } fake_context;
+static fake_context mbedtls_config, mbedtls_entropy, mbedtls_rng;
+static bool initialized;
+static int mode, names_seen, configured, consumed, registrations, ca_calls;
+#define GIT_DEFAULT_CERT_LOCATION NULL
+#define GIT_ERROR_SSL 1
+#define GIT_ERROR_CHECK_ALLOC(x) do { if (!(x)) return -1; } while (0)
+#define git_error_set(...) ((void)0)
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#define MBEDTLS_SSL_IS_CLIENT 0
+#define MBEDTLS_SSL_TRANSPORT_STREAM 0
+#define MBEDTLS_SSL_PRESET_DEFAULT 0
+#define MBEDTLS_SSL_VERIFY_OPTIONAL 0
+
+static void mbedtls_ssl_config_init(fake_context *p) { (void)p; }
+static void mbedtls_entropy_init(fake_context *p) { (void)p; }
+static void mbedtls_ctr_drbg_init(fake_context *p) { (void)p; }
+static int mbedtls_ssl_config_defaults(fake_context *p, int a, int b, int c) {
+ (void)p; (void)a; (void)b; (void)c; return 0;
+}
+static void mbedtls_ssl_conf_authmode(fake_context *p, int mode_) { (void)p; (void)mode_; }
+static char *git__strdup(const char *s) {
+ char *copy = malloc(strlen(s) + 1); assert(copy); strcpy(copy, s); return copy;
+}
+static char *git__strtok(char **cursor, const char *delimiters) {
+ char *start = *cursor, *end;
+ if (!start) return NULL;
+ end = strpbrk(start, delimiters);
+ if (end) { *end = '\0'; *cursor = end + 1; } else { *cursor = NULL; }
+ return start;
+}
+#define git__free free
+static int mbedtls_ssl_get_ciphersuite_id(const char *name) {
+ assert(*name); ++names_seen;
+ return mode == 2 || (mode == 1 && names_seen != 1) ? 0 : names_seen;
+}
+static void mbedtls_ssl_conf_ciphersuites(fake_context *p, const int *suites) {
+ (void)p; ++configured; consumed = 0;
+ /* Model the library's zero-terminated read, including the final read. */
+ while (suites[consumed] != 0) ++consumed;
+}
+static int mbedtls_entropy_func(void *p, unsigned char *out, size_t n) {
+ (void)p; (void)out; (void)n; return 0;
+}
+static int mbedtls_ctr_drbg_random(void *p, unsigned char *out, size_t n) {
+ (void)p; (void)out; (void)n; return 0;
+}
+static int mbedtls_ctr_drbg_seed(fake_context *p,
+ int (*f)(void *, unsigned char *, size_t), void *entropy,
+ const unsigned char *custom, size_t length) {
+ (void)p; (void)f; (void)entropy; (void)custom; (void)length; return 0;
+}
+static void mbedtls_ssl_conf_rng(fake_context *p,
+ int (*f)(void *, unsigned char *, size_t), void *rng) {
+ (void)p; (void)f; (void)rng;
+}
+static int git_mbedtls__set_cert_location(const char *file, const char *path) {
+ (void)file; (void)path; ++ca_calls; return 0;
+}
+static void shutdown_ssl(void) {}
+static int git_runtime_shutdown_register(void (*callback)(void)) {
+ assert(callback == shutdown_ssl); ++registrations; return 0;
+}
+static void mbedtls_ctr_drbg_free(fake_context *p) { (void)p; }
+static void mbedtls_ssl_config_free(fake_context *p) { (void)p; }
+static void mbedtls_entropy_free(fake_context *p) { (void)p; }
+'''
+
+CIPHER_CASES = r'''
+int main(void) {
+ mode = 0;
+ assert(git_mbedtls_stream_global_init() == 0);
+ assert(names_seen == GIT_SSL_DEFAULT_CIPHERS_COUNT);
+ assert(configured == 1 && consumed == GIT_SSL_DEFAULT_CIPHERS_COUNT);
+ assert(initialized && registrations == 1 && ca_calls == 0);
+
+ /* A later shorter list must not retain nonzero entries from the first. */
+ mode = 1; names_seen = 0;
+ assert(git_mbedtls_stream_global_init() == 0);
+ assert(names_seen == GIT_SSL_DEFAULT_CIPHERS_COUNT);
+ assert(configured == 2 && consumed == 1 && registrations == 2 && ca_calls == 0);
+
+ mode = 2; names_seen = 0;
+ assert(git_mbedtls_stream_global_init() == -1);
+ assert(names_seen == GIT_SSL_DEFAULT_CIPHERS_COUNT);
+ assert(configured == 2 && registrations == 2 && ca_calls == 0);
+ return 0;
+}
+'''
+
 
 class StreamOwnership(unittest.TestCase):
     def test_failure_and_success_ownership(self):
@@ -356,6 +455,23 @@ class StreamOwnership(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="mbedtls-hostname-") as directory:
             source, binary = Path(directory) / "hostname.c", Path(directory) / "hostname"
             source.write_text(HOSTNAME_PREFIX + text[start:end] + "\n" + "\n".join(bodies) + HOSTNAME_CASES)
+            command = [os.environ.get("CC", "cc"), "-std=c99", "-Wall", "-Wextra", "-Werror"]
+            if os.environ.get("MBEDTLS_OWNERSHIP_ASAN") == "1":
+                command += ["-fsanitize=address", "-fno-omit-frame-pointer"]
+            subprocess.run(command + [str(source), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+    def test_cipher_consumer_stops_at_terminator(self):
+        text = SOURCE.read_text()
+        declaration = re.search(
+            r"^#define GIT_SSL_DEFAULT_CIPHERS .+\n"
+            r"#define GIT_SSL_DEFAULT_CIPHERS_COUNT .+\n\n"
+            r"static int ciphers_list\[.+\];", text, re.M)
+        self.assertIsNotNone(declaration)
+        body = function(text, "git_mbedtls_stream_global_init")
+        with tempfile.TemporaryDirectory(prefix="mbedtls-cipher-list-") as directory:
+            source, binary = Path(directory) / "cipher.c", Path(directory) / "cipher"
+            source.write_text(CIPHER_HEADER + declaration.group() + "\n" + CIPHER_PREFIX + body + CIPHER_CASES)
             command = [os.environ.get("CC", "cc"), "-std=c99", "-Wall", "-Wextra", "-Werror"]
             if os.environ.get("MBEDTLS_OWNERSHIP_ASAN") == "1":
                 command += ["-fsanitize=address", "-fno-omit-frame-pointer"]
