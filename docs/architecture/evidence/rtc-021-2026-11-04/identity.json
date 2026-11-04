@@ -1,0 +1,31 @@
+{
+  "harness_commit_tested": "1957be86b1e19d3c87810bca8f611f19d3db68c0",
+  "webrtc_tree": "e60e95c559d72e9ea4e0abd110f3fe655322431d",
+  "core_tree": "e929f14ac74985702c2b15c4ec89320c06f796b7",
+  "media_tree": "13995d331a8369ca4f3e4749fa2e82ba74e6e9c8",
+  "server_tree": "47cec97b580316964caeea5e2e7cf3d0caeea351",
+  "nix_tree": "6024251b0484a1f846cd74aad08940d71ca50dcd",
+  "nested_cargo_lock_sha256": "af848e9d12e4db93eaf06327f34f9c02f085391721fcde076a7f5215f0bdbbd4",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "host": "aarch64-apple-darwin",
+  "files": {
+    "core-tests.log.gz": "3de229811282382ee38a10fcc81ae5c8c62f49c32d798370cd514490d72a5e94",
+    "coturn.log.gz": "ef050698cefe293d59b74bd4b1c91dc40cd42fd43565fa06473eab153a275b32",
+    "gstreamer-check.log.gz": "dd986b17ea59f4df59d46bfbe4bbb123928a1db35cea42b8e9718457187f8fba",
+    "media-tests.log.gz": "74d6255797956b1ac83dd0b81c84de9c814212f8a284da7204af0ee71f646a6b",
+    "metadata.json": "58c49e9b80a187e40535ee649e89b6aceda22fabaa08630c667d54fe89d8728b",
+    "server-probe.log.gz": "4506118634bb697f043b74b11261c2533e5378a5012dc44b9b8f7801c85d567d",
+    "turn-tests.log.gz": "48b0af85722e8851c1ef7da15243236e96ff230edea704c51975fc53f59d50b9",
+    "coturn-entrypoint.log.gz": "dc2965a02be0708c38e902d7a20bfd027814570086940b6cfdb5cfeeab0727aa"
+  },
+  "uncompressed_log_sha256": {
+    "core-tests.log": "7eb06624b4fbc43b4b6857e649f220ad76423e2eceb8fd6cc994501b1f80e210",
+    "coturn.log": "e91df7534626620c2fe39cfa15c53805a07a9fe5cdb22ba595b10a8d8403bef8",
+    "gstreamer-check.log": "1efa58bdc65a2f68f213c3e5ff566e9d3c6df2a92a419af51b38e91cc87f0d25",
+    "media-tests.log": "69f242c88912be3decf7ade03d637c37984ce887bd8cabd5e90fc4dd0a6d3632",
+    "server-probe.log": "05eb0f21c1027fab0e4feb6d4dd95a0e7d0b9f91269f3daca95974f97b2fc689",
+    "turn-tests.log": "c0834cfe91a7f7028381b4c1572ae7750daf131b3159e84f292108e00954792d",
+    "coturn-entrypoint.log": "03adff1b56abf814b67469ec56df50e962038e319f2ddb339aeda1a100813aeb"
+  }
+}

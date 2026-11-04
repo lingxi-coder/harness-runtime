@@ -222,22 +222,27 @@ impl Transport {
         let check_interval = Duration::from_millis(/*millis*/ 200);
         let attempts = u16::try_from(WAIT.as_millis() / check_interval.as_millis())
             .map_err(|_| "invalid voice ICE attempt budget")?;
-        let mut settings = webrtc::peer_connection::SettingEngine::default();
-        settings.set_ice_connection_attempts(Some(check_interval), Some(attempts));
         // Joining the mDNS group can be refused (e.g. iOS without the multicast
         // entitlement); a data-only peer then connects without resolving `.local` names.
         let query_mdns = mdns == crate::MdnsMode::QueryOnly
             && (!data_only || rtc::mdns::MulticastSocket::new().into_std().is_ok());
-        settings.set_multicast_dns_mode(if query_mdns {
-            rtc::ice::mdns::MulticastDnsMode::QueryOnly
-        } else {
-            rtc::ice::mdns::MulticastDnsMode::Disabled
-        });
+        let settings = webrtc::peer_connection::SettingEngineBuilder::new()
+            .with_ice_connection_attempts(Some(check_interval), Some(attempts))
+            .with_multicast_dns_mode(if query_mdns {
+                rtc::ice::mdns::MulticastDnsMode::QueryOnly
+            } else {
+                rtc::ice::mdns::MulticastDnsMode::Disabled
+            })
+            .with_sctp_max_receive_buffer_size(sctp_receive_buffer)
+            .build();
         let (state_tx, state) = watch::channel(RTCPeerConnectionState::New);
         let connection: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
                 .with_configuration(configuration)
-                .with_interceptor_registry(rtc::interceptor::Registry::from(ingress))
+                .with_interceptor_registry(
+                    rtc::interceptor::Registry::new()
+                        .with(rtc::interceptor::Slot::Custom(12_999), ingress),
+                )
                 .with_media_engine(media)
                 .with_runtime(runtime)
                 .with_setting_engine(settings)
@@ -250,7 +255,6 @@ impl Transport {
                 .with_udp_addrs(addresses)
                 .with_tcp_addrs(vec!["0.0.0.0:0".into(), "[::]:0".into()])
                 .with_data_channel_send_buffer_limit(sctp_send_buffer)
-                .with_sctp_receive_buffer_size(sctp_receive_buffer)
                 .build()
                 .await
                 .map_err(|_| "failed to create voice peer")?,
@@ -358,10 +362,8 @@ impl Transport {
                     DataChannelEvent::OnMessage(message) => {
                         if let Err(error) = message_tx.try_send(message) {
                             // Closing is observable; never silently lose an Agent message.
-                            // The upstream driver also drops events once its own 256-event
-                            // queue fills, so this loop must keep draining it: awaiting
-                            // here would turn backpressure into silent loss. Senders pace
-                            // themselves with protocol acknowledgements.
+                            // Do not wait indefinitely when our own bounded queue is full.
+                            // Senders pace themselves with protocol acknowledgements.
                             overflow_flag.store(
                                 matches!(error, tokio::sync::mpsc::error::TrySendError::Full(_)),
                                 Ordering::Release,
@@ -372,6 +374,12 @@ impl Transport {
                     }
                     DataChannelEvent::OnBufferedAmountLow
                     | DataChannelEvent::OnBufferedAmountHigh => {}
+                    _ => {
+                        // A future event may affect channel state; stop rather than
+                        // continuing with an event we do not understand.
+                        let _ = observed.close().await;
+                        break;
+                    }
                 }
             }
             sender.send_replace(false);
