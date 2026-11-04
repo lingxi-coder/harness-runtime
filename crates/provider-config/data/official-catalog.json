@@ -246,6 +246,28 @@
         "source": "connection = { protocol_profiles = { open_ai_responses = \"openrouter-responses\", anthropic_messages = \"openrouter-anthropic\" } }\nembeddings = { mode = \"enabled\", value = { api = \"open_router\", endpoint = \"https://openrouter.ai/api/v1/embeddings\", models_endpoint = \"https://openrouter.ai/api/v1/embeddings/models\", auth = { type = \"bearer\" } } }\n# An aggregator: one key, many vendors' models, all over one OpenAI-compatible\n# wire. Its catalog is by far the largest here, which is the nature of the thing\n# rather than a mistake.\n#\n# Read `[model.pricing.batch]` here with more care than on a first-party preset.\n# An aggregator quotes the cheapest host it can route to, and the batch rate it\n# publishes may come from a different host than the listed one — for eleven\n# models here the \"batch\" rate is dearer than the interactive rate, up to 4x on\n# the open-weights ones. Those pairs are not a discount, they are two sellers.\n# The numbers are carried as published; nothing here assumes batch is cheaper.\n#\n# A `:free` id is this vendor's own marker for a model served at no charge, and\n# unlike `:batch` it is a real wire id. Those models carry\n# `billing_mode = \"free\"` so failover will not quietly move a free request onto\n# a metered sibling. The route's `per_token` below is the default for everything\n# that does not say otherwise.\n#\n# \"Free\" is not inferred from a zero price anywhere, and must not be: several\n# models here and on other presets are priced at zero because a subscription\n# already covers them. Those are covered, not free.\n#\n# What this does not model: the free tier carries its own request-rate caps,\n# which the catalog does not publish.\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"reasoning_object\", fast = \"priority\" }\nfeatures = { thinking = \"supported\", budget = { support = \"supported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"supported\", sources = [\"https://openrouter.ai/docs/guides/best-practices/reasoning-tokens\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [\"https://openrouter.ai/docs/guides/features/service-tiers\"] }\n\nregions = [\"international\"]\nprovider_id = \"openrouter\"\nbase_url = \"https://openrouter.ai/api/v1\"\nprotocol = \"open_ai_chat\"\nauth = \"api_key\"\ncredential_env = \"OPENROUTER_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"OpenRouter\"\ndescription = \"An aggregator: one key, many vendors' models, one wire.\"\nconsole_url = \"https://openrouter.ai\"\napi_key_url = \"https://openrouter.ai/settings/keys\"\ndocs_url = \"https://openrouter.ai/docs\"\ncredential_hint = \"sk-or-\"\n\nextra = { web_search = \"openrouter\" }\n\n[[model]]\nid = \"openrouter/auto\"\nname = \"Auto Router\"\ndescription = \"The Auto Router automatically selects the best model for your prompt, powered by the wisdom of the market. It routes you based on what the OpenRouter community collectively spends on...\"\nrelease_date = \"2023-11-08\"\ninput_modalities = [\"text\", \"image\", \"audio\", \"file\", \"video\"]\noutput_modalities = [\"text\", \"image\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\n\n[model.pricing]\nsource = \"models.dev\"\n\n\n[model.features]\nthinking = \"supported\"\nfast = \"unknown\"\nsources = [\"https://openrouter.ai/docs/guides/best-practices/reasoning-tokens\"]\n\n",
         "sha256": "e92bad2c9a57ac3cd974603a5bbc57f6994ad64dcb7c2631a8ddcf1c43805e80"
       }
+    },
+    {
+      "id": "xai",
+      "name": "xAI Grok",
+      "description": "First-party Grok models over an OpenAI-compatible wire.",
+      "baseUrl": "https://api.x.ai/v1",
+      "protocol": "open_ai_chat",
+      "enabled": true,
+      "order": 11,
+      "regions": [
+        "international"
+      ],
+      "defaultModelId": "grok-4.20",
+      "requiredCapabilities": [
+        "catalog.execution_definition.v1",
+        "protocol.open_ai_chat"
+      ],
+      "executionDefinition": {
+        "format": "llm-client-preset-toml",
+        "source": "# This vendor also speaks both wires behind one key, so its second entry is a\n# connection rather than a provider.\ndeferred = { mode = \"enabled\", value = { api = \"xai_chat\", endpoint = \"https://api.x.ai/v1/chat/completions\", results_endpoint = \"https://api.x.ai/v1/chat/deferred-completion\", auth = { type = \"bearer\" } } }\n\n# Inference controls are endpoint contracts, separate from catalog model facts.\ninference = { reasoning = \"open_ai_chat\", fast = \"priority\" }\nfeatures = { thinking = \"supported\", budget = { support = \"unsupported\", dynamic = \"unsupported\" }, effort = { support = \"supported\" }, fast = \"supported\", sources = [\"https://docs.x.ai/developers/model-capabilities/text/reasoning\"] }\npricing_info = { currencies = [\"USD\"], units = [\"per_million_tokens\"], dimensions = [\"model\", \"service_tier\", \"submission\", \"input_tokens\", \"time\"], sources = [\"https://docs.x.ai/developers/pricing\"] }\n\nregions = [\"international\"]\nprovider_id = \"xai\"\nbase_url = \"https://api.x.ai/v1\"\nprotocol = \"open_ai_chat\"\ndecisions = { implementation = \"structured_output\", text = true, image = false }\nauth = \"api_key\"\ncredential_env = \"XAI_API_KEY\"\nbilling_mode = \"per_token\"\n\ndisplay_name = \"xAI Grok\"\ndescription = \"First-party Grok models over an OpenAI-compatible wire.\"\nconsole_url = \"https://console.x.ai\"\napi_key_url = \"https://console.x.ai\"\ndocs_url = \"https://docs.x.ai\"\nconnection = { group = \"xai\", connection_id = \"openai\", order = 0, protocol_profiles = { open_ai_responses = \"grok-responses\", anthropic_messages = \"grok-anthropic\" } }\n# catalog provenance: derived from the aggregator slice by stripping its x-ai/ qualifier; this vendor publishes no first-party slice, and the prices are the aggregator's\n\n[extra]\nreasoning_tokens_separate = true\n\n[[model]]\nid = \"grok-4.20\"\nname = \"Grok 4.20\"\ndescription = \"Grok 4.20 is a reasoning model from SpaceXAI with industry-leading speed and agentic tool calling capabilities. It combines the lowest hallucination rate on the market with strict prompt adherance, delivering...\"\nrelease_date = \"2026-03-31\"\ncontext_window = 2000000\nmax_output = 1800000\ninput_modalities = [\"text\", \"image\", \"file\"]\noutput_modalities = [\"text\"]\ntool_call = true\nreasoning = true\nstructured_output = true\ntemperature = true\nattachment = true\n\n[model.pricing]\ninput_per_million = 1.25\noutput_per_million = 2.5\ncache_read_per_million = 0.19999999999999998\nsource = \"models.dev via aggregator\"\n\n\n[[model.pricing.rules]]\nservice_tier = \"fast\"\nmultiplier = { factor = 2.0, buckets = [\"input\", \"output\", \"cache_read\", \"cache_write\", \"cache_write_1h\", \"reasoning\"] }\nsource = \"https://docs.x.ai/developers/pricing\"\nverified_at = \"2026-09-24\"\n\n[model.features]\nthinking = \"supported\"\nfast = \"supported\"\nsources = [\"https://docs.x.ai/developers/model-capabilities/text/reasoning\"]\nbudget = { support = \"unsupported\", dynamic = \"unsupported\" }\n\n",
+        "sha256": "baf8cf80bf2eba6bd5769b0608ef6d06c63762fc005a4988af3ccdfa996d0267"
+      }
     }
   ],
   "models": [
@@ -1189,6 +1211,45 @@
         "image"
       ],
       "pricing": null
+    },
+    {
+      "providerId": "xai",
+      "id": "grok-4.20",
+      "name": "Grok 4.20",
+      "description": "Grok 4.20 is a reasoning model from SpaceXAI with industry-leading speed and agentic tool calling capabilities. It combines the lowest hallucination rate on the market with strict prompt adherance, delivering...",
+      "status": "active",
+      "requiredCapabilities": [],
+      "order": 25,
+      "platforms": [
+        "desktop",
+        "android",
+        "ios",
+        "cli"
+      ],
+      "minAppVersion": "0.0.0",
+      "maxAppVersion": null,
+      "contextWindow": 2000000,
+      "maxOutputTokens": 1800000,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "audio": false
+      },
+      "inputModalities": [
+        "text",
+        "image",
+        "file"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "pricing": {
+        "currency": "USD",
+        "inputPerMillion": 1.25,
+        "outputPerMillion": 2.5,
+        "cacheReadPerMillion": 0.19999999999999998
+      }
     }
   ]
 }
