@@ -54,14 +54,19 @@ fn protocol_schema_unavailable() -> AppError {
     ))
 }
 
+/// Native host identity for an app invocation and its admitted tasks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Owner {
+    /// Stable identifier of the owning app.
     pub app_id: String,
+    /// Lowercase 64-character digest identifying the owning app release.
     pub release_digest: String,
+    /// Host-provided identifier of the invocation holding this authority.
     pub invocation_id: String,
 }
 impl Owner {
+    /// Reject malformed app, release, or invocation identifiers.
     pub fn validate(&self) -> Result<(), AppError> {
         if !valid_app_id(&self.app_id)
             || !valid_hex(&self.release_digest, 64)
@@ -86,19 +91,27 @@ fn valid_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Host-approved identity of a builtin or MCP tool.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ToolGrant {
+    /// A builtin tool identified by its exact public name.
     Builtin {
+        /// Builtin tool name.
         name: String,
     },
+    /// An MCP tool bound to a specific server configuration and definition.
     Mcp {
+        /// Host identifier of the server configuration.
         #[serde(rename = "serverConfigId")]
         server_config_id: String,
+        /// Revision of the server configuration approved by the host.
         #[serde(rename = "configRevision")]
         config_revision: String,
+        /// Tool name as supplied by the MCP server.
         #[serde(rename = "rawToolName")]
         raw_tool_name: String,
+        /// Digest of the approved tool definition.
         #[serde(rename = "definitionDigest")]
         definition_digest: String,
     },
@@ -107,20 +120,28 @@ pub enum ToolGrant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Model {
+    /// Exact provider identifier selected by the host.
     pub provider_id: String,
+    /// Exact model identifier selected by the host.
     pub model_id: String,
 }
 
+/// Host-approved model, capabilities, and execution limits for an app.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
+    /// Provider and model selected for admitted tasks.
     pub model: Model,
+    /// Public tool IDs mapped to their approved tool identities.
     pub tools: BTreeMap<String, ToolGrant>,
     /// Host-approved, release-declared Skill IDs. Skills do not add tools.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Host setting for background execution.
     pub background: bool,
+    /// Maximum model turns permitted for a task.
     pub max_turns: u32,
+    /// Maximum task duration in milliseconds.
     pub timeout_ms: u64,
 }
 impl Settings {
@@ -147,68 +168,95 @@ impl Settings {
     }
 }
 
+/// Task input accepted for admission after host-side validation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Input {
+    /// Caller-visible request identifier used for admission deduplication.
     pub request_id: String,
     /// Public AG-UI thread identity, kept inside the private task ledger so a
     /// duplicate runId cannot be replayed against another thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_thread_id: Option<String>,
+    /// Optional public parent run identifier from the AG-UI request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_parent_run_id: Option<String>,
+    /// Optional fingerprint of the complete public AG-UI request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_input_digest: Option<String>,
+    /// Optional digest of the public request's final user message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_message_sha256: Option<String>,
     /// Host-only snapshot of the committed Chat history used for normalization.
     /// Never accepted from page JSON or included in a persisted request digest.
     #[serde(skip)]
     pub protocol_history_digest: Option<String>,
+    /// Prompt text supplied for the task.
     pub prompt: String,
+    /// Private input attachments supplied with the prompt.
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     /// Ordered content produced by the public AG-UI normalizer. Native model
     /// adapters also accept the bounded private prompt/attachments DTO.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_parts: Vec<InputContentPart>,
+    /// Optional schema requested for structured output.
     #[serde(default)]
     pub output_schema: Option<Value>,
+    /// Public tool IDs requested for this task.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Skill IDs requested for this task.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Optional turn limit bounded by the host setting.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Optional timeout in milliseconds bounded by the host setting.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
+/// One ordered text or attachment part normalized from AG-UI input.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum InputContentPart {
+    /// A text part.
     Text {
+        /// Text supplied in this part.
         text: String,
     },
+    /// An inline attachment part.
     Attachment {
+        /// Attachment name.
         name: String,
+        /// Attachment media type.
         #[serde(rename = "mediaType")]
         media_type: String,
+        /// Base64-encoded attachment data.
         base64: String,
     },
 }
+/// Private inline attachment supplied as task input.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Attachment {
+    /// Attachment name.
     pub name: String,
+    /// Attachment media type.
     pub media_type: String,
+    /// Base64-encoded attachment data.
     pub base64: String,
 }
 
+/// Attachment details retained without the attachment bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AttachmentMetadata {
+    /// Attachment name.
     pub name: String,
+    /// Attachment media type.
     pub media_type: String,
+    /// Decoded attachment size in bytes.
     pub size: u64,
 }
 
@@ -219,25 +267,32 @@ where
     Value::deserialize(deserializer).map(Some)
 }
 
+/// Public result returned by a completed task.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskResult {
+    /// Text produced by the task, if any.
     #[serde(default)]
     pub text: String,
+    /// Optional structured JSON output, including an explicitly present null.
     #[serde(
         default,
         deserialize_with = "deserialize_present_json",
         skip_serializing_if = "Option::is_none"
     )]
     pub output: Option<Value>,
+    /// Attachment values reported with the result.
     #[serde(default)]
     pub attachments: Vec<Value>,
+    /// Optional chat associated with the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    /// Optional message associated with the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
 }
 
+/// Confirmed task progress and its configured turn ceiling.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskProgress {
@@ -252,45 +307,69 @@ pub struct TaskProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatTranscriptCheckpoint {
+    /// Length of the sealed transcript in bytes.
     pub byte_len: u64,
+    /// SHA-256 digest of the sealed transcript bytes.
     pub sha256: String,
 }
 
+/// Lifecycle state of an admitted task.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum State {
+    /// The task is admitted and awaiting execution.
     Queued,
+    /// The task is executing.
     Running,
+    /// The task completed successfully.
     Succeeded,
+    /// The task ended with an error.
     Failed,
+    /// Execution was cancelled.
     Cancelled,
+    /// Execution or publication was interrupted.
     Interrupted,
 }
 impl State {
+    /// Return whether the task has left queued and running states.
     pub fn terminal(&self) -> bool {
         !matches!(self, Self::Queued | Self::Running)
     }
 }
 
+/// Durable public snapshot of an admitted task.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Task {
+    /// Host-generated task identifier.
     pub run_id: String,
+    /// Public request identifier associated with the task.
     pub request_id: String,
+    /// Current task lifecycle state.
     pub state: State,
+    /// Task snapshot sequence number.
     pub sequence: u64,
+    /// Optional description of the current execution phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Optional confirmed execution progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<TaskProgress>,
+    /// Creation time in milliseconds since the Unix epoch.
     pub created_at: u64,
+    /// Most recent update time in milliseconds since the Unix epoch.
     pub updated_at: u64,
+    /// Model selected when the task was admitted.
     pub model: Model,
+    /// Execution limits selected when the task was admitted.
     pub limits: Limits,
+    /// Result of a successful task, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<TaskResult>,
+    /// Optional usage data reported for the task.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
+    /// Optional stable error describing the task outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<TaskError>,
 }
@@ -305,42 +384,62 @@ pub struct TaskListPage {
     /// Public request ID of the last task when another page is available.
     pub next_cursor: Option<String>,
 }
+/// Turn and duration limits fixed for an admitted task.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Limits {
+    /// Maximum permitted model turns.
     pub max_turns: u32,
+    /// Maximum permitted task duration in milliseconds.
     pub timeout_ms: u64,
 }
+/// Stable task error code and page-facing explanation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskError {
+    /// Machine-readable task error code.
     pub code: String,
+    /// Human-readable task error message.
     pub message: String,
 }
 
+/// Current state of an app-owned chat.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChatState {
+    /// No turn is currently active.
     Idle,
+    /// A turn is currently active.
     Running,
+    /// The chat requires attention after an interrupted turn.
     Interrupted,
 }
 
+/// Public metadata for an app-owned chat.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSummary {
+    /// Stable chat identifier.
     pub chat_id: String,
+    /// Display title for the chat.
     pub title: String,
+    /// Creation time in milliseconds since the Unix epoch.
     pub created_at: u64,
+    /// Most recent update time in milliseconds since the Unix epoch.
     pub updated_at: u64,
+    /// Whether the chat has been archived.
     pub archived: bool,
+    /// Current chat state.
     pub state: ChatState,
 }
 
+/// Role associated with a chat message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChatRole {
+    /// A message supplied by the user.
     User,
+    /// A message produced by the assistant.
     Assistant,
 }
 
@@ -692,22 +791,32 @@ pub struct ProtocolCommitPermit<'a> {
 /// change, including when no grant is currently stored for the release.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ConfigureResult {
+    /// Whether the grant changed; an explicit revoke always counts as a change.
     pub changed: bool,
+    /// Nonterminal task IDs affected by the grant change.
     pub affected_run_ids: Vec<String>,
 }
 /// Newly accepted tasks execute exactly once; duplicates only return a snapshot.
 pub struct Admission {
+    /// Newly admitted task or the existing duplicate's snapshot.
     pub task: Task,
+    /// Whether the caller should start execution for this admission.
     pub start: bool,
+    /// Tool grants selected for the request.
     pub tools: BTreeMap<String, ToolGrant>,
+    /// Skill IDs selected for the request.
     pub skills: Vec<String>,
+    /// Optional chat associated with the admitted task.
     pub chat_id: Option<String>,
 }
 
+/// Bounded page of persisted AG-UI events and its replay cursor.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolEventPage {
+    /// Events after the requested cursor, in stored order.
     pub events: Vec<Value>,
+    /// Last returned transport sequence, or the requested cursor for an empty page.
     pub sequence: u64,
 }
 
@@ -1075,6 +1184,7 @@ pub fn error_message(code: &str) -> &'static str {
 }
 
 impl AgentStore {
+    /// Open or initialize the private task ledger and reconcile stored events.
     pub fn open(root: &Path) -> Result<Self, AppError> {
         Self::open_with_event_validator(root, protocol::validate_event)
     }
@@ -1604,6 +1714,7 @@ impl AgentStore {
             affected_run_ids: affected,
         })
     }
+    /// Return settings granted to this owner's app and release, if any.
     pub fn settings(&self, owner: &Owner) -> Result<Option<Settings>, AppError> {
         owner.validate()?;
         let ledger = self.lock_ledger()?;
@@ -1613,6 +1724,7 @@ impl AgentStore {
             .filter(|g| g.owner.release_digest == owner.release_digest)
             .map(|g| g.settings.clone()))
     }
+    /// Admit a task with declared tools and no chat or declared skills.
     pub fn admit(
         &self,
         owner: &Owner,
@@ -1810,6 +1922,7 @@ impl AgentStore {
             })
         })
     }
+    /// Read an app-and-release-scoped task by its host task ID.
     pub fn get(&self, owner: &Owner, id: &str) -> Result<Task, AppError> {
         let _commit = self
             .protocol_commit
@@ -2068,10 +2181,12 @@ impl AgentStore {
         }
         Ok((record.task.clone(), checkpoint))
     }
+    /// Read an app-and-release-scoped task by its public request ID.
     pub fn get_by_request(&self, owner: &Owner, run_id: &str) -> Result<Task, AppError> {
         let id = self.task_id_for_request(owner, run_id)?;
         self.get(owner, &id)
     }
+    /// Return the stored AG-UI request fingerprint for a public request ID.
     pub fn protocol_input_fingerprint(
         &self,
         owner: &Owner,
@@ -2094,6 +2209,7 @@ impl AgentStore {
             .clone()
             .ok_or_else(|| AppError::NotFound("AG-UI request fingerprint".into()))
     }
+    /// Return the public AG-UI thread bound to an app-and-release-scoped request.
     pub fn thread_id_for_request(&self, owner: &Owner, run_id: &str) -> Result<String, AppError> {
         owner.validate()?;
         let ledger = self.lock_ledger()?;
