@@ -666,7 +666,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         &mut tracking,
                         instructions.as_ref(),
                         (token_gap > 0).then_some(token_gap),
-                        None,
+                        Some(ConversationOrchestrator::new_compaction_api_budget()),
                     );
                     if let Some(cancel) = cancel.as_ref() {
                         tokio::select! {

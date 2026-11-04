@@ -847,6 +847,12 @@ fn native_synthetic_assistant_text(message: &ConversationMessage) -> bool {
 }
 
 impl ConversationOrchestrator {
+    /// Use Native's bounded validation path so an untagged model reply never
+    /// replaces committed history. The shared budget also bounds PTL retries.
+    pub(crate) fn new_compaction_api_budget() -> llm_runtime::ApiAttemptsLeft {
+        llm_runtime::ApiAttemptsLeft::new(5)
+    }
+
     /// Refresh configured model-selection inputs after a live settings reload.
     /// A session pick remains authoritative until a later user selection; the
     /// managed restriction is always refreshed because policy edits apply to
@@ -2050,7 +2056,7 @@ impl ConversationOrchestrator {
                                 result = compactor.process_forced(
                                     source_messages.clone(),
                                     instructions.as_ref(),
-                                    None,
+                                    Some(Self::new_compaction_api_budget()),
                                 ) => result.map_err(|error| {
                                     hooks::mods::ModError::Native(Self::summarize_error(error))
                                 })?,
@@ -4001,7 +4007,7 @@ impl ConversationOrchestrator {
             None
         };
         let operation_cancel_for_core = operation_cancel.clone();
-        let token_budget = api_attempts_left.clone();
+        let token_budget = Some(api_attempts_left.unwrap_or_else(Self::new_compaction_api_budget));
         let core: SessionCompactCore = std::sync::Arc::new(move |source_messages, instructions| {
             let cancel = operation_cancel_for_core.clone();
             let tracking = tracking_for_core.clone();

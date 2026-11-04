@@ -1036,3 +1036,80 @@ async fn an_ordinary_compact_boundary_keeps_the_three_arg_shape() {
     assert_eq!(metadata.user_context, None);
     assert_eq!(metadata.messages_summarized, None);
 }
+
+struct InvalidSummaryClient {
+    requests: std::sync::Mutex<Vec<sidequery::SideQueryRequest>>,
+}
+
+#[async_trait::async_trait]
+impl sidequery::SideQueryClient for InvalidSummaryClient {
+    async fn query(
+        &self,
+        request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(sidequery::SideQueryResponse {
+            text: Some("c8v6h".into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn manual_compact_rejects_untagged_replies_and_preserves_exact_history() {
+    let client = Arc::new(InvalidSummaryClient {
+        requests: Default::default(),
+    });
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "test-compact-model".into()),
+    );
+    let compactor = Arc::new(CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        1_000,
+    ));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor);
+    seed_history(&orch, 20).await;
+    let before = serde_json::to_value(&orch.session().lock().await.history).unwrap();
+    let error = orch
+        .force_compact()
+        .await
+        .expect_err("untagged replies must not commit");
+    assert!(error.to_string().contains("no <summary> block"), "{error}");
+    let after = serde_json::to_value(&orch.session().lock().await.history).unwrap();
+    assert_eq!(
+        after, before,
+        "failed compact must retain every original message and ID"
+    );
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one summary request and one native re-ask"
+    );
+    let first = requests[0]
+        .api_attempts_left
+        .as_ref()
+        .expect("finite operation budget");
+    assert!(first.shares_scope_with(requests[1].api_attempts_left.as_ref().unwrap()));
+    let original_prompt = requests[0].messages.last().unwrap().text_content();
+    let retry_prompt = requests[1].messages.last().unwrap().text_content();
+    assert!(retry_prompt.starts_with(&original_prompt));
+    assert!(retry_prompt.len() > original_prompt.len());
+}

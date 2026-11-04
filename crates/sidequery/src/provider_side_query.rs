@@ -3028,6 +3028,93 @@ mod tests {
         assert_eq!(bodies.len(), 1);
         assert_eq!(bodies[0]["stream"], true);
     }
+    #[tokio::test]
+    async fn responses_compaction_http_preserves_the_last_summary_request() {
+        let summary = "<summary>dictionary: p9l4s=m6q1z; h1y6d=f8p2w</summary>";
+        let output = serde_json::json!({"type":"message","id":"msg_summary","role":"assistant","status":"completed","content":[{"type":"output_text","text":summary,"annotations":[]}]});
+        for provider_name in ["openai", "openai-chatgpt"] {
+            let transport = Arc::new(StreamStubTransport {
+            frames: vec![
+                serde_json::json!({"type":"response.created","response":{"id":"resp_summary","model":"gpt-6-luna","status":"in_progress","output":[]}}).to_string(),
+                serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_summary","role":"assistant","content":[]}}).to_string(),
+                serde_json::json!({"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"msg_summary","part":{"type":"output_text","text":"","annotations":[]}}).to_string(),
+                serde_json::json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_summary","delta":summary}).to_string(),
+                serde_json::json!({"type":"response.output_item.done","output_index":0,"item":output}).to_string(),
+                serde_json::json!({"type":"response.completed","response":{"id":"resp_summary","model":"gpt-6-luna","status":"completed","output":[output],"usage":{"input_tokens":10,"output_tokens":10,"total_tokens":20}}}).to_string(),
+            ],
+            received_bodies: Mutex::new(Vec::new()),
+        });
+            let mut provider = llm_runtime::builtin_presets()
+                .providers
+                .into_iter()
+                .find(|provider| {
+                    provider.profile_name == provider_name
+                        && provider.protocol == ProtocolFamily::OpenAiResponses
+                })
+                .expect("OpenAI Responses profile");
+            provider.auth = AuthStrategy::None;
+            provider.credential = CredentialConfig::None;
+            provider.supports_websockets = false;
+            let runtime = ModelRuntime::from_config(ClientConfig {
+                providers: vec![provider],
+            })
+            .unwrap();
+            let service = llm_runtime::ApiService::new(
+                Arc::new(runtime),
+                transport.clone(),
+                Default::default(),
+                Default::default(),
+                "test",
+                None,
+                None,
+            );
+            let client = ProviderSideQueryClient::from_service(Arc::new(service));
+            let mut request = req(None);
+            request.model = "gpt-6-luna".into();
+            request.query_source = QuerySource::Compaction;
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../compaction/tests/fixtures/claude_2_1_318_compact.json"
+            ))
+            .unwrap();
+            let prompt = fixture["prompts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["custom"].is_null())
+                .unwrap()["expected"]
+                .as_str()
+                .unwrap();
+            let mut message = ConversationMessage::user(MessageId::new(), String::new());
+            if let ConversationMessage::User { content, .. } = &mut message {
+                *content = vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                    text: prompt.into(),
+                    utf16_code_units: prompt.encode_utf16().collect(),
+                    citations: None,
+                }];
+            }
+            request.messages = vec![
+                ConversationMessage::user(MessageId::new(), "What is the value of p9l4s?".into()),
+                message,
+            ];
+            let response = client.query(request).await.unwrap();
+            assert_eq!(response.text.unwrap().string_at(""), Some(summary));
+            let bodies = transport.received_bodies.lock().unwrap();
+            assert_eq!(bodies.len(), 1);
+            let input = bodies[0]["input"].as_array().unwrap();
+            assert_eq!(
+                input.last().unwrap()["content"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["text"],
+                prompt,
+                "{:#}",
+                bodies[0]
+            );
+            assert!(bodies[0].get("previous_response_id").is_none());
+        }
+    }
+
     #[test]
     fn compact_response_selection_matches_official_318_oracle() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(

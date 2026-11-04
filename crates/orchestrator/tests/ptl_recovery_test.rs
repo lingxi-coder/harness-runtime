@@ -275,6 +275,32 @@ async fn failed_reactive_summary_keeps_all_original_messages_and_does_not_retry(
         .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
 }
 
+#[tokio::test]
+async fn untagged_reactive_summary_reasks_then_preserves_all_original_messages() {
+    let api = Arc::new(PtlMockApi::new(vec![ptl_err(1)]));
+    let summary = Arc::new(SummaryClient {
+        result: Ok("c8v6h"),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let (orch, output) = make_orch(api.clone(), Some(summary.clone()));
+    seed_rounds(&orch, 8).await;
+    let before = orch.session().lock().await.history.clone();
+    orch.run_turn("trigger").await.unwrap();
+    assert_eq!(
+        output.compaction_phase_snapshot().await,
+        ["preparing", "summarizing", "error"]
+    );
+    assert_eq!(summary.requests.lock().unwrap().len(), 2);
+    assert_eq!(api.call_lens().await.len(), 1);
+    assert_eq!(orch.session().lock().await.history[..before.len()], before);
+    assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text.string_at("") == Some("Prompt is too long · automatic compaction failed: Failed to generate conversation summary - the model's reply has no <summary> block"))));
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
+}
+
 fn input_budget_error() -> LlmError {
     LlmError::InputBudgetExceeded {
         input_tokens: 300000,
