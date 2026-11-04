@@ -9891,6 +9891,10 @@ mod protocol_retry_tests {
         let timestamp = "2026-10-28T12:00:00.000Z";
         let rows = vec![
             json!({
+                "type":"fixed-session-mode", "sessionId":session_id,
+                "sessionMode":"chat", "instructionEpoch":0
+            }),
+            json!({
                 "type":"user","uuid":first_task_uuid,"parentUuid":null,
                 "sessionId":session_id,"timestamp":timestamp,"cwd":cwd,
                 "message":{"role":"user","content":"read a file"}

@@ -1652,11 +1652,17 @@ mod resume_guard_tests {
         let attachment_id = Uuid::new_v4();
         let result_uuid = Uuid::new_v4();
         let cwd = root.path().to_string_lossy().to_string();
-        let mut rows: Vec<Value> = vec![json!({
-            "type": "user", "uuid": user_id, "parentUuid": null,
-            "sessionId": session_id, "timestamp": "2026-10-27T01:00:00.000Z", "cwd": cwd,
-            "message": {"role": "user", "content": "inspect the saved session"}
-        })];
+        let mut rows: Vec<Value> = vec![
+            json!({
+                "type": "fixed-session-mode", "sessionId": session_id,
+                "sessionMode": "chat", "instructionEpoch": 0
+            }),
+            json!({
+                "type": "user", "uuid": user_id, "parentUuid": null,
+                "sessionId": session_id, "timestamp": "2026-10-27T01:00:00.000Z", "cwd": cwd,
+                "message": {"role": "user", "content": "inspect the saved session"}
+            }),
+        ];
         if deferred {
             rows.push(json!({
                 "type": "assistant", "uuid": assistant_id, "parentUuid": user_id,
