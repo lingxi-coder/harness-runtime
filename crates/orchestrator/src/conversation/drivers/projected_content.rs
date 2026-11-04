@@ -832,8 +832,10 @@ mod tests {
                 root.path().to_path_buf(),
             )
             .with_jsonl_writer(writer)
-            .with_session_id(session_id),
+            .with_session_id(session_id)
+            .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat),
         );
+        orch.initialize_conversation_mode().await.unwrap();
 
         let first_id = MessageId::new();
         let first = Utf16JsonProjection::from_serde_value(&serde_json::json!([
