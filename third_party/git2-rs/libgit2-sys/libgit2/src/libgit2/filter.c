@@ -93,10 +93,10 @@ static int filter_def_scan_attrs(
 			if (has_eq || *start == '-' || *start == '+' || *start == '!')
 				(*nmatch)++;
 
-			if (has_eq)
-				git_str_putc(attrs, '=');
-			git_str_put(attrs, start, scan - start);
-			git_str_putc(attrs, '\0');
+			if ((has_eq && git_str_putc(attrs, '=') < 0) ||
+			    git_str_put(attrs, start, scan - start) < 0 ||
+			    git_str_putc(attrs, '\0') < 0)
+				return -1;
 		}
 	}
 
@@ -148,26 +148,40 @@ static int filter_def_filter_key_check(const void *key, const void *fdef)
 	return (key == filter) ? 0 : -1;
 }
 
+static void filter_def_free(git_filter_def *fdef)
+{
+	if (!fdef)
+		return;
+
+	git__free(fdef->filter_name);
+	git__free(fdef->attrdata);
+	git__free(fdef);
+}
+
 /* Note: callers must lock the registry before calling this function */
 static int filter_registry_insert(
 	const char *name, git_filter *filter, int priority)
 {
-	git_filter_def *fdef;
+	git_filter_def *fdef = NULL;
 	size_t nattr = 0, nmatch = 0, alloc_len;
 	git_str attrs = GIT_STR_INIT;
+	int error = -1;
 
 	if (filter_def_scan_attrs(&attrs, &nattr, &nmatch, filter->attributes) < 0)
-		return -1;
+		goto done;
 
-	GIT_ERROR_CHECK_ALLOC_MULTIPLY(&alloc_len, nattr, 2);
-	GIT_ERROR_CHECK_ALLOC_MULTIPLY(&alloc_len, alloc_len, sizeof(char *));
-	GIT_ERROR_CHECK_ALLOC_ADD(&alloc_len, alloc_len, sizeof(git_filter_def));
+	if (GIT_MULTIPLY_SIZET_OVERFLOW(&alloc_len, nattr, 2) ||
+	    GIT_MULTIPLY_SIZET_OVERFLOW(&alloc_len, alloc_len, sizeof(char *)) ||
+	    GIT_ADD_SIZET_OVERFLOW(&alloc_len, alloc_len, sizeof(git_filter_def)))
+		goto done;
 
 	fdef = git__calloc(1, alloc_len);
-	GIT_ERROR_CHECK_ALLOC(fdef);
+	if (!fdef)
+		goto done;
 
 	fdef->filter_name = git__strdup(name);
-	GIT_ERROR_CHECK_ALLOC(fdef->filter_name);
+	if (!fdef->filter_name)
+		goto done;
 
 	fdef->filter      = filter;
 	fdef->priority    = priority;
@@ -177,23 +191,27 @@ static int filter_registry_insert(
 
 	filter_def_set_attrs(fdef);
 
-	if (git_vector_insert(&filter_registry.filters, fdef) < 0) {
-		git__free(fdef->filter_name);
-		git__free(fdef->attrdata);
-		git__free(fdef);
-		return -1;
-	}
+	if (git_vector_insert(&filter_registry.filters, fdef) < 0)
+		goto done;
 
 	git_vector_sort(&filter_registry.filters);
-	return 0;
+	fdef = NULL;
+	error = 0;
+
+done:
+	filter_def_free(fdef);
+	git_str_dispose(&attrs);
+	return error;
 }
 
 int git_filter_global_init(void)
 {
 	git_filter *crlf = NULL, *ident = NULL;
+	git_filter_def *fdef;
+	size_t pos;
 	int error = 0;
 
-	if (git_rwlock_init(&filter_registry.lock) < 0)
+	if (git_rwlock_init(&filter_registry.lock) != 0)
 		return -1;
 
 	if ((error = git_vector_init(&filter_registry.filters, 2,
@@ -213,6 +231,10 @@ int git_filter_global_init(void)
 
 done:
 	if (error) {
+		git_vector_foreach(&filter_registry.filters, pos, fdef)
+			filter_def_free(fdef);
+		git_vector_dispose(&filter_registry.filters);
+		git_rwlock_free(&filter_registry.lock);
 		git_filter_free(crlf);
 		git_filter_free(ident);
 	}

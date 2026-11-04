@@ -440,10 +440,16 @@ int git_socket_stream_global_init(void)
 	if (LOBYTE(wsa_data.wVersion) != 2 ||
 	    HIBYTE(wsa_data.wVersion) != 2) {
 		git_error_set(GIT_ERROR_SSL, "Windows Socket Library does not support Winsock 2.2");
+		WSACleanup();
 		return -1;
 	}
 
-	return git_runtime_shutdown_register(socket_stream_global_shutdown);
+	if (git_runtime_shutdown_register(socket_stream_global_shutdown) < 0) {
+		WSACleanup();
+		return -1;
+	}
+
+	return 0;
 }
 
 #else

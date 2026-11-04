@@ -457,10 +457,10 @@ fn decode_fork_response(
         response.text = compact_text;
     }
     ForkedSideQueryResponse {
-        request_id,
+        response,
         assistant_content,
         candidates,
-        response,
+        request_id,
     }
 }
 
