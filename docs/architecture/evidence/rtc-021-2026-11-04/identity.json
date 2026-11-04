@@ -16,7 +16,8 @@
     "media-tests.log.gz": "74d6255797956b1ac83dd0b81c84de9c814212f8a284da7204af0ee71f646a6b",
     "metadata.json": "58c49e9b80a187e40535ee649e89b6aceda22fabaa08630c667d54fe89d8728b",
     "server-probe.log.gz": "4506118634bb697f043b74b11261c2533e5378a5012dc44b9b8f7801c85d567d",
-    "turn-tests.log.gz": "48b0af85722e8851c1ef7da15243236e96ff230edea704c51975fc53f59d50b9"
+    "turn-tests.log.gz": "48b0af85722e8851c1ef7da15243236e96ff230edea704c51975fc53f59d50b9",
+    "coturn-entrypoint.log.gz": "dc2965a02be0708c38e902d7a20bfd027814570086940b6cfdb5cfeeab0727aa"
   },
   "uncompressed_log_sha256": {
     "core-tests.log": "7eb06624b4fbc43b4b6857e649f220ad76423e2eceb8fd6cc994501b1f80e210",
@@ -24,6 +25,7 @@
     "gstreamer-check.log": "1efa58bdc65a2f68f213c3e5ff566e9d3c6df2a92a419af51b38e91cc87f0d25",
     "media-tests.log": "69f242c88912be3decf7ade03d637c37984ce887bd8cabd5e90fc4dd0a6d3632",
     "server-probe.log": "05eb0f21c1027fab0e4feb6d4dd95a0e7d0b9f91269f3daca95974f97b2fc689",
-    "turn-tests.log": "c0834cfe91a7f7028381b4c1572ae7750daf131b3159e84f292108e00954792d"
+    "turn-tests.log": "c0834cfe91a7f7028381b4c1572ae7750daf131b3159e84f292108e00954792d",
+    "coturn-entrypoint.log": "03adff1b56abf814b67469ec56df50e962038e319f2ddb339aeda1a100813aeb"
   }
 }

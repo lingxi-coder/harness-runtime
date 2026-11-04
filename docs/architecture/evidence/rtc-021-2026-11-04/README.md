@@ -21,8 +21,10 @@ was locked and offline; `metadata.json` is its all-features dependency graph.
   allocations closed and recreated on the same source port. `coturn.log.gz` contains
   the unmodified fixture output. Only the task-owned container and network were
   removed afterwards. The server logged an unnamed `Unknown argument` at
-  startup, despite subsequently allocating and releasing relays; its cause
-  was not determined.
+  startup. The image entrypoint evaluates `echo -n` to an empty argument;
+  `coturn-entrypoint.log.gz` reproduces that expansion without networking.
+  The fixture log confirms the image found no config file, then allocated and
+  released the tested relays using the explicit command-line settings.
 * `cargo check --locked --offline -p lingxi-webrtc-media --tests --features
   gstreamer-media` passed. The repository's `python3 scripts/test-media.py`
   passed 53 media and three mobile tests with its restricted plugin set,
