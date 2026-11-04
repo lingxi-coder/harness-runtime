@@ -4,6 +4,7 @@
 use super::*;
 use std::collections::BTreeSet;
 
+/// Host-selected recovery generation and the transcript frontier it retains.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatRecoveryFrontier {
@@ -17,21 +18,27 @@ pub struct ChatRecoveryFrontier {
 }
 
 impl ChatRecoveryFrontier {
+    /// Return the successful base task, if the frontier retains a checkpoint.
     pub fn base_task_id(&self) -> Option<&str> {
         self.base_task_id.as_deref()
     }
+    /// Return the chat whose history this frontier governs.
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
+    /// Return this recovery generation's identifier.
     pub fn generation(&self) -> &str {
         &self.generation
     }
+    /// Return the previous active generation, if one existed.
     pub fn source_generation(&self) -> Option<&str> {
         self.source_generation.as_deref()
     }
+    /// Return the sealed transcript checkpoint retained by the frontier.
     pub fn checkpoint(&self) -> Option<&ChatTranscriptCheckpoint> {
         self.checkpoint.as_ref()
     }
+    /// Return terminal unsuccessful runs excluded by this recovery frontier.
     pub fn abandoned_run_ids(&self) -> &BTreeSet<String> {
         &self.abandoned_run_ids
     }
@@ -144,6 +151,7 @@ pub(super) fn validate_records(ledger: &Ledger) -> Result<(), AppError> {
 }
 
 impl AgentStore {
+    /// Return attempts in the active frontier for this owner's app and chat.
     pub fn archived_chat_attempts(
         &self,
         owner: &Owner,
@@ -165,6 +173,7 @@ impl AgentStore {
             .collect())
     }
 
+    /// Check for a pending recovery or an unarchived unsuccessful terminal run.
     pub fn chat_requires_recovery(&self, app_id: &str, chat_id: &str) -> Result<bool, AppError> {
         let ledger = self.lock_ledger()?;
         Ok(pending(&ledger, chat_id)

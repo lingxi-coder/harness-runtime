@@ -29,9 +29,12 @@ static RUN_INPUT_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new(
 static MESSAGE_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 static EVENT_VALIDATOR: OnceLock<Result<Validator, String>> = OnceLock::new();
 
+/// A stable protocol error code and its page-facing message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtocolError {
+    /// Machine-readable reason for rejecting the protocol value.
     pub code: &'static str,
+    /// Human-readable explanation suitable for returning to the caller.
     pub message: &'static str,
 }
 
@@ -53,8 +56,11 @@ fn error(code: &'static str, message: &'static str) -> ProtocolError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolMessageDigest {
+    /// Public identifier of the protocol message.
     pub id: String,
+    /// Protocol role associated with the message.
     pub role: String,
+    /// SHA-256 of the normalized complete message.
     pub sha256: String,
 }
 
@@ -69,9 +75,13 @@ pub fn history_fingerprint(messages: &[ProtocolMessageDigest]) -> String {
 /// Normalized run data after schema, options and canonical-history checks.
 #[derive(Clone, Debug)]
 pub struct NormalizedInput {
+    /// Public AG-UI thread identifier.
     pub thread_id: String,
+    /// Public AG-UI run identifier.
     pub run_id: String,
+    /// Optional public identifier of the parent run.
     pub parent_run_id: Option<String>,
+    /// Private task input produced by normalization.
     pub input: Input,
     /// The official final UserMessage, retained for the private chat journal.
     pub user_message: Value,
@@ -137,6 +147,7 @@ pub fn run_input_fingerprint(value: &Value) -> Result<String, ProtocolError> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// Validate a run request and return its bounded public run identifier.
 pub fn run_id(value: &Value) -> Result<String, ProtocolError> {
     validate_run_agent_input(value)?;
     value
@@ -156,6 +167,7 @@ pub fn validate_message(value: &Value) -> Result<(), ProtocolError> {
         .map_err(|_| error("invalid_agui_message", "The AG-UI message is invalid."))
 }
 
+/// Validate an AG-UI event against the pinned protocol schema.
 pub fn validate_event(value: &Value) -> Result<(), ProtocolError> {
     validator(&EVENT_VALIDATOR, None)?
         .validate(value)
