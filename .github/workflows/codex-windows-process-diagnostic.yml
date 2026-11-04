@@ -20,9 +20,12 @@ jobs:
         run: git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Restore the baseline Windows file access on the runner
+      - name: Record native Windows owner controls
+        shell: pwsh
+        run: .github/scripts/windows_owner_diagnostic.ps1
+      - name: Restore baseline Windows file and directory creation behavior
         run: python .github/scripts/windows_process_diagnostic.py baseline
-      - name: Confirm baseline file access and process stop failures
+      - name: Confirm baseline access, stop, and directory owner failures
         shell: bash
         run: |
           set -euo pipefail
@@ -31,11 +34,15 @@ jobs:
           rooted_status=${PIPESTATUS[0]}
           cargo test --locked -p platform-windows --lib process::background::foreground_stop_tests::native_job_stop_reports_waited_status_before_exit -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/stop-before.log"
           stop_status=${PIPESTATUS[0]}
+          cargo test --locked -p platform-windows --lib process::supervisor_native::tests::private_supervisor_directory_is_created_once_and_validated -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/owner-before.log"
+          owner_status=${PIPESTATUS[0]}
           set -e
           test "$rooted_status" -eq 101
           grep -Eq 'PermissionDenied|permission denied' "$RUNNER_TEMP/rooted-before.log"
           test "$stop_status" -eq 101
-      - name: Restore the candidate file access on the runner
+          test "$owner_status" -eq 101
+          grep -F 'supervisor directory owner differs from current user' "$RUNNER_TEMP/owner-before.log"
+      - name: Restore the candidate behavior on the runner
         run: python .github/scripts/windows_process_diagnostic.py fixed
       - name: Verify rooted append access and pinned-root safety
         shell: bash
@@ -43,6 +50,13 @@ jobs:
           set -euo pipefail
           cargo test --locked -p rooted-fs --lib tests::windows_pinned_append_handles_keep_append_and_metadata_access -- --exact --nocapture
           cargo test --locked -p rooted-fs --lib tests::private_directory_append_handle_rejects_root_replacement -- --exact --nocapture
+      - name: Verify directory owner and reject untrusted entries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p platform-windows --lib process::supervisor_native::tests::private_supervisor_directory_is_created_once_and_validated -- --exact --nocapture
+          cargo test --locked -p platform-windows --lib process::supervisor_native::tests::private_supervisor_directory_rejects_untrusted_existing_entries -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/owner-negative.log"
+          grep -F 'foreign-owner negative control exercised' "$RUNNER_TEMP/owner-negative.log"
       - name: Run the complete Windows platform library suite
         run: cargo test --locked -p platform-windows --lib
       - name: Repeat the two original process lifecycle regressions
