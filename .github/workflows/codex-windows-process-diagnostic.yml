@@ -19,21 +19,37 @@ jobs:
         run: git config --global core.longpaths true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Instrument the existing cases on the runner
-        run: python .github/scripts/windows_process_diagnostic.py
-      - name: Run original payload-job close test
-        continue-on-error: true
-        run: cargo test --locked -p platform-windows --lib process::supervisor_gate::tests::armed_payload_job_drop_still_terminates_its_child -- --exact --nocapture
-      - name: Compare close behavior with child stdin held open
-        continue-on-error: true
-        run: cargo test --locked -p platform-windows --lib process::supervisor_gate::tests::diagnose_job_close_stdin_lifetimes -- --exact --nocapture
-      - name: Diagnose each stop mode independently
-        shell: pwsh
+      - name: Restore the baseline Windows file access on the runner
+        run: python .github/scripts/windows_process_diagnostic.py baseline
+      - name: Confirm baseline file access and process stop failures
+        shell: bash
         run: |
-          $name = 'process::background::foreground_stop_tests::native_job_stop_reports_waited_status_before_exit'
-          foreach ($testCase in @('false,false', 'true,false', 'false,true', 'true,true')) {
-            $env:WINDOWS_PROCESS_DIAG_CASE = $testCase
-            Write-Host "DIAG case=$testCase"
-            cargo test --locked -p platform-windows --lib $name -- --exact --nocapture
-            Write-Host "DIAG case=$testCase exit=$LASTEXITCODE"
-          }
+          set -euo pipefail
+          set +e
+          cargo test --locked -p rooted-fs --lib tests::windows_pinned_append_handles_keep_append_and_metadata_access -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/rooted-before.log"
+          rooted_status=${PIPESTATUS[0]}
+          cargo test --locked -p platform-windows --lib process::background::foreground_stop_tests::native_job_stop_reports_waited_status_before_exit -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/stop-before.log"
+          stop_status=${PIPESTATUS[0]}
+          set -e
+          test "$rooted_status" -eq 101
+          grep -Eq 'PermissionDenied|permission denied' "$RUNNER_TEMP/rooted-before.log"
+          test "$stop_status" -eq 101
+      - name: Restore the candidate file access on the runner
+        run: python .github/scripts/windows_process_diagnostic.py fixed
+      - name: Verify rooted append access and pinned-root safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p rooted-fs --lib tests::windows_pinned_append_handles_keep_append_and_metadata_access -- --exact --nocapture
+          cargo test --locked -p rooted-fs --lib tests::private_directory_append_handle_rejects_root_replacement -- --exact --nocapture
+      - name: Run the complete Windows platform library suite
+        run: cargo test --locked -p platform-windows --lib
+      - name: Repeat the two original process lifecycle regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for iteration in 1 2 3; do
+            echo "Windows process lifecycle iteration $iteration"
+            cargo test --locked -p platform-windows --lib process::supervisor_gate::tests::armed_payload_job_drop_still_terminates_its_child -- --exact --nocapture
+            cargo test --locked -p platform-windows --lib process::background::foreground_stop_tests::native_job_stop_reports_waited_status_before_exit -- --exact --nocapture
+          done
