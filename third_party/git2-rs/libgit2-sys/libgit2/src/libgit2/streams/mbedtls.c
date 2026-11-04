@@ -360,7 +360,7 @@ static int mbedtls_stream_wrap(
 	int owned)
 {
 	mbedtls_stream *st;
-	int error;
+	int error = -1;
 
 	st = git__calloc(1, sizeof(mbedtls_stream));
 	GIT_ERROR_CHECK_ALLOC(st);
@@ -369,7 +369,8 @@ static int mbedtls_stream_wrap(
 	st->owned = owned;
 
 	st->ssl = git__malloc(sizeof(mbedtls_ssl_context));
-	GIT_ERROR_CHECK_ALLOC(st->ssl);
+	if (!st->ssl)
+		goto out_err;
 	mbedtls_ssl_init(st->ssl);
 	if (mbedtls_ssl_setup(st->ssl, &mbedtls_config)) {
 		git_error_set(GIT_ERROR_SSL, "failed to create ssl object");
@@ -378,7 +379,8 @@ static int mbedtls_stream_wrap(
 	}
 
 	st->host = git__strdup(host);
-	GIT_ERROR_CHECK_ALLOC(st->host);
+	if (!st->host)
+		goto out_err;
 
 	st->parent.version = GIT_STREAM_VERSION;
 	st->parent.encrypted = 1;
@@ -395,9 +397,11 @@ static int mbedtls_stream_wrap(
 	return 0;
 
 out_err:
-	mbedtls_ssl_free(st->ssl);
-	git_stream_close(st->io);
-	git_stream_free(st->io);
+	/* The input stream remains the caller's responsibility until success. */
+	if (st->ssl)
+		mbedtls_ssl_free(st->ssl);
+	git__free(st->ssl);
+	git__free(st->host);
 	git__free(st);
 
 	return error;
