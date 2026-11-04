@@ -1,4 +1,5 @@
 import {validateContentPart} from './validators.js';
+import {LOCAL_APP_EXTENSION_KEY} from './wire.js';
 
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
@@ -61,7 +62,7 @@ export async function fileToContentPart(file) {
       value: encodeBase64(new Uint8Array(await file.arrayBuffer())),
       mimeType,
     },
-    metadata: {'com.lingxi.localApp': {version: 1, filename: file.name}},
+    metadata: {[LOCAL_APP_EXTENSION_KEY]: {version: 1, filename: file.name}},
   };
   const checked = validateContentPart(part);
   return checked;

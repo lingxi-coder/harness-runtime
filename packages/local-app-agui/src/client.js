@@ -2,8 +2,9 @@ import {AbstractAgent} from '@ag-ui/client';
 import {EMPTY, Observable} from 'rxjs';
 import {preflightJson} from './preflight.js';
 import {validateEvent, validateRunAgentInput} from './validators.js';
+import {LOCAL_APP_EXTENSION_KEY} from './wire.js';
 
-export const LOCAL_APP_EXTENSION_KEY = 'com.lingxi.localApp';
+export {LOCAL_APP_EXTENSION_KEY};
 export const AG_UI_PROTOCOL_VERSION = '1.0';
 const MAX_EVENT_PAGE_EVENTS = 128;
 const MAX_RUN_EVENTS = 10_000;
@@ -67,7 +68,7 @@ function localAppInput(value, {persistentChat = false, knownMessageIds = new Set
   const forwardedProps = input.forwardedProps === undefined ? {} : input.forwardedProps;
   if (!isRecord(forwardedProps)) throw new TypeError('forwardedProps must be an object for Local App options.');
   if (Object.keys(forwardedProps).some(key => key !== LOCAL_APP_EXTENSION_KEY)) {
-    throw new TypeError('This Local App host supports only forwardedProps.com.lingxi.localApp.');
+    throw new TypeError(`This Local App host supports only forwardedProps.${LOCAL_APP_EXTENSION_KEY}.`);
   }
   const extension = forwardedProps[LOCAL_APP_EXTENSION_KEY];
   if (extension === undefined) {
