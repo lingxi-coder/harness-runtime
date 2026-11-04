@@ -286,7 +286,7 @@ fn normalize_message_content(content: &mut Value) -> Result<(), ProtocolError> {
 }
 
 fn decode_base64(encoded: &str) -> Result<Vec<u8>, ProtocolError> {
-    if encoded.len() > ((MAX_MEDIA_BYTES + 2) / 3) * 4 {
+    if encoded.len() > MAX_MEDIA_BYTES.div_ceil(3) * 4 {
         return Err(error(
             "invalid_agui_attachment",
             "The AG-UI attachment exceeds the supported size limit.",

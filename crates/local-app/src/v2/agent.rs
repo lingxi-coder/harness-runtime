@@ -24,7 +24,7 @@ use std::{
 const MAX_ATTACHMENTS: usize = 8;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
-const MAX_ATTACHMENT_BASE64_BYTES: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4;
+const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
 const MAX_PROTOCOL_EVENT_LOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_NATIVE_OUTPUT_BYTES: u64 = 9_007_199_254_740_991;
 const MAX_PROTOCOL_EVENT_PAGE: usize = 128;
@@ -49,8 +49,7 @@ impl From<EventLogReadError> for AppError {
 }
 
 fn protocol_schema_unavailable() -> AppError {
-    AppError::Io(std::io::Error::new(
-        std::io::ErrorKind::Other,
+    AppError::Io(std::io::Error::other(
         "The pinned AG-UI event schema is unavailable",
     ))
 }
@@ -852,7 +851,7 @@ pub fn validate_input(input: &Input) -> Result<(), AppError> {
 }
 fn valid_base64(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return false;
     }
     let padding = bytes.iter().rev().take_while(|byte| **byte == b'=').count();
@@ -1339,8 +1338,7 @@ impl AgentStore {
     }
 
     fn storage_unavailable() -> AppError {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        AppError::Io(std::io::Error::other(
             "Agent storage state is uncertain; reopen the store",
         ))
     }
@@ -2869,7 +2867,7 @@ fn read_protocol_events_with_validator(
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(EventLogReadError::Unavailable(AppError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, "AG-UI event log is unavailable"),
+            std::io::Error::other("AG-UI event log is unavailable"),
         )));
     }
     if metadata.len() > MAX_PROTOCOL_EVENT_LOG_BYTES {
