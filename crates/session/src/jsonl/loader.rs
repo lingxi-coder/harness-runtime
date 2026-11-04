@@ -3664,10 +3664,8 @@ async fn select_session_path_from_directories(
         {
             continue;
         }
-        if require_unique_messages {
-            if selected.is_some() {
-                return Err(LoaderError::AmbiguousSession { arg });
-            }
+        if require_unique_messages && selected.is_some() {
+            return Err(LoaderError::AmbiguousSession { arg });
         }
         let file_modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let modified = loaded
