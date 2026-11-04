@@ -1198,7 +1198,7 @@ where
         let Some(host) = &route.host else {
             return error(&mut socket, 503, "application host unavailable").await;
         };
-        let config = serde_json::json!({"appId":host.app_id,"name":host.name,"revision":host.revision,"hostPlatform":host.platform,"runId":route.run_id,"capabilities":route.capabilities,"services":route.services.keys().collect::<Vec<_>>()});
+        let config = serde_json::json!({"appId":host.app_id,"name":host.name,"productName":branding::PRODUCT_NAME,"revision":host.revision,"hostPlatform":host.platform,"runId":route.run_id,"capabilities":route.capabilities,"services":route.services.keys().collect::<Vec<_>>()});
         let script = browser_sdk_script(&config.to_string());
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
         if method == "GET" {

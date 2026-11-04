@@ -1455,6 +1455,10 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
     let sdk = get(port, &format!("/__run/{epoch}/__host/sdk.js")).await;
     assert!(sdk.starts_with("HTTP/1.1 200"));
     assert!(sdk.contains(id));
+    assert!(sdk.contains(&format!(
+        "\"productName\":{}",
+        serde_json::to_string(branding::PRODUCT_NAME).unwrap()
+    )));
     assert!(!sdk.contains("__LINGXI_APP_CONFIGURATION__"));
     assert!(sdk.contains("window.LingxiLocalAppAGUI"));
     assert!(sdk.contains("installBrowserAgent"));

@@ -7,6 +7,7 @@ const adapter = readFileSync('crates/runtime/src/mobile/unified_local_apps/brows
 const config = {
   appId: 'module-mode-app',
   name: 'Module mode fixture',
+  productName: 'Host Product',
   revision: 1,
   runId: 'module-mode-run',
   hostPlatform: 'android',
