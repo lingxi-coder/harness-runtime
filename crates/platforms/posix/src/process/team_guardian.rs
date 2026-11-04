@@ -88,7 +88,7 @@ fn environment(root: &Path) -> HashMap<String, String> {
     HashMap::from([
         ("HOME".into(), root.join("home").to_string_lossy().into()),
         (
-            "LINGXI_CONFIG_DIR".into(),
+            branding::CONFIG_DIR_ENV.into(),
             root.join("home").to_string_lossy().into(),
         ),
         ("TMPDIR".into(), root.join("tmp").to_string_lossy().into()),

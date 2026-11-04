@@ -28,7 +28,7 @@ pub(super) fn main() -> Result<(), TeamProcessError> {
     // defaults; never "sanitize" the already-running owner's process.
     let allowed = [
         "HOME",
-        "LINGXI_CONFIG_DIR",
+        branding::CONFIG_DIR_ENV,
         "TMPDIR",
         "PATH",
         "LANG",
