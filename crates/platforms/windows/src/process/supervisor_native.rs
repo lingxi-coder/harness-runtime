@@ -29,6 +29,7 @@ extern "system" {
         text: *mut *mut u16,
         len: *mut u32,
     ) -> i32;
+    fn ConvertSidToStringSidW(sid: Handle, text: *mut *mut u16) -> i32;
     fn GetSecurityInfo(
         handle: Handle,
         kind: u32,
@@ -74,8 +75,10 @@ impl Drop for Local {
 fn last_error() -> std::io::Error {
     std::io::Error::last_os_error()
 }
-fn private_descriptor() -> std::io::Result<Local> {
-    let text: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)\0".encode_utf16().collect();
+const PRIVATE_DACL: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
+
+fn descriptor_from_sddl(sddl: &str) -> std::io::Result<Local> {
+    let text: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
     let mut descriptor = std::ptr::null_mut();
     // SAFETY: buffers are valid for this synchronous allocation; Local frees it.
     if unsafe {
@@ -90,6 +93,62 @@ fn private_descriptor() -> std::io::Result<Local> {
         return Err(last_error());
     }
     Ok(Local(descriptor))
+}
+
+/// The SID pointer in TOKEN_USER points into this aligned backing buffer.
+fn current_user_sid() -> std::io::Result<Vec<usize>> {
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), 8, &mut token) } == 0 {
+        return Err(last_error());
+    }
+    struct Token(Handle);
+    impl Drop for Token {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+    let token = Token(token);
+    let mut needed = 0;
+    unsafe {
+        GetTokenInformation(token.0, 1, std::ptr::null_mut(), 0, &mut needed);
+    }
+    if needed == 0 {
+        return Err(last_error());
+    }
+    // usize storage supplies the alignment required by TOKEN_USER/SID_AND_ATTRIBUTES.
+    let mut data = vec![
+        0usize;
+        (needed as usize + std::mem::size_of::<usize>() - 1)
+            / std::mem::size_of::<usize>()
+    ];
+    if unsafe { GetTokenInformation(token.0, 1, data.as_mut_ptr().cast(), needed, &mut needed) }
+        == 0
+    {
+        return Err(last_error());
+    }
+    if data.is_empty() || data[0] == 0 {
+        return Err(std::io::Error::other("current user SID is missing"));
+    }
+    Ok(data)
+}
+
+fn sid_string(sid: Handle) -> std::io::Result<String> {
+    let mut text = std::ptr::null_mut();
+    // SAFETY: the SID remains live while Windows creates a LocalFree-owned string.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+        return Err(last_error());
+    }
+    let allocation = Local(text.cast());
+    let mut len = 0;
+    while unsafe { *text.add(len) } != 0 {
+        len += 1;
+    }
+    let string = String::from_utf16(unsafe { std::slice::from_raw_parts(text, len) })
+        .map_err(|_| std::io::Error::other("Windows returned an invalid SID string"));
+    drop(allocation);
+    string
 }
 pub(super) fn random_nonce() -> std::io::Result<String> {
     let mut bytes = [0u8; 24];
@@ -109,7 +168,11 @@ pub(super) fn random_nonce() -> std::io::Result<String> {
 }
 pub(super) fn create_private_directory(nonce: &str) -> std::io::Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("lxs-{}", &nonce[..16]));
-    let descriptor = private_descriptor()?;
+    let user = current_user_sid()?;
+    let owner = sid_string(user[0] as Handle)?;
+    // TOKEN_OWNER can be an administrators group even when TOKEN_USER is an
+    // individual account. Specify the user at creation; validation stays strict.
+    let descriptor = descriptor_from_sddl(&format!("O:{owner}{PRIVATE_DACL}"))?;
     let attributes = SecurityAttributes {
         length: std::mem::size_of::<SecurityAttributes>() as u32,
         descriptor: descriptor.0,
@@ -160,35 +223,8 @@ pub(super) fn validate_private_directory(path: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::from_raw_os_error(status as i32));
     }
     let descriptor = Local(descriptor);
-    let mut token = std::ptr::null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), 8, &mut token) } == 0 {
-        return Err(last_error());
-    }
-    struct Token(Handle);
-    impl Drop for Token {
-        fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-    let token = Token(token);
-    let mut needed = 0;
-    unsafe {
-        GetTokenInformation(token.0, 1, std::ptr::null_mut(), 0, &mut needed);
-    }
-    // usize storage supplies the alignment required by TOKEN_USER/SID_AND_ATTRIBUTES.
-    let mut data = vec![
-        0usize;
-        (needed as usize + std::mem::size_of::<usize>() - 1)
-            / std::mem::size_of::<usize>()
-    ];
-    if unsafe { GetTokenInformation(token.0, 1, data.as_mut_ptr().cast(), needed, &mut needed) }
-        == 0
-    {
-        return Err(last_error());
-    }
-    if data.is_empty() || unsafe { EqualSid(owner, data[0] as Handle) } == 0 {
+    let user = current_user_sid()?;
+    if unsafe { EqualSid(owner, user[0] as Handle) } == 0 {
         return Err(std::io::Error::other(
             "supervisor directory owner differs from current user",
         ));
@@ -214,7 +250,7 @@ pub(super) fn validate_private_directory(path: &Path) -> std::io::Result<()> {
     drop(allocation);
     // The filesystem maps GENERIC_ALL to FILE_ALL_ACCESS when creating the
     // directory; both serialize the same access rights for these two ACEs.
-    if dacl.replace(";;FA;;;", ";;GA;;;") != "D:P(A;;GA;;;OW)(A;;GA;;;SY)" {
+    if dacl.replace(";;FA;;;", ";;GA;;;") != PRIVATE_DACL {
         return Err(std::io::Error::other(
             "supervisor directory DACL is not private and protected",
         ));
@@ -222,7 +258,7 @@ pub(super) fn validate_private_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 pub(super) fn create_pipe(endpoint: &str, first: bool) -> std::io::Result<NamedPipeServer> {
-    let descriptor = private_descriptor()?;
+    let descriptor = descriptor_from_sddl(PRIVATE_DACL)?;
     let mut attributes = SecurityAttributes {
         length: std::mem::size_of::<SecurityAttributes>() as u32,
         descriptor: descriptor.0,
@@ -263,6 +299,62 @@ mod tests {
         assert!(create_private_directory(&nonce).is_err());
         std::fs::remove_dir(directory).unwrap();
     }
+
+    fn create_test_directory_with_sddl(path: &Path, sddl: &str) -> std::io::Result<()> {
+        let descriptor = descriptor_from_sddl(sddl)?;
+        let attributes = SecurityAttributes {
+            length: std::mem::size_of::<SecurityAttributes>() as u32,
+            descriptor: descriptor.0,
+            inherit: 0,
+        };
+        let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        if unsafe { CreateDirectoryW(path_wide.as_ptr(), &attributes) } == 0 {
+            return Err(last_error());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn private_supervisor_directory_rejects_untrusted_existing_entries() {
+        let nonce = random_nonce().unwrap();
+        let directory = std::env::temp_dir().join(format!("lxs-{}", &nonce[..16]));
+        let user = current_user_sid().unwrap();
+        let owner = sid_string(user[0] as Handle).unwrap();
+        // Even with the correct owner, a directory that grants access to
+        // Everyone must fail validation and cannot be reused by create-new.
+        create_test_directory_with_sddl(
+            &directory,
+            &format!("O:{owner}D:P(A;;GA;;;WD)(A;;GA;;;SY)"),
+        )
+        .unwrap();
+        assert!(validate_private_directory(&directory)
+            .unwrap_err()
+            .to_string()
+            .contains("DACL is not private and protected"));
+        assert!(create_private_directory(&nonce).is_err());
+        std::fs::remove_dir(&directory).unwrap();
+
+        // An elevated administrator can create this directory with a different
+        // owner but the exact protected DACL. Ordinary users may be forbidden
+        // to assign that owner, which itself prevents creating this fixture.
+        match create_test_directory_with_sddl(&directory, &format!("O:BA{PRIVATE_DACL}")) {
+            Ok(()) => {
+                assert!(validate_private_directory(&directory)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("owner differs from current user"));
+                assert!(create_private_directory(&nonce).is_err());
+                std::fs::remove_dir(&directory).unwrap();
+                eprintln!("foreign-owner negative control exercised");
+            }
+            Err(error) => {
+                assert!(matches!(error.raw_os_error(), Some(5 | 1307 | 1314)));
+                assert!(!directory.exists());
+                eprintln!("foreign-owner fixture is not permitted: {error}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn pipe_rejects_name_takeover_and_wrong_server_identity() {
         use tokio::net::windows::named_pipe::ClientOptions;
