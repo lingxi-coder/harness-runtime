@@ -76,11 +76,11 @@ pub(crate) mod schema_validation;
 mod server_fallback;
 #[cfg(test)]
 mod server_fallback_288_tests;
+pub mod session_handoff;
 pub mod sse;
 pub mod stop_hook_snapshot;
 pub(crate) mod streaming_executor;
 pub mod streaming_loop;
-pub mod session_handoff;
 pub mod structured_output;
 mod subagent_stop_hook_firer;
 pub mod task_completed_firer;
@@ -118,8 +118,8 @@ pub use conversation::{
     realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, NativeProactivityRemountState, PendingPromptIdentity,
     QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentOutput, RealtimeAgentSessionIo, RealtimeCompletionBoundary, ScheduledLoopFire, ScheduledMediaChild,
-    ScheduledMediaChildRoute, ScheduledMediaParentCheck,
+    RealtimeAgentLimits, RealtimeAgentOutput, RealtimeAgentSessionIo, RealtimeCompletionBoundary,
+    ScheduledLoopFire, ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,

@@ -426,7 +426,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
-            ..
+                ..
             } => {
                 assert_eq!(
                     command.string_at(""),

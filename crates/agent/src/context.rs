@@ -23,10 +23,7 @@ use tool_api::content_replacement::ContentReplacementState;
 /// `CancelLoading` keeps the slot join-required after the owner cancels even
 /// if the loader settles before the runner begins its terminal drain.
 #[derive(Debug, Default)]
-pub struct AgentPreloadLifecycle(
-    std::sync::atomic::AtomicU8,
-    Arc<Mutex<()>>,
-);
+pub struct AgentPreloadLifecycle(std::sync::atomic::AtomicU8, Arc<Mutex<()>>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentPreloadPhase {

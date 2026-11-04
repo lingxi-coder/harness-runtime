@@ -40,9 +40,13 @@ impl BuiltinCommandHandler for ContextHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
         if args.raw_args.string_at("").unwrap_or_default().trim() == "manifest" {
             return match serde_json::to_string_pretty(&self.handle.context_manifest().await) {
-                Ok(display) => CommandResult::Done { display: Some(display.into()) },
+                Ok(display) => CommandResult::Done {
+                    display: Some(display.into()),
+                },
                 Err(error) => CommandResult::Failed {
-                    source: lingxi_core::settings::SettingsError::SchemaViolation(error.to_string()),
+                    source: lingxi_core::settings::SettingsError::SchemaViolation(
+                        error.to_string(),
+                    ),
                 },
             };
         }
@@ -201,10 +205,14 @@ mod tests {
         let handler = ContextHandler::new(Arc::new(MockOrchestratorHandle::new()));
         let mut command = args();
         command.raw_args = "manifest".into();
-        let CommandResult::Done { display: Some(display) } = handler.handle(&command).await else {
+        let CommandResult::Done {
+            display: Some(display),
+        } = handler.handle(&command).await
+        else {
             panic!("manifest command must return its diagnostic output");
         };
-        let value: serde_json::Value = serde_json::from_str(display.string_at("").unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(display.string_at("").unwrap()).unwrap();
         assert_eq!(value["session"]["active"], "code");
         assert_eq!(value["projected"], false);
         assert!(value["blocks"].is_array());
@@ -221,14 +229,17 @@ mod tests {
         let dispatcher = crate::dispatcher::RegistrySlashDispatcher::new(Arc::new(
             tokio::sync::RwLock::new(registry),
         ));
-        let result = dispatcher.dispatch_headless(
-            "/context manifest".into(),
-            lingxi_core::host::CancellationToken::new(),
-        ).await;
+        let result = dispatcher
+            .dispatch_headless(
+                "/context manifest".into(),
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await;
         let lingxi_core::host::SlashDispatchResult::Handled { display } = result else {
             panic!("manifest must dispatch locally: {result:?}");
         };
-        let value: serde_json::Value = serde_json::from_str(display.string_at("").unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(display.string_at("").unwrap()).unwrap();
         assert_eq!(value["session"]["active"], "code");
     }
 

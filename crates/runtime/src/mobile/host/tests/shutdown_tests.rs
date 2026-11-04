@@ -307,7 +307,10 @@ fn mobile_drop_waits_for_tracked_turn_after_its_slot_is_cleared() {
         .expect("runtime should shut down after the turn future is released");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while crate::mobile::transcript::session_owner_is_live(home.clone(), session_id) {
-        assert!(std::time::Instant::now() < deadline, "session claim did not drain");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session claim did not drain"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }

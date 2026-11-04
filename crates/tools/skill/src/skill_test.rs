@@ -1574,7 +1574,8 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             shell_test_ctx(dummy_out()),
             Arc::new(FixedLoader(Some(desc))),
         );
-        let result = tool.call(source_json!({"skill": "regtest"}), fresh_ctx(), fresh_tx())
+        let result = tool
+            .call(source_json!({"skill": "regtest"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
 
@@ -1586,7 +1587,9 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             &skill_name,
         );
         assert!(compaction::invoked_skills::content_for_test(&main_thread_key).is_none());
-        assert!(compaction::invoked_skills::is_individual_skill_activation(&result.new_messages[0]));
+        assert!(compaction::invoked_skills::is_individual_skill_activation(
+            &result.new_messages[0]
+        ));
         // A skill NOT invoked leaves no row.
         let other_key = compaction::invoked_skills::registry_key(
             compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
@@ -1648,7 +1651,10 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             calls_after_invocation, 2,
             "snapshot plus the one-time action"
         );
-        assert_eq!(origin.string_at("/skill_definition_sha256").unwrap().len(), 64);
+        assert_eq!(
+            origin.string_at("/skill_definition_sha256").unwrap().len(),
+            64
+        );
         assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());
         assert_eq!(capture.seen.lock().unwrap().len(), calls_after_invocation);
         compaction::invoked_skills::reset_for_test();
@@ -1670,8 +1676,10 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         .expect("raw UTF-16 skill name");
         let alias_units = vec![0xd801];
         let alias_name = Utf16JsonProjection::root_string(
-            String::from_utf16_lossy(&alias_units), alias_units.clone(),
-        ).expect("raw UTF-16 alias");
+            String::from_utf16_lossy(&alias_units),
+            alias_units.clone(),
+        )
+        .expect("raw UTF-16 alias");
         let prompt_units = vec![u16::from(b'R'), 0xdfff, u16::from(b'!')];
         let args = Utf16JsonProjection::root_string(
             String::from_utf16_lossy(&prompt_units),
@@ -1714,7 +1722,10 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             let lingxi_core::types::ConversationMessage::User { content, .. } = message else {
                 panic!("skill prompt must remain a user message");
             };
-            let [lingxi_core::types::ContentBlock::TextJsUtf16 { utf16_code_units, .. }] = content.as_slice() else {
+            let [lingxi_core::types::ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            }] = content.as_slice()
+            else {
                 panic!("skill prompt must retain its exact UTF-16 carrier");
             };
             assert_eq!(utf16_code_units, &prompt_units);
@@ -1751,14 +1762,21 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         let agent_id = AgentId::nil();
         let session_text = session_id.to_string();
         let agent_text = agent_id.to_string();
-        compaction::invoked_skills::set_context_epoch(compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_text), Some(&agent_text)), 11);
+        compaction::invoked_skills::set_context_epoch(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(
+                Some(&session_text),
+                Some(&agent_text),
+            ),
+            11,
+        );
         let mut builtin_ctx = shell_test_ctx(dummy_out());
         builtin_ctx.session_id = Some(session_id);
         let tool = SkillTool::with_loader(builtin_ctx, Arc::new(FixedLoader(Some(desc))));
         let mut call_ctx = fresh_ctx();
         call_ctx.agent_id = Some(agent_id);
 
-        let result = tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
+        let result = tool
+            .call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
             .await
             .expect("ok");
 
@@ -1770,7 +1788,13 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             &Utf16JsonProjection::from("regtest"),
         );
         assert!(compaction::invoked_skills::content_for_test(&scoped_key).is_none());
-        let ConversationMessage::User { origin: Some(origin), .. } = &result.new_messages[0] else { panic!("skill origin") };
+        let ConversationMessage::User {
+            origin: Some(origin),
+            ..
+        } = &result.new_messages[0]
+        else {
+            panic!("skill origin")
+        };
         assert_eq!(origin.number_at("/context_epoch"), Some(11.0));
         let main_thread_key = compaction::invoked_skills::registry_key(
             compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
@@ -1800,8 +1824,14 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         let live_session_id = SessionId::new();
         let stale_text = stale_session_id.to_string();
         let live_text = live_session_id.to_string();
-        compaction::invoked_skills::set_context_epoch(compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&stale_text), None), 3);
-        compaction::invoked_skills::set_context_epoch(compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&live_text), None), 42);
+        compaction::invoked_skills::set_context_epoch(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&stale_text), None),
+            3,
+        );
+        compaction::invoked_skills::set_context_epoch(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&live_text), None),
+            42,
+        );
         let mut builtin_ctx = shell_test_ctx(dummy_out());
         builtin_ctx.session_id = Some(stale_session_id);
         let tool = SkillTool::with_loader(builtin_ctx, Arc::new(FixedLoader(Some(desc))));
@@ -1810,7 +1840,8 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             lingxi_core::SessionState::empty(live_session_id, "model".into()),
         )));
 
-        let result = tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
+        let result = tool
+            .call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
             .await
             .expect("ok");
 
@@ -1830,7 +1861,13 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         );
         assert!(compaction::invoked_skills::content_for_test(&live_key).is_none());
         assert!(compaction::invoked_skills::content_for_test(&stale_key).is_none());
-        let ConversationMessage::User { origin: Some(origin), .. } = &result.new_messages[0] else { panic!("skill origin") };
+        let ConversationMessage::User {
+            origin: Some(origin),
+            ..
+        } = &result.new_messages[0]
+        else {
+            panic!("skill origin")
+        };
         assert_eq!(origin.number_at("/context_epoch"), Some(42.0));
 
         compaction::invoked_skills::reset_for_test();

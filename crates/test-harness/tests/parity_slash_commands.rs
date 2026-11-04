@@ -479,7 +479,7 @@ async fn every_fixture_command_dispatches_to_handled() {
                 command,
                 body,
                 hook_messages,
-            ..
+                ..
             } => {
                 let expected_body = expected_prompt_bodies
                     .get(&entry.name)

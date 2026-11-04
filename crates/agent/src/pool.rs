@@ -84,8 +84,12 @@ struct AllocateCancelGuard {
 }
 
 impl AllocateCancelGuard {
-    fn new(runtime: Arc<dyn RuntimeSpawner>, task: BackgroundTaskHandle,
-        cancellation_token: CancellationToken, publication_gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+    fn new(
+        runtime: Arc<dyn RuntimeSpawner>,
+        task: BackgroundTaskHandle,
+        cancellation_token: CancellationToken,
+        publication_gate: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
         Self {
             runtime,
             task: Some(task),
@@ -486,7 +490,9 @@ impl StateMachinePool {
             )
             .await?;
         let mut cancel_guard = AllocateCancelGuard::new(
-            self.runtime.clone(), task.clone(), cancellation_token.clone(),
+            self.runtime.clone(),
+            task.clone(),
+            cancellation_token.clone(),
             preload_lifecycle.skill_publication_gate(),
         );
 

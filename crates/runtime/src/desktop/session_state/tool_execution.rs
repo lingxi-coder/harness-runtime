@@ -1,10 +1,10 @@
 //! Tool side effects use the canonical session writer, queue and retention pin.
 use super::*;
 
-pub(super) use crate::branch_recovery::ToolProjection;
 use crate::branch_recovery::invalid;
 #[cfg(test)]
 use crate::branch_recovery::validate_output;
+pub(super) use crate::branch_recovery::ToolProjection;
 
 impl ToolProjection {
     fn validate(
