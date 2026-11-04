@@ -133,6 +133,7 @@ fn builder(
         root.to_path_buf(),
     )
     .with_session_id(session_id)
+    .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
     .with_jsonl_writer(writer)
     .with_persistent_app_chat()
 }
@@ -217,6 +218,7 @@ async fn fixture_seed_contents(
         main.clone(),
         budget,
     );
+    seed.initialize_conversation_mode().await.unwrap();
     for round in 0..6 {
         let user_len = if thinking_only_tail && round == 4 {
             5000

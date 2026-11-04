@@ -373,6 +373,16 @@ mod tests {
         let session_id = SessionId::from_uuid(
             uuid::Uuid::parse_str(&state.chats.session_id(chat_id).unwrap()).unwrap(),
         );
+        if previous.is_none() {
+            writer
+                .initialize_fixed_session_mode(
+                    &session_id.as_uuid().to_string(),
+                    lingxi_core::host::session_context::ConversationMode::Chat,
+                    0,
+                )
+                .await
+                .unwrap();
+        }
         let orch = ConversationOrchestrator::into_shared(
             ConversationOrchestrator::new_side_chat(
                 OrchestratorConfig::default(),
@@ -386,6 +396,7 @@ mod tests {
                 host.apps_root.clone(),
             )
             .with_session_id(session_id)
+            .with_conversation_mode(lingxi_core::host::session_context::ConversationMode::Chat)
             .with_persistent_app_chat()
             .with_jsonl_writer(writer.clone()),
         );
@@ -904,6 +915,14 @@ mod tests {
         )
         .await
         .unwrap();
+        writer
+            .initialize_fixed_session_mode(
+                &session_id.as_uuid().to_string(),
+                lingxi_core::host::session_context::ConversationMode::Chat,
+                0,
+            )
+            .await
+            .unwrap();
         let answer_id = MessageId::new();
         for row in [
             json!({"type":"user","uuid":user_id.as_uuid(),"parentUuid":null,"sessionId":session_id.as_uuid(),
