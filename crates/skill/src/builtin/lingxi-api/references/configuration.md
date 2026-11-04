@@ -14,10 +14,10 @@ MCP has separate storage:
 | Local project | `~/{{global_config_file}}`, `projects[<cwd>].mcpServers` |
 | Shared project | `<project>/.mcp.json`, `mcpServers` |
 
-Use an available LingXi CLI's `mcp` subcommands or the native MCP settings UI.
-Inspect that CLI version's help before constructing flags. A model without that
-CLI or a registered management tool can explain the native steps. Host-private
-Bridge/FFI commands are not implicitly callable through `Skill`.
+`lingxi mcp add` is the ordinary way to add a server. On Mac and on WSL,
+`lingxi mcp add-from-claude-desktop` only imports servers that desktop app
+already saved. Inspect that CLI version's help before constructing other flags.
+Host-private Bridge/FFI commands are not implicitly callable through `Skill`.
 
 On Desktop, open Settings → MCP servers, use that page's own scope selector,
 then add/edit the server. The general settings-layer selector is not the MCP
@@ -42,9 +42,15 @@ Hooks react to runtime events; a memory entry does not execute them. Cron and
 Bot routines schedule work and have different owners. Permissions remain
 runtime/host decisions even when the skill describes the desired operation.
 
-Project/user skills and installed plugin skills extend the current catalog.
-Use `plugin-authoring` or `workflow-authoring` only if present. A skill body
-does not install its required MCP server or add a tool by mentioning its name.
+A skill is a directory that contains `SKILL.md`. Project skills are
+`{{config_dir}}/skills` directories from the working directory up. The walk ends at the git root when that root is below the home directory, and at the home directory when there is no such root. User skills are
+`~/{{config_dir}}/skills`. `lingxi plugin init NAME`
+scaffolds that user directory. `--disable-slash-commands` empties the
+slash-command and skill registry for that launch. `--bare` and `--safe-mode` both disable settings hooks, plugins, skills, and custom agents. `--bare` skips instruction auto-discovery unless `--add-dir` is set, still discovers
+MCP servers, and skips managed policy hooks. `--safe-mode` always skips
+instruction files and discovered `.mcp.json` servers, and it still runs managed policy hooks. Servers passed with `--mcp-config` remain. A skill body
+does not install an MCP server or add a tool by naming it. Use
+`plugin-authoring` or `workflow-authoring` only if that skill is registered.
 
 Source anchors: Harness `crates/configuration-admin/src/mcp_bridge.rs`,
 `crates/command-api/src/builtins/bundled/update_config_skill.rs`; product
@@ -59,13 +65,7 @@ Harness user file, not Desktop appearance settings. Config cannot set native
 appearance preferences. Do not infer .claude or CLAUDE.md paths from code ancestry. Provider-specific
 authentication variables apply only to the selected provider; actual Anthropic
 protocol identifiers and credentials remain valid on an Anthropic route.
-A host-pinned session config-home/global-config path takes priority over ambient
-process variables. For the user config home, a set `{{config_dir_env}}` wins
-verbatim, including an empty value; the CLI then resolves a relative or empty
-value against the working directory. Only an unset variable falls back to
-`~/{{config_dir}}`. The global `~/{{global_config_file}}` resolver treats an
-empty override as unset. Do not collapse those two rules.
-
+Config-home and global-file rules are in sessions. Do not collapse them.
 Permission mode decides whether an unmatched tool call asks. It does not start
 an operating-system sandbox. The starting mode is manual (ask first) and prints
 no mode line. Shift+Tab cycles modes in the terminal. `--permission-mode`
@@ -77,6 +77,12 @@ read-only. `dontAsk` denies anything without an allow rule.
 and can be selected for one launch.
 
 In `settings.json` the field is `permissions.defaultMode`, not a top-level
-`permissionMode`. User settings may store `auto`; the session stays manual
-when auto mode is unavailable. A project settings file cannot grant `auto` or
-`bypassPermissions`. Internal modes are not user settings.
+`permissionMode`. With no `--setting-sources`, the session policy reads the
+user file, the project `settings.json`, then `settings.local.json`, then `--settings`, then managed policy. A later allowed value replaces the earlier
+one. The project file and `settings.local.json` can set `acceptEdits`, `plan`,
+`dontAsk`, and `manual`. They cannot grant `auto` or `bypassPermissions`.
+User settings, `--settings`, and managed policy can. `--restricted` skips the
+user, project, and local files. `--settings` still applies under
+`--restricted`. Hooks can still read the local file. User settings may store
+`auto`; the session stays manual when auto mode is unavailable. Internal
+modes are not user settings.
