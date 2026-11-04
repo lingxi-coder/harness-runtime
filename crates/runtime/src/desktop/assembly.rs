@@ -747,11 +747,47 @@ pub(super) fn resolve_ask_user_question_timeout(
         .or(loaded)
 }
 
+fn desktop_process(
+    team_output_dir: Option<std::path::PathBuf>,
+) -> Result<DesktopProcess, super::team_invocation::TeamInvocationError> {
+    #[cfg(unix)]
+    {
+        Ok(team_output_dir.map_or_else(DesktopProcess::new, DesktopProcess::with_task_output_dir))
+    }
+    #[cfg(windows)]
+    {
+        // The Windows runner does not provide the private Team output root.
+        // Do not silently route Team output into the ordinary task directory.
+        if team_output_dir.is_some() {
+            return Err(super::team_invocation::TeamInvocationError::Platform);
+        }
+        Ok(DesktopProcess::new())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod desktop_process_windows_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_team_output_without_a_private_windows_runner() {
+        assert!(desktop_process(None).is_ok());
+        assert!(matches!(
+            desktop_process(Some(std::path::PathBuf::from("private-team-output"))),
+            Err(super::super::team_invocation::TeamInvocationError::Platform)
+        ));
+    }
+}
+
 pub async fn build(
     mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
+    #[cfg(windows)]
+    if cfg.team_invocation.is_some() {
+        return Err(super::team_invocation::TeamInvocationError::Platform.into());
+    }
     super::team_invocation::enforce_team_config(&mut cfg)?;
     super::app_invocation::enforce_app_config(&mut cfg)?;
     // Reject malformed embedding options before opening credential storage.
@@ -891,6 +927,11 @@ pub async fn build_with_credential_stack(
     permission_sink: Arc<dyn PermissionRequestSink>,
     shared: SharedCredentialStack,
 ) -> Result<DesktopRuntime, BuildError> {
+    let process = desktop_process(
+        cfg.team_invocation
+            .as_ref()
+            .map(|profile| profile.task_output_dir()),
+    )?;
     let account_data_root = shared
         .provider_account_home
         .clone()
@@ -4651,13 +4692,7 @@ pub async fn build_with_credential_stack(
         // P1-08 trusted dirs now live inside `session_cwd` (built above from the
         // `trusted_dirs` set); `BuiltinToolContext` no longer has a standalone
         // `trusted_dirs` field — tools read `ctx.trusted_dirs()` off `session_cwd`.
-        process: Arc::new(
-            cfg.team_invocation
-                .as_ref()
-                .map_or_else(DesktopProcess::new, |profile| {
-                    DesktopProcess::with_task_output_dir(profile.task_output_dir())
-                }),
-        ),
+        process: Arc::new(process),
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: sandbox_runtime_cfg,

@@ -2,7 +2,9 @@
 //! Neither role exposes settings, credentials refresh or a public RPC server.
 
 fn main() {
+    #[cfg(unix)]
     use platform_posix::process::team_guardian;
+    #[cfg(unix)]
     if team_guardian::is_team_guardian_invocation() {
         // Preflight stays single-threaded: validate the helper's clean launch
         // and close inherited descriptors before constructing a Tokio runtime.
