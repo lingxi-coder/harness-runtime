@@ -40,6 +40,22 @@ re-vendor: `rg '[^:]str::from_utf8' third_party/libssh2-sys/*.rs` should be empt
 Built with `vendored-libgit2 + https + ssh` — TLS + crypto backend is **mbedTLS**
 (M-a swap; see below). `vendored-openssl` is dropped from `tools/git-mobile`.
 
+## libgit2 runtime initialization failure rollback
+
+`libgit2-sys/libgit2/src/util/runtime.c` rolls back registered shutdown handlers
+and the initialization reference count when a subsystem initializer returns a
+nonzero result. A retry then runs the initializers again; an unmatched shutdown
+returns an error without decrementing the count below zero. Re-apply this change
+after re-vendoring and run `scripts/tests/test_git_runtime_lifecycle.py` from
+the workspace root. The test compiles the actual runtime with native pthreads,
+while substituting controlled subsystem initializers and error recording.
+
+This rollback covers only cleanup handlers registered before failure. An
+initializer remains responsible for resources it acquired before registering a
+handler. After rollback, `git_error_last()` reports that the library is not
+initialized rather than retaining the original initializer diagnostic; these
+boundaries require separate fixes and are not covered by this patch.
+
 ## mbedTLS swap (M-a)
 
 OpenSSL is fully replaced by **mbedTLS 3.6.2 LTS** for libgit2 TLS+SHA256 AND
