@@ -23,6 +23,13 @@ SEAM = ROOT / "third_party/mbedtls-sys"
 TEST = ROOT / "scripts/tests/test_mbedtls_ca_snapshot.py"
 SSH_TEST = ROOT / "scripts/tests/run_libssh2_mbedtls_init.py"
 SSH_FIXTURE = ROOT / "scripts/tests/fixtures/libssh2_mbedtls_init.c"
+SSH_SOURCE = ROOT / "third_party/libssh2-sys"
+SSH_SOURCE_FILES = (
+    "build.rs", "libssh2/include/libssh2.h", "libssh2/src/global.c",
+    "libssh2/src/session.c", "libssh2/src/libssh2_priv.h", "libssh2/src/mbedtls.c",
+    "libssh2/src/mbedtls.h", "libssh2/src/openssl.c", "libssh2/src/openssl.h",
+    "libssh2/src/wincng.h", "libssh2/src/libgcrypt.h", "libssh2/src/os400qc3.h",
+)
 CC_VERSION = "1.2.62"
 
 LOCK = '''# Generated fixture lock; dependency versions and checksums are deliberate.
@@ -193,6 +200,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitizer", choices=("none", "address", "thread"), required=True)
     parser.add_argument("--output-dir", type=Path, help="retain logs and hashes under a new run directory")
+    parser.add_argument("--negative-libssh2-source", type=Path,
+                        help="also require the original libssh2-sys source to fail the entropy assertion")
     args = parser.parse_args()
     compiler = shutil.which(os.environ.get("CC", "cc"))
     if compiler is None:
@@ -233,6 +242,22 @@ def main():
                        env=env, cwd=ROOT, log=logdir / "libssh2-init.log")
         if "real entropy failure, cleanup, retry, references and PSA ownership passed" not in ssh_test.stdout:
             raise RuntimeError("libssh2 initialization test did not complete")
+        negative = None
+        if args.negative_libssh2_source:
+            original = args.negative_libssh2_source.resolve()
+            command = [sys.executable, str(SSH_TEST), "--include", str(include), "--lib-dir", str(native),
+                       "--sanitizer", args.sanitizer, "--source-dir", str(original)]
+            print("+", shlex.join(command), "(expected failure)", flush=True)
+            control = subprocess.run(command, env=env, cwd=ROOT, text=True, capture_output=True)
+            output = control.stdout + control.stderr
+            (logdir / "libssh2-negative.log").write_text(output)
+            if (control.returncode == 0 or "real entropy failure control passed" not in output or
+                    "libssh2_init(0) == LIBSSH2_ERROR_RANDGEN" not in output):
+                raise RuntimeError("original libssh2 did not fail at the expected real entropy assertion")
+            negative = {"exit_code": control.returncode,
+                        "source_sha256": {name: digest(original / name) for name in SSH_SOURCE_FILES},
+                        "log_sha256": digest(logdir / "libssh2-negative.log")}
+            print("Original libssh2 failed the real entropy assertion as expected.")
         (directory / "openssl.cnf").write_text(OPENSSL_CONFIG)
         results = []
         for algorithm in ("rsa", "ec"):
@@ -269,6 +294,8 @@ def main():
                     "libssh2_init_test_sha256": digest(SSH_TEST),
                     "libssh2_init_fixture_sha256": digest(SSH_FIXTURE),
                     "libssh2_init_log_sha256": digest(logdir / "libssh2-init.log"),
+                    "libssh2_source_sha256": {name: digest(SSH_SOURCE / name) for name in SSH_SOURCE_FILES},
+                    "libssh2_negative_control": negative,
                     "runner_sha256": digest(Path(__file__).resolve()), "results": results}
         (logdir / "results.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"Passed RSA and ECDSA CA tests ({args.sanitizer}); {count} native sources compiled.")

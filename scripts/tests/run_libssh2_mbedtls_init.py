@@ -19,13 +19,13 @@ SSH = ROOT / "third_party/libssh2-sys"
 FIXTURE = ROOT / "scripts/tests/fixtures/libssh2_mbedtls_init.c"
 
 
-def source_files():
-    build = (SSH / "build.rs").read_text()
+def source_files(ssh=SSH):
+    build = (ssh / "build.rs").read_text()
     sources = re.findall(r'\.file\("(libssh2/src/[^\"]+\.c)"\)', build)
     sources = [source for source in sources if not source.endswith("/agent_win.c")]
     if len(sources) < 25 or len(sources) != len(set(sources)):
         raise RuntimeError("could not determine vendored libssh2 source set from build.rs")
-    return [SSH / source for source in sources]
+    return [ssh / source for source in sources]
 
 
 def unix_defines(backend):
@@ -36,8 +36,8 @@ def unix_defines(backend):
             "LIBSSH2_DH_GEX_NEW", "LIBSSH2_HAVE_ZLIB")
 
 
-def write_config(directory):
-    template = (SSH / "libssh2/src/libssh2_config_cmake.h.in").read_text()
+def write_config(directory, ssh=SSH):
+    template = (ssh / "libssh2/src/libssh2_config_cmake.h.in").read_text()
     (directory / "libssh2_config.h").write_text("\n".join(
         line for line in template.splitlines() if "#cmakedefine" not in line) + "\n")
 
@@ -47,6 +47,8 @@ def main():
     parser.add_argument("--include", type=Path, required=True)
     parser.add_argument("--lib-dir", type=Path, required=True)
     parser.add_argument("--sanitizer", choices=("none", "address", "thread"), required=True)
+    parser.add_argument("--source-dir", type=Path, default=SSH,
+                        help="libssh2-sys source tree (default: current checkout)")
     args = parser.parse_args()
     if sys.platform not in ("darwin", "linux"):
         raise RuntimeError("real OS entropy failure injection requires macOS or glibc Linux")
@@ -55,18 +57,19 @@ def main():
             raise RuntimeError(f"missing Mbed TLS archive: {name}")
     if not (args.include / "mbedtls/mbedtls_config.h").is_file():
         raise RuntimeError("missing generated Mbed TLS include tree")
-    sources = source_files()
+    ssh = args.source_dir.resolve()
+    sources = source_files(ssh)
     defines = unix_defines("LIBSSH2_MBEDTLS")
     with tempfile.TemporaryDirectory(prefix="lingxi-libssh2-init-") as temporary:
         tmp = Path(temporary)
-        write_config(tmp)
+        write_config(tmp, ssh)
         compiler = os.environ.get("CC", "cc")
         flags = ["-O1", "-g0", "-fno-omit-frame-pointer", "-fvisibility=hidden"]
         if args.sanitizer != "none":
             flags += ["-fsanitize=" + args.sanitizer]
         command = [compiler, *flags, *("-D" + item for item in defines),
-                   "-I", str(tmp), "-I", str(SSH / "libssh2/include"),
-                   "-I", str(SSH / "libssh2/src"), "-I", str(args.include),
+                   "-I", str(tmp), "-I", str(ssh / "libssh2/include"),
+                   "-I", str(ssh / "libssh2/src"), "-I", str(args.include),
                    *(str(source) for source in sources), str(FIXTURE),
                    "-L", str(args.lib_dir), "-lmbedtls", "-lmbedx509", "-lmbedcrypto",
                    "-lz", "-lpthread"]

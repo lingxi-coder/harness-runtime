@@ -35,6 +35,33 @@ rustc-1.82 compat: libssh2-sys's Rust sources (`lib.rs`, `build.rs`) use no bare
 `str::from_utf8` — no qualification patch needed (unlike git2). Verify on
 re-vendor: `rg '[^:]str::from_utf8' third_party/libssh2-sys/*.rs` should be empty.
 
+## libssh2 global crypto initialization failure
+
+`libssh2/src/global.c` propagates backend initialization failures without
+acquiring a reference. The first successful call determines crypto ownership
+until the last matching exit; later calls with different `NO_CRYPTO` flags do
+not transfer ownership. Every backend's `libssh2_crypto_init()` expression
+returns zero or a negative error. Implicit initialization errors make
+`libssh2_session_init_ex()` free the new session and return `NULL`.
+
+The Mbed TLS backend always initializes its private entropy and CTR-DRBG
+contexts, including with `LIBSSH2_INIT_NO_CRYPTO`: external callers cannot
+initialize those private contexts. A seeding error frees both contexts and
+returns `LIBSSH2_ERROR_RANDGEN`, allowing a later retry. This does not initialize
+or release a caller-owned PSA context. The Rust `libssh2-sys::init()` wrapper
+already asserts success; it was not changed. Global initialization retains
+libssh2's documented requirement that callers serialize it.
+
+After re-vendoring, run `python3 scripts/tests/run_mbedtls_ca.py --sanitizer
+none` (and `address` / `thread` where supported). The runner uses the pinned
+Mbed TLS source and records the modified libssh2 source hashes with the test
+logs. `--negative-libssh2-source <original-libssh2-sys>` additionally requires
+the original backend to fail at the real entropy assertion. OS entropy failure
+injection is supported on macOS and glibc Linux; unsupported hosts fail the
+test rather than silently skipping it. `python3
+scripts/tests/run_libssh2_openssl_init.py` checks first-call ownership using a
+real OpenSSL backend and its development SDK.
+
 ## TLS backend
 
 Built with `vendored-libgit2 + https + ssh` — TLS + crypto backend is **mbedTLS**

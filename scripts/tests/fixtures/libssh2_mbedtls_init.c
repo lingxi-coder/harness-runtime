@@ -119,6 +119,8 @@ int main(void)
     test_real_entropy_control(0);
     set_entropy_failure(1);
     test_real_entropy_control(1);
+    puts("real entropy failure control passed");
+    fflush(stdout);
     assert(libssh2_init(0) == LIBSSH2_ERROR_RANDGEN);
     assert(libssh2_init(LIBSSH2_INIT_NO_CRYPTO) == LIBSSH2_ERROR_RANDGEN);
     /* An exit after either failed init must not consume a later reference. */
