@@ -246,7 +246,8 @@ static int mbedtls_connect(git_stream *stream)
 
 	st->connected = true;
 
-	mbedtls_ssl_set_hostname(st->ssl, st->host);
+	if ((ret = mbedtls_ssl_set_hostname(st->ssl, st->host)) != 0)
+		return ssl_set_error(st->ssl, ret);
 
 	mbedtls_ssl_set_bio(st->ssl, st->io, bio_write, bio_read, NULL);
 

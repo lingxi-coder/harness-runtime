@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Check real wrapper/new/free bodies with deterministic allocation failures.
+"""Check real stream lifecycle bodies with deterministic injected failures.
 
 The small C harness substitutes allocation and TLS setup, not the product cleanup
-branches. It verifies stream ownership and local allocation balance, not TLS
-protocol correctness or the independent CA configuration lifecycle.
+branches. Hostname tests also inject setter failures before handshake. These
+checks do not test TLS protocol correctness or the CA configuration lifecycle.
 """
 from pathlib import Path
 import os
@@ -186,6 +186,121 @@ int main(void) {
 }
 '''
 
+HOSTNAME_PREFIX = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct { int marker; } git_stream;
+typedef struct { int marker; } git_cert_x509;
+typedef struct { int marker; } mbedtls_ssl_context;
+#define GIT_ASSERT(x) assert(x)
+#define GIT_ERROR_SSL 1
+#define GIT_ECERTIFICATE -17
+#define MBEDTLS_ERR_SSL_BAD_INPUT_DATA -0x7100
+#define MBEDTLS_ERR_SSL_ALLOC_FAILED -0x7f00
+#define MBEDTLS_ERR_SSL_WANT_READ -0x6900
+#define MBEDTLS_ERR_SSL_WANT_WRITE -0x6880
+#define MBEDTLS_ERR_X509_CERT_VERIFY_FAILED -0x2700
+
+static int socket_status, hostname_status, handshake_status, verify_status;
+static int socket_calls, hostname_calls, bio_calls, handshake_calls, verify_calls;
+static int strerror_arg, diagnostic_class;
+static char diagnostic[512];
+static git_stream *expected_io;
+static mbedtls_ssl_context *expected_ssl;
+static const char *expected_host;
+
+static void mbedtls_strerror(int error, char *buffer, size_t length) {
+ strerror_arg = error;
+ snprintf(buffer, length, "mock mbedtls reason");
+}
+static int mbedtls_ssl_get_verify_result(mbedtls_ssl_context *ssl) {
+ assert(ssl == expected_ssl); return 0;
+}
+static void git_error_set(int klass, const char *format, ...) {
+ va_list args;
+ diagnostic_class = klass;
+ va_start(args, format);
+ vsnprintf(diagnostic, sizeof(diagnostic), format, args);
+ va_end(args);
+}
+static int git_stream_connect(git_stream *io) {
+ assert(io == expected_io); ++socket_calls; return socket_status;
+}
+static int mbedtls_ssl_set_hostname(mbedtls_ssl_context *ssl, const char *host) {
+ assert(ssl == expected_ssl && host == expected_host);
+ ++hostname_calls; return hostname_status;
+}
+static int bio_write(void *io, const unsigned char *buffer, size_t length) {
+ (void)io; (void)buffer; (void)length; return 0;
+}
+static int bio_read(void *io, unsigned char *buffer, size_t length) {
+ (void)io; (void)buffer; (void)length; return 0;
+}
+static void mbedtls_ssl_set_bio(mbedtls_ssl_context *ssl, void *io,
+ int (*send)(void *, const unsigned char *, size_t),
+ int (*receive)(void *, unsigned char *, size_t), void *timeout) {
+ assert(ssl == expected_ssl && io == expected_io);
+ assert(send == bio_write && receive == bio_read && timeout == NULL);
+ ++bio_calls;
+}
+static int mbedtls_ssl_handshake(mbedtls_ssl_context *ssl) {
+ assert(ssl == expected_ssl); ++handshake_calls; return handshake_status;
+}
+static int verify_server_cert(mbedtls_ssl_context *ssl) {
+ assert(ssl == expected_ssl); ++verify_calls; return verify_status;
+}
+'''
+
+HOSTNAME_CASES = r'''
+static void reset(void) {
+ socket_status = hostname_status = handshake_status = verify_status = 0;
+ socket_calls = hostname_calls = bio_calls = handshake_calls = verify_calls = 0;
+ strerror_arg = diagnostic_class = 0; diagnostic[0] = '\0';
+}
+int main(void) {
+ git_stream io = {0}; mbedtls_ssl_context ssl = {0};
+ char host[] = "example.test";
+ expected_io = &io; expected_ssl = &ssl; expected_host = host;
+
+ for (int owned = 0; owned <= 1; ++owned) {
+  const int failures[] = {MBEDTLS_ERR_SSL_BAD_INPUT_DATA, MBEDTLS_ERR_SSL_ALLOC_FAILED};
+  for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
+   reset(); mbedtls_stream st = {0}; st.io = &io; st.ssl = &ssl;
+   st.host = host; st.owned = owned; hostname_status = failures[i];
+   assert(mbedtls_connect(&st.parent) == -1);
+   assert(socket_calls == owned && hostname_calls == 1 && st.connected);
+   assert(bio_calls == 0 && handshake_calls == 0 && verify_calls == 0);
+   assert(strerror_arg == failures[i] && diagnostic_class == GIT_ERROR_SSL);
+   assert(strstr(diagnostic, "mock mbedtls reason") != NULL);
+  }
+  reset(); mbedtls_stream st = {0}; st.io = &io; st.ssl = &ssl;
+  st.host = host; st.owned = owned;
+  assert(mbedtls_connect(&st.parent) == 0);
+  assert(socket_calls == owned && hostname_calls == 1 && bio_calls == 1);
+  assert(handshake_calls == 1 && verify_calls == 1 && st.connected);
+
+  reset(); st.connected = false; handshake_status = -0x7200;
+  assert(mbedtls_connect(&st.parent) == -1);
+  assert(strerror_arg == handshake_status && diagnostic_class == GIT_ERROR_SSL);
+  assert(handshake_calls == 1 && verify_calls == 0);
+
+  reset(); st.connected = false; verify_status = -33;
+  assert(mbedtls_connect(&st.parent) == -33);
+  assert(handshake_calls == 1 && verify_calls == 1);
+ }
+ reset(); mbedtls_stream st = {0}; st.io = &io; st.ssl = &ssl;
+ st.host = host; st.owned = 1; socket_status = -7;
+ assert(mbedtls_connect(&st.parent) == -7 && !st.connected);
+ assert(socket_calls == 1 && hostname_calls == 0 && bio_calls == 0);
+ assert(handshake_calls == 0 && verify_calls == 0);
+ return 0;
+}
+'''
+
 
 class StreamOwnership(unittest.TestCase):
     def test_failure_and_success_ownership(self):
@@ -198,6 +313,20 @@ class StreamOwnership(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="mbedtls-ownership-") as directory:
             source, binary = Path(directory) / "ownership.c", Path(directory) / "ownership"
             source.write_text(PREFIX + text[start:end] + "\n" + "\n".join(bodies) + CASES)
+            command = [os.environ.get("CC", "cc"), "-std=c99", "-Wall", "-Wextra", "-Werror"]
+            if os.environ.get("MBEDTLS_OWNERSHIP_ASAN") == "1":
+                command += ["-fsanitize=address", "-fno-omit-frame-pointer"]
+            subprocess.run(command + [str(source), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+    def test_hostname_failure_stops_before_handshake(self):
+        text = SOURCE.read_text()
+        start = text.index("typedef struct {\n\tgit_stream parent;")
+        end = text.index("} mbedtls_stream;", start) + len("} mbedtls_stream;")
+        bodies = [function(text, name) for name in ("ssl_set_error", "mbedtls_connect")]
+        with tempfile.TemporaryDirectory(prefix="mbedtls-hostname-") as directory:
+            source, binary = Path(directory) / "hostname.c", Path(directory) / "hostname"
+            source.write_text(HOSTNAME_PREFIX + text[start:end] + "\n" + "\n".join(bodies) + HOSTNAME_CASES)
             command = [os.environ.get("CC", "cc"), "-std=c99", "-Wall", "-Wextra", "-Werror"]
             if os.environ.get("MBEDTLS_OWNERSHIP_ASAN") == "1":
                 command += ["-fsanitize=address", "-fno-omit-frame-pointer"]
