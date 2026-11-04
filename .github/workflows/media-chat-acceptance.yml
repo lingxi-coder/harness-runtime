@@ -1,0 +1,109 @@
+# Temporary branch-only diagnostic. Do not merge this workflow to main.
+name: media-chat-acceptance
+
+on:
+  push:
+    branches:
+      - codex/media-chat-acceptance-20261104
+
+permissions:
+  contents: read
+
+jobs:
+  chat-recovery:
+    name: App Chat acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    env:
+      RUST_MIN_STACK: "16777216"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - id: checkout
+        uses: actions/checkout@v4
+      - id: llm-client
+        uses: ./.github/actions/llm-client
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Record source and toolchain
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/media-chat-acceptance"
+          {
+            git rev-parse HEAD
+            git rev-parse 'HEAD^{tree}'
+            rustc -vV
+            cargo --version
+            uname -a
+          } | tee "$RUNNER_TEMP/media-chat-acceptance/environment.log"
+      - name: Test rooted filesystem locks
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p rooted-fs --lib 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/rooted-fs.log"
+      - name: Test persistent Chat five times with default concurrency
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for round in 1 2 3 4 5; do
+            cargo test --locked -p orchestrator --lib persistent_chat 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/chat-$round.log"
+          done
+      - name: Test mode and projected-content paths
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orchestrator --lib context_state_impl:: 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/context-state.log"
+          cargo test --locked -p orchestrator --lib projected_content 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/projected-content.log"
+      - name: Test session and Local App agent storage
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p session --lib persistent_chat 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/session.log"
+          cargo test --locked -p local-app --lib v2::agent:: 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/local-app.log"
+      - name: Test factory, service, and Chat recovery
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p harness-runtime --no-default-features --features mobile --lib \
+            mobile::app_agent:: 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/app-agent.log"
+          grep -Fqx 'test mobile::app_agent::history_model_capability_tests::factory_initializes_new_chat_and_resumes_its_verified_profile ... ok' "$RUNNER_TEMP/media-chat-acceptance/app-agent.log"
+          grep -Fqx 'test mobile::app_agent::history_model_capability_tests::factory_cold_resume_restores_nonzero_instruction_epoch ... ok' "$RUNNER_TEMP/media-chat-acceptance/app-agent.log"
+          grep -Fqx 'test mobile::app_agent::service::protocol_retry_tests::recovered_inline_tool_transcript_repairs_owner_for_admission_history ... ok' "$RUNNER_TEMP/media-chat-acceptance/app-agent.log"
+      - name: Test gateway JSON and Linux private spool
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p harness-runtime --no-default-features --features mobile --lib \
+            mobile::unified_local_apps::gateway::agent_json_tests:: 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/gateway-json.log"
+          if [ "$RUNNER_OS" = Linux ]; then
+            grep -Fqx 'test mobile::unified_local_apps::gateway::agent_json_tests::pending_request_spools_are_private_and_close_after_timeout_eof_or_cancellation ... ok' "$RUNNER_TEMP/media-chat-acceptance/gateway-json.log"
+          fi
+      - name: Test gateway control lane
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p harness-runtime --no-default-features --features mobile --lib \
+            mobile::unified_local_apps::gateway::agent_control_lane_tests::private_spool_rejection_is_a_server_error_without_dispatch_or_sensitive_details \
+            -- --exact 2>&1 | tee "$RUNNER_TEMP/media-chat-acceptance/gateway-control.log"
+          grep -Fqx 'test mobile::unified_local_apps::gateway::agent_control_lane_tests::private_spool_rejection_is_a_server_error_without_dispatch_or_sensitive_details ... ok' "$RUNNER_TEMP/media-chat-acceptance/gateway-control.log"
+      - name: Preserve acceptance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-chat-acceptance-${{ matrix.os }}
+          path: ${{ runner.temp }}/media-chat-acceptance
+          if-no-files-found: ignore
+          retention-days: 7
