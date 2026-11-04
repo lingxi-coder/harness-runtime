@@ -231,6 +231,12 @@ pub const DISABLE_NONSTREAMING_FALLBACK_ENV: &str = "LINGXI_DISABLE_NONSTREAMING
 pub const SKIP_FAST_MODE_ORG_CHECK_ENV: &str = "LINGXI_SKIP_FAST_MODE_ORG_CHECK";
 /// Native transient-network bypass, excluded for agent-owned remote sessions.
 pub const SKIP_FAST_MODE_NETWORK_ERRORS_ENV: &str = "LINGXI_SKIP_FAST_MODE_NETWORK_ERRORS";
+/// Explicit override for inline tool changes.
+pub const INLINE_TOOLS_ENV: &str = "LINGXI_INLINE_TOOLS";
+/// Disables the one-shot refusal safety retry when set to a nonempty value.
+pub const DISABLE_REFUSAL_RETRY_ENV: &str = "LINGXI_DISABLE_REFUSAL_RETRY";
+/// Override for cross-session and agent-listing availability.
+pub const HARBOR_KITE_ENV: &str = "LINGXI_HARBOR_KITE";
 
 /// User config directory name under `$HOME` (e.g. `~/.lingxi`). Also the
 /// per-project config dir name (`<repo>/.lingxi/`).
@@ -406,6 +412,9 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     DISABLE_NONSTREAMING_FALLBACK_ENV,
     SKIP_FAST_MODE_ORG_CHECK_ENV,
     SKIP_FAST_MODE_NETWORK_ERRORS_ENV,
+    INLINE_TOOLS_ENV,
+    DISABLE_REFUSAL_RETRY_ENV,
+    HARBOR_KITE_ENV,
     DOT_DIR,
     MANAGED_PREFERENCES_DOMAIN,
     GLOBAL_CONFIG_FILE,
@@ -568,6 +577,9 @@ mod tests {
             DISABLE_BACKGROUND_TASKS_ENV,
             "LINGXI_DISABLE_BACKGROUND_TASKS"
         );
+        assert_eq!(INLINE_TOOLS_ENV, "LINGXI_INLINE_TOOLS");
+        assert_eq!(DISABLE_REFUSAL_RETRY_ENV, "LINGXI_DISABLE_REFUSAL_RETRY");
+        assert_eq!(HARBOR_KITE_ENV, "LINGXI_HARBOR_KITE");
         assert_eq!(PLUGIN_ROOT_ENV, "LINGXI_PLUGIN_ROOT");
         assert_eq!(PLUGIN_DATA_ENV, "LINGXI_PLUGIN_DATA");
         assert_eq!(PROJECT_DIR_ENV, "LINGXI_PROJECT_DIR");

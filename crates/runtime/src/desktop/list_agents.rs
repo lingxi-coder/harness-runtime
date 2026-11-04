@@ -25,7 +25,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const HARBOR_KITE_ENV: &str = "CLAUDE_CODE_HARBOR_KITE";
 #[cfg(windows)]
 const HARBOR_KITE_WINDOWS_FLAG: &str = "tengu_harbor_kite_win";
 const HARBOR_KITE_FLAG: &str = "tengu_harbor_kite";
@@ -125,7 +124,7 @@ impl ListAgentsProvider for DesktopListAgentsProvider {
 }
 
 fn harbor_kite_enabled() -> bool {
-    if let Some(raw) = std::env::var_os(HARBOR_KITE_ENV) {
+    if let Some(raw) = std::env::var_os(branding::HARBOR_KITE_ENV) {
         // Presence is an override, including a non-Unicode value (which has no
         // truthy JavaScript string representation and therefore evaluates
         // false). Do not fall through to GrowthBook when it is set.
@@ -404,6 +403,35 @@ mod tests {
     use lingxi_core::types::AgentId;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn product_harbor_kite_flag_controls_roster_in_child() {
+        const CHILD: &str = "HARNESS_TEST_HARBOR_KITE_EXPECTED";
+        const RAN: &str = "harbor-kite-product-env-child-ran";
+        if let Ok(expected) = std::env::var(CHILD) {
+            assert_eq!(harbor_kite_enabled(), expected == "true");
+            println!("{RAN}");
+            return;
+        }
+
+        for (value, expected) in [("1", "true"), ("off", "false"), ("", "false")] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "desktop::list_agents::tests::product_harbor_kite_flag_controls_roster_in_child",
+                    "--nocapture",
+                ])
+                .env(CHILD, expected)
+                .env(branding::HARBOR_KITE_ENV, value)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(RAN),
+                "{output:?}"
+            );
+        }
+    }
 
     fn local_agent(
         task_id: &str,

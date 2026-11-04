@@ -165,10 +165,7 @@ G1	crates/cost/build.rs	LINGXI
 G1	crates/cost/src/events.rs	LINGXI
 G1	crates/cron/src/autonomous_loop.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/cron/src/autonomous_loop.rs	\.lingxi
-G1	crates/cron/src/lock.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/cron/src/run_due.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/cron/src/run_due.rs	\.lingxi
-G1	crates/cron/src/scheduler.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/cron/src/scheduler.rs	\.lingxi
 G1	crates/cron/src/tasks_file.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/cron/src/tasks_file.rs	\.lingxi
@@ -423,7 +420,6 @@ G1	crates/plugin/tests/materialize.rs	\.lingxi
 G1	crates/runtime/src/desktop/agent_skill_loader.rs	LINGXI
 G1	crates/runtime/src/desktop/assembly.rs	LINGXI
 G1	crates/runtime/src/desktop/auto_mode_propose.rs	LINGXI
-G1	crates/runtime/src/desktop/connect.rs	LingXi
 G1	crates/runtime/src/desktop/cron_management.rs	\.lingxi
 G1	crates/runtime/src/desktop/fusion_implement_e2e_test.rs	\.lingxi
 G1	crates/runtime/src/desktop/ide.rs	LingXi
@@ -440,7 +436,6 @@ G1	crates/runtime/src/desktop/tests/tests.rs	LINGXI
 G1	crates/runtime/src/desktop/tests/tests.rs	LingXi
 G1	crates/runtime/src/desktop/tests/tests.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/assembly.rs	LINGXI
-G1	crates/runtime/src/mobile/host/automation.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/tests/cron_automation_tests.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/tests/tests.rs	LINGXI
@@ -542,12 +537,8 @@ G1	crates/tools/agent/src/agent.rs	LINGXI
 G1	crates/tools/agent/src/agent_test.rs	LINGXI
 G1	crates/tools/agent/src/agent_test.rs	\.lingxi
 G1	crates/tools/computer-use/examples/desktop_acceptance.rs	\.lingxi
-G1	crates/tools/cron/src/cron_delete.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/tools/cron/src/cron_list.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/tools/cron/src/remote_trigger.rs	LingXi
-G1	crates/tools/cron/src/schedule_cron.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/tools/cron/src/wakeup.rs	LINGXI
-G1	crates/tools/cron/tests/fixtures/cron_contracts_2_1_270.json	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/tools/cron/tests/oracle/verify_storage.py	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/tools/file/src/edit.rs	LINGXI
 G1	crates/tools/file/src/edit_test.rs	LINGXI
@@ -634,7 +625,6 @@ G1	scripts/tests/headless-fixtures/native-2.1.293-source-system-prefix.json	Ling
 G1	scripts/tests/headless-fixtures/native-harness-first-print-text.json	LINGXI
 G1	scripts/tests/smoke.sh	LINGXI
 G2	crates/compaction/src/thresholds.rs	CLAUDE_CODE_DISABLE_1M_CONTEXT
-G2	crates/core/src/host/live_sessions.rs	CLAUDE_CODE_HARBOR_KITE
 G2	crates/core/src/host/traffic_mode.rs	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 G2	crates/core/src/host/uds_inbox.rs	CLAUDE_CODE_TMPDIR
 G2	crates/http-client/src/tls_config.rs	CLAUDE_CODE_CERT_STORE
@@ -915,7 +905,6 @@ G3	crates/runtime/src/desktop/tests/bash_edit_diff_wiring_tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi-plugin
 G3	crates/runtime/src/desktop/tests/tests.rs	LINGXI.md
-G3	crates/runtime/src/mobile/host/automation.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/cron_automation_tests.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/tests.rs	.lingxi

@@ -2216,7 +2216,7 @@ fn read_settings_file(path: &std::path::Path) -> Option<String> {
 #[must_use]
 pub fn cross_session_messaging_enabled() -> bool {
     let env_on = |k: &str| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
-    env_on("LINGXI_HARBOR_KITE") || env_on("CLAUDE_CODE_HARBOR_KITE") || process_dir().is_some()
+    env_on(branding::HARBOR_KITE_ENV) || process_dir().is_some()
 }
 
 /// Subagent-steer latch (`N7()`). Absent / `"default"` keeps the long
