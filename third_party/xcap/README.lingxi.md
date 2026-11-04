@@ -18,7 +18,14 @@ the Linux portal tests also run reproducibly outside the excluded workspace.
 resolves this crate's upstream optional `image` feature and its development
 dependencies for the standalone lock, so it contains additional packages not
 used by the production configuration. `quick-error` 2.0.1 is an optional image
-dependency; the Harness lock has 1.2.3 for a separate dependency. When refreshing
-the locks, seed this lock from the Harness lock, resolve the standalone crate's
+dependency; the Harness lock has 1.2.3 for a separate dependency. The exception
+matches the exact crates.io source and checksum, and CI checks that version is
+absent from both active Linux test graphs. When refreshing the locks, seed this
+lock from the Harness lock, resolve the standalone crate's
 features and development dependencies, then run the lock check and both portal
 test variants before committing.
+
+The portal worker owns and closes its D-Bus session while a recorder is alive.
+The upstream PipeWire capture thread still runs its main loop without an explicit
+stop/join when the recorder is dropped. The portal lifetime test does not cover
+or establish cleanup of that separate capture thread.
