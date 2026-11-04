@@ -453,6 +453,10 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    fn durable_origin_state(&self) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
+        self.inner.get().and_then(|invoker| invoker.durable_origin_state())
+    }
+
     async fn cleanup_computer_inputs(
         &self,
         agent_id: lingxi_core::types::AgentId,
@@ -1400,24 +1404,39 @@ async fn hydrate_captured_session_before_start(
         && !loaded
             .mobile_empty_sessions
             .contains(&session_id.to_string())
+        && !session_state::is_mode_only_draft(&snapshot.content, &session_id.to_string())
     {
         return Err(BuildError::Orchestrator(
             "cold resume snapshot contains no conversation".into(),
         ));
     }
     let plan_mode = orchestrator::state_from_messages(session_id, &messages).plan_mode;
+    // Assembly may already have resolved an agent, preference or auto-mode
+    // policy into a different live mode than the raw configuration value.
+    let resolved_permission_mode = orchestrator
+        .permission_mode()
+        .as_deref()
+        .map(permission::permission_mode_from_cli_string)
+        .unwrap_or(cfg.permission_mode);
     let permission_mode = if !cfg.permission_mode_cli_explicit && plan_mode {
         permission::PermissionMode::Plan
     } else {
-        cfg.permission_mode
+        resolved_permission_mode
     };
     orchestrator
         .restore_captured_session_history(
             session_id,
             &messages,
             &loaded.messages_in_order,
-            model_provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier,
+            cfg.cli_agent.is_some()
+                || model_provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier,
             permission_mode,
+            session::JsonlWriter::fixed_session_mode_from_source(
+                &snapshot.content,
+                &session_id.to_string(),
+            )
+            .map_err(BuildError::Orchestrator)?,
+            &snapshot.content,
         )
         .await
         .map_err(BuildError::Orchestrator)?;
@@ -2771,6 +2790,54 @@ pub struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    /// Pin the currently mounted session's durable writer authority. The
+    /// session mutex excludes identity activation while the manager resolves
+    /// and pins the matching coordinator; the returned lease remains tied to
+    /// that UUID even if the runtime later mounts a different session.
+    pub async fn current_session_writer_lease(
+        &self,
+        expected: lingxi_core::types::SessionId,
+    ) -> Result<lingxi_core::host::live_sessions::SharedSessionWriterLease, String> {
+        let session = self.orchestrator.session();
+        let state = session.lock().await;
+        if state.session_id != expected {
+            return Err("the active session changed before acquiring its writer lease".into());
+        }
+        let coordinator = self
+            .session_lifecycle
+            .session_state_manager
+            .coordinator(expected)
+            .ok_or_else(|| "the active session writer is unavailable".to_string())?;
+        let lease = coordinator.writer_lease();
+        if lease.canonical_session_id() != Some(expected) {
+            return Err("the active session writer has a different identity".into());
+        }
+        Ok(lease)
+    }
+
+    /// Capture a complete committed prefix under the session's writer lock.
+    /// No conversation or turn lock is held while waiting for filesystem I/O.
+    pub async fn capture_current_session_transcript(
+        &self,
+        expected: lingxi_core::types::SessionId,
+    ) -> Result<session::jsonl::writer::CommittedTranscript, String> {
+        if self.orchestrator.current_session_id().await != expected {
+            return Err("the active session changed before transcript capture".into());
+        }
+        let writer = self
+            .fork_writer
+            .as_ref()
+            .ok_or("session persistence is disabled")?;
+        let capture = writer
+            .capture_committed_transcript(expected.as_uuid())
+            .await
+            .map_err(|error| error.to_string())?;
+        if self.orchestrator.current_session_id().await != expected {
+            return Err("the active session changed during transcript capture".into());
+        }
+        Ok(capture)
+    }
+
     /// Apply SessionStart reload requests through the session's live handler,
     /// retaining registered prompt directories and shared producer refreshes.
     pub async fn apply_session_start_effects(

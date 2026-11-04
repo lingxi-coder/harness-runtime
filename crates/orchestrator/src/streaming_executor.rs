@@ -1253,8 +1253,8 @@ impl<'a> StreamingToolExecutor<'a> {
     pub(crate) async fn remove_assistant_stream_rows(
         &mut self,
         rows: &[crate::streaming_loop::PersistedAssistantRowLink],
-    ) {
-        self.orch.remove_assistant_stream_rows(rows).await;
+    ) -> Result<(), crate::error::OrchestratorError> {
+        self.orch.remove_assistant_stream_rows(rows).await
     }
 
     pub(crate) fn last_request_id(&self) -> Option<String> {

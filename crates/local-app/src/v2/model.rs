@@ -58,6 +58,13 @@ pub struct AppRecord {
     pub latest_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authoring: Option<AuthoringRef>,
+    /// Immutable source authorities explicitly associated with this app.
+    /// Current authoring is only a preferred session pointer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authoring_source_ids: Vec<String>,
+    /// Durable native publication outcomes, committed with the app record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authoring_publications: Vec<AuthoringPublicationReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub market_origin: Option<MarketOrigin>,
     pub origin_port: u16,
@@ -66,6 +73,20 @@ pub struct AppRecord {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthoringPublicationReceipt {
+    pub request_id: String,
+    pub payload_sha256: String,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<AuthoringRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// Record returned by the committed publication, without receipt history.
+    pub record: serde_json::Value,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -270,8 +291,6 @@ pub enum LibraryRequest {
     Import {
         #[serde(rename = "sourcePath")]
         source_path: String,
-        #[serde(default)]
-        authoring: Option<AuthoringRef>,
         #[serde(default, rename = "marketOrigin")]
         market_origin: Option<MarketOrigin>,
     },
@@ -282,30 +301,5 @@ pub enum LibraryRequest {
         session_bindings: BTreeMap<String, AuthoringSessionContext>,
         #[serde(rename = "sourceExists")]
         source_exists: bool,
-    },
-    BindAuthoring {
-        #[serde(rename = "appId")]
-        app_id: String,
-        authoring: AuthoringRef,
-    },
-    RestoreAuthoring {
-        #[serde(rename = "appId")]
-        app_id: String,
-        #[serde(default)]
-        revision: Option<u64>,
-        #[serde(rename = "sourcePath")]
-        source_path: String,
-        authoring: AuthoringRef,
-    },
-    Remix {
-        #[serde(rename = "appId")]
-        app_id: String,
-        #[serde(default)]
-        revision: Option<u64>,
-        #[serde(rename = "sourcePath")]
-        source_path: String,
-        authoring: AuthoringRef,
-        #[serde(default)]
-        name: Option<String>,
     },
 }

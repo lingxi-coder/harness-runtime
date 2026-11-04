@@ -63,13 +63,23 @@ async fn read_all_round_trips_writer_output() {
 }
 
 #[tokio::test]
-async fn read_lite_extracts_metadata_from_first_line_only() {
+async fn read_lite_extracts_workspace_after_fixed_mode_header() {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("session.jsonl");
+    let path = dir
+        .path()
+        .join("11111111-2222-3333-4444-555555555555.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = JsonlWriter::new(path.clone(), fs.clone());
 
-    // First line is small + has all three lite fields.
+    writer
+        .initialize_fixed_session_mode(
+            "11111111-2222-3333-4444-555555555555",
+            session::jsonl::SessionMode::Chat,
+            0,
+        )
+        .await
+        .unwrap();
+    // The first workspace-bearing row follows the immutable mode header.
     writer.append(&user_msg(0)).await.expect("append 0");
     // Pad with many subsequent lines so the file exceeds 64 KiB —
     // the lite read MUST NOT need to parse past the head buffer.
@@ -99,9 +109,20 @@ async fn read_lite_extracts_metadata_from_first_line_only() {
 #[tokio::test]
 async fn read_lite_handles_escaped_chars_in_first_line() {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("session.jsonl");
+    let path = dir
+        .path()
+        .join("11111111-2222-3333-4444-555555555555.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = JsonlWriter::new(path.clone(), fs.clone());
+
+    writer
+        .initialize_fixed_session_mode(
+            "11111111-2222-3333-4444-555555555555",
+            session::jsonl::SessionMode::Code,
+            0,
+        )
+        .await
+        .unwrap();
 
     // cwd contains a quote + backslash (forced into the field by manual
     // construction; the writer escapes them in JSON).
@@ -112,6 +133,29 @@ async fn read_lite_handles_escaped_chars_in_first_line() {
     let reader = JsonlReader::new(path, fs);
     let meta = reader.read_lite().await.expect("lite");
     assert_eq!(meta.cwd, "/path/with \"quote\" and \\back");
+}
+
+#[tokio::test]
+async fn read_lite_reads_fields_when_first_message_exceeds_prefix() {
+    let dir = tempdir().unwrap();
+    let id = "11111111-2222-3333-4444-555555555555";
+    let path = dir.path().join(format!("{id}.jsonl"));
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = JsonlWriter::new(path.clone(), fs.clone());
+    writer
+        .initialize_fixed_session_mode(id, session::jsonl::SessionMode::Code, 0)
+        .await
+        .unwrap();
+    let mut message = user_msg(0);
+    message.message = Utf16JsonProjection::from_serde_value(
+        &json!({"role":"user", "content":"x".repeat(100_000)}),
+    )
+    .unwrap();
+    writer.append(&message).await.unwrap();
+    let metadata = JsonlReader::new(path, fs).read_lite().await.unwrap();
+    assert_eq!(metadata.session_id, id);
+    assert_eq!(metadata.cwd, "/tmp/proj");
+    assert_eq!(metadata.first_type, "user");
 }
 
 // ---- Tolerant reader (BLOCKING gap): real-transcript line-type tolerance ----
@@ -133,8 +177,6 @@ const MIXED: &str = concat!(
     r#"{not json at all"#,
     "\n",
     r#"{"type":"permission-mode","sessionId":"sid-1","mode":"acceptEdits"}"#,
-    "\n",
-    r#"{"type":"session-mode","sessionId":"sid-1","sessionMode":"chat"}"#,
     "\n",
     r#"{"type":"assistant","uuid":"u-2","parentUuid":"u-1","sessionId":"sid-1","timestamp":"2026-05-25T12:00:01.000Z","cwd":"/p","version":"0.6.0","isSidechain":false,"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
     "\n",
@@ -202,10 +244,6 @@ fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
     assert_eq!(
         routed.ai_titles.get("sid-1").map(String::as_str),
         Some("Greeting")
-    );
-    assert_eq!(
-        routed.session_modes.get("sid-1").map(String::as_str),
-        Some("chat")
     );
 }
 

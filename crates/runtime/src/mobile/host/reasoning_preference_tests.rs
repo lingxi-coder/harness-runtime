@@ -48,8 +48,7 @@ mod reasoning_preference_tests {
             restarted
                 .submit(ClientCommand::NewSession {
                     cwd: None,
-                    model: None,
-                })
+                    model: None, mode: client::protocol::listings::SessionModeDto::Code, })
                 .await
                 .unwrap();
             assert_eq!(

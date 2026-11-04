@@ -5,10 +5,12 @@ pub mod agent;
 mod document;
 mod library;
 mod manifest;
+mod market_remix;
 mod model;
 pub use document::validate_inline_document;
 pub use library::*;
 pub use manifest::*;
+pub use market_remix::*;
 pub use model::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +40,9 @@ pub enum AppError {
     /// A Chat index write may have committed and requires reopening to verify.
     #[error("Chat storage outcome is uncertain; reopen the store before continuing")]
     ChatStorageUncertain,
+    /// A not-yet-committed Market remix needs its original archive again.
+    #[error("the original Market archive is missing")]
+    ArchiveMissing,
     #[error("local app storage: {0}")]
     Io(#[from] std::io::Error),
     #[error("local app JSON: {0}")]
@@ -56,6 +61,7 @@ impl AppError {
             Self::ChatCreateConflict => "chatCreateConflict",
             Self::ChatCreateDeleted => "chatCreateDeleted",
             Self::ChatStorageUncertain => "chatStorageUncertain",
+            Self::ArchiveMissing => "archiveMissing",
             Self::Io(_) => "storageFailure",
         }
     }

@@ -182,7 +182,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
         ("event/side_chat_submitted.json", ClientEvent::SideChatSubmitted {side_id:"side-1".into(),request_id:"submit-1".into()}),
         ("event/side_chat_ended.json", ClientEvent::SideChatEnded {side_id:"side-1".into()}),
         ("event/side_chat_error.json", ClientEvent::SideChatError {request_id:None,side_id:Some("side-1".into()),message:"side chat is closing".into()}),
-        ("event/audio_session_context.json", ClientEvent::AudioSessionContext {request_id:"context-1".into(),session_id:Some("session-1".into()),profile_id:Some("profile-1".into()),account_scope:Some("profile:profile-1".into()),media_owner:Some(MediaOwnerDto::Attached { attachment_host_id:"21eb56b5-2f6c-43d5-b23e-f98766a91f02".into(), attachment_generation:1, logical_kind:MediaOwnerKindDto::Session, logical_owner_id:"session-1".into() })}),
+        ("event/audio_session_context.json", ClientEvent::AudioSessionContext {request_id:"context-1".into(),session_id:Some("session-1".into()),profile_id:Some("profile-1".into()),account_scope:Some("unbound".into()),media_owner:Some(MediaOwnerDto::Attached { attachment_host_id:"21eb56b5-2f6c-43d5-b23e-f98766a91f02".into(), attachment_generation:1, logical_kind:MediaOwnerKindDto::Session, logical_owner_id:"session-1".into() })}),
         ("event/realtime_audio_event.json", ClientEvent::RealtimeAudioEvent {session_id:"session-1".into(),event_json:r#"{"type":"closed","reason":"Cancelled"}"#.into()}),
         ("event/cron_run_bound.json", ClientEvent::CronRunBound {run_id: "run-1".into(), error: None}),
         ("event/scheduled_run_finished.json", ClientEvent::ScheduledRunFinished {run_id: "run-1".into(), summary: Some("Completed".into()), error: None}),
@@ -1305,6 +1305,9 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
+        ("event/context_manifest.json", ClientEvent::ContextManifest { manifest_json: "{\"projected\":false}".into() }),
+        ("event/session_handoff_prepared.json", ClientEvent::SessionHandoffPrepared { request_id: "handoff-1".into(), source_session_id: "session-1".into(), source_mode: SessionModeDto::Code, target_mode: SessionModeDto::Chat, cutoff: "sha256:example:42".into(), summary: ClientTextDto::from_utf8("Summary") }),
+        ("event/session_handoff_failed.json", ClientEvent::SessionHandoffFailed { request_id: "handoff-1".into(), message: "unavailable".into() }),
         (
             "event/media_control_request.json",
             ClientEvent::MediaControlRequest {
@@ -1359,7 +1362,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ("command/start_realtime_audio.json", ClientCommand::StartRealtimeAudio {request_json:r#"{"operationId":"audio-1"}"#.into()}),
         ("command/realtime_audio_input.json", ClientCommand::RealtimeAudioInput {input_json:r#"{"type":"commit_input"}"#.into()}),
         ("command/stop_realtime_audio.json", ClientCommand::StopRealtimeAudio),
-        ("command/cron_run_started.json", ClientCommand::CronRunStarted {run_id: "run-1".into(), session_id: "session-1".into()}),
+        ("command/cron_run_started.json", ClientCommand::CronRunStarted {run_id: "run-1".into(), session_id: "session-1".into(), transcript_path: "/project/session.jsonl".into(), session_mode: "code".into(), session_scope_key: Some("scope-1".into())}),
         ("command/cron_run_completed.json", ClientCommand::CronRunCompleted {run_id: "run-1".into(), session_id: Some("session-1".into()), summary: Some("Completed".into()), error: None}),
         ("command/scheduled_run_turn.json", ClientCommand::ScheduledRunTurn {run_id: "run-1".into(), prompt: "Daily brief".into(), model: "openai/model".into(), reasoning: ReasoningSelectionDto::Automatic}),
         ("command/task_message.json", ClientCommand::TaskMessage { task_id: "a12345678".into(), message: "Please continue the review.".into() }),
@@ -1512,6 +1515,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::NewSession {
                 cwd: Some("/home/dev/project".to_string()),
                 model: Some(ClientTextDto::from_utf8("claude-opus-4-7")),
+                mode: SessionModeDto::Code,
             },
         ),
         (
@@ -1519,11 +1523,12 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::ResumeSession {
                 session_id: "44444444-4444-4444-8444-444444444444".to_string(),
                 cwd: Some("/home/dev/project".to_string()),
+                expected_mode: SessionModeDto::Code,
             },
         ),
         (
             "command/list_sessions.json",
-            ClientCommand::ListSessions { limit: Some(20) },
+            ClientCommand::ListSessions { limit: Some(20), mode: Some(SessionModeDto::Chat) },
         ),
         (
             "command/fork_session.json",
@@ -1975,6 +1980,10 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 },
             },
         ),
+        ("command/prepare_session_handoff.json", ClientCommand::PrepareSessionHandoff { request_id: "handoff-1".into(), target_mode: SessionModeDto::Chat }),
+        ("command/cancel_session_handoff.json", ClientCommand::CancelSessionHandoff { request_id: "handoff-1".into() }),
+        ("command/retry_session_handoff.json", ClientCommand::RetrySessionHandoff { request_id: "handoff-1".into() }),
+        ("command/get_context_manifest.json", ClientCommand::GetContextManifest),
         (
             "command/update_media_session_modes.json",
             ClientCommand::UpdateMediaSessionModes {

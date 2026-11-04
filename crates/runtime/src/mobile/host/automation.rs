@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use super::{build_mobile_inner, MobileConfig, MobileEngineError, MobileEngineHandle};
+use super::{MobileConfig, MobileEngineError, MobileEngineHandle};
 
 /// Per-job wall-clock budget for a fired cron turn. This remains a second
 /// safety limit beneath WorkManager's outer lifecycle budget.
@@ -28,6 +28,9 @@ pub enum CronFireStatusDto {
         /// Human-readable failure detail.
         message: String,
     },
+    /// The turn may have executed, but its terminal record could not be
+    /// confirmed. This occurrence must never be automatically replayed.
+    OutcomeUnknown { message: String },
 }
 
 /// One fired-job record the Android service turns into a result notification.
@@ -36,6 +39,12 @@ pub enum CronFireStatusDto {
 pub struct FiredCronJobDto {
     /// Persisted result conversation, when execution created one.
     pub session_id: Option<String>,
+    /// Exact source path emitted in the host's mobile path coordinates.
+    pub session_transcript_path: Option<String>,
+    /// Immutable capability mode of the result conversation.
+    pub session_mode: Option<String>,
+    /// Opaque app owner captured when this occurrence was claimed.
+    pub session_scope_key: Option<String>,
     /// The cron job id that fired.
     pub id: String,
     /// The prompt that was run.
@@ -48,6 +57,272 @@ pub struct FiredCronJobDto {
     /// transport failures, or a durable `busy:` queued occurrence). Successful
     /// runs always report `false`.
     pub retryable: bool,
+}
+
+/// A durable reservation for one native conversation owner. A reservation
+/// does not imply that its scheduled turn was executed.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronOwnerReservationDto {
+    pub session_id: String,
+    pub session_transcript_path: String,
+    pub session_mode: String,
+    pub session_scope_key: String,
+}
+
+/// The candidate owner known before any child runtime or transcript is
+/// created. A fresh UUID has no transcript path yet.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronOwnerCandidateDto {
+    pub session_id: String,
+    pub session_transcript_path: Option<String>,
+    pub session_mode: String,
+    pub session_scope_key: String,
+}
+
+/// Native hosts durably mirror the reservation under their short admission
+/// gate before returning true. Rejection or cancellation never starts a turn.
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait]
+pub trait MobileCronOwnerAdmission: Send + Sync {
+    /// Reserve this UUID in the host before any transcript or owner ledger is
+    /// created. Other UUIDs remain available while the child is prepared.
+    async fn begin_owner(&self, candidate: CronOwnerCandidateDto) -> bool;
+    async fn confirm_owner(&self, reservation: CronOwnerReservationDto) -> bool;
+}
+
+/// A one-use barrier around the short interval in which a scheduled owner can
+/// be persisted. It remains observable after the foreign fire future is
+/// cancelled, even while the owned execution task is finishing its I/O.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct MobileCronAdmission {
+    owner: Arc<dyn MobileCronOwnerAdmission>,
+    state: std::sync::Mutex<MobileCronAdmissionState>,
+    cancelled: CancellationToken,
+    settled: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct MobileCronAdmissionState {
+    started: bool,
+    active: bool,
+    closed: bool,
+    reservation: Option<CronOwnerReservationDto>,
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl MobileCronAdmission {
+    #[cfg_attr(feature = "uniffi", uniffi::constructor)]
+    pub fn new(owner: Box<dyn MobileCronOwnerAdmission>) -> Arc<Self> {
+        let (settled, _) = tokio::sync::watch::channel(false);
+        Arc::new(Self {
+            owner: Arc::from(owner),
+            state: std::sync::Mutex::new(MobileCronAdmissionState::default()),
+            cancelled: CancellationToken::new(),
+            settled,
+        })
+    }
+
+    /// Close this admission and wait until no task can write its reservation
+    /// or still be executing the host callback. This does not wait for an
+    /// already admitted model turn.
+    pub async fn cancel_and_wait(&self) {
+        let mut settled = self.settled.subscribe();
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.closed = true;
+            self.cancelled.cancel();
+            if !state.active {
+                return;
+            }
+        }
+        while !*settled.borrow_and_update() {
+            if settled.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+impl MobileCronAdmission {
+    pub(super) fn begin(self: &Arc<Self>) -> Option<MobileCronAdmissionLease> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed || state.started {
+            return None;
+        }
+        state.started = true;
+        state.active = true;
+        Some(MobileCronAdmissionLease(self.clone(), None, None))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MobileCronSourceKey {
+    run_mode: cron::RunMode,
+    creation_mode: Option<String>,
+    creation_scope: Option<String>,
+    target_id: Option<String>,
+    target_path: Option<String>,
+    target_mode: Option<String>,
+    target_scope: Option<String>,
+    owned_id: Option<String>,
+    owned_path: Option<String>,
+    owned_mode: Option<String>,
+    owned_scope: Option<String>,
+}
+
+impl From<&cron::CronAutomation> for MobileCronSourceKey {
+    fn from(value: &cron::CronAutomation) -> Self {
+        Self {
+            run_mode: value.run_mode,
+            creation_mode: value.session_mode.clone(),
+            creation_scope: value.session_scope_key.clone(),
+            target_id: value.target_session_id.clone(),
+            target_path: value.target_session_transcript_path.clone(),
+            target_mode: value.target_session_mode.clone(),
+            target_scope: value.target_session_scope_key.clone(),
+            owned_id: value.owned_session_id.clone(),
+            owned_path: value.owned_session_transcript_path.clone(),
+            owned_mode: value.owned_session_mode.clone(),
+            owned_scope: value.owned_session_scope_key.clone(),
+        }
+    }
+}
+
+pub(super) struct MobileCronAdmissionLease(
+    Arc<MobileCronAdmission>,
+    Option<uuid::Uuid>,
+    Option<MobileCronSourceKey>,
+);
+
+pub(super) const CRON_OWNER_RESERVATION_BUSY: &str =
+    "busy: Scheduled session owner could not be reserved";
+
+/// Reserve the UUID before waiting for the task claim lock. This owned task
+/// outlives a cancelled FFI future, so its callback is covered by the barrier.
+pub(super) async fn reserve_mobile_cron_owner(
+    mut lease: MobileCronAdmissionLease,
+    automation: &cron::CronAutomation,
+) -> Result<MobileCronAdmissionLease, String> {
+    cron::validate_automation_source(automation).map_err(|error| format!("paused: {error}"))?;
+    let source_key = MobileCronSourceKey::from(automation);
+    let id = match automation.run_mode {
+        cron::RunMode::SelectedSession => automation.target_session_id.as_deref(),
+        cron::RunMode::TaskSession => automation.owned_session_id.as_deref(),
+        cron::RunMode::NewSession => None,
+    };
+    let id = id
+        .map(|id| uuid::Uuid::parse_str(id.strip_prefix("sess:").unwrap_or(id)))
+        .transpose()
+        .map_err(|error| format!("paused: Invalid session: {error}"))?
+        .unwrap_or_else(uuid::Uuid::new_v4);
+    let (path, mode, scope) = match automation.run_mode {
+        cron::RunMode::SelectedSession => (
+            automation.target_session_transcript_path.clone(),
+            automation.target_session_mode.clone(),
+            automation.target_session_scope_key.clone(),
+        ),
+        cron::RunMode::TaskSession if automation.owned_session_id.is_some() => (
+            automation.owned_session_transcript_path.clone(),
+            automation.owned_session_mode.clone(),
+            automation.owned_session_scope_key.clone(),
+        ),
+        _ => (
+            None,
+            automation.session_mode.clone(),
+            automation.session_scope_key.clone(),
+        ),
+    };
+    let candidate = CronOwnerCandidateDto {
+        session_id: id.to_string(),
+        session_transcript_path: path,
+        session_mode: mode.ok_or("paused: Session mode is required")?,
+        session_scope_key: scope.ok_or("paused: Session scope is required")?,
+    };
+    mobile_automation_runtime()
+        .spawn(async move {
+            if lease.0.cancelled.is_cancelled() {
+                return Err("cancelled: Scheduled owner admission was cancelled".into());
+            }
+            let accepted = lease.0.owner.begin_owner(candidate).await;
+            if lease.0.cancelled.is_cancelled() {
+                return Err("cancelled: Scheduled owner admission was cancelled".into());
+            }
+            if !accepted {
+                return Err(CRON_OWNER_RESERVATION_BUSY.into());
+            }
+            lease.1 = Some(id);
+            lease.2 = Some(source_key);
+            Ok(lease)
+        })
+        .await
+        .map_err(|error| format!("scheduled owner preparation failed: {error}"))?
+}
+
+impl MobileCronAdmissionLease {
+    pub(super) fn admission(&self) -> Arc<MobileCronAdmission> {
+        self.0.clone()
+    }
+
+    fn remember_reservation(&self, reservation: CronOwnerReservationDto) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .reservation = Some(reservation);
+    }
+
+    /// Linearize host confirmation with `cancel_and_wait`: whichever acquires
+    /// this mutex first determines whether the model may be admitted.
+    fn confirm(self, caller_cancel: &CancellationToken) -> bool {
+        let allowed = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.closed || caller_cancel.is_cancelled() {
+                false
+            } else {
+                state.active = false;
+                let _ = self.0.settled.send(true);
+                true
+            }
+        };
+        allowed
+    }
+}
+
+impl Drop for MobileCronAdmissionLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active = false;
+        let _ = self.0.settled.send(true);
+    }
+}
+
+#[cfg(test)]
+struct AllowCronOwner;
+
+#[cfg(test)]
+#[async_trait]
+impl MobileCronOwnerAdmission for AllowCronOwner {
+    async fn begin_owner(&self, _: CronOwnerCandidateDto) -> bool {
+        true
+    }
+    async fn confirm_owner(&self, _: CronOwnerReservationDto) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+pub(super) fn allow_cron_owner() -> Arc<MobileCronAdmission> {
+    MobileCronAdmission::new(Box::new(AllowCronOwner))
 }
 
 /// A persisted cron job lowered for the Android management UI.
@@ -170,6 +445,10 @@ pub(super) fn try_mobile_automation_runtime() -> Result<&'static tokio::runtime:
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("mobile-cron")
+            // Scheduled runs assemble and drive complete mobile sessions on
+            // this worker, just like the main mobile engine runtime. Use the
+            // same supported budget instead of Tokio's smaller default stack.
+            .thread_stack_size(crate::RUNTIME_THREAD_STACK_SIZE)
             .enable_all()
             .build()
             .map_err(|error| format!("build mobile scheduled execution runtime: {error}"))
@@ -189,6 +468,28 @@ pub(super) async fn supervise_mobile_automation<F>(
 where
     F: std::future::Future<Output = Result<cron::AutomationRunResult, String>> + Send + 'static,
 {
+    supervise_mobile_automation_with_cancel(fs, cwd, clock, claim, move |request, cancel| async move {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err("cancelled: Scheduled execution was cancelled by the host".into()),
+            result = execute(request) => result,
+        }
+    }, None).await
+}
+
+/// Production executions cooperate with cancellation and settle their owned
+/// cleanup before a terminal cancellation is committed to the task ledger.
+pub(super) async fn supervise_mobile_automation_with_cancel<F>(
+    fs: Arc<dyn FileSystem>,
+    cwd: std::path::PathBuf,
+    clock: Arc<dyn Clock>,
+    claim: impl std::future::Future<Output = Option<cron::AutomationRunRequest>> + Send + 'static,
+    execute: impl FnOnce(cron::AutomationRunRequest, CancellationToken) -> F + Send + 'static,
+    admission: Option<Arc<MobileCronAdmission>>,
+) -> Option<FiredCronJobDto>
+where
+    F: std::future::Future<Output = Result<cron::AutomationRunResult, String>> + Send + 'static,
+{
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     mobile_automation_runtime().spawn(async move {
@@ -196,13 +497,17 @@ where
         // cancelled. Never drop the claim future: settle it, then cancel the
         // returned occurrence before any model execution begins.
         let request = claim.await?;
-        let execution = execute(request.clone());
-        let result = {
-            // The losing execution future is destroyed before durable completion.
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err("cancelled: Scheduled execution was cancelled by the host".into()),
-                result = execution => result,
+        let result = if cancel.is_cancelled() {
+            // The execution closure owns the admission lease. No reservation
+            // will be written, so settle it before terminal bookkeeping.
+            drop(execute);
+            Err("cancelled: Scheduled execution was cancelled by the host".into())
+        } else {
+            let result = execute(request.clone(), cancel.clone()).await;
+            if cancel.is_cancelled() {
+                Err("cancelled: Scheduled execution was cancelled by the host".into())
+            } else {
+                result
             }
         };
         let now = clock.now().duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -236,10 +541,30 @@ where
         }
         let Some(disposition) = disposition else {
             tracing::error!(run_id = %request.run_id, "mobile cron result persistence gave up; the run stays claimed for recovery");
-            return None;
+            let source = admission.as_ref().and_then(|admission|
+                admission.state.lock().unwrap_or_else(|error| error.into_inner()).reservation.clone()
+            ).or_else(|| result.as_ref().ok().and_then(|value| Some(CronOwnerReservationDto {
+                session_id: value.session_id.clone(),
+                session_transcript_path: value.session_transcript_path.clone()?,
+                session_mode: value.session_mode.clone()?,
+                session_scope_key: value.session_scope_key.clone()?,
+            })));
+            let mut fired = fired_cron_dto(&request.task, Err("Scheduled outcome could not be confirmed".into()));
+            fired.status = CronFireStatusDto::OutcomeUnknown { message: "Scheduled outcome could not be confirmed; do not replay this occurrence".into() };
+            fired.retryable = false;
+            if let Some(source) = source {
+                fired.session_id = Some(source.session_id);
+                fired.session_transcript_path = Some(source.session_transcript_path);
+                fired.session_mode = Some(source.session_mode);
+                fired.session_scope_key = Some(source.session_scope_key);
+            }
+            return Some(fired);
         };
         let finished = matches!(disposition, cron::AutomationFinishDisposition::Terminal);
         let result_session_id = result.as_ref().ok().map(|value| value.session_id.clone());
+        let result_path = result.as_ref().ok().and_then(|value| value.session_transcript_path.clone());
+        let result_mode = result.as_ref().ok().and_then(|value| value.session_mode.clone());
+        let result_scope = result.as_ref().ok().and_then(|value| value.session_scope_key.clone());
         let persisted = read_cron_tasks(fs.as_ref(), &cwd).await.tasks.into_iter()
             .find(|task| task.id == request.task.id)
             .and_then(|task| task.automation)
@@ -261,7 +586,10 @@ where
             Err(format!("{}{}", cron::AUTOMATION_CANCELLED_PREFIX, persisted.as_ref().and_then(|run| run.error.as_deref()).unwrap_or("Scheduled execution was cancelled")))
         } else { result.map(|value| value.summary) };
         let mut dto = fired_cron_dto(&request.task, outcome);
-        dto.session_id = persisted.and_then(|run| run.session_id).or(result_session_id);
+        dto.session_id = persisted.as_ref().and_then(|run| run.session_id.clone()).or(result_session_id);
+        dto.session_transcript_path = persisted.as_ref().and_then(|run| run.session_transcript_path.clone()).or(result_path);
+        dto.session_mode = persisted.as_ref().and_then(|run| run.session_mode.clone()).or(result_mode);
+        dto.session_scope_key = persisted.and_then(|run| run.session_scope_key).or(result_scope);
         // Busy is a durable pending occurrence, not a terminal failure to skip.
         // OR rather than assign: `fired_cron_dto` already set `retryable` from
         // `cron_failure_is_retryable` (HTTP 429/5xx, transport failures, turn
@@ -420,6 +748,29 @@ pub(super) struct MobileTurnFirer {
     pub(super) platform: Arc<dyn Platform>,
 }
 
+/// A caller can disappear while a scheduled child is still unwinding. Keep the
+/// child task (and its session gate) alive, but request cancellation immediately.
+async fn run_owned_mobile_cron<F, Fut>(operation: F) -> Result<cron::AutomationRunResult, String>
+where
+    F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<cron::AutomationRunResult, String>> + Send + 'static,
+{
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    mobile_automation_runtime()
+        .spawn(operation(cancel))
+        .await
+        .map_err(|error| format!("scheduled execution owner failed: {error}"))?
+}
+
+async fn drain_scheduled_child(runtime: &mut super::MobileRuntime) {
+    if let Some(retirement) = runtime.retirement.take() {
+        // The foreground reader remains fenced until task workers and command
+        // handlers from this child can no longer write or launch more work.
+        retirement.retire().await;
+    }
+}
+
 #[async_trait]
 impl cron::CronJobFirer for MobileTurnFirer {
     async fn fire(&self, _id: &str, prompt: &Utf16JsonProjection) -> Result<String, String> {
@@ -468,7 +819,39 @@ fn scheduled_parent_context_check(
     })
 }
 
+fn bind_scheduled_media_route(
+    route: &dyn orchestrator::ScheduledMediaChildRoute,
+    parent_session: &str,
+    child_session: &str,
+    profile: &str,
+    parent_is_current: orchestrator::ScheduledMediaParentCheck,
+) -> Result<(), String> {
+    route.bind_session(
+        parent_session,
+        child_session,
+        profile,
+        lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+        parent_is_current,
+    )
+}
+
 impl MobileTurnFirer {
+    pub(super) async fn fire_automation_with_cancel(
+        &self,
+        request: &cron::AutomationRunRequest,
+        cancel: CancellationToken,
+        owner_admission: MobileCronAdmissionLease,
+    ) -> Result<cron::AutomationRunResult, String> {
+        llm_runtime::catalog_task::scope(Box::pin(self.fire_session_scoped(
+            request.task.prompt.clone(),
+            request.task.automation.as_ref(),
+            Some(request),
+            cancel,
+            Some(owner_admission),
+        )))
+        .await
+    }
+
     /// Build a transient scheduled runtime with its own host-issued media
     /// attachment. The child cannot borrow the parent's owner namespace or
     /// conversation adapter, and parent revocation cascades through the
@@ -477,6 +860,11 @@ impl MobileTurnFirer {
         &self,
     ) -> Result<(MobileConfig, Option<ScheduledChildMedia>), String> {
         let mut config = self.cfg.clone();
+        // The parent identity belongs only to its live source; each scheduled
+        // child either creates a session or explicitly mounts its own target.
+        config.initial_session_id = None;
+        config.initial_session_transcript_path = None;
+        config.scheduler_controller = false;
         config.media_attachment_confirmed_callback = None;
         // Realtime IO is engine-specific; only the separate host route factory
         // participates in scheduled child assembly.
@@ -544,8 +932,53 @@ impl MobileTurnFirer {
         automation: Option<&cron::CronAutomation>,
         request: Option<&cron::AutomationRunRequest>,
     ) -> Result<cron::AutomationRunResult, String> {
-        llm_runtime::catalog_task::scope(self.fire_session_scoped(prompt, automation, request))
+        self.fire_session_with_admission(prompt, automation, request, None)
             .await
+    }
+
+    pub(super) async fn fire_session_with_admission(
+        &self,
+        prompt: Utf16JsonProjection,
+        automation: Option<&cron::CronAutomation>,
+        request: Option<&cron::AutomationRunRequest>,
+        owner_admission: Option<Arc<MobileCronAdmission>>,
+    ) -> Result<cron::AutomationRunResult, String> {
+        let owner = MobileTurnFirer {
+            cfg: self.cfg.clone(),
+            platform: self.platform.clone(),
+        };
+        let automation = automation.cloned();
+        let request = request.cloned();
+        let owner_admission = owner_admission
+            .map(|owner| {
+                owner
+                    .begin()
+                    .ok_or("cancelled: Scheduled admission is closed")
+            })
+            .transpose()?;
+        let owner_admission = match owner_admission {
+            Some(owner) => Some(
+                reserve_mobile_cron_owner(
+                    owner,
+                    automation
+                        .as_ref()
+                        .ok_or("paused: Automation settings are required")?,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        run_owned_mobile_cron(move |cancel| async move {
+            llm_runtime::catalog_task::scope(Box::pin(owner.fire_session_scoped(
+                prompt,
+                automation.as_ref(),
+                request.as_ref(),
+                cancel,
+                owner_admission,
+            )))
+            .await
+        })
+        .await
     }
 
     async fn fire_session_scoped(
@@ -553,7 +986,19 @@ impl MobileTurnFirer {
         mut prompt: Utf16JsonProjection,
         automation: Option<&cron::CronAutomation>,
         request: Option<&cron::AutomationRunRequest>,
+        cancel: CancellationToken,
+        mut owner_admission: Option<MobileCronAdmissionLease>,
     ) -> Result<cron::AutomationRunResult, String> {
+        if cancel.is_cancelled() {
+            return Err("cancelled: Scheduled execution was cancelled by the host".into());
+        }
+        if let Some(automation) = automation {
+            cron::validate_automation_source(automation)
+                .map_err(|error| format!("paused: {error}"))?;
+            if request.is_none() || owner_admission.is_none() {
+                return Err("paused: Scheduled owner admission is required".into());
+            }
+        }
         let target = automation.and_then(|a| match a.run_mode {
             cron::RunMode::SelectedSession => a.target_session_id.as_deref(),
             cron::RunMode::TaskSession => a.owned_session_id.as_deref(),
@@ -574,20 +1019,107 @@ impl MobileTurnFirer {
             .map(|id| uuid::Uuid::parse_str(id.strip_prefix("sess:").unwrap_or(id)))
             .transpose()
             .map_err(|e| format!("paused: Invalid session: {e}"))?;
-        let workspace = if automation.is_some() {
-            super::scheduled_workspaces::ScheduledWorkspace::prepare(
-                &self.cfg,
-                request.map(|r| r.task.id.as_str()).unwrap_or("scheduled"),
-                automation.and_then(|a| a.name.as_deref()).unwrap_or("task"),
-                target_uuid,
+        let selected_uuid = match owner_admission.as_ref() {
+            Some(owner) => {
+                let reserved = owner.1.ok_or("paused: Scheduled owner was not reserved")?;
+                if automation.map(MobileCronSourceKey::from) != owner.2 {
+                    return Err("paused: Scheduled source changed after owner reservation".into());
+                }
+                if target_uuid.is_some_and(|id| id != reserved) {
+                    return Err("paused: Scheduled owner changed after reservation".into());
+                }
+                reserved
+            }
+            None => target_uuid.unwrap_or_else(uuid::Uuid::new_v4),
+        };
+        let (mode, scope, selected_path) = match automation {
+            Some(a) if a.run_mode == cron::RunMode::SelectedSession => (
+                a.target_session_mode.as_deref(),
+                a.target_session_scope_key.as_deref(),
+                a.target_session_transcript_path.as_deref(),
+            ),
+            Some(a) if a.run_mode == cron::RunMode::TaskSession && target_uuid.is_some() => {
+                if a.owned_session_mode != a.session_mode
+                    || a.owned_session_scope_key != a.session_scope_key
+                {
+                    return Err("paused: Owned session mode or owner changed".into());
+                }
+                (
+                    a.owned_session_mode.as_deref(),
+                    a.owned_session_scope_key.as_deref(),
+                    a.owned_session_transcript_path.as_deref(),
+                )
+            }
+            Some(a) => (
+                a.session_mode.as_deref(),
+                a.session_scope_key.as_deref(),
+                None,
+            ),
+            None => (Some(self.cfg.session_mode.as_str()), None, None),
+        };
+        let mode = mode
+            .and_then(session::jsonl::SessionMode::from_str)
+            .ok_or("paused: Invalid scheduled conversation mode")?;
+        if target_uuid.is_some() && selected_path.is_none() {
+            return Err("paused: Selected conversation has no exact source".into());
+        }
+        let captured_initial = if let Some(uuid) = target_uuid {
+            let mut source_config = self.cfg.clone();
+            source_config.initial_session_id = Some(uuid.to_string());
+            source_config.initial_session_transcript_path =
+                selected_path.map(std::path::PathBuf::from);
+            source_config.session_mode = mode;
+            Some(
+                super::restoration::capture_initial_mobile_session(&source_config, &self.platform)
+                    .await
+                    .map_err(|error| format!("paused: Cannot restore conversation: {error}"))?
+                    .ok_or("paused: Selected conversation has no source")?,
             )
-            .map_err(|error| format!("paused: {error}"))?
         } else {
             None
         };
-        let cwd = workspace
+        let task_id = request.map(|r| r.task.id.as_str()).unwrap_or("scheduled");
+        let title = automation.and_then(|a| a.name.as_deref()).unwrap_or("task");
+        let selected_session =
+            automation.is_some_and(|a| a.run_mode == cron::RunMode::SelectedSession);
+        let scheduled_owner = scope == Some("scheduled");
+        let scheduled_controller =
+            super::scheduled_workspaces::is_scheduled_controller_cwd(&self.cfg);
+        if scheduled_owner && !selected_session && !scheduled_controller {
+            return Err("paused: Scheduled owner requires its scheduler controller".into());
+        }
+        let workspace = match (automation, captured_initial.as_ref()) {
+            (Some(_), Some(source))
+                if scheduled_owner && scheduled_controller && selected_session =>
+            {
+                super::scheduled_workspaces::ScheduledWorkspace::prepare_selected(
+                    &self.cfg,
+                    task_id,
+                    title,
+                    source.id,
+                    &source.logical_cwd,
+                    &source.replayed.transcript_path,
+                )
+            }
+            (Some(_), _) if scheduled_owner && scheduled_controller => {
+                super::scheduled_workspaces::ScheduledWorkspace::prepare(
+                    &self.cfg,
+                    task_id,
+                    title,
+                    target_uuid,
+                )
+            }
+            _ => Ok(None),
+        }
+        .map_err(|error| format!("paused: {error}"))?;
+        let cwd = captured_initial
             .as_ref()
-            .map(|w| w.logical.to_string_lossy().into_owned())
+            .map(|source| source.logical_cwd.to_string_lossy().into_owned())
+            .or_else(|| {
+                workspace
+                    .as_ref()
+                    .map(|w| w.logical.to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| store_cwd.clone());
         if let Some(workspace) = &workspace {
             let mut units = prompt
@@ -606,6 +1138,7 @@ impl MobileTurnFirer {
             ),
             None => None,
         };
+        let mut reader_transitions = Vec::new();
         let mut readers = Vec::new();
         if let Some(uuid) = target_uuid {
             // Fresh sessions cannot have foreground readers. Do not retain
@@ -620,12 +1153,51 @@ impl MobileTurnFirer {
                 .collect();
             for reader in handles {
                 let handle: Arc<dyn OrchestratorHandle> = reader.inner.orchestrator.clone();
-                if reader.session_cwd() == cwd
+                if reader.lingxi_home == self.cfg.lingxi_home
                     && handle.current_session_id().await.as_uuid() == uuid
                 {
+                    let expected_path = captured_initial
+                        .as_ref()
+                        .map(|source| &source.replayed.transcript_path)
+                        .ok_or("paused: Missing captured conversation source")?;
+                    if !mobile_cron_reader_matches_source(&reader, &cwd, expected_path) {
+                        return Err(
+                            "busy: Conversation owner has a different source or workspace".into(),
+                        );
+                    }
+                    // Foreground submission takes transition before the cron
+                    // gate; never wait in the reverse order. Holding this lease
+                    // also fences realtime and queued wake admission.
+                    let transition = reader
+                        .loop_transition
+                        .clone()
+                        .try_lock_owned()
+                        .map_err(|_| "busy: Conversation is changing".to_string())?;
+                    if handle.current_session_id().await.as_uuid() != uuid
+                        || !mobile_cron_reader_matches_source(&reader, &cwd, expected_path)
+                    {
+                        return Err("busy: Conversation changed".into());
+                    }
+                    let captured = captured_initial
+                        .as_ref()
+                        .expect("selected source was captured");
+                    let source_authority =
+                        session::jsonl::writer::TranscriptFileAuthority::from_capture(
+                            captured.transcript_root.clone(),
+                            captured.transcript_relative.clone(),
+                            captured.transcript_identity,
+                            captured.transcript_file_identity,
+                        )
+                        .map_err(|error| format!("paused: Invalid session source: {error}"))?;
+                    reader
+                        .inner
+                        .session_writer
+                        .verify_active_transcript_source(&source_authority)
+                        .map_err(|_| "busy: Conversation source identity changed".to_string())?;
                     if reader.active_cancel.lock().await.is_some() {
                         return Err("busy: Conversation has an active turn".into());
                     }
+                    reader_transitions.push(transition);
                     readers.push(reader);
                 }
             }
@@ -645,6 +1217,7 @@ impl MobileTurnFirer {
         });
         let (mut config, child_media) = self.scheduled_runtime_config()?;
         cleanup.media_attachment = child_media;
+        config.session_mode = mode;
         if let Some(workspace) = &workspace {
             config.cwd = workspace.host.clone();
             config.logical_cwd = self
@@ -661,94 +1234,207 @@ impl MobileTurnFirer {
         // not model-supplied guest paths, even if their spelling overlaps a
         // guest root such as /tmp.
         let model_fs = self.platform.filesystem();
-        let host_fs = model_fs
-            .host_filesystem()
-            .unwrap_or_else(|| model_fs.clone());
         if let Some(uuid) = target_uuid {
-            config.session_mode =
-                cron_target_session_mode(&config.lingxi_home, &cwd, uuid, host_fs.clone()).await?;
+            config.initial_session_id = Some(uuid.to_string());
+            config.initial_session_transcript_path = selected_path.map(std::path::PathBuf::from);
         }
         if let Some(automation) = automation {
             config.default_model = automation.model.clone();
         }
-        let mut rt = build_mobile_inner(config, self.platform.clone(), listener, sink, None)
-            .await
-            .map_err(|e| {
-                if automation.is_some() {
-                    format!("paused: Scheduled runtime configuration is unavailable: {e}")
-                } else {
-                    e.to_string()
-                }
-            })?;
+        let borrowed_sessions = cleanup
+            .readers
+            .first()
+            .map(|reader| reader.inner.transcript_sessions.clone());
+        if let Some(owner) = &borrowed_sessions {
+            if cleanup
+                .readers
+                .iter()
+                .any(|reader| !Arc::ptr_eq(owner, &reader.inner.transcript_sessions))
+            {
+                return Err("busy: Multiple conversation owners".into());
+            }
+        }
+        let planned_path = super::assembly::planned_mobile_transcript_path(
+            &config,
+            captured_initial.as_ref(),
+            lingxi_core::types::SessionId::from_uuid(selected_uuid),
+        );
+        // Selected paths retain the host's exact coordinate spelling; new
+        // paths are projected using the same mount table as the writer.
+        let transcript_path = selected_path
+            .map(str::to_owned)
+            .unwrap_or_else(|| scheduled_transcript_path(&planned_path, self.platform.as_ref()));
+        if cancel.is_cancelled()
+            || owner_admission
+                .as_ref()
+                .is_some_and(|owner| owner.0.cancelled.is_cancelled())
+        {
+            return Err("cancelled: Scheduled owner admission was cancelled".into());
+        }
+        if let Some(request) = request {
+            // Reserve durably before assembly can create a header or anchor.
+            // A later build failure leaves an allocated, unexecuted receipt.
+            cron::reserve_automation_owner(
+                model_fs.as_ref(),
+                std::path::Path::new(&store_cwd),
+                request,
+                &selected_uuid.to_string(),
+                &transcript_path,
+                mode.as_str(),
+                scope,
+            )
+            .await?;
+            if let Some(owner) = owner_admission.as_ref() {
+                owner.remember_reservation(CronOwnerReservationDto {
+                    session_id: selected_uuid.to_string(),
+                    session_transcript_path: transcript_path.clone(),
+                    session_mode: mode.as_str().to_owned(),
+                    session_scope_key: scope.expect("validated owner scope").to_owned(),
+                });
+            }
+        }
+        // Keep the scheduled child assembly state off the enclosing session
+        // future while retaining this task's ownership of cleanup and gates.
+        let mut rt = Box::pin(super::assembly::build_mobile_inner_for_scheduled(
+            config,
+            self.platform.clone(),
+            listener,
+            sink,
+            borrowed_sessions,
+            captured_initial,
+            target_uuid
+                .is_none()
+                .then(|| lingxi_core::types::SessionId::from_uuid(selected_uuid)),
+        ))
+        .await
+        .map_err(|e| {
+            if automation.is_some() {
+                format!("paused: Scheduled runtime configuration is unavailable: {e}")
+            } else {
+                e.to_string()
+            }
+        })?;
         // The guard was installed before assembly to cover build failures and
         // is the sole cleanup owner for this short-lived scheduled runtime.
         debug_assert!(rt.media_attachment_confirmed_callback.is_none());
         drop(rt.media_attachment_handle.take());
+        if cancel.is_cancelled() {
+            drain_scheduled_child(&mut rt).await;
+            return Err("cancelled: Scheduled execution was cancelled by the host".into());
+        }
 
         let handle: Arc<dyn OrchestratorHandle> = rt.orchestrator.clone();
-        if let Some(uuid) = target_uuid {
-            let replayed =
-                cron_replay_session(&self.cfg.lingxi_home, &cwd, uuid, host_fs.clone()).await?;
-            let (history, last_message, runtime) = match replayed {
-                Some(replayed) => (
-                    replayed.state.history.clone(),
-                    replayed.last_message_uuid.map(|id| id.to_string()),
-                    replayed.handle_runtime_snapshot(),
-                ),
-                None => (
-                    Vec::new(),
-                    None,
-                    lingxi_core::host::ResumeRuntimeSnapshot::default(),
-                ),
-            };
-            handle
-                .resume_session(
-                    lingxi_core::types::SessionId::from_uuid(uuid),
-                    history,
-                    last_message,
-                    None,
-                    runtime,
-                )
-                .await
-                .map_err(|error| format!("paused: Cannot restore conversation: {error}"))?;
-            rt.retarget_session_context(
-                &self.cfg.lingxi_home,
-                lingxi_core::types::SessionId::from_uuid(uuid),
-                &cwd,
-            )
-            .await;
-        }
         let session_id = handle.current_session_id().await.as_uuid().to_string();
-        if target_uuid.is_none() && automation.is_some() {
-            // A configured turn can fail validation before appending a prompt.
-            // Anchor newly allocated identities before publishing the binding,
-            // so a repaired task can resume the same durable conversation.
-            rt.session_writer
-                .append_mobile_empty_session(
+        let preparation = async {
+            if session_id != selected_uuid.to_string() {
+                return Err("paused: Scheduled session differs from the reserved owner".into());
+            }
+            if cancel.is_cancelled()
+                || owner_admission
+                    .as_ref()
+                    .is_some_and(|lease| lease.0.cancelled.is_cancelled())
+            {
+                return Err("cancelled: Scheduled owner admission was cancelled".into());
+            }
+            let actual_mode = handle.conversation_mode().await;
+            if actual_mode.session_id != session_id || actual_mode.mode != mode {
+                return Err("paused: Scheduled session identity or mode changed".into());
+            }
+            if rt.session_writer.active_path() != planned_path {
+                return Err("paused: Scheduled transcript differs from the reserved source".into());
+            }
+            if selected_path.is_none()
+                && scheduled_transcript_path(
+                    &rt.session_writer.active_path(),
+                    self.platform.as_ref(),
+                ) != transcript_path
+            {
+                return Err("paused: Scheduled transcript coordinates changed".into());
+            }
+            if target_uuid.is_none() && automation.is_some() {
+                // A configured turn can fail validation before appending a prompt.
+                // Anchor newly allocated identities before publishing the binding,
+                // so a repaired task can resume the same durable conversation.
+                rt.session_writer
+                    .append_mobile_empty_session(
+                        &session_id,
+                        automation
+                            .and_then(|a| a.name.as_deref())
+                            .unwrap_or("Scheduled task"),
+                        &cwd,
+                    )
+                    .await
+                    .map_err(|error| format!("persist scheduled session anchor: {error}"))?;
+            }
+            if let Some(workspace) = &workspace {
+                workspace.bind(&self.cfg.lingxi_home, &session_id)?;
+            }
+            if let Some(request) = request {
+                cron::bind_automation_run_session_with_source(
+                    model_fs.as_ref(),
+                    std::path::Path::new(&store_cwd),
+                    request,
                     &session_id,
-                    automation
-                        .and_then(|a| a.name.as_deref())
-                        .unwrap_or("Scheduled task"),
-                    &cwd,
+                    &transcript_path,
+                    mode.as_str(),
+                    scope,
                 )
-                .await
-                .map_err(|error| format!("persist scheduled session anchor: {error}"))?;
-            rt.session_writer
-                .append_session_mode(self.cfg.session_mode.as_str())
-                .await
-                .map_err(|error| format!("persist scheduled session mode: {error}"))?;
+                .await?;
+            }
+            Ok::<String, String>(transcript_path.clone())
         }
-        if let Some(workspace) = &workspace {
-            workspace.bind(&self.cfg.lingxi_home, &session_id)?;
+        .await;
+        let transcript_path = match preparation {
+            Ok(path) => path,
+            Err(error) => {
+                drain_scheduled_child(&mut rt).await;
+                return Err(error);
+            }
+        };
+        if automation.is_some() {
+            let owner = owner_admission.as_ref().expect("validated owner admission");
+            let reservation = CronOwnerReservationDto {
+                session_id: session_id.clone(),
+                session_transcript_path: transcript_path.clone(),
+                session_mode: mode.as_str().to_owned(),
+                session_scope_key: scope.expect("validated owner scope").to_owned(),
+            };
+            // Do not abandon an in-flight foreign callback: the barrier must
+            // include the host's complete owner persistence, even on cancel.
+            let allowed = if cancel.is_cancelled() || owner.0.cancelled.is_cancelled() {
+                false
+            } else {
+                owner.0.owner.confirm_owner(reservation).await
+            };
+            if !allowed {
+                drain_scheduled_child(&mut rt).await;
+                return Err("cancelled: Scheduled owner admission was not confirmed".into());
+            }
+            // No more reservation writes or admission callbacks occur after
+            // this point; do not hold the host gate for the model turn.
+            if !owner_admission
+                .take()
+                .expect("validated owner admission")
+                .confirm(&cancel)
+            {
+                drain_scheduled_child(&mut rt).await;
+                return Err("cancelled: Scheduled owner admission was not confirmed".into());
+            }
         }
-        if let Some(request) = request {
-            cron::bind_automation_run_session(
-                model_fs.as_ref(),
-                std::path::Path::new(&store_cwd),
-                request,
-                &session_id,
-            )
-            .await?;
+        if cancel.is_cancelled() {
+            drain_scheduled_child(&mut rt).await;
+            return Err("cancelled: Scheduled execution was cancelled by the host".into());
+        }
+        let startup = rt
+            .scheduled_startup
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(startup) = startup {
+            if let Err(error) = startup.await {
+                drain_scheduled_child(&mut rt).await;
+                return Err(format!("paused: Scheduled session startup failed: {error}"));
+            }
         }
         if let Some(route) = cleanup
             .media_attachment
@@ -808,12 +1494,11 @@ impl MobileTurnFirer {
                             parent_session.clone(),
                             parent_profile.clone(),
                         );
-                        let account_scope = format!("profile:{child_profile}");
-                        if let Err(error) = route.bind_session(
+                        if let Err(error) = bind_scheduled_media_route(
+                            route.as_ref(),
                             &parent_session,
                             &child_session,
                             &child_profile,
-                            &account_scope,
                             parent_is_current,
                         ) {
                             tracing::warn!(%error, "scheduled media provider binding unavailable");
@@ -834,43 +1519,59 @@ impl MobileTurnFirer {
                     .await;
             }
         }));
-        let turn_cancel = CancellationToken::new();
-        let _cancel_turn_on_drop = turn_cancel.clone().drop_guard();
-        let run = async {
-            if let Some(automation) = automation {
-                let reasoning = if automation.reasoning.is_null() {
-                    lingxi_core::host::ReasoningSelection::Automatic
+        let turn_cancel = cancel;
+        let outcome = {
+            let run = async {
+                if let Some(automation) = automation {
+                    let reasoning = if automation.reasoning.is_null() {
+                        lingxi_core::host::ReasoningSelection::Automatic
+                    } else {
+                        serde_json::from_value(automation.reasoning.clone())
+                            .map_err(|e| format!("paused: {e}"))?
+                    };
+                    rt.orchestrator
+                        .run_scheduled_turn(
+                            prompt.clone(),
+                            &automation.model,
+                            reasoning,
+                            turn_cancel.clone(),
+                        )
+                        .await
+                        .and_then(cron_scheduled_turn_outcome)
                 } else {
-                    serde_json::from_value(automation.reasoning.clone())
-                        .map_err(|e| format!("paused: {e}"))?
-                };
-                rt.orchestrator
-                    .run_scheduled_turn(
-                        prompt.clone(),
-                        &automation.model,
-                        reasoning,
-                        turn_cancel.clone(),
-                    )
-                    .await
-                    .and_then(cron_scheduled_turn_outcome)
-            } else {
-                rt.orchestrator
-                    .run_turn_streaming_source_with_origin(
-                        prompt.clone(),
-                        Vec::new(),
-                        turn_cancel.clone(),
-                        None,
-                        true,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(cron_scheduled_turn_outcome)
+                    rt.orchestrator
+                        .run_turn_streaming_source_with_origin(
+                            prompt.clone(),
+                            Vec::new(),
+                            turn_cancel.clone(),
+                            None,
+                            true,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(cron_scheduled_turn_outcome)
+                }
+            };
+
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => Ok(result),
+                () = tokio::time::sleep(CRON_TURN_TIMEOUT) => {
+                    turn_cancel.cancel();
+                    // Never release the borrowed session gate while child cleanup
+                    // can still persist a prompt, result, or admission transaction.
+                    let _ = run.await;
+                    Err(())
+                }
             }
         };
-
-        let result = match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
+        drain_scheduled_child(&mut rt).await;
+        let result = match outcome {
             Ok(Ok(_outcome)) => Ok(cron::AutomationRunResult {
                 session_id,
+                session_transcript_path: Some(transcript_path),
+                session_mode: Some(mode.as_str().to_owned()),
+                session_scope_key: scope.map(str::to_owned),
                 summary: captured.lock().await.clone(),
             }),
             Ok(Err(e)) => Err(e.to_string()),
@@ -881,6 +1582,32 @@ impl MobileTurnFirer {
     }
 }
 
+pub(super) fn mobile_cron_reader_matches_source(
+    reader: &MobileEngineHandle,
+    cwd: &str,
+    expected_path: &std::path::Path,
+) -> bool {
+    reader.session_cwd() == cwd
+        && canonical_cwd_string(&reader.inner.session_writer.active_path())
+            == canonical_cwd_string(expected_path)
+}
+
+fn scheduled_transcript_path(path: &std::path::Path, platform: &dyn Platform) -> String {
+    if let Some(linux) = platform.mobile_linux() {
+        let mut mounts = linux.current_mounts();
+        for mount in &mut mounts {
+            mount.host_path = std::path::PathBuf::from(canonical_cwd_string(&mount.host_path));
+        }
+        if let Some(path) = mobile_linux_api::map_host_path_to_guest(
+            std::path::Path::new(&canonical_cwd_string(&path)),
+            &mounts,
+        ) {
+            return path;
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
 impl MobileCronTurnCleanup {
     async fn revoke_media_attachment(&mut self) -> Result<(), String> {
         if let Some(child) = &mut self.media_attachment {
@@ -888,63 +1615,6 @@ impl MobileCronTurnCleanup {
         }
         self.media_attachment = None;
         Ok(())
-    }
-}
-
-pub(super) async fn cron_replay_session(
-    home: &std::path::Path,
-    cwd: &str,
-    session_id: uuid::Uuid,
-    fs: Arc<dyn FileSystem>,
-) -> Result<Option<orchestrator::resume::ReplayedSession>, String> {
-    match orchestrator::replay_session_state(home, cwd, session_id, fs.clone()).await {
-        Ok(replayed) => Ok(Some(replayed)),
-        Err(error) => {
-            if matches!(
-                &error,
-                orchestrator::resume::ResumeError::Loader(
-                    session::jsonl::LoaderError::EmptyDirectory
-                        | session::jsonl::LoaderError::SessionNotFound { .. }
-                )
-            ) {
-                let path = session::jsonl::session_path(home, cwd, &session_id.to_string());
-                if let Ok(routed) = session::jsonl::JsonlReader::new(path, fs)
-                    .read_routed()
-                    .await
-                {
-                    // Match the native resume-empty contract: an existing,
-                    // explicitly versioned anchor is required. A missing or
-                    // deleted selected/owned transcript is never recreated.
-                    if routed
-                        .mobile_empty_sessions
-                        .contains(&session_id.to_string())
-                        && routed.messages_in_order.is_empty()
-                    {
-                        return Ok(None);
-                    }
-                }
-            }
-            Err(format!("paused: Cannot restore conversation: {error}"))
-        }
-    }
-}
-
-pub(super) async fn cron_target_session_mode(
-    home: &std::path::Path,
-    cwd: &str,
-    session_id: uuid::Uuid,
-    fs: Arc<dyn FileSystem>,
-) -> Result<session::jsonl::SessionMode, String> {
-    let path = session::jsonl::session_path(home, cwd, &session_id.to_string());
-    let routed = session::jsonl::JsonlReader::new(path, fs)
-        .read_routed()
-        .await
-        .map_err(|error| format!("paused: Cannot read scheduled conversation mode: {error}"))?;
-    match routed.session_modes.get(&session_id.to_string()) {
-        Some(value) => session::jsonl::SessionMode::from_str(value)
-            .ok_or_else(|| "paused: Scheduled conversation mode is invalid".to_string()),
-        // Historical transcripts without explicit mode were Code sessions.
-        None => Ok(session::jsonl::SessionMode::Code),
     }
 }
 
@@ -1059,6 +1729,47 @@ mod media_attachment_tests {
             self.released_notify.notify_one();
             Ok(())
         }
+    }
+
+    #[test]
+    fn scheduled_route_forwards_session_identity_with_unbound_account_scope() {
+        #[derive(Default)]
+        struct Capture(StdMutex<Option<(String, String, String, String, bool)>>);
+        impl orchestrator::ScheduledMediaChildRoute for Capture {
+            fn bind_session(
+                &self,
+                parent: &str,
+                child: &str,
+                profile: &str,
+                scope: &str,
+                is_current: orchestrator::ScheduledMediaParentCheck,
+            ) -> Result<(), String> {
+                *self.0.lock().unwrap() = Some((
+                    parent.into(),
+                    child.into(),
+                    profile.into(),
+                    scope.into(),
+                    is_current(),
+                ));
+                Ok(())
+            }
+            fn release_after_media_drain(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let route = Capture::default();
+        bind_scheduled_media_route(&route, "parent", "child", "anthropic", Arc::new(|| true))
+            .unwrap();
+        assert_eq!(
+            *route.0.lock().unwrap(),
+            Some((
+                "parent".into(),
+                "child".into(),
+                "anthropic".into(),
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into(),
+                true,
+            ))
+        );
     }
 
     struct TestScheduledFactory {
@@ -1527,6 +2238,9 @@ pub(super) fn fired_cron_dto(
     match result {
         Ok(text) => FiredCronJobDto {
             session_id: None,
+            session_transcript_path: None,
+            session_mode: None,
+            session_scope_key: None,
             id: task.id.clone(),
             prompt: source_display(&task.prompt),
             result_text: Some(text),
@@ -1535,12 +2249,193 @@ pub(super) fn fired_cron_dto(
         },
         Err(message) => FiredCronJobDto {
             session_id: None,
+            session_transcript_path: None,
+            session_mode: None,
+            session_scope_key: None,
             id: task.id.clone(),
             prompt: source_display(&task.prompt),
             result_text: None,
             retryable: cron_failure_is_retryable(&message),
             status: CronFireStatusDto::Failed { message },
         },
+    }
+}
+
+pub(super) struct CronAdmissionSnapshot {
+    pub(super) task: cron::CronTask,
+    root_identity: Option<lingxi_core::host::rooted_fs::RootIdentity>,
+    state_identity: Option<lingxi_core::host::rooted_fs::RootIdentity>,
+    claimable: Option<bool>,
+}
+
+/// Read a task under the same process and file locks used by claim. Pin both
+/// roots so an identical replacement cannot become an occurrence receipt.
+pub(super) async fn cron_admission_snapshot(
+    fs: &dyn FileSystem,
+    cwd: &std::path::Path,
+    id: &str,
+    occurrence: Option<(CronAdmissionOccurrence, std::time::SystemTime)>,
+) -> Result<Option<CronAdmissionSnapshot>, String> {
+    let _process_guard = cron::lock_cron_file().await;
+    let root_identity = fs
+        .root_identity_no_follow(cwd)
+        .await
+        .map_err(|e| e.to_string())?;
+    let task_path = cron::scheduled_tasks_path(cwd);
+    let state_root = task_path.parent().ok_or("invalid scheduler state root")?;
+    let state_identity = match fs.root_identity_no_follow(state_root).await {
+        Ok(identity) => identity,
+        Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let lock =
+        cron::tasks_file::lock_automation_tasks_pinned(fs, state_root, state_identity.as_ref())
+            .await
+            .map_err(|e| e.to_string())?;
+    lock.validate_current().map_err(|e| e.to_string())?;
+    let body = match cron::tasks_file::read_automation_tasks_body_pinned(
+        fs,
+        state_root,
+        state_identity.as_ref(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let document = cron::tasks_file::parse_automation_tasks_strict(&body)?;
+    if !document.unmodeled.is_empty() {
+        return Err("scheduled task record is invalid".into());
+    }
+    lock.validate_current().map_err(|e| e.to_string())?;
+    if fs
+        .root_identity_no_follow(cwd)
+        .await
+        .map_err(|e| e.to_string())?
+        != root_identity
+        || fs
+            .root_identity_no_follow(state_root)
+            .await
+            .map_err(|e| e.to_string())?
+            != state_identity
+    {
+        return Err("scheduler scope changed during admission".into());
+    }
+    let mut tasks = document.tasks.into_iter().filter(|task| task.id == id);
+    let task = tasks.next();
+    if tasks.next().is_some() {
+        return Err("duplicate scheduled task identity".into());
+    }
+    Ok(task.map(|task| {
+        let claimable = occurrence.map(|(occurrence, now)| match occurrence {
+            CronAdmissionOccurrence::Due(at) => {
+                cron::can_claim_automation_run(&task, now, Some(at))
+            }
+            CronAdmissionOccurrence::ManualAt(at) => {
+                cron::can_claim_automation_run_now(&task, now, Some(at))
+            }
+            CronAdmissionOccurrence::Manual => cron::can_claim_automation_run_now(&task, now, None),
+        });
+        CronAdmissionSnapshot {
+            task,
+            root_identity,
+            state_identity,
+            claimable,
+        }
+    }))
+}
+
+pub(super) enum CronAdmissionOccurrence {
+    Due(u64),
+    ManualAt(u64),
+    Manual,
+}
+
+/// A rejected callback has not claimed a run itself. Recheck that this exact
+/// occurrence was not claimed by another caller while the callback ran.
+pub(super) async fn cron_owner_reservation_failure_dto(
+    fs: &dyn FileSystem,
+    cwd: &std::path::Path,
+    snapshot: &CronAdmissionSnapshot,
+    occurrence: CronAdmissionOccurrence,
+    now: std::time::SystemTime,
+    admission: &MobileCronAdmission,
+    error: String,
+) -> Option<FiredCronJobDto> {
+    if error != CRON_OWNER_RESERVATION_BUSY {
+        return Some(fired_cron_dto(&snapshot.task, Err(error)));
+    }
+    if admission.cancelled.is_cancelled() {
+        return Some(fired_cron_dto(
+            &snapshot.task,
+            Err("cancelled: Scheduled owner admission was cancelled".into()),
+        ));
+    }
+    let current =
+        match cron_admission_snapshot(fs, cwd, &snapshot.task.id, Some((occurrence, now))).await {
+            Ok(Some(current)) => current,
+            Ok(None) => return Some(cron_admission_unknown_dto(snapshot.task.id.clone())),
+            Err(_) => return Some(cron_admission_unknown_dto(snapshot.task.id.clone())),
+        };
+    if current.root_identity != snapshot.root_identity
+        || current.state_identity != snapshot.state_identity
+    {
+        return Some(cron_admission_unknown_dto(snapshot.task.id.clone()));
+    }
+    if current.claimable != Some(true) {
+        return None;
+    }
+    let mut initial = snapshot.task.clone();
+    let mut latest = current.task;
+    initial.last_fired_at = None;
+    latest.last_fired_at = None;
+    if let Some(config) = initial.automation.as_mut() {
+        config.runs.clear();
+    }
+    if let Some(config) = latest.automation.as_mut() {
+        config.runs.clear();
+    }
+    if initial != latest {
+        return Some(cron_admission_unknown_dto(snapshot.task.id.clone()));
+    }
+    if admission.cancelled.is_cancelled() {
+        return Some(fired_cron_dto(
+            &snapshot.task,
+            Err("cancelled: Scheduled owner admission was cancelled".into()),
+        ));
+    }
+    let mut dto = fired_cron_dto(&snapshot.task, Err(error));
+    dto.retryable = true;
+    Some(dto)
+}
+
+/// The persisted occurrence cannot be verified; it may already have run.
+pub(super) fn cron_admission_unknown_dto(id: String) -> FiredCronJobDto {
+    let mut dto = busy_cron_dto(id);
+    dto.status = CronFireStatusDto::OutcomeUnknown {
+        message: "Scheduled occurrence could not be verified; do not replay it automatically"
+            .into(),
+    };
+    dto.retryable = false;
+    dto
+}
+
+/// No occurrence was claimed when the host transition was busy. The native
+/// caller can retry the same scheduled timestamp after the foreground settles.
+pub(super) fn busy_cron_dto(id: String) -> FiredCronJobDto {
+    FiredCronJobDto {
+        session_id: None,
+        session_transcript_path: None,
+        session_mode: None,
+        session_scope_key: None,
+        id,
+        prompt: String::new(),
+        result_text: None,
+        status: CronFireStatusDto::Failed {
+            message: "busy: Conversation is changing".into(),
+        },
+        retryable: true,
     }
 }
 
@@ -1552,6 +2447,29 @@ pub(super) async fn read_cron_tasks(
         .await
         .map(|body| cron::tasks_file::parse_automation_tasks(&body))
         .unwrap_or_default()
+}
+
+/// Mutations must never rewrite a damaged or partly unmodeled task document.
+pub(super) async fn read_cron_tasks_for_mutation(
+    fs: &dyn FileSystem,
+    cwd: &std::path::Path,
+    allow_absent: bool,
+) -> Result<cron::ScheduledTasks, MobileEngineError> {
+    let body = match cron::tasks_file::read_automation_tasks_body(fs, cwd).await {
+        Ok(body) => body,
+        Err(lingxi_core::host::FsError::NotFound(_)) if allow_absent => {
+            return Ok(Default::default())
+        }
+        Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
+    };
+    let document = cron::tasks_file::parse_automation_tasks_strict(&body)
+        .map_err(MobileEngineError::Internal)?;
+    if !document.unmodeled.is_empty() {
+        return Err(MobileEngineError::Internal(
+            "scheduled task record is invalid".into(),
+        ));
+    }
+    Ok(document)
 }
 
 /// Lightweight, credential-free scheduled-task store used by Android UI and
@@ -1569,215 +2487,11 @@ impl MobileCronStoreHandle {
     pub fn new(cwd: std::path::PathBuf, fs: Arc<dyn FileSystem>, clock: Arc<dyn Clock>) -> Self {
         Self { cwd, fs, clock }
     }
-    pub(super) async fn migrate_legacy_scope(&self) -> Result<(), MobileEngineError> {
-        if !self.cwd.ends_with("scheduled/workspace") {
-            return Ok(());
-        }
-        let Some(root) = self.cwd.parent().and_then(std::path::Path::parent) else {
-            return Ok(());
-        };
-        let _guard = cron::lock_cron_file().await;
-        let _legacy_lock = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), root)
-            .await
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let _new_lock = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd)
-            .await
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let marker_path = std::path::Path::new(".lingxi/cron-v2-migration.json");
-        let marker: Option<serde_json::Value> =
-            match self.fs.read_file_rooted_no_follow(root, marker_path).await {
-                Ok(file) => Some(serde_json::from_str(&file.content).map_err(|e| {
-                    MobileEngineError::Internal(format!("invalid cron migration marker: {e}"))
-                })?),
-                Err(lingxi_core::host::FsError::NotFound(_)) => None,
-                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
-            };
-        let old_body =
-            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), root).await {
-                Ok(body) => body,
-                Err(lingxi_core::host::FsError::NotFound(_)) => {
-                    cron::serialize_tasks(&cron::ScheduledTasks::default())
-                }
-                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
-            };
-        let mut legacy = cron::tasks_file::parse_automation_tasks_strict(&old_body)
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let snapshot = if let Some(marker) = marker
-            .as_ref()
-            .filter(|marker| marker.get("completed") == Some(&serde_json::Value::Bool(false)))
-        {
-            marker
-                .get("source")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    MobileEngineError::Internal(
-                        "cron migration marker is missing its source snapshot".into(),
-                    )
-                })?
-                .to_string()
-        } else {
-            if legacy.tasks.is_empty() {
-                return Ok(());
-            }
-            let pending = serde_json::json!({"version":2,"completed":false,"source":old_body});
-            self.fs
-                .write_file_rooted_atomic(root, marker_path, &pending.to_string())
-                .await
-                .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-            old_body
-        };
-        let mut source = cron::tasks_file::parse_automation_tasks_strict(&snapshot)
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        // Old /loop records belong to their original session, not task-center
-        // automations. Exclude before computing removal IDs so they stay intact
-        // in the old document without being revived in the destination.
-        source
-            .tasks
-            .retain(|task| !cron::is_loop_default_sentinel(&task.prompt));
-        // Suppress the old scheduler before publishing any destination tasks.
-        // The durable source snapshot recovers a crash after this write.
-        let migrated_ids: std::collections::HashSet<_> =
-            source.tasks.iter().map(|task| task.id.clone()).collect();
-        legacy.tasks.retain(|task| !migrated_ids.contains(&task.id));
-        cron::tasks_file::write_automation_tasks_body(
-            self.fs.as_ref(),
-            root,
-            &cron::serialize_tasks(&legacy),
-        )
-        .await
-        .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let mut destination =
-            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
-                Ok(body) => cron::tasks_file::parse_automation_tasks_strict(&body)
-                    .map_err(|e| MobileEngineError::Internal(e.to_string()))?,
-                Err(lingxi_core::host::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
-                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
-            };
-        for mut task in source.tasks {
-            if destination
-                .tasks
-                .iter()
-                .any(|existing| existing.id == task.id)
-            {
-                continue;
-            }
-            if task.automation.is_none() {
-                task.automation = Some(cron::CronAutomation {
-                    version: 2,
-                    name: None,
-                    status: cron::AutomationStatus::Paused,
-                    status_reason: Some("Choose a model to enable this migrated task".into()),
-                    model: String::new(),
-                    reasoning: serde_json::json!({"type":"automatic"}),
-                    run_mode: cron::RunMode::NewSession,
-                    target_session_id: None,
-                    owned_session_id: None,
-                    notification_policy: cron::NotificationPolicy::All,
-                    runs: Vec::new(),
-                });
-            }
-            destination.tasks.push(task);
-        }
-        cron::tasks_file::write_automation_tasks_body(
-            self.fs.as_ref(),
-            &self.cwd,
-            &cron::serialize_tasks(&destination),
-        )
-        .await
-        .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        self.fs
-            .write_file_rooted_atomic(
-                root,
-                marker_path,
-                &serde_json::json!({"version":2,"completed":true}).to_string(),
-            )
-            .await
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        Ok(())
-    }
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileCronStoreHandle {
-    /// Capture host-selected defaults while upgrading legacy tasks atomically.
-    pub async fn set_migration_defaults(
-        &self,
-        model: String,
-        reasoning_json: String,
-    ) -> Result<(), MobileEngineError> {
-        self.migrate_legacy_scope().await?;
-        if model.trim().is_empty() {
-            return Ok(());
-        }
-        let reasoning: lingxi_core::host::ReasoningSelection =
-            serde_json::from_str(&reasoning_json)
-                .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let reasoning = serde_json::to_value(reasoning)
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let _guard = cron::lock_cron_file().await;
-        let _file = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd)
-            .await
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let body =
-            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
-                Ok(body) => body,
-                Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(()),
-                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
-            };
-        let mut document = cron::tasks_file::parse_automation_tasks_strict(&body)
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let now = self
-            .clock
-            .now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let mut changed = false;
-        for task in &mut document.tasks {
-            let needs_defaults = task.automation.as_ref().is_none_or(|a| {
-                a.model.is_empty()
-                    && a.status_reason.as_deref()
-                        == Some("Choose a model to enable this migrated task")
-            });
-            if !needs_defaults {
-                continue;
-            }
-            task.automation = Some(cron::CronAutomation {
-                version: 2,
-                name: None,
-                status: if task.expires_at.is_some_and(|expiry| expiry <= now) {
-                    cron::AutomationStatus::Completed
-                } else {
-                    cron::AutomationStatus::Active
-                },
-                status_reason: None,
-                model: model.clone(),
-                reasoning: reasoning.clone(),
-                run_mode: cron::RunMode::NewSession,
-                target_session_id: None,
-                owned_session_id: None,
-                notification_policy: cron::NotificationPolicy::All,
-                runs: Vec::new(),
-            });
-            changed = true;
-        }
-        if changed {
-            cron::tasks_file::write_automation_tasks_body(
-                self.fs.as_ref(),
-                &self.cwd,
-                &cron::serialize_tasks(&document),
-            )
-            .await
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        }
-        Ok(())
-    }
-
     pub async fn list(&self) -> Vec<CronTaskDto> {
-        if let Err(error) = self.migrate_legacy_scope().await {
-            tracing::warn!(%error, "cron migration failed");
-            return Vec::new();
-        }
         if !read_cron_tasks(self.fs.as_ref(), &self.cwd)
             .await
             .tasks
@@ -1804,14 +2518,83 @@ impl MobileCronStoreHandle {
             .collect()
     }
 
-    pub async fn create(
+    /// Read the independent, non-pruned owner ledger for this scheduler root.
+    /// An absent ledger is empty; incomplete or conflicting records fail closed.
+    pub async fn list_owner_reservations_strict(
         &self,
-        cron_expr: String,
-        prompt: String,
-        recurring: bool,
-    ) -> Result<CronTaskDto, MobileEngineError> {
-        self.create_configured(cron_expr, prompt, recurring, String::new())
+    ) -> Result<Vec<CronOwnerReservationDto>, MobileEngineError> {
+        cron::list_owner_reservations_strict(self.fs.as_ref(), &self.cwd)
             .await
+            .map(|reservations| {
+                reservations
+                    .into_iter()
+                    .map(|owner| CronOwnerReservationDto {
+                        session_id: owner.session_id,
+                        session_transcript_path: owner.session_transcript_path,
+                        session_mode: owner.session_mode,
+                        session_scope_key: owner.session_scope_key,
+                    })
+                    .collect()
+            })
+            .map_err(MobileEngineError::Internal)
+    }
+
+    /// Read durable execution receipts for host index recovery. A damaged or
+    /// inaccessible store is an error; only an absent store is empty.
+    pub async fn list_strict(&self) -> Result<Vec<CronTaskDto>, MobileEngineError> {
+        let _guard = cron::lock_cron_file().await;
+        let _file = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd)
+            .await
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let body =
+            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
+                Ok(body) => body,
+                Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(Vec::new()),
+                Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
+            };
+        let document = cron::tasks_file::parse_automation_tasks_strict(&body)
+            .map_err(MobileEngineError::Internal)?;
+        if !document.unmodeled.is_empty() {
+            return Err(MobileEngineError::Internal(
+                "scheduled task record is invalid".into(),
+            ));
+        }
+        for automation in document
+            .tasks
+            .iter()
+            .filter_map(|task| task.automation.as_ref())
+        {
+            if !complete_or_empty_owner_source(
+                automation.owned_session_id.as_deref(),
+                automation.owned_session_transcript_path.as_deref(),
+                automation.owned_session_mode.as_deref(),
+                automation.owned_session_scope_key.as_deref(),
+            ) {
+                return Err(MobileEngineError::Internal(
+                    "scheduled task owner is incomplete".into(),
+                ));
+            }
+            for run in &automation.runs {
+                if !complete_or_empty_owner_source(
+                    run.session_id.as_deref(),
+                    run.session_transcript_path.as_deref(),
+                    run.session_mode.as_deref(),
+                    run.session_scope_key.as_deref(),
+                ) || (run.status == cron::AutomationRunStatus::Succeeded
+                    && run.session_id.is_none())
+                {
+                    return Err(MobileEngineError::Internal(
+                        "scheduled run owner is incomplete".into(),
+                    ));
+                }
+            }
+        }
+        let now = self.clock.now();
+        Ok(document
+            .tasks
+            .into_iter()
+            .map(|task| cron_task_dto(task, now))
+            .collect())
     }
 
     pub async fn create_configured(
@@ -1821,8 +2604,14 @@ impl MobileCronStoreHandle {
         recurring: bool,
         automation_json: String,
     ) -> Result<CronTaskDto, MobileEngineError> {
-        self.migrate_legacy_scope().await?;
-        let automation = decode_cron_automation(&automation_json)?;
+        let mut automation = decode_cron_automation(&automation_json)?.ok_or_else(|| {
+            MobileEngineError::Internal("automation settings are required".into())
+        })?;
+        automation.runs.clear();
+        automation.owned_session_id = None;
+        automation.owned_session_transcript_path = None;
+        automation.owned_session_mode = None;
+        automation.owned_session_scope_key = None;
         if let Some(error) = mobile_cron_schedule_error(&cron_expr, recurring) {
             return Err(MobileEngineError::Internal(error));
         }
@@ -1839,16 +2628,7 @@ impl MobileCronStoreHandle {
         // symlink rejection) is not evidence that there are no tasks, and
         // starting from `default()` would write the new task over every
         // existing one.
-        let mut document =
-            match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
-                Ok(body) => cron::tasks_file::parse_automation_tasks(&body),
-                Err(lingxi_core::host::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
-                Err(error) => {
-                    return Err(MobileEngineError::Internal(format!(
-                        "read scheduled_tasks.json: {error}"
-                    )));
-                }
-            };
+        let mut document = read_cron_tasks_for_mutation(self.fs.as_ref(), &self.cwd, true).await?;
         let now = self.clock.now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -1865,7 +2645,7 @@ impl MobileCronStoreHandle {
             permanent: None,
             expires_at: None,
             session_id: None,
-            automation,
+            automation: Some(automation),
         };
         document.tasks.push(task.clone());
         cron::tasks_file::write_automation_tasks_body(
@@ -1880,17 +2660,6 @@ impl MobileCronStoreHandle {
         Ok(cron_task_dto(task, now))
     }
 
-    pub async fn update(
-        &self,
-        id: String,
-        cron_expr: String,
-        prompt: String,
-        recurring: bool,
-    ) -> Result<CronTaskDto, MobileEngineError> {
-        self.update_configured(id, cron_expr, prompt, recurring, String::new())
-            .await
-    }
-
     pub async fn update_configured(
         &self,
         id: String,
@@ -1899,7 +2668,9 @@ impl MobileCronStoreHandle {
         recurring: bool,
         automation_json: String,
     ) -> Result<CronTaskDto, MobileEngineError> {
-        let automation = decode_cron_automation(&automation_json)?;
+        let mut automation = decode_cron_automation(&automation_json)?.ok_or_else(|| {
+            MobileEngineError::Internal("automation settings are required".into())
+        })?;
         if let Some(error) = mobile_cron_schedule_error(&cron_expr, recurring) {
             return Err(MobileEngineError::Internal(error));
         }
@@ -1909,7 +2680,7 @@ impl MobileCronStoreHandle {
             .map_err(|error| {
                 MobileEngineError::Internal(format!("lock scheduled_tasks.json: {error}"))
             })?;
-        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        let mut document = read_cron_tasks_for_mutation(self.fs.as_ref(), &self.cwd, false).await?;
         let now = self.clock.now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -1920,22 +2691,17 @@ impl MobileCronStoreHandle {
             .iter_mut()
             .find(|task| task.id == id)
             .ok_or(MobileEngineError::NotFound)?;
-        if let Some(mut automation) = automation {
-            if let Some(previous) = &task.automation {
-                automation.runs = previous.runs.clone();
-                automation.owned_session_id = if automation.run_mode == previous.run_mode {
-                    previous.owned_session_id.clone()
-                } else {
-                    None
-                };
-            }
-            if automation.status != cron::AutomationStatus::Active {
-                automation
-                    .runs
-                    .retain(|run| run.status != cron::AutomationRunStatus::Queued);
-            }
-            task.automation = Some(automation);
+        if let Some(previous) = &task.automation {
+            preserve_owned_automation(previous, &mut automation)?;
+        } else {
+            clear_owned_automation(&mut automation);
         }
+        if automation.status != cron::AutomationStatus::Active {
+            automation
+                .runs
+                .retain(|run| run.status != cron::AutomationRunStatus::Queued);
+        }
+        task.automation = Some(automation);
         task.cron = cron_expr;
         task.prompt = prompt.into();
         task.recurring = Some(recurring);
@@ -1967,23 +2733,14 @@ impl MobileCronStoreHandle {
         let _file = cron::tasks_file::lock_automation_tasks(self.fs.as_ref(), &self.cwd)
             .await
             .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let body = cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd)
-            .await
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
-        let mut document = cron::tasks_file::parse_automation_tasks_strict(&body)
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+        let mut document = read_cron_tasks_for_mutation(self.fs.as_ref(), &self.cwd, false).await?;
         let task = document
             .tasks
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or(MobileEngineError::NotFound)?;
         if let Some(previous) = &task.automation {
-            automation.runs = previous.runs.clone();
-            automation.owned_session_id = if automation.run_mode == previous.run_mode {
-                previous.owned_session_id.clone()
-            } else {
-                None
-            };
+            preserve_owned_automation(previous, &mut automation)?;
             if previous.status != cron::AutomationStatus::Active
                 && automation.status == cron::AutomationStatus::Active
             {
@@ -1995,6 +2752,8 @@ impl MobileCronStoreHandle {
                         .as_millis() as u64,
                 );
             }
+        } else {
+            clear_owned_automation(&mut automation);
         }
         if automation.status != cron::AutomationStatus::Active {
             automation
@@ -2020,7 +2779,11 @@ impl MobileCronStoreHandle {
         else {
             return false;
         };
-        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        let Ok(mut document) =
+            read_cron_tasks_for_mutation(self.fs.as_ref(), &self.cwd, false).await
+        else {
+            return false;
+        };
         let previous_len = document.tasks.len();
         document.tasks.retain(|task| task.id != id);
         previous_len != document.tasks.len()
@@ -2069,7 +2832,11 @@ impl MobileCronStoreHandle {
         else {
             return false;
         };
-        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        let Ok(mut document) =
+            read_cron_tasks_for_mutation(self.fs.as_ref(), &self.cwd, false).await
+        else {
+            return false;
+        };
         let now = self.clock.now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -2102,6 +2869,64 @@ pub(super) fn cron_task_active(task: &cron::CronTask) -> bool {
         .is_none_or(|automation| automation.status == cron::AutomationStatus::Active)
 }
 
+fn complete_or_empty_owner_source(
+    id: Option<&str>,
+    path: Option<&str>,
+    mode: Option<&str>,
+    scope: Option<&str>,
+) -> bool {
+    match (id, path, mode, scope) {
+        (None, None, None, None) => true,
+        (Some(id), Some(path), Some(mode), Some(scope)) => {
+            lingxi_core::types::SessionId::parse_prefixed(id).is_some()
+                && std::path::Path::new(path).is_absolute()
+                && matches!(mode, "chat" | "code")
+                && !scope.trim().is_empty()
+                && scope.len() <= 8192
+        }
+        _ => false,
+    }
+}
+
+fn clear_owned_automation(automation: &mut cron::CronAutomation) {
+    automation.runs.clear();
+    automation.owned_session_id = None;
+    automation.owned_session_transcript_path = None;
+    automation.owned_session_mode = None;
+    automation.owned_session_scope_key = None;
+}
+
+fn preserve_owned_automation(
+    previous: &cron::CronAutomation,
+    incoming: &mut cron::CronAutomation,
+) -> Result<(), MobileEngineError> {
+    incoming.runs = previous.runs.clone();
+    if incoming.run_mode == cron::RunMode::TaskSession
+        && previous.run_mode == cron::RunMode::TaskSession
+        && previous.owned_session_id.is_some()
+        && (incoming.session_mode != previous.owned_session_mode
+            || incoming.session_scope_key != previous.owned_session_scope_key)
+    {
+        return Err(MobileEngineError::Internal(
+            "Create a new task to change an owned session's mode or owner".into(),
+        ));
+    }
+    let same_mode = incoming.run_mode == previous.run_mode;
+    incoming.owned_session_id = same_mode
+        .then(|| previous.owned_session_id.clone())
+        .flatten();
+    incoming.owned_session_transcript_path = same_mode
+        .then(|| previous.owned_session_transcript_path.clone())
+        .flatten();
+    incoming.owned_session_mode = same_mode
+        .then(|| previous.owned_session_mode.clone())
+        .flatten();
+    incoming.owned_session_scope_key = same_mode
+        .then(|| previous.owned_session_scope_key.clone())
+        .flatten();
+    Ok(())
+}
+
 pub(super) fn decode_cron_automation(
     json: &str,
 ) -> Result<Option<cron::CronAutomation>, MobileEngineError> {
@@ -2116,6 +2941,7 @@ pub(super) fn decode_cron_automation(
             "automation version 2 and a model are required".into(),
         ));
     }
+    cron::validate_automation_source(&value).map_err(MobileEngineError::Internal)?;
     Ok(Some(value))
 }
 
@@ -2133,5 +2959,200 @@ pub(super) fn finalize_cron_occurrence(
                 document.tasks.retain(|task| task.id != task_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod owned_cron_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    struct BlockingCandidate {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl MobileCronOwnerAdmission for BlockingCandidate {
+        async fn begin_owner(&self, _: CronOwnerCandidateDto) -> bool {
+            self.entered.notify_one();
+            self.release.notified().await;
+            true
+        }
+        async fn confirm_owner(&self, _: CronOwnerReservationDto) -> bool {
+            panic!("cancelled candidate must never be confirmed")
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_waits_for_owned_begin_callback_before_barrier_settles() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let owner = MobileCronAdmission::new(Box::new(BlockingCandidate {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let automation: cron::CronAutomation = serde_json::from_value(serde_json::json!({
+            "version":2, "status":"active", "model":"test/model", "reasoning":{"type":"automatic"},
+            "runMode":"new_session", "sessionMode":"code", "sessionScopeKey":"project.test",
+            "notificationPolicy":"all"
+        }))
+        .unwrap();
+        let lease = owner.begin().unwrap();
+        let caller =
+            tokio::spawn(async move { reserve_mobile_cron_owner(lease, &automation).await });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        caller.abort();
+        let _ = caller.await;
+        let first = tokio::spawn({
+            let owner = owner.clone();
+            async move { owner.cancel_and_wait().await }
+        });
+        let second = tokio::spawn({
+            let owner = owner.clone();
+            async move { owner.cancel_and_wait().await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), owner.cancelled.cancelled())
+            .await
+            .unwrap();
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(owner.begin().is_none());
+    }
+
+    #[tokio::test]
+    async fn admission_barrier_waits_for_all_owned_work_and_closes_registration() {
+        let admission = allow_cron_owner();
+        let lease = admission.begin().expect("first registration");
+        assert!(admission.begin().is_none());
+        let first = tokio::spawn({
+            let admission = admission.clone();
+            async move { admission.cancel_and_wait().await }
+        });
+        let second = tokio::spawn({
+            let admission = admission.clone();
+            async move { admission.cancel_and_wait().await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), admission.cancelled.cancelled())
+            .await
+            .unwrap();
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(admission.begin().is_none());
+    }
+
+    #[tokio::test]
+    async fn admission_barrier_closed_before_fire_rejects_late_registration() {
+        let admission = allow_cron_owner();
+        admission.cancel_and_wait().await;
+        assert!(admission.begin().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_keeps_session_gate_until_cleanup_finishes() {
+        let gate = Arc::new(Mutex::new(()));
+        let entered = Arc::new(Notify::new());
+        let cleaning = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let done = Arc::new(Notify::new());
+        let caller = tokio::spawn({
+            let gate = gate.clone();
+            let entered = entered.clone();
+            let cleaning = cleaning.clone();
+            let release = release.clone();
+            let done = done.clone();
+            async move {
+                run_owned_mobile_cron(move |cancel| async move {
+                    let held = gate.lock().await;
+                    entered.notify_one();
+                    cancel.cancelled().await;
+                    cleaning.notify_one();
+                    release.notified().await;
+                    drop(held);
+                    done.notify_one();
+                    Ok(cron::AutomationRunResult {
+                        session_transcript_path: None,
+                        session_mode: None,
+                        session_scope_key: None,
+                        session_id: "same".into(),
+                        summary: String::new(),
+                    })
+                })
+                .await
+            }
+        });
+        entered.notified().await;
+        caller.abort();
+        let _ = caller.await;
+        tokio::time::timeout(Duration::from_secs(2), cleaning.notified())
+            .await
+            .unwrap();
+        assert!(
+            gate.try_lock().is_err(),
+            "the session gate must outlive the cancelled caller"
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), done.notified())
+            .await
+            .unwrap();
+        assert!(gate.try_lock().is_ok());
+    }
+
+    #[test]
+    fn dropped_caller_runtime_cannot_abandon_the_scheduled_owner() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let gate = Arc::new(Mutex::new(()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (cleaning_tx, cleaning_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let owned_gate = gate.clone();
+        runtime.spawn(async move {
+            let _ = run_owned_mobile_cron(move |cancel| async move {
+                let held = owned_gate.lock().await;
+                let _ = entered_tx.send(());
+                cancel.cancelled().await;
+                let _ = cleaning_tx.send(());
+                let _ = release_rx.await;
+                drop(held);
+                let _ = done_tx.send(());
+                Ok(cron::AutomationRunResult {
+                    session_transcript_path: None,
+                    session_mode: None,
+                    session_scope_key: None,
+                    session_id: "same".into(),
+                    summary: String::new(),
+                })
+            })
+            .await;
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        runtime.shutdown_timeout(Duration::from_secs(2));
+        cleaning_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(gate.try_lock().is_err());
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(gate.try_lock().is_ok());
     }
 }

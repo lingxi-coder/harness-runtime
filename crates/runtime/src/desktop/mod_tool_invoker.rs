@@ -163,6 +163,12 @@ fn source_text_with_prefix(
 
 #[async_trait]
 impl ToolInvoker for ModSubagentToolInvoker {
+    fn durable_origin_state(
+        &self,
+    ) -> Option<lingxi_core::host::tool_invoker::ToolInvocationContextState> {
+        self.inner.durable_origin_state()
+    }
+
     async fn cleanup_computer_inputs(
         &self,
         agent_id: lingxi_core::types::AgentId,

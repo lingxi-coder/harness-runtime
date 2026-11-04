@@ -573,353 +573,6 @@ fn fork_error_source(error: &sidequery::ForkError) -> Utf16JsonProjection {
 #[cfg(test)]
 use super::prompt_suggestion::parse_prompt_suggestion_response;
 
-fn is_cross_device(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(17) | Some(18))
-}
-
-fn superseded_sidecar_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| std::io::Error::other("session sidecar path is not UTF-8"))?;
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    for attempt in 0..1000_u32 {
-        let suffix = if attempt == 0 {
-            format!(".superseded-{millis}")
-        } else {
-            format!(".superseded-{millis}-{attempt}")
-        };
-        let candidate = path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join(format!("{name}{suffix}"));
-        if std::fs::symlink_metadata(&candidate).is_err() {
-            std::fs::rename(path, &candidate)?;
-            return Ok(candidate);
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "could not allocate a superseded session sidecar name",
-    ))
-}
-
-fn copy_session_sidecar(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir(target)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700))?;
-    }
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            copy_session_sidecar(&source_path, &target_path)?;
-        } else if file_type.is_file() {
-            std::fs::copy(source_path, target_path)?;
-        } else {
-            return Err(std::io::Error::other("unsupported session sidecar entry"));
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-#[cfg(test)]
-enum SidecarCopyError {
-    Copy(std::io::Error),
-    Cleanup(std::io::Error),
-}
-
-/// Run the cross-device copy and source cleanup as two distinct phases.  A
-/// successful copy is already a complete, authoritative destination; failure
-/// while removing the old source must therefore leave that destination in
-/// place rather than entering the copy-failure rollback path.
-#[cfg(test)]
-fn copy_then_cleanup_with<C, R>(
-    source: &std::path::Path,
-    target: &std::path::Path,
-    copy: C,
-    remove_source: R,
-) -> Result<(), SidecarCopyError>
-where
-    C: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
-    R: FnOnce(&std::path::Path) -> std::io::Result<()>,
-{
-    copy(source, target).map_err(SidecarCopyError::Copy)?;
-    remove_source(source).map_err(SidecarCopyError::Cleanup)
-}
-
-/// Validate a path below its rooted projects directory without following a
-/// symlinked component. The sidecar paths are derived from the config home,
-/// but the filesystem can be changed independently between `/cd` requests;
-/// inspect every existing component before any quarantine or move operation.
-fn sidecar_path_is_rooted(root: &std::path::Path, candidate: &std::path::Path) -> bool {
-    let Ok(root_metadata) = std::fs::symlink_metadata(root) else {
-        return false;
-    };
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return false;
-    }
-    let Ok(relative) = candidate.strip_prefix(root) else {
-        return false;
-    };
-    if relative
-        .components()
-        .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return false;
-    }
-
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(_) => return false,
-        };
-        if metadata.file_type().is_symlink() {
-            return false;
-        }
-    }
-    true
-}
-
-/// Move the complete per-session sidecar directory best-effort.  The current
-/// runtime primarily stores `tool-results` here, but Claude keeps all
-/// session-scoped artifacts under this directory; moving the directory as a
-/// unit avoids stranding future attachment/state files after `/cd`.
-#[cfg(test)]
-fn move_session_sidecar_best_effort(source: &std::path::Path, target: &std::path::Path) {
-    if source == target {
-        return;
-    }
-
-    // Both paths are `<projects>/<sanitized-cwd>/<session-id>`. Keep the
-    // source and destination under the same rooted projects directory and
-    // inspect the source entry itself with `symlink_metadata`: `Path::is_dir`
-    // follows a symlink and could otherwise move/quarantine an arbitrary tree.
-    let Some(source_root) = source.parent().and_then(std::path::Path::parent) else {
-        return;
-    };
-    let Some(target_root) = target.parent().and_then(std::path::Path::parent) else {
-        return;
-    };
-    if source_root != target_root
-        || !sidecar_path_is_rooted(source_root, source)
-        || !sidecar_path_is_rooted(source_root, target)
-    {
-        return;
-    }
-    let Ok(source_metadata) = std::fs::symlink_metadata(source) else {
-        return;
-    };
-    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
-        return;
-    }
-    if let Some(parent) = target.parent() {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            tracing::warn!(
-                source = %source.display(),
-                target = %target.display(),
-                %error,
-                "failed to create session sidecar relocation parent"
-            );
-            return;
-        }
-    }
-
-    // Re-check after creating missing destination parents. This closes the
-    // ordinary check-then-create window without ever following a newly
-    // introduced symlink in the rooted path.
-    if !sidecar_path_is_rooted(source_root, source) || !sidecar_path_is_rooted(source_root, target)
-    {
-        return;
-    }
-
-    let superseded = if std::fs::symlink_metadata(target).is_ok() {
-        match superseded_sidecar_path(target) {
-            Ok(path) => Some(path),
-            Err(error) => {
-                tracing::warn!(
-                    source = %source.display(),
-                    target = %target.display(),
-                    %error,
-                    "failed to quarantine occupied session sidecar"
-                );
-                return;
-            }
-        }
-    } else {
-        None
-    };
-
-    let move_result = match std::fs::rename(source, target) {
-        Ok(()) => Ok(()),
-        Err(error) if is_cross_device(&error) => {
-            // A config directory can span mounts (notably desktop app
-            // containers), so copy into the empty destination and remove the
-            // source only after every regular child copied successfully.  Once
-            // the copy succeeds, cleanup is best-effort and MUST NOT delete
-            // the complete destination if source removal reports an error.
-            match copy_then_cleanup_with(
-                source,
-                target,
-                copy_session_sidecar,
-                |path: &std::path::Path| std::fs::remove_dir_all(path),
-            ) {
-                Ok(()) => Ok(()),
-                Err(SidecarCopyError::Copy(error)) => Err(error),
-                Err(SidecarCopyError::Cleanup(error)) => {
-                    tracing::warn!(
-                        source = %source.display(),
-                        target = %target.display(),
-                        %error,
-                        "session sidecar copied but source cleanup failed; keeping destination"
-                    );
-                    Ok(())
-                }
-            }
-        }
-        Err(error) => Err(error),
-    };
-    if let Err(error) = move_result {
-        let _ = std::fs::remove_dir_all(target);
-        if let Some(superseded) = superseded.as_ref() {
-            let _ = std::fs::rename(superseded, target);
-        }
-        tracing::warn!(
-            source = %source.display(),
-            target = %target.display(),
-            %error,
-            "failed to move session sidecar"
-        );
-    }
-}
-
-/// Stage the complete session artifact directory before changing transcript
-/// authority. Until commit, dropping this token restores both the source and
-/// any destination set aside for the move.
-struct SessionSidecarRelocation {
-    source: std::path::PathBuf,
-    target: std::path::PathBuf,
-    superseded: Option<std::path::PathBuf>,
-    copied: bool,
-    committed: bool,
-}
-
-impl SessionSidecarRelocation {
-    fn prepare(
-        source: std::path::PathBuf,
-        target: std::path::PathBuf,
-    ) -> std::io::Result<Option<Self>> {
-        if source == target {
-            return Ok(None);
-        }
-        let metadata = match std::fs::symlink_metadata(&source) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(std::io::Error::other(
-                "session sidecar source is not a real directory",
-            ));
-        }
-        let root = source
-            .parent()
-            .and_then(std::path::Path::parent)
-            .ok_or_else(|| std::io::Error::other("session sidecar source has no projects root"))?;
-        if target.parent().and_then(std::path::Path::parent) != Some(root)
-            || !sidecar_path_is_rooted(root, &source)
-            || !sidecar_path_is_rooted(root, &target)
-        {
-            return Err(std::io::Error::other(
-                "unsafe session sidecar relocation path",
-            ));
-        }
-        std::fs::create_dir_all(target.parent().expect("validated sidecar parent"))?;
-        if !sidecar_path_is_rooted(root, &source) || !sidecar_path_is_rooted(root, &target) {
-            return Err(std::io::Error::other(
-                "unsafe session sidecar relocation parent",
-            ));
-        }
-        let superseded = match std::fs::symlink_metadata(&target) {
-            Ok(_) => Some(superseded_sidecar_path(&target)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        let mut relocation = Self {
-            source,
-            target,
-            superseded,
-            copied: false,
-            committed: false,
-        };
-        match std::fs::rename(&relocation.source, &relocation.target) {
-            Ok(()) => Ok(Some(relocation)),
-            Err(error) if is_cross_device(&error) => {
-                relocation.copied = true;
-                if let Err(error) = copy_session_sidecar(&relocation.source, &relocation.target) {
-                    let _ = relocation.rollback();
-                    return Err(error);
-                }
-                Ok(Some(relocation))
-            }
-            Err(error) => {
-                // No source move occurred; only restore a quarantined target.
-                relocation.committed = true;
-                if let Some(previous) = &relocation.superseded {
-                    std::fs::rename(previous, &relocation.target)?;
-                }
-                Err(error)
-            }
-        }
-    }
-
-    fn rollback(&mut self) -> std::io::Result<()> {
-        if self.committed {
-            return Ok(());
-        }
-        if self.copied {
-            if self.target.exists() {
-                std::fs::remove_dir_all(&self.target)?;
-            }
-        } else {
-            std::fs::rename(&self.target, &self.source)?;
-        }
-        if let Some(previous) = &self.superseded {
-            std::fs::rename(previous, &self.target)?;
-        }
-        self.committed = true;
-        Ok(())
-    }
-
-    fn commit(mut self) {
-        self.committed = true;
-        if self.copied {
-            if let Err(error) = std::fs::remove_dir_all(&self.source) {
-                tracing::warn!(%error, source = %self.source.display(), "relocated session sidecar source cleanup failed");
-            }
-        }
-    }
-}
-
-impl Drop for SessionSidecarRelocation {
-    fn drop(&mut self) {
-        if let Err(error) = self.rollback() {
-            tracing::error!(%error, source = %self.source.display(), target = %self.target.display(), "session sidecar relocation rollback failed");
-        }
-    }
-}
-
 impl ConversationOrchestrator {
     /// Capture the composition-owned session writer before publishing a host
     /// input transport. The returned owner is independent of later responses.
@@ -1814,7 +1467,23 @@ impl ConversationOrchestrator {
             .tool_source_assistant_uuids
             .lock()
             .await
-            .insert(id.to_string(), assistant_line_uuid);
+            .insert(id.to_string(), assistant_line_uuid.clone());
+    }
+
+    pub(crate) async fn record_durable_tool_origin(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        assistant_id: &str,
+        result: Result<String, String>,
+    ) {
+        self.transcript
+            .tool_persisted_origins
+            .lock()
+            .await
+            .insert((id.to_string(), assistant_id.to_owned()), result);
+        self.transcript
+            .tool_source_assistant_notify
+            .notify_waiters();
     }
 
     /// Remove and return the payloads queued for `id`, in production order.
@@ -1958,16 +1627,10 @@ impl ConversationOrchestrator {
         result.map(|(appended, _)| appended)
     }
 
-    /// Persist a session-cwd move before directing future transcript appends
-    /// into the cwd's project directory. The writer rehomes an existing
-    /// transcript before appending the relocation marker. The complete
-    /// per-session sidecar directory is staged first and rolled back if the
-    /// transcript transaction fails.
-    /// This is intentionally a no-op when session persistence is disabled (or
-    /// the config home was not wired), preserving the in-memory/library setup.
-    /// On successful persistence returns the writer's published transcript
-    /// path, so a background owner can refresh its durable launch identity
-    /// only after the transcript move has completed.
+    /// Persist a session-cwd move without changing its admitted source path.
+    /// The directory alias makes that source discoverable from the new cwd;
+    /// it is not an authorization to substitute a different transcript.
+    /// This is a no-op when session persistence or the config home is absent.
     pub async fn retarget_transcript_for_cwd(
         &self,
         cwd: &std::path::Path,
@@ -1981,34 +1644,29 @@ impl ConversationOrchestrator {
         let session_id = self.session.lock().await.session_id;
         let session_uuid = session_id.as_uuid().to_string();
         let cwd = cwd.to_string_lossy().into_owned();
-        let target = session::jsonl::path::session_path(config_home, &cwd, &session_uuid);
-        let previous = writer.active_path();
-        let old_sidecar = previous
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join(&session_uuid);
-        let new_sidecar = target
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join(&session_uuid);
-        let mut sidecar_move = SessionSidecarRelocation::prepare(old_sidecar, new_sidecar)
-            .map_err(|error| format!("stage session sidecar relocation: {error}"))?;
-        if let Err(error) = writer
-            .retarget_with_relocation(target.clone(), &session_uuid, &cwd)
+        let source = writer.active_path();
+        let target = match std::fs::symlink_metadata(&source) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                session::jsonl::record_session_cwd_alias(
+                    config_home,
+                    &source,
+                    std::path::Path::new(&cwd),
+                )
+                .await
+                .map_err(|error| format!("persist session directory association: {error}"))?;
+                source
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A lazy, never-persisted draft has no captured source yet.
+                session::jsonl::path::session_path(config_home, &cwd, &session_uuid)
+            }
+            Ok(_) => return Err("session transcript source is not a regular file".into()),
+            Err(error) => return Err(format!("inspect session transcript: {error}")),
+        };
+        writer
+            .retarget_with_relocation(target, &session_uuid, &cwd)
             .await
-        {
-            let rollback = sidecar_move
-                .as_mut()
-                .map(SessionSidecarRelocation::rollback)
-                .transpose();
-            return Err(match rollback {
-                Ok(_) => format!("retarget transcript for cwd {cwd}: {error}"),
-                Err(rollback) => format!("retarget transcript for cwd {cwd}: {error}; sidecar rollback failed: {rollback}"),
-            });
-        }
-        if let Some(sidecar_move) = sidecar_move {
-            sidecar_move.commit();
-        }
+            .map_err(|error| format!("persist session cwd {cwd}: {error}"))?;
         Ok(Some(writer.active_path()))
     }
 
@@ -2057,6 +1715,201 @@ impl ConversationOrchestrator {
     /// the byte-audit copy in `command-core`'s `recap.rs` test.
     pub(crate) const RECAP_PROMPT: &str = "The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.";
 
+    /// Capture committed history without waiting for the active turn to finish.
+    /// The writer transaction is released before prefix assembly or model I/O.
+    pub async fn capture_session_handoff(
+        &self,
+        expected_session_id: SessionId,
+        target_mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<crate::session_handoff::SessionHandoffCapture, lingxi_core::host::HandleError> {
+        use lingxi_core::host::HandleError;
+        use sha2::{Digest, Sha256};
+        let session_id = self.session.lock().await.session_id;
+        if session_id != expected_session_id {
+            return Err(HandleError::ActionFailed(
+                "handoff source session changed".into(),
+            ));
+        }
+        let writer = self.transcript.jsonl_writer.as_ref().ok_or_else(|| {
+            HandleError::ActionFailed("handoff requires a persisted conversation".into())
+        })?;
+        let captured = writer
+            .capture_committed_transcript(session_id.as_uuid())
+            .await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        let profile = session::JsonlWriter::fixed_session_mode_from_source(
+            &captured.source,
+            &session_id.as_uuid().to_string(),
+        )
+        .map_err(HandleError::ActionFailed)?;
+        if profile == target_mode {
+            return Err(HandleError::ActionFailed(
+                "handoff target must use the other mode".into(),
+            ));
+        }
+        let cutoff = format!(
+            "sha256:{:x}:{}",
+            Sha256::digest(captured.source.as_bytes()),
+            captured.source.len()
+        );
+        let loaded = session::jsonl::route_lines(&captured.source);
+        // The evidence projection preserves the committed UTF-16 source rather
+        // than applying the native assistant-resume text replacement boundary.
+        let replayed = crate::resume::replay_persistent_app_chat_session(
+            captured.transcript_path,
+            captured.source,
+            loaded,
+            session_id.as_uuid(),
+        )
+        .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
+        let history = crate::session_handoff::evidence(replayed.state.model_context_history());
+        if history.is_empty() {
+            return Err(HandleError::ActionFailed(
+                "handoff requires a non-empty conversation".into(),
+            ));
+        }
+        // Construct only the route and immutable evidence needed here. The
+        // general side-query fallback builds wire tools, updates model/tool
+        // caches and assembles prompts from live state, none of which belongs
+        // to a read-only handoff.
+        let (model, model_profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        let model_source = self
+            .main_model_source_for_request(&model, model_profile.as_deref())
+            .await;
+        let params = sidequery::CacheSafeParams {
+            system_prompt: Arc::new(crate::session_handoff::HANDOFF_SYSTEM.into()),
+            system_prompt_input: None,
+            user_context: Default::default(),
+            system_context: Default::default(),
+            user_context_message: None,
+            tool_use_options: tool_api::ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: model,
+                model_profile,
+                max_budget_nano_usd: None,
+                mcp_clients: Vec::new(),
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            model_source,
+            tools: Vec::new(),
+            effort: None,
+            fork_context_messages: history,
+            typed_attachment_ids: Default::default(),
+            task_deliveries: Default::default(),
+            transcript_path: None,
+            generation: 0,
+        };
+        if self.session.lock().await.session_id != expected_session_id {
+            return Err(HandleError::ActionFailed(
+                "handoff source session changed".into(),
+            ));
+        }
+        Ok(crate::session_handoff::SessionHandoffCapture {
+            source_session_id: session_id.as_uuid().to_string(),
+            source_mode: profile,
+            target_mode,
+            cutoff,
+            params,
+        })
+    }
+
+    /// One isolated, tool-denied summary request over an already fixed cutoff.
+    /// This does not compact, save a prompt cache, mutate history or fire hooks.
+    pub async fn summarize_session_handoff(
+        &self,
+        capture: &crate::session_handoff::SessionHandoffCapture,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<crate::session_handoff::SessionHandoffSummary, lingxi_core::host::HandleError> {
+        use lingxi_core::host::HandleError;
+        let runner = self
+            .recap_runner
+            .clone()
+            .ok_or_else(|| HandleError::ActionFailed("handoff summary is unavailable".into()))?;
+        let request = sidequery::ForkedAgentRequest {
+            api_attempts_left: None,
+            prompt_messages: vec![ConversationMessage::user(MessageId::new(), format!(
+                "Prepare a handoff from {} to {}. Source session: {}. Durable cutoff: {}.\nThe target is a new conversation which starts only after the user edits and sends the summary.",
+                capture.source_mode.as_str(), capture.target_mode.as_str(), capture.source_session_id, capture.cutoff,
+            ))],
+            cache_safe_params: capture.params.clone(),
+            fork_label: "session_handoff".into(),
+            query_source: sidequery::QuerySource::Custom("session_handoff".into()),
+            max_output_tokens: Some(2048),
+        };
+        let observer = self.model_safety_observer().await;
+        let response = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(HandleError::ActionFailed("handoff cancelled".into())),
+            result = lingxi_core::host::model_safety::bind_model_safety(observer, runner.run(request)) =>
+                result.map_err(|error| HandleError::ActionFailed(error.to_string()))?,
+        };
+        if !response.tool_calls.is_empty() {
+            return Err(HandleError::ActionFailed(
+                "handoff returned a tool request instead of a summary".into(),
+            ));
+        }
+        let summary = source_trimmed_text(&response.final_text);
+        if source_text_is_empty(&summary) {
+            return Err(HandleError::ActionFailed(
+                "handoff summary was empty".into(),
+            ));
+        }
+        Ok(crate::session_handoff::SessionHandoffSummary {
+            source_session_id: capture.source_session_id.clone(),
+            source_mode: capture.source_mode,
+            target_mode: capture.target_mode,
+            cutoff: capture.cutoff.clone(),
+            summary,
+        })
+    }
+
+    /// Wait until a running or detached turn has released its session gate.
+    /// Hosts use this only after closing admission for an isolated owner.
+    pub async fn wait_for_turn_idle(&self) {
+        let _guard = self.turn_gate.lock().await;
+    }
+
+    /// Rebuild a side-query prefix when a profile boundary invalidated the
+    /// last main request. Do not publish this provisional prefix to the slot.
+    async fn side_query_params_after_profile_boundary(
+        &self,
+    ) -> Result<Option<sidequery::CacheSafeParams>, lingxi_core::settings::SettingsError> {
+        let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
+            return Ok(None);
+        };
+        loop {
+            let profile = self.conversation_profile().await;
+            let params = match slot.get_last().await {
+                Some(params) => Some(params),
+                None => {
+                    if self.session.lock().await.model_context_history().is_empty() {
+                        None
+                    } else {
+                        let system = self.provider_side_query_system_prompt().await?;
+                        let model = self.session.lock().await.model.clone();
+                        let tools = self.build_wire_tools().await?.0;
+                        Some(
+                            self.build_cache_safe_params(Some(&system), &model, &tools)
+                                .await?,
+                        )
+                    }
+                }
+            };
+            let transition = self.conversation_transition.lock().await;
+            if self.conversation_profile().await == profile {
+                drop(transition);
+                return Ok(params);
+            }
+            drop(transition);
+        }
+    }
+
     /// Real `/recap` body — a read-only, tool-denied, single-turn side query,
     /// cancelable via a [`CancellationToken`]. HISTORY-INERT by construction:
     /// unlike [`Self::force_compact_with_cancel`], it reuses the
@@ -2067,9 +1920,8 @@ impl ConversationOrchestrator {
     /// the recap prompt, exposes no tools, and issues exactly one query.
     ///
     /// On cancel returns `Ok(RecapOutcome::Cancelled)` (a fixed-string outcome),
-    /// not `Err`. An empty cache-safe slot (no successful turn recorded yet — a
-    /// resumed session whose transcript loaded but which has run no live turn)
-    /// maps to `Err(ActionFailed)` rather than a panic.
+    /// not `Err`. If a profile change invalidated the last request, rebuild a
+    /// filtered prefix from the current conversation before making the fork.
     pub(crate) async fn generate_recap_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
@@ -2078,15 +1930,14 @@ impl ConversationOrchestrator {
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed("recap unavailable".into())
         })?;
+        if self.model_runtime.cache_safe_slot.is_none() {
+            return Err(lingxi_core::host::HandleError::ActionFailed(
+                "recap: no cache-safe slot".into(),
+            ));
+        }
         let params = self
-            .model_runtime
-            .cache_safe_slot
-            .as_ref()
-            .ok_or_else(|| {
-                lingxi_core::host::HandleError::ActionFailed("recap: no cache-safe slot".into())
-            })?
-            .get_last()
-            .await
+            .side_query_params_after_profile_boundary()
+            .await?
             .ok_or_else(|| {
                 lingxi_core::host::HandleError::ActionFailed("recap: no cache-safe params".into())
             })?;
@@ -2134,18 +1985,12 @@ impl ConversationOrchestrator {
                 "session name generation unavailable".into(),
             )
         })?;
-        let Some(params) = self
-            .model_runtime
-            .cache_safe_slot
-            .as_ref()
-            .ok_or_else(|| {
-                lingxi_core::host::HandleError::ActionFailed(
-                    "session name generation unavailable".into(),
-                )
-            })?
-            .get_last()
-            .await
-        else {
+        if self.model_runtime.cache_safe_slot.is_none() {
+            return Err(lingxi_core::host::HandleError::ActionFailed(
+                "session name generation unavailable".into(),
+            ));
+        }
+        let Some(params) = self.side_query_params_after_profile_boundary().await? else {
             return Ok(None);
         };
 
@@ -2212,7 +2057,7 @@ impl ConversationOrchestrator {
         // but current tools, model options, and post-compaction messages.
         let system = match saved.as_ref() {
             Some(params) => params.system_prompt_input.clone(),
-            None => Some(self.provider_system_prompt().await?),
+            None => Some(self.provider_side_query_system_prompt().await?),
         };
         let model = self.session.lock().await.model.clone();
         let tools = self.build_wire_tools().await?.0;
@@ -3051,23 +2896,33 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     /// Wait for all launches accepted before foreground admission closed.
-    pub async fn drain_background_session_launches(&self) -> Result<(), String> {
+    pub async fn drain_background_session_launches(
+        &self,
+    ) -> lingxi_core::host::bg_session_forker::lifecycle::BackgroundLaunchDrainReport {
         if let Some(forker) = &self.bg_session_forker {
-            forker
-                .lifecycle()
-                .close_and_drain()
-                .await
-                .map_err(|error| error.to_string())?;
+            return forker.lifecycle().close_and_drain().await;
         }
-        Ok(())
+        Default::default()
     }
 
     /// Joining is owned independently of this waiter, including on timeout.
-    pub async fn shutdown_startup_responses_websocket_prewarm(&self) -> Result<(), String> {
+    pub async fn shutdown_startup_responses_websocket_prewarm(&self) -> Vec<String> {
         self.lifecycle_runtime
             .startup_responses_websocket_prewarm
             .close_and_drain()
             .await
+            .diagnostics
+    }
+
+    /// Install a controlled startup producer for host lifecycle integration tests.
+    #[cfg(feature = "test-support")]
+    pub fn spawn_startup_prewarm_for_test<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.lifecycle_runtime
+            .startup_responses_websocket_prewarm
+            .spawn(future);
     }
 
     /// Task 6 (llm-runtime future-work batch 5): re-map a terminal
@@ -4366,10 +4221,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         reasoning: lingxi_core::host::ReasoningSelection,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, String> {
-        let turn_guard = self
-            .turn_gate
-            .try_lock()
-            .map_err(|_| "busy:Target session is running".to_string())?;
+        let turn_guard = Arc::new(
+            self.turn_gate
+                .clone()
+                .try_lock_owned()
+                .map_err(|_| "busy:Target session is running".to_string())?,
+        );
         let settings = self.scheduled_turn_settings(model, reasoning)?;
         self.run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
             .await
@@ -4403,10 +4260,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     where
         F: std::future::Future<Output = Result<(), String>> + Send,
     {
-        let turn_guard = self
-            .turn_gate
-            .try_lock()
-            .map_err(|_| "busy:Target session is running".to_string())?;
+        let turn_guard = Arc::new(
+            self.turn_gate
+                .clone()
+                .try_lock_owned()
+                .map_err(|_| "busy:Target session is running".to_string())?,
+        );
         if self.session.lock().await.session_id != expected_session {
             return Err("busy:Target session changed before execution".into());
         }
@@ -4464,7 +4323,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
     async fn run_scheduled_turn_locked(
         &self,
-        turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        turn_guard: &super::context_state_impl::ProfileTurnGuard,
         prompt: Utf16JsonProjection,
         settings: crate::scheduled_turn::ScheduledSettings,
         cancel: CancellationToken,
@@ -4569,170 +4428,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 mod live_permission_mode_tests;
 
 #[cfg(test)]
-mod session_sidecar_tests {
-    use super::{
-        copy_then_cleanup_with, move_session_sidecar_best_effort, parse_prompt_suggestion_response,
-        SidecarCopyError,
-    };
-
-    #[test]
-    fn occupied_sidecar_destination_is_quarantined_while_source_moves_as_a_unit() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let old_project = temp.path().join("old-project");
-        let new_project = temp.path().join("new-project");
-        let session_id = "11111111-2222-4333-8444-555555555555";
-        let source = old_project.join(session_id);
-        let target = new_project.join(session_id);
-        std::fs::create_dir_all(source.join("tool-results")).expect("source sidecar");
-        std::fs::create_dir_all(&target).expect("occupied target sidecar");
-        std::fs::write(source.join("session-state.json"), "current").expect("source state");
-        std::fs::write(source.join("tool-results").join("result.txt"), "result")
-            .expect("source result");
-        std::fs::write(target.join("stale.json"), "stale").expect("stale state");
-
-        move_session_sidecar_best_effort(&source, &target);
-
-        assert!(!source.exists(), "the complete source sidecar is rehomed");
-        assert_eq!(
-            std::fs::read_to_string(target.join("session-state.json")).expect("moved state"),
-            "current"
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("tool-results").join("result.txt"))
-                .expect("moved result"),
-            "result"
-        );
-        assert!(
-            !target.join("stale.json").exists(),
-            "an occupied destination must not be merged over the moved sidecar"
-        );
-        let quarantined = std::fs::read_dir(&new_project)
-            .expect("new project")
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .find(|name| name.starts_with(&format!("{session_id}.superseded-")));
-        assert!(
-            quarantined.is_some(),
-            "stale destination is retained for recovery"
-        );
-        let stale_path = new_project.join(quarantined.expect("quarantined path"));
-        assert_eq!(
-            std::fs::read_to_string(stale_path.join("stale.json")).expect("quarantined state"),
-            "stale"
-        );
-    }
-
-    #[test]
-    fn copied_sidecar_survives_injected_source_cleanup_failure() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        let target = temp.path().join("target");
-        std::fs::create_dir_all(&source).expect("source");
-
-        let result = copy_then_cleanup_with(
-            &source,
-            &target,
-            |_source, target| {
-                std::fs::create_dir_all(target)?;
-                std::fs::write(target.join("complete.txt"), "authoritative")
-            },
-            |_source| Err(std::io::Error::other("injected cleanup failure")),
-        );
-
-        assert!(matches!(result, Err(SidecarCopyError::Cleanup(_))));
-        assert_eq!(
-            std::fs::read_to_string(target.join("complete.txt")).expect("keep copied target"),
-            "authoritative",
-            "cleanup failure must not delete a complete destination copy"
-        );
-        assert!(source.exists(), "source debris remains recoverable");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn source_symlink_is_rejected_before_target_quarantine() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let projects = temp.path().join("projects");
-        let old_project = projects.join("old-project");
-        let new_project = projects.join("new-project");
-        let session_id = "22222222-3333-4444-8555-666666666666";
-        let source = old_project.join(session_id);
-        let real_source = temp.path().join("outside-source");
-        let target = new_project.join(session_id);
-        std::fs::create_dir_all(&real_source).expect("real source");
-        std::fs::write(real_source.join("current.txt"), "current").expect("source data");
-        std::fs::create_dir_all(&target).expect("occupied target");
-        std::fs::write(target.join("stale.txt"), "stale").expect("target data");
-        std::fs::create_dir_all(&old_project).expect("old project");
-        symlink(&real_source, &source).expect("source symlink");
-
-        move_session_sidecar_best_effort(&source, &target);
-
-        assert!(
-            std::fs::symlink_metadata(&source)
-                .expect("source entry")
-                .file_type()
-                .is_symlink(),
-            "the source symlink must not be followed or moved"
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("stale.txt")).expect("target remains"),
-            "stale"
-        );
-        assert!(
-            !new_project
-                .read_dir()
-                .expect("new project")
-                .filter_map(Result::ok)
-                .any(|entry| entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&format!("{session_id}.superseded-"))),
-            "an unsafe source must not quarantine the target"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_sidecar_parent_is_rejected_before_target_quarantine() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let projects = temp.path().join("projects");
-        let old_project = projects.join("old-project");
-        let new_project = projects.join("new-project");
-        let outside = temp.path().join("outside");
-        let session_id = "33333333-4444-4555-8666-777777777777";
-        let source = old_project.join(session_id);
-        let target = new_project.join(session_id);
-        std::fs::create_dir_all(outside.join(session_id)).expect("outside source");
-        std::fs::write(outside.join(session_id).join("current.txt"), "current")
-            .expect("source data");
-        std::fs::create_dir_all(&projects).expect("projects");
-        std::fs::create_dir_all(&target).expect("occupied target");
-        std::fs::write(target.join("stale.txt"), "stale").expect("target data");
-        symlink(&outside, &old_project).expect("old project symlink");
-
-        move_session_sidecar_best_effort(&source, &target);
-
-        assert_eq!(
-            std::fs::read_to_string(target.join("stale.txt")).expect("target remains"),
-            "stale"
-        );
-        assert!(
-            !new_project
-                .read_dir()
-                .expect("new project")
-                .filter_map(Result::ok)
-                .any(|entry| entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&format!("{session_id}.superseded-"))),
-            "a symlinked parent must not quarantine the target"
-        );
-    }
+mod prompt_suggestion_tests {
+    use super::parse_prompt_suggestion_response;
 
     #[test]
     fn prompt_suggestion_parser_unwraps_xml_and_labels() {

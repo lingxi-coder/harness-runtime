@@ -47,6 +47,8 @@ use tokio::sync::Mutex;
 use tool_api::registry::ToolRegistry;
 use uuid::Uuid;
 
+#[cfg(test)]
+mod deferred_authority_tests;
 mod file_state;
 #[cfg(test)]
 mod file_state_tests;
@@ -60,6 +62,9 @@ pub enum ResumeError {
     /// Deferred-tool replay failed after the transcript loaded.
     #[error("deferred replay: {0}")]
     DeferredReplay(String),
+    /// The captured conversation profile could not be restored.
+    #[error("conversation profile restore: {0}")]
+    Profile(String),
 }
 
 // Shared by the two unconditional test modules below. Keep this helper under
@@ -161,6 +166,60 @@ mod mod_session_turn_resume_tests {
         }))
         .unwrap();
         row
+    }
+
+    #[test]
+    fn cold_resume_keeps_excluded_attachment_in_history_but_not_model_context() {
+        let session_id = Uuid::new_v4();
+        let excluded_id = Uuid::new_v4();
+        let visible_id = Uuid::new_v4();
+        let payload = serde_json::json!({"type":"environment","snapshot":{}});
+        let mut excluded = prompt_ingress_row(
+            session_id,
+            excluded_id,
+            payload.clone(),
+            "system",
+            "same evidence",
+        );
+        excluded
+            .extra
+            .set_field(
+                "isModelContextExcluded",
+                Utf16JsonProjection::from_serde_value(&serde_json::json!(true)).unwrap(),
+            )
+            .unwrap();
+        let visible =
+            prompt_ingress_row(session_id, visible_id, payload, "system", "same evidence");
+        let queued_id = MessageId::new();
+        let mut queued = prompt_ingress_row(
+            session_id,
+            Uuid::new_v4(),
+            serde_json::json!({
+                "type":"queued_command",
+                "commandMode":"prompt",
+                "prompt":"queued request",
+                "source_uuid":queued_id.to_string()
+            }),
+            "system",
+            "queued request",
+        );
+        queued
+            .extra
+            .set_field(
+                "isModelContextExcluded",
+                Utf16JsonProjection::from_serde_value(&serde_json::json!(true)).unwrap(),
+            )
+            .unwrap();
+
+        let state = state_from_messages(session_id, &[excluded, visible, queued]);
+        assert_eq!(state.history.len(), 3);
+        let model = state.model_context_history();
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].id().as_uuid(), visible_id);
+        assert!(state
+            .model_context_excluded_messages
+            .contains(&MessageId::from_uuid(excluded_id)));
+        assert!(state.model_context_excluded_messages.contains(&queued_id));
     }
 
     #[test]
@@ -501,7 +560,9 @@ impl ReplayedSession {
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
+            lifetime_guard: None,
             transcript_path: Some(self.transcript_path.clone()),
+            transcript_source: None,
             working_directory: self.working_directory.clone(),
             worktree_session: self.worktree_session.clone(),
             transcript_metadata: Some(self.transcript_metadata.clone()),
@@ -565,6 +626,7 @@ impl ReplayedSession {
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
             deferred_tools: self.runtime_metadata.deferred_tools.clone(),
             prompt_snapshot: self.runtime_metadata.prompt_snapshot.clone(),
+            prompt_snapshot_epoch: self.runtime_metadata.prompt_snapshot_epoch,
             context_rendering_hint: self.runtime_metadata.context_rendering_hint,
         }
     }
@@ -615,6 +677,8 @@ pub struct ResumeRuntimeMetadata {
     pub deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
     /// Last valid static prompt snapshot recovered from the transcript.
     pub prompt_snapshot: Option<lingxi_core::host::PromptSnapshot>,
+    /// Admitted epoch for the recovered static prefix and routing hint.
+    pub prompt_snapshot_epoch: Option<u64>,
     /// Hint from the latest raw prompt_snapshot, with no older-row fallback.
     pub context_rendering_hint: Option<lingxi_core::host::instructions::InstructionRendering>,
 }
@@ -714,9 +778,14 @@ fn replay_captured_session_with_text_projection(
     // `load_session` returns only the resumable chain; prompt snapshots are
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
-    runtime_metadata.prompt_snapshot = prompt_snapshot_from_messages(&transcript_entries);
-    runtime_metadata.context_rendering_hint =
-        context_rendering_hint_from_messages(&transcript_entries);
+    let profile_epoch = JsonlWriter::fixed_session_profile_from_source(&source, &sid_str)
+        .map_err(ResumeError::Profile)?
+        .instruction_epoch;
+    let (snapshot, rendering) =
+        prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
+    runtime_metadata.prompt_snapshot = snapshot;
+    runtime_metadata.prompt_snapshot_epoch = Some(profile_epoch);
+    runtime_metadata.context_rendering_hint = rendering;
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -856,6 +925,60 @@ pub fn context_rendering_hint_from_messages(
         .filter_map(|message| message.attachment_projection.clone())
         .collect::<Vec<_>>();
     lingxi_core::host::instruction_announcements::latest_snapshot_context_rendering(&attachments)
+}
+
+/// Recover prompt attachments only from the admitted epoch in the captured
+/// source. Session-mode metadata is absent from `messages_in_order`, so its
+/// Only the session's current instruction epoch may supply its prompt snapshot.
+#[must_use]
+pub fn prompt_state_for_epoch_from_source(
+    source: &str,
+    session_id: &str,
+    expected_epoch: u64,
+) -> (
+    Option<lingxi_core::host::PromptSnapshot>,
+    Option<lingxi_core::host::instructions::InstructionRendering>,
+) {
+    let Ok(target_id) = Uuid::parse_str(session_id) else {
+        return (None, None);
+    };
+    if !JsonlWriter::fixed_session_profile_from_source(source, session_id)
+        .is_ok_and(|profile| profile.instruction_epoch == expected_epoch)
+    {
+        return (None, None);
+    }
+    let mut matching = String::new();
+    for line in source.lines() {
+        let Ok(row) = Utf16JsonProjection::parse(line) else {
+            continue;
+        };
+        if !row
+            .string_at("/sessionId")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_some_and(|value| value == target_id)
+        {
+            continue;
+        }
+        match row.string_at("/type") {
+            Some("attachment") => {
+                // A fork copies source attachments for audit, but its new
+                // instruction epoch must assemble a fresh prompt. Branch
+                // records carry their source in `forkedFrom`.
+                if row.string_at("/attachment/type") == Some("prompt_snapshot")
+                    && row.string_at("/forkedFrom/sessionId").is_none()
+                {
+                    matching.push_str(line);
+                    matching.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+    let entries = session::jsonl::route_lines(&matching).messages_in_order;
+    (
+        prompt_snapshot_from_messages(&entries),
+        context_rendering_hint_from_messages(&entries),
+    )
 }
 
 fn projection_value<T: DeserializeOwned>(
@@ -1227,6 +1350,15 @@ fn build_state_from_jsonl_with_text_projection(
                 if let Some(message) = queued_human_attachment_message_for_api(m, msg_uuid)
                     .or_else(|| hook_attachment_message_for_api(m, msg_uuid))
                 {
+                    if m.extra
+                        .at_pointer("/isModelContextExcluded")
+                        .and_then(JsonValueView::as_bool)
+                        == Some(true)
+                    {
+                        // Queued attachments may project to their source UUID,
+                        // which can differ from the attachment envelope UUID.
+                        state.model_context_excluded_messages.insert(message.id());
+                    }
                     state.history.push(message);
                 }
                 if is_compact_boundary(m) {
@@ -2189,8 +2321,40 @@ pub fn deferred_tool_replays_from_messages(
         let Some(tool_input) = attachment.subprojection("/toolInput").ok() else {
             continue;
         };
+        let assistant_message_id = attachment
+            .string_at("/assistantMessageId")
+            .and_then(MessageId::parse_prefixed)
+            .and_then(|id| {
+                let logical = id.as_uuid().to_string();
+                let mut rows = messages.iter().filter(|row| {
+                    if row.message_type != "assistant"
+                        || row.session_id != message.session_id
+                        || (row.uuid != logical
+                            && row.message.string_at("/id") != Some(logical.as_str()))
+                    {
+                        return false;
+                    }
+                    let Some(content) = row.message.at_pointer("/content") else {
+                        return false;
+                    };
+                    (0..content.array_len().unwrap_or(0)).any(|index| {
+                        content.get_index(index).is_some_and(|block| {
+                            block.get_property("type").and_then(JsonValueView::as_str)
+                                == Some("tool_use")
+                                && block.get_property("id").and_then(JsonValueView::as_str)
+                                    == Some(tool_use_id)
+                        })
+                    })
+                });
+                let row = rows.next()?;
+                if rows.next().is_some() {
+                    return None;
+                }
+                MessageId::parse_prefixed(&row.uuid)
+            });
         deferred.push(lingxi_core::host::DeferredToolReplay {
             tool_use_id: tool_use_id.to_string(),
+            assistant_message_id,
             tool_name: tool_name.to_string(),
             tool_input,
             permission_mode: attachment.string_at("/permissionMode").map(str::to_string),
@@ -2213,6 +2377,21 @@ async fn replay_deferred_tool_after_resume(
     deferred: lingxi_core::host::DeferredToolReplay,
 ) -> Result<DeferredReplayOutcome, crate::OrchestratorError> {
     let tool_use_id = ToolUseId::from(deferred.tool_use_id);
+    let assistant_message_id = deferred.assistant_message_id;
+    if let Some(assistant) = assistant_message_id {
+        // The loader only retains this ID after matching the captured durable
+        // assistant row and its exact tool-use block in the same session.
+        orch.record_source_tool_assistant_uuid(&tool_use_id, assistant.as_uuid().to_string())
+            .await;
+        if deferred.tool_name == "LocalApp" {
+            orch.record_durable_tool_origin(
+                &tool_use_id,
+                &assistant.as_uuid().to_string(),
+                Ok(assistant.as_uuid().to_string()),
+            )
+            .await;
+        }
+    }
     let trace_context = deferred.traceparent.as_deref().map(|traceparent| {
         telemetry::otel::SerializedTraceContext {
             traceparent: traceparent.to_string(),
@@ -2253,8 +2432,17 @@ async fn replay_deferred_tool_after_resume(
         crate::turn_loop::boxed_turn_future(|| {
             telemetry::otel::with_trace_context_future(
                 trace_context.as_ref(),
-                crate::turn_loop::boxed_turn_future(|| {
-                    crate::turn_loop::dispatch_tool_uses_tracked(orch, &tool_uses, None)
+                crate::turn_loop::boxed_turn_future(|| async {
+                    let dispatched =
+                        crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred(
+                            orch,
+                            &tool_uses,
+                            None,
+                            assistant_message_id,
+                        )
+                        .await?;
+                    crate::turn_loop::tool_dispatch::finish_direct_tool_dispatch(orch, dispatched)
+                        .await
                 }),
             )
         })
@@ -2279,6 +2467,7 @@ pub async fn replay_deferred_tools_after_resume(
     orch: &ConversationOrchestrator,
     deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
 ) -> Result<(), crate::OrchestratorError> {
+    let session_id = orch.session.lock().await.session_id;
     // ONE user message carrying EVERY replayed result, exactly as the normal
     // dispatch path batches a turn's results. Emitting one message per tool
     // would be a wire-shape bug, not a cosmetic one: `ensure_tool_result_pairing`
@@ -2291,6 +2480,16 @@ pub async fn replay_deferred_tools_after_resume(
     let mut tool_results: Vec<ContentBlock> = Vec::new();
     let mut injected_messages: Vec<(ConversationMessage, ToolUseId)> = Vec::new();
     for deferred in deferred_tools {
+        if let Some(writer) = &orch.transcript.jsonl_writer {
+            writer
+                .verify_active_replay_source(session_id)
+                .await
+                .map_err(|error| {
+                    crate::OrchestratorError::Internal(format!(
+                        "deferred replay transcript authority: {error}"
+                    ))
+                })?;
+        }
         let outcome = crate::turn_loop::boxed_turn_future(|| {
             replay_deferred_tool_after_resume(orch, deferred)
         })
@@ -2765,6 +2964,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         compaction_tracking: tracking,
         deferred_tools: Vec::new(),
         prompt_snapshot: prompt_snapshot_from_messages(messages),
+        prompt_snapshot_epoch: Some(0),
         context_rendering_hint: context_rendering_hint_from_messages(messages),
     }
 }
@@ -3274,7 +3474,17 @@ impl ConversationOrchestrator {
         entries: &[JsonlMessage],
         preserve_boot_model: bool,
         permission_mode: permission::PermissionMode,
+        expected_mode: lingxi_core::host::session_context::ConversationMode,
+        source: &str,
     ) -> Result<(), String> {
+        let persisted =
+            JsonlWriter::fixed_session_profile_from_source(source, &session_id.to_string())?;
+        if expected_mode != persisted.mode {
+            return Err("captured session mode does not match the supplied profile".into());
+        }
+        self.ensure_conversation_mode(persisted.mode)
+            .await
+            .map_err(|error| error.to_string())?;
         let (replayed, last_uuid, metadata) = build_state_from_jsonl(session_id, messages);
         let model_recovered = messages.iter().any(|message| {
             carries_human_turn_settings(message)
@@ -3307,6 +3517,18 @@ impl ConversationOrchestrator {
         self.sync_active_goal_stop_hook_for_current_state().await;
         self.restore_resume_runtime_metadata(messages).await;
         self.restore_resume_prompt_metadata(entries).await;
+        self.restore_resume_prompt_state_from_source(
+            source,
+            &session_id.to_string(),
+            persisted.instruction_epoch,
+        )
+        .await;
+        // A captured resume is mounted before SessionStart and instruction
+        // hooks run. Restore the admitted profile and epoch at that boundary,
+        // including its model-only exclusions, before any hook observes it.
+        self.restore_captured_conversation_profile(persisted.mode, persisted.instruction_epoch)
+            .await
+            .map_err(|error| error.to_string())?;
         let (model, profile) = {
             let state = self.session.lock().await;
             (state.model.clone(), state.model_profile.clone())
@@ -3341,6 +3563,7 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
+        *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(0);
         *self.prompt_runtime.context_rendering_hint.lock().await = metadata.context_rendering_hint;
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
@@ -3393,6 +3616,24 @@ impl ConversationOrchestrator {
         self.restore_prompt_ingress_sent_sets(messages).await;
         self.restore_mod_attachment_provenance_from_messages(messages)
             .await;
+    }
+
+    /// Bind restored prompt state to the admitted profile in the same raw
+    /// transcript that supplied the mounted history and metadata.
+    pub async fn restore_resume_prompt_state_from_source(
+        &self,
+        source: &str,
+        session_id: &str,
+        active_epoch: u64,
+    ) {
+        let (snapshot, rendering) =
+            prompt_state_for_epoch_from_source(source, session_id, active_epoch);
+        *self.prompt_runtime.prompt_snapshot.lock().await = snapshot;
+        *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(active_epoch);
+        *self.prompt_runtime.context_rendering_hint.lock().await = rendering;
+        self.prompt_runtime
+            .prompt_snapshot_resume
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     async fn restore_prompt_ingress_sent_sets(&self, messages: &[JsonlMessage]) {
@@ -3494,6 +3735,20 @@ impl ConversationOrchestrator {
     ) -> Result<Self, ResumeError> {
         config.resume_session_id = Some(session_id);
         let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs.clone()).await?;
+        let metadata_source = replayed
+            .transcript_metadata
+            .iter()
+            .map(|row| {
+                row.to_json_string()
+                    .map_err(|error| ResumeError::Profile(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        let fixed_profile = JsonlWriter::fixed_session_profile_from_source(
+            &metadata_source,
+            &session_id.to_string(),
+        )
+        .map_err(ResumeError::Profile)?;
         let effort_was_explicit = config.effort.is_some();
         if config.effort.is_none() {
             config.effort.clone_from(&replayed.runtime_metadata.effort);
@@ -3514,7 +3769,8 @@ impl ConversationOrchestrator {
             output,
             memory,
             cwd,
-        );
+        )
+        .with_conversation_mode(fixed_profile.mode);
         orch.restore_prompt_suggestion_api_errors(prompt_suggestion_api_error_ids(
             &replayed.messages,
         ));
@@ -3597,6 +3853,8 @@ impl ConversationOrchestrator {
             .store(true, std::sync::atomic::Ordering::Release);
         *orch.prompt_runtime.prompt_snapshot.lock().await =
             replayed.runtime_metadata.prompt_snapshot.clone();
+        *orch.prompt_runtime.prompt_snapshot_epoch.lock().await =
+            replayed.runtime_metadata.prompt_snapshot_epoch;
         *orch.prompt_runtime.context_rendering_hint.lock().await =
             replayed.runtime_metadata.context_rendering_hint;
         orch.restore_mod_attachment_provenance_from_messages(&replayed.messages)
@@ -3604,6 +3862,17 @@ impl ConversationOrchestrator {
         if let Some(writer) = jsonl_writer {
             orch.transcript.jsonl_writer = Some(writer);
         }
+        // The metadata was captured with the same source that supplied the
+        // history and prompt snapshot, even when no writer is attached.
+        orch.restore_captured_conversation_profile(
+            fixed_profile.mode,
+            fixed_profile.instruction_epoch,
+        )
+        .await
+        .map_err(|error| ResumeError::Profile(error.to_string()))?;
+        orch.initialize_conversation_mode()
+            .await
+            .map_err(|error| ResumeError::Profile(error.to_string()))?;
         orch.sync_active_goal_stop_hook_for_current_state().await;
         orch.restore_file_read_state().await;
         if !replayed.runtime_metadata.deferred_tools.is_empty() {

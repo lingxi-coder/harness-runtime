@@ -303,6 +303,7 @@ pub enum PlanOutcome {
 /// never-compacted transcript is left alone rather than rewritten pointlessly.
 #[must_use]
 pub fn build_compact_plan<'a, I: IntoIterator<Item = &'a str>>(lines: I) -> PlanOutcome {
+    let mut source_lines = Vec::new();
     // `i` — uuid -> (parentUuid, idx), transcript records only.
     let mut by_uuid: HashMap<String, (Option<String>, usize)> = HashMap::new();
     // `s` / `a` — file-history sidecars keyed by the message they belong to.
@@ -317,9 +318,11 @@ pub fn build_compact_plan<'a, I: IntoIterator<Item = &'a str>>(lines: I) -> Plan
 
     let mut last_boundary_idx: Option<usize> = None;
     let mut last_boundary_metadata: Option<Value> = None;
+    let mut last_boundary_uuid: Option<String> = None;
     let mut last_non_preserved_boundary_idx: Option<usize> = None;
 
     for (idx, raw) in lines.into_iter().enumerate() {
+        source_lines.push(raw);
         let Some(record) = parse_record(raw) else {
             // `else if(h) l.add(t)` — a non-empty line this build cannot parse
             // is ALWAYS kept. (The oracle additionally repairs a torn
@@ -355,6 +358,7 @@ pub fn build_compact_plan<'a, I: IntoIterator<Item = &'a str>>(lines: I) -> Plan
                 }
                 if is_compact_boundary(&record) {
                     last_boundary_idx = Some(idx);
+                    last_boundary_uuid = str_field(&record, "uuid").map(ToString::to_string);
                     let metadata = record.get("compactMetadata").cloned();
                     let preserves = metadata.as_ref().is_some_and(|m| {
                         !m.get("preservedSegment").unwrap_or(&Value::Null).is_null()
@@ -430,6 +434,38 @@ pub fn build_compact_plan<'a, I: IntoIterator<Item = &'a str>>(lines: I) -> Plan
         .as_ref()
         .and_then(|m| m.get("preservedSegment"))
         .filter(|v| !v.is_null());
+
+    // Exact native summaries and announcements are durably staged before the
+    // boundary. Validate through the same owner/identity/parent rules as cold
+    // resume, then keep the entire staged prelude, not just its final anchor.
+    if let Some(flag) = last_boundary_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("nativeExactPreserved"))
+    {
+        if flag.as_bool() != Some(true) {
+            return PlanOutcome::Abort(PlanAbort::PreservedWalkBroken);
+        }
+        let Some(boundary_uuid) = last_boundary_uuid.as_deref() else {
+            return PlanOutcome::Abort(PlanAbort::PreservedWalkBroken);
+        };
+        let source = source_lines
+            .iter()
+            .map(|line| strip_leading_nuls(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let routed = crate::jsonl::reader::route_lines(&source);
+        let Some(stage_ids) =
+            crate::jsonl::loader::exact_native_staged_anchors(&routed, boundary_uuid)
+        else {
+            return PlanOutcome::Abort(PlanAbort::PreservedWalkBroken);
+        };
+        for id in stage_ids {
+            let Some(&(_, idx)) = by_uuid.get(&id) else {
+                return PlanOutcome::Abort(PlanAbort::PreservedWalkBroken);
+            };
+            keep_message(&id, &mut keep_idx, idx);
+        }
+    }
 
     if let Some(pm) = preserved_messages {
         let uuids = pm.get("uuids").and_then(Value::as_array);
@@ -909,6 +945,122 @@ fn open_tmp(tmp: &Path) -> std::io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_exact_gc_rewrite_retains_validated_stage_chain_for_cold_resume() {
+        use crate::jsonl::{loader::build_conversation_chain, reader::JsonlReader};
+        use platform_posix::fs::PosixFileSystem;
+        use serde_json::json;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("native.jsonl");
+        let owner = Uuid::new_v4().to_string();
+        let ids = (0..7)
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let (a, removed, b, announce, summary, boundary, after) = (
+            &ids[0], &ids[1], &ids[2], &ids[3], &ids[4], &ids[5], &ids[6],
+        );
+        let user = |id: &str, parent: Option<&str>, sidechain: bool| {
+            json!({"type":"user","uuid":id,"parentUuid":parent,"sessionId":owner,
+                "isSidechain":sidechain,"timestamp":"2025-01-01T00:00:00Z","cwd":"/","version":"test",
+                "message":{"role":"user","content":id}})
+        };
+        let mut staged_announcement = user(announce, Some(boundary), true);
+        staged_announcement["nativeCompactStage"] = json!(boundary);
+        let mut staged_summary = user(summary, Some(announce), true);
+        staged_summary["nativeCompactStage"] = json!(boundary);
+        staged_summary["isCompactSummary"] = json!(true);
+        let marker = json!({"type":"system","subtype":"compact_boundary","uuid":boundary,
+            "parentUuid":null,"sessionId":owner,"isSidechain":false,
+            "timestamp":"2025-01-01T00:00:00Z","cwd":"/","version":"test",
+            "compactMetadata":{"nativeExactPreserved":true,
+                "preservedSegment":{"headUuid":a,"tailUuid":b,"anchorUuid":summary},
+                "preservedMessages":{"anchorUuid":summary,"uuids":[a,b],"allUuids":[a,b]}}});
+        let rows = vec![
+            user(a, None, false),
+            user(removed, Some(a), false),
+            user(b, Some(removed), false),
+            staged_announcement,
+            staged_summary,
+            marker,
+            user(after, Some(b), false),
+        ];
+        let write = |rows: &[Value]| {
+            std::fs::write(
+                &path,
+                rows.iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+        };
+        write(&rows);
+        assert!(matches!(
+            compact_with_min(&path, 0),
+            CompactOutcome::Compacted(_)
+        ));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.lines().any(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
+                .as_deref()
+                == Some(removed.as_str())
+        }));
+        let loaded = JsonlReader::new(
+            path.clone(),
+            Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+        )
+        .read_routed()
+        .await
+        .unwrap();
+        let chain = build_conversation_chain(&loaded, &owner).0;
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                boundary.as_str(),
+                announce.as_str(),
+                summary.as_str(),
+                a.as_str(),
+                b.as_str(),
+                after.as_str()
+            ]
+        );
+        assert!(chain.iter().all(|row| !row.is_sidechain));
+
+        // A foreign, untagged, missing, or cyclic prelude must not cause a
+        // destructive rewrite of an already invalid exact boundary.
+        for damage in 0..4 {
+            let mut broken = rows.clone();
+            match damage {
+                0 => broken[3]["sessionId"] = json!(Uuid::new_v4().to_string()),
+                1 => {
+                    broken[3]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("nativeCompactStage");
+                }
+                2 => {
+                    broken.remove(3);
+                }
+                3 => broken[3]["parentUuid"] = json!(summary),
+                _ => unreachable!(),
+            }
+            write(&broken);
+            let before = std::fs::read(&path).unwrap();
+            assert!(matches!(
+                compact_with_min(&path, 0),
+                CompactOutcome::Failed(CompactFailure::Plan(PlanAbort::PreservedWalkBroken))
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
 
     #[test]
     fn compact_preserved_segment_recognizes_native_exact_peer_rows_and_copies_bytes() {

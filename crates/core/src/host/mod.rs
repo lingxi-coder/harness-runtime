@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod remote_ui;
+pub mod session_context;
 pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};
 
 pub mod native_settings;
@@ -176,8 +177,8 @@ pub mod plan_files;
 pub mod plan_slug;
 pub mod platform;
 pub mod process;
-pub mod provider_accounts;
 pub mod prompting_gate;
+pub mod provider_accounts;
 pub mod read_auto_allow;
 pub mod refusal_api_text;
 pub mod repo_root_reload;
@@ -251,7 +252,7 @@ pub use calendar::{CalendarError, CalendarEvent, CalendarProvider, CalendarQuery
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
 pub use clipboard::{Clipboard, ClipboardError};
 pub use clock::Clock;
-pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
+pub use commands::{SlashCommandDispatcher, SlashDispatchResult, SlashSkillIdentity};
 pub use computer_control::{ComputerControl, ComputerError, Screenshot};
 pub use contacts::{Contact, ContactsError, ContactsProvider, ContactsQuery};
 pub use deep_link::{DeepLinkError, DeepLinkOpener};
@@ -343,10 +344,10 @@ pub use orchestrator::{
     ModelMetadata, ModelPricing, ModelPricingTier, ModelProvenance, ModelRouteAnchor,
     ModelSelectionOrigin, ModelSelectionRequest, ModelSourceBinding, ModelUsageRow,
     ModelValidationMode, OrchestratorHandle, OutputEvent, OutputStream, OutputStyleListing,
-    PermissionControlState, PermissionModeAvailability, PlanSnapshot, PromptSnapshot,
-    PromptSuggestionContext, PromptSuggestionResult, PromptToolDescription, RateLimitSnapshot,
-    ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection, RecapOutcome,
-    RefusalContinuationJoin, RefusalContinuationPhase, RegisterRepoRootOutcome,
+    PermissionControlState, PermissionModeAvailability, PinnedResumeSource, PlanSnapshot,
+    PromptSnapshot, PromptSuggestionContext, PromptSuggestionResult, PromptToolDescription,
+    RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection,
+    RecapOutcome, RefusalContinuationJoin, RefusalContinuationPhase, RegisterRepoRootOutcome,
     RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage,
     SkillInfo, StatusSnapshot, SummarizeDirection, ToolResultProjection, TurnOutcome,
 };
@@ -445,6 +446,7 @@ pub mod instruction_context_cache;
 pub mod instruction_memory_sanitize;
 /// Shared main/subagent instruction-loading boundary.
 pub mod instructions;
+pub mod invoked_skills;
 
 pub use tool_execution::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,

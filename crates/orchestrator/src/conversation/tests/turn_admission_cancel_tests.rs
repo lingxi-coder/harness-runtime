@@ -57,6 +57,7 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
                     images: Vec::new(),
                     is_meta: false,
                     turn_companion: false,
+                    skill_identity: None,
                     trailing_history_rows: Vec::new(),
                     mod_origin: None,
                     message_origin: None,

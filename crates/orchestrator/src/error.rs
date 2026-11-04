@@ -28,6 +28,9 @@ pub const REPEATED_529_ERROR_MESSAGE: &str = "Repeated 529 Overloaded errors";
 /// change the format string without a corresponding spec amendment.
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
+    /// A context transition failed before the next query could be admitted.
+    #[error("Conversation context could not be committed: {0}")]
+    ContextState(#[from] lingxi_core::host::HandleError),
     /// A source-preserving settings projection failed while building the request context.
     #[error(transparent)]
     Settings(#[from] lingxi_core::settings::SettingsError),
@@ -83,6 +86,11 @@ pub enum OrchestratorError {
     /// hot path, etc.). Test stubs use this for synthetic failures.
     #[error("orchestrator internal error: {0}")]
     Internal(String),
+
+    /// A transcript rewrite was published but its final state could not be
+    /// confirmed. The current owner must stop until the session is remounted.
+    #[error("transcript rewrite is uncertain: {0}")]
+    TranscriptRewriteUncertain(String),
 
     /// Mid-stream byte-level error from the streaming transport. Surfaced
     /// when the SSE chunk fails to decode or the HTTP body is cut.

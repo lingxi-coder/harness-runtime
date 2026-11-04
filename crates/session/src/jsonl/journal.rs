@@ -1025,6 +1025,39 @@ impl DurableJournal {
         self.read_locked()
     }
 
+    /// Validate the WAL without repairing or writing the source journal.
+    /// Unterminated tails, including valid JSON without a delimiter, are
+    /// rejected so the ordinary scanner cannot repair them during this read.
+    pub fn replay_read_only_with<F>(&self, mut visitor: F) -> Result<JournalReplay, JournalError>
+    where
+        F: FnMut(JournalEntry),
+    {
+        let _lock = self.lock()?;
+        let relative = Path::new(JOURNAL_FILE_NAME);
+        match open_read_file_pinned(&self.root, relative, Some(&self.identity)) {
+            Ok(mut file) => {
+                let length = file
+                    .metadata()
+                    .map_err(|error| FsError::Io(error.to_string()))?
+                    .len();
+                if length > 0 {
+                    file.seek(SeekFrom::End(-1))
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    let mut last = [0_u8; 1];
+                    file.read_exact(&mut last)
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    if last[0] != b'\n' {
+                        return Err(JournalError::MalformedFinalTail { offset: length - 1 });
+                    }
+                }
+            }
+            Err(FsError::NotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let scan = self.scan_locked(false, Some(&mut visitor))?;
+        Ok(scan.replay)
+    }
+
     /// Validate and durably sync the authoritative WAL while delivering each
     /// unique event to `visitor` one record at a time. The returned replay
     /// carries summary metadata with an empty `entries` vector; callers that
@@ -1839,5 +1872,36 @@ mod tests {
             std::fs::read(dir.path().join(JOURNAL_FILE_NAME)).unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn read_only_replay_never_repairs_or_rewrites_source_files() {
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        journal
+            .write_snapshot(1, &json!({"snapshot": "unchanged"}))
+            .unwrap();
+        let wal = dir.path().join(JOURNAL_FILE_NAME);
+        let snapshot = dir.path().join(SNAPSHOT_FILE_NAME);
+        let snapshot_before = std::fs::read(&snapshot).unwrap();
+        let complete = std::fs::read(&wal).unwrap();
+        let mut events = Vec::new();
+        journal
+            .replay_read_only_with(|entry| events.push(entry))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(std::fs::read(&wal).unwrap(), complete);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
+        for tail in [b"{bad".as_slice(), b"{\"schema_version\":1}".as_slice()] {
+            let mut incomplete = complete.clone();
+            incomplete.extend_from_slice(tail);
+            std::fs::write(&wal, &incomplete).unwrap();
+            assert!(matches!(
+                journal.replay_read_only_with(|_| {}),
+                Err(JournalError::MalformedFinalTail { .. })
+            ));
+            assert_eq!(std::fs::read(&wal).unwrap(), incomplete);
+            assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
+        }
     }
 }

@@ -14,6 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
+// Transcript filenames and session IDs are UUIDs whose letter case is not
+// significant. Keep non-UUID keys unchanged for the reader's general callers.
+fn session_metadata_key(value: &str) -> String {
+    uuid::Uuid::parse_str(value).map_or_else(|_| value.to_owned(), |id| id.to_string())
+}
+
 /// Remove Native message, attachment, tool-result, and MCP metadata members before the
 /// remaining row enters the typed-metadata parser. These arbitrary payloads go
 /// directly into the flat UTF-16 carrier, so deep ToolUse input and exact
@@ -459,10 +465,6 @@ pub struct LoadedTranscript {
     /// `permission-mode` entries: keyed by `sessionId` → permission-mode string,
     /// last-write-wins. Binary `Yle`: `permissionModes.set(N.sessionId, N.permissionMode)`.
     pub permission_modes: HashMap<String, String>,
-    /// `session-mode` entries: keyed by `sessionId` → mobile session mode,
-    /// last-write-wins. LingXi-only metadata used to separate chat/code
-    /// capability profiles without colliding with Claude's generic `mode`.
-    pub session_modes: HashMap<String, String>,
     /// `worktree-state` entries: keyed by `sessionId` → the inner
     /// `worktreeSession` JSON value (an object for an active worktree, or `null`
     /// after `ExitWorktree` clears it). Binary (2.1.212 `Yle`):
@@ -508,14 +510,14 @@ pub enum ReaderError {
     LiteMissing(&'static str),
 }
 
-/// Lite metadata — populated from the first JSON line only.
+/// Lite metadata from the fixed header and first row carrying a workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMetadata {
     /// `sessionId` from the first line's outer object.
     pub session_id: String,
-    /// `cwd` from the first line's outer object.
+    /// `cwd` from the first transcript or empty-session anchor row.
     pub cwd: String,
-    /// `type` from the first line's outer object (e.g. `"user"`).
+    /// `type` from that workspace-bearing row (e.g. `"user"`).
     pub first_type: String,
 }
 
@@ -570,42 +572,47 @@ impl JsonlReader {
         Ok(route_lines(&content))
     }
 
-    /// Read up to `LITE_READ_BUF_SIZE` bytes from the file head and extract
-    /// `sessionId` / `cwd` / `type` from line 1 using
-    /// [`extract_json_string_field`] (no full parse — works even if line 1
-    /// is the only complete line in the buffer).
+    /// Read the fixed header and first workspace-bearing row within the bounded
+    /// head window. Full resume must still validate the complete transcript.
     pub async fn read_lite(&self) -> Result<SessionMetadata, ReaderError> {
         let path_str = self.path.to_str().expect("UTF-8 path");
-        // Prefix read: at most `LITE_READ_BUF_SIZE` bytes from the file head.
-        // Line 1 is extracted from that window (a very long line-1 payload is
-        // still capped at 64 KiB).
-        let read = self
-            .fs
-            .read_file_prefix(path_str, super::LITE_READ_BUF_SIZE)
-            .await?;
-        // Strip a leading UTF-8 BOM (claude-code parseJSONLBuffer, live in
-        // v2.1.193) so `extract_json_string_field` sees a clean line 1 — without
-        // it a BOM-prefixed transcript's first line yields no sessionId/cwd.
-        let content = read
-            .content
-            .strip_prefix('\u{FEFF}')
-            .unwrap_or(&read.content);
-        let head = if content.len() > super::LITE_READ_BUF_SIZE {
-            &content[..super::LITE_READ_BUF_SIZE]
-        } else {
-            content
-        };
-        let line1 = head.split('\n').next().unwrap_or("");
-        let session_id = extract_json_string_field(line1, "sessionId")
-            .ok_or(ReaderError::LiteMissing("sessionId"))?;
-        let cwd = extract_json_string_field(line1, "cwd").ok_or(ReaderError::LiteMissing("cwd"))?;
-        let first_type =
-            extract_json_string_field(line1, "type").ok_or(ReaderError::LiteMissing("type"))?;
-        Ok(SessionMetadata {
-            session_id,
-            cwd,
-            first_type,
-        })
+        // Native message rows put cwd/sessionId after the message body. Grow
+        // the prefix for a large first body, with a hard cap on catalog I/O.
+        const MAX_LITE_BYTES: usize = 16 * 1024 * 1024;
+        let mut budget = super::LITE_READ_BUF_SIZE;
+        loop {
+            let read = self.fs.read_file_prefix(path_str, budget).await?;
+            let mut lines = read.content.lines();
+            let header = lines.next().unwrap_or("");
+            let session_id = extract_json_string_field(header, "sessionId")
+                .ok_or(ReaderError::LiteMissing("sessionId"))?;
+            super::JsonlWriter::fixed_session_mode_from_source(header, &session_id)
+                .map_err(|_| ReaderError::LiteMissing("fixed session mode"))?;
+            let found = lines
+                .filter_map(|line| {
+                    let row = Utf16JsonProjection::parse(line).ok()?;
+                    if row.string_at("/sessionId") != Some(session_id.as_str()) {
+                        return None;
+                    }
+                    let ty = row.string_at("/type")?;
+                    if !is_transcript_message_type(ty) && ty != "custom-title" {
+                        return None;
+                    }
+                    Some((row.string_at("/cwd")?.to_owned(), ty.to_owned()))
+                })
+                .next();
+            if let Some((cwd, first_type)) = found {
+                return Ok(SessionMetadata {
+                    session_id,
+                    cwd,
+                    first_type,
+                });
+            }
+            if !read.truncated || budget >= MAX_LITE_BYTES {
+                return Err(ReaderError::LiteMissing("cwd"));
+            }
+            budget = budget.saturating_mul(2).min(MAX_LITE_BYTES);
+        }
     }
 }
 
@@ -808,14 +815,14 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
                 value.get("customTitle").and_then(Value::as_str),
             ) {
                 out.custom_titles.insert(sid.to_string(), title.to_string());
+                let key = session_metadata_key(sid);
                 if value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1) {
-                    out.mobile_empty_sessions.insert(sid.to_string());
+                    out.mobile_empty_sessions.insert(key.clone());
                     if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
-                        out.mobile_empty_session_cwds
-                            .insert(sid.to_string(), cwd.to_string());
+                        out.mobile_empty_session_cwds.insert(key, cwd.to_string());
                     }
                 } else {
-                    out.mobile_empty_sessions.remove(sid);
+                    out.mobile_empty_sessions.remove(&key);
                 }
             }
         } else if ty == "ai-title" {
@@ -934,13 +941,6 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             ) {
                 out.permission_modes.insert(sid.to_string(), pm.to_string());
             }
-        } else if ty == "session-mode" {
-            if let (Some(sid), Some(mode)) = (
-                value.get("sessionId").and_then(Value::as_str),
-                value.get("sessionMode").and_then(Value::as_str),
-            ) {
-                out.session_modes.insert(sid.to_string(), mode.to_string());
-            }
         } else if ty == "worktree-state" {
             // Binary (2.1.212 `Yle`): `x.set(J.sessionId, J.worktreeSession)` —
             // keyed by `sessionId` and stores the inner `worktreeSession` payload
@@ -961,7 +961,7 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
             ) {
                 if !relocated_cwd.is_empty() {
                     out.relocated_cwds
-                        .insert(session_id.to_string(), relocated_cwd.to_string());
+                        .insert(session_metadata_key(session_id), relocated_cwd.to_string());
                 }
             }
         } else if ty == "history-suppression" {

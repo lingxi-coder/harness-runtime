@@ -241,7 +241,14 @@ impl ConversationOrchestrator {
     ) -> (
         lingxi_core::host::bg_session_forker::BgSessionSnapshot,
         String,
+        Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     ) {
+        // Keep the history, fixed mode and frozen prompt on the same side of a
+        // concurrent session transition.
+        let _transition = self.conversation_transition.lock().await;
+        let profile = self.conversation_profile().await;
+        let instruction_epoch = self.profile_epoch().await;
+        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         let session = self.session.lock().await;
         let attachments = self
             .transcript
@@ -261,10 +268,14 @@ impl ConversationOrchestrator {
         (
             lingxi_core::host::bg_session_forker::BgSessionSnapshot {
                 history: session.history.clone(),
+                model_context_excluded_messages: session.model_context_excluded_messages.clone(),
+                mode: profile.mode,
+                instruction_epoch,
                 model_reminder_attachments,
                 native_request_history: session.native_request_history.clone(),
             },
             session.model.clone(),
+            system_prompt,
         )
     }
 
@@ -996,11 +1007,33 @@ enum PreparedTranscriptSwitch {
         cwd: std::path::PathBuf,
         durable_lock: Arc<session::jsonl::DurableTranscriptWriter>,
         metadata: Option<Vec<Utf16JsonProjection>>,
+        source: Option<(session::jsonl::writer::TranscriptFileAuthority, String)>,
     },
 }
 
 impl PreparedTranscriptSwitch {
     async fn import_resume_identity(&self, required_source: bool) -> Result<(), HandleError> {
+        if let Self::Durable {
+            writer,
+            path,
+            durable_lock,
+            source: Some((authority, content)),
+            ..
+        } = self
+        {
+            return writer
+                .bootstrap_prepared_session_message_identity_snapshot_with_source_authority(
+                    path,
+                    durable_lock.clone(),
+                    authority,
+                    content.as_bytes(),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    HandleError::ActionFailed(format!("Transcript identity import failed: {error}"))
+                });
+        }
         let (writer, path, authority) = match self {
             Self::None => return Ok(()),
             Self::Legacy { writer, path, .. } => (writer, path, None),
@@ -1053,7 +1086,7 @@ impl PreparedTranscriptSwitch {
         }
     }
 
-    fn activate(self) {
+    fn activate(self) -> Result<(), HandleError> {
         match self {
             Self::Durable {
                 writer,
@@ -1062,19 +1095,25 @@ impl PreparedTranscriptSwitch {
                 cwd,
                 durable_lock,
                 metadata,
+                source,
             } => {
+                writer
+                    .activate_session_target_with_durable_lock_and_authority(
+                        session_id,
+                        path,
+                        cwd,
+                        durable_lock,
+                        source.map(|(authority, _)| authority),
+                    )
+                    .map_err(|error| {
+                        HandleError::ActionFailed(format!("Transcript activation failed: {error}"))
+                    })?;
                 if let Some(metadata) = metadata {
                     writer.install_session_metadata_source(
                         &session_id.as_uuid().to_string(),
                         &metadata,
                     );
                 }
-                writer.activate_session_target_with_durable_lock(
-                    session_id,
-                    path,
-                    cwd,
-                    durable_lock,
-                );
             }
             Self::Legacy {
                 writer,
@@ -1087,6 +1126,7 @@ impl PreparedTranscriptSwitch {
             }
             _ => {}
         }
+        Ok(())
     }
 }
 
@@ -1098,8 +1138,14 @@ impl ConversationOrchestrator {
         selected_path: Option<std::path::PathBuf>,
         selected_cwd: Option<std::path::PathBuf>,
         metadata: Option<Vec<Utf16JsonProjection>>,
+        source: Option<lingxi_core::host::PinnedResumeSource>,
     ) -> Result<PreparedTranscriptSwitch, HandleError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref().cloned() else {
+            if source.is_some() {
+                return Err(HandleError::ActionFailed(
+                    "captured transcript has no writer".into(),
+                ));
+            }
             return Ok(PreparedTranscriptSwitch::None);
         };
         let cwd = selected_cwd.unwrap_or_else(|| self.current_cwd());
@@ -1122,6 +1168,25 @@ impl ConversationOrchestrator {
                     "durable session switch did not prepare its transcript authority".into(),
                 )
             })?;
+            let source = source
+                .map(|source| {
+                    let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+                        source.root,
+                        source.relative,
+                        source.root_identity,
+                        source.file_identity,
+                    )
+                    .map_err(|error| {
+                        HandleError::ActionFailed(format!("invalid transcript authority: {error}"))
+                    })?;
+                    if authority.path() != path {
+                        return Err(HandleError::ActionFailed(
+                            "captured transcript does not match the target".into(),
+                        ));
+                    }
+                    Ok((authority, source.expected_content))
+                })
+                .transpose()?;
             Ok(PreparedTranscriptSwitch::Durable {
                 writer,
                 session_id,
@@ -1129,8 +1194,14 @@ impl ConversationOrchestrator {
                 cwd,
                 durable_lock,
                 metadata,
+                source,
             })
         } else {
+            if source.is_some() {
+                return Err(HandleError::ActionFailed(
+                    "captured transcript requires a durable writer".into(),
+                ));
+            }
             Ok(PreparedTranscriptSwitch::Legacy {
                 writer,
                 path,
@@ -1219,14 +1290,22 @@ impl ConversationOrchestrator {
         turn_guard: tokio::sync::OwnedMutexGuard<()>,
         request: OwnedSessionSwitch,
     ) -> Result<(), HandleError> {
+        // Selections may be queued behind a running query, but must not race
+        // an administrative switch of the transcript/writer identity.
+        let _profile_transition = self.conversation_transition.lock().await;
+
         // A model hook sequence must belong entirely to one session even
         // though live selections no longer acquire the turn gate.
         let _switch_guard = self.model_switch_gate.lock().await;
         // Keep each operation's large child future out of this enum's poll
         // frame; cold replay must leave stack room for permission classifiers.
-        match request {
+        let turn_guard = Arc::new(turn_guard);
+        let result = match request {
             OwnedSessionSwitch::Clear => {
-                crate::turn_loop::boxed_turn_future(|| self.execute_clear_session(turn_guard)).await
+                crate::turn_loop::boxed_turn_future(|| {
+                    self.execute_clear_session(turn_guard.clone())
+                })
+                .await
             }
             OwnedSessionSwitch::CompleteColdResume {
                 session_id,
@@ -1245,6 +1324,8 @@ impl ConversationOrchestrator {
                         "cold resume target changed before deferred replay".into(),
                     ));
                 }
+                self.restore_conversation_profile_locked(self.conversation_profile().await.mode)
+                    .await?;
                 crate::turn_loop::boxed_turn_future(|| {
                     crate::resume::replay_deferred_tools_after_resume(self, deferred_tools)
                 })
@@ -1292,7 +1373,7 @@ impl ConversationOrchestrator {
             } => {
                 crate::turn_loop::boxed_turn_future(|| {
                     self.execute_resume_session(
-                        turn_guard,
+                        turn_guard.clone(),
                         session_id,
                         history,
                         last_jsonl_uuid,
@@ -1302,12 +1383,13 @@ impl ConversationOrchestrator {
                 })
                 .await
             }
-        }
+        };
+        result
     }
 
     async fn execute_clear_session(
         &self,
-        _turn_guard: tokio::sync::OwnedMutexGuard<()>,
+        _turn_guard: Arc<tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<(), HandleError> {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
@@ -1336,6 +1418,7 @@ impl ConversationOrchestrator {
             None,
             None,
             Some(Vec::new()),
+            None,
         )?;
         prepared_transcript.prepare_legacy().await;
         self.compaction_runtime.roll_over_total_tokens_context();
@@ -1351,7 +1434,7 @@ impl ConversationOrchestrator {
         // All fallible and awaiting work is complete. Publish the captured
         // transcript authority, cost scope, and conversation state in one
         // synchronous critical section so caller cancellation cannot split it.
-        prepared_transcript.activate();
+        prepared_transcript.activate()?;
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
         s.history.clear();
@@ -1396,6 +1479,9 @@ impl ConversationOrchestrator {
             .await;
         self.recover_main_reports_after_activation();
         self.invoked_skill_session_guard.replace(new_session_id);
+        // The new UUID inherits the source session's fixed mode. Persist it
+        // before any startup hook can observe or write the new conversation.
+        self.initialize_conversation_mode_locked().await?;
         *self.compaction_runtime.compaction_tracking.lock().await =
             compaction::AutoCompactTrackingState::default();
         self.hooks.clear_session_hooks(old_session_id).await;
@@ -1408,13 +1494,31 @@ impl ConversationOrchestrator {
     #[allow(clippy::too_many_arguments)]
     async fn execute_resume_session(
         &self,
-        _turn_guard: tokio::sync::OwnedMutexGuard<()>,
+        _turn_guard: Arc<tokio::sync::OwnedMutexGuard<()>>,
         session_id: lingxi_core::types::SessionId,
         history: Vec<lingxi_core::types::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
         active_goal: Option<ActiveGoalSnapshot>,
         runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
+        let metadata_source = runtime
+            .transcript_metadata
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|row| {
+                row.to_json_string().map_err(|error| {
+                    HandleError::ActionFailed(format!("invalid resume metadata: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        let fixed = session::JsonlWriter::fixed_session_mode_from_source(
+            &metadata_source,
+            &session_id.as_uuid().to_string(),
+        )
+        .map_err(HandleError::ActionFailed)?;
+        self.ensure_conversation_mode(fixed).await?;
         let (old_session_id, from_model, from_profile, from_binding) = {
             let session = self.session.lock().await;
             let binding = match session.user_model_setting_source {
@@ -1548,6 +1652,7 @@ impl ConversationOrchestrator {
             runtime.transcript_path.clone(),
             resumed_cwd.clone(),
             runtime.transcript_metadata.clone(),
+            runtime.transcript_source.clone(),
         )?;
         prepared_transcript
             .import_resume_identity(runtime.transcript_path.is_some())
@@ -1560,6 +1665,8 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = runtime.prompt_snapshot.clone();
+        *self.prompt_runtime.prompt_snapshot_epoch.lock().await =
+            Some(runtime.prompt_snapshot_epoch.unwrap_or(0));
         *self.prompt_runtime.context_rendering_hint.lock().await = runtime.context_rendering_hint;
         let mut reports = self.main_reports.state.lock().await;
         let mut s = self.session.lock().await;
@@ -1567,7 +1674,7 @@ impl ConversationOrchestrator {
         if let Some(registry) = &self.task_registry {
             registry.reset_agent_session_statistics(session_id, None);
         }
-        prepared_transcript.activate();
+        prepared_transcript.activate()?;
         if let Some(cwd) = resumed_cwd {
             self.session_cwd.change_cwd(cwd.clone());
             *self
@@ -1785,6 +1892,8 @@ impl ConversationOrchestrator {
             .replace_loaded(runtime.loaded_tool_names);
         self.restore_hot_resume_prompt_state().await;
         *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        // The fixed mode precedes resumed hooks and deferred skill dispatch.
+        self.restore_conversation_profile_locked(fixed).await?;
         // The latch resets with the session, and so does the cascade's
         // tried-models list (see `clear_session`).
         self.model_runtime
@@ -1874,6 +1983,14 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
+    async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
+        self.conversation_profile().await
+    }
+
+    async fn context_manifest(&self) -> lingxi_core::host::session_context::ContextManifest {
+        self.current_context_manifest().await
+    }
+
     async fn record_prompt_suggestion_submission(&self, text: &str) -> Result<(), HandleError> {
         self.record_prompt_suggestion_submission_inner(text).await;
         Ok(())
@@ -2141,10 +2258,39 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .clone()
             .ok_or_else(|| HandleError::ActionFailed("fork: no budget wired".into()))?;
 
-        // Keep the complete parent history, including lazy instruction bodies.
-        let (history, origin_session_id) = {
-            let s = self.session.lock().await;
-            (s.history.clone(), s.session_id)
+        // A fork started between turns is itself the next query boundary. If
+        // the main turn owns the gate, its detached child instead inherits
+        // that already-admitted turn's profile.
+        if let Ok(turn) = self.turn_gate.clone().try_lock_owned() {
+            let turn = Arc::new(turn);
+            self.admit_conversation_profile(&turn).await?;
+            drop(turn);
+        }
+
+        // Freeze a model-facing history and system prompt under the same
+        // profile revision. Building a fresh prompt can call Mods, so do that
+        // outside the transition gate and retry if a selection changed while
+        // it was assembled.
+        let (history, origin_session_id, parent_sys, instruction_context, owner_profile) = loop {
+            let profile = self.conversation_profile().await;
+            let parent_sys = match self.current_turn_system_prompt().await {
+                Some(prompt) => prompt,
+                None => Self::system_prompt_source_text(
+                    &self.provider_side_query_system_prompt().await?,
+                ),
+            };
+            let instruction_context = self.instruction_context_snapshot().await;
+            let transition = self.conversation_transition.lock().await;
+            if self.conversation_profile().await != profile {
+                drop(transition);
+                continue;
+            }
+            let (history, session_id) = {
+                let s = self.session.lock().await;
+                (s.model_context_history(), s.session_id)
+            };
+            drop(transition);
+            break (history, session_id, parent_sys, instruction_context, profile);
         };
         if !history.iter().any(|message| {
             matches!(
@@ -2158,10 +2304,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
 
         let fork_msgs = lingxi_core::host::fork_subagent::build_forked_context(directive, &history);
-        // The parent's rendered system-prompt bytes for a cache-identical child
-        // prefix (`None` until the first successful turn).
-        let parent_sys = self.current_turn_system_prompt().await;
-
         // Synthesize a short, stable display codename. Reused for BOTH the spawn
         // request's `name` (so the background spawner registers it for
         // `SendMessage` routing) and the returned `ForkOutcome.name` (rendered
@@ -2197,8 +2339,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             cwd: None,
             worktree: None,
             fork_context_messages: Some(fork_msgs),
-            instruction_context: Some(self.instruction_context_snapshot().await),
-            fork_parent_system_prompt: parent_sys,
+            instruction_context: Some(instruction_context),
+            fork_parent_system_prompt: Some(parent_sys),
             schema: None,
             structured_output_mode: Default::default(),
             structured_output_parse_retries: 0,
@@ -2233,7 +2375,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
         };
 
         let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(
-            tool_api::tool_invoker_impl::RegistryToolInvoker::new(self.tools.clone()),
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(self.tools.clone())
+                .with_trusted_session(Some(owner_profile), self.transcript.jsonl_writer.as_ref().map(|_| tool_api::context::DurableToolOrigins {
+                    sources: self.transcript.tool_persisted_origins.clone(),
+                    changed: self.transcript.tool_source_assistant_notify.clone(),
+                })),
         );
         let inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: invoker,
@@ -2274,7 +2420,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // sonnet`, or a cross-provider model) instead of the `DEFAULT_MODEL`
         // seed — the copied assistant lines otherwise carry no `model` for
         // `state_from_messages` to restore.
-        let (mut conversation, mut model) = self.background_session_snapshot().await;
+        let (mut conversation, mut model, system_prompt) = self.background_session_snapshot().await;
         lingxi_core::host::refusal_state::neutralize_fork(&mut conversation.history);
         if let Some(latch) = self
             .model_runtime
@@ -2289,9 +2435,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 .flatten()
                 .unwrap_or_else(|| self.config.model.clone());
         }
-        // The parent's rendered system-prompt bytes (`None` until the first
-        // successful turn) so the copy carries a cache-identical prefix.
-        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         forker
             .fork_to_background(&conversation, system_prompt, prompt, &model)
             .await
@@ -2325,7 +2468,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             )
         })?;
 
-        let (mut conversation, model) = self.background_session_snapshot().await;
+        let (mut conversation, model, system_prompt) = self.background_session_snapshot().await;
         let partial = snapshot.partial_text();
         if !partial.is_empty() {
             conversation
@@ -2342,7 +2485,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 });
         }
 
-        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         let continuation = if matches!(
             snapshot,
             lingxi_core::host::BackgroundingSnapshot::Idle { .. }
@@ -4108,9 +4250,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Vec::new();
         };
         let cwd = self.cwd.to_string_lossy();
-        let project_dir = memory::lingxi_md::user_config_dir(&home)
-            .join("projects")
-            .join(session::project_dir_name(&cwd));
+        let project_dir = self
+            .transcript
+            .jsonl_writer
+            .as_ref()
+            .and_then(|writer| {
+                writer
+                    .active_path()
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .unwrap_or_else(|| {
+                memory::lingxi_md::user_config_dir(&home)
+                    .join("projects")
+                    .join(session::project_dir_name(&cwd))
+            });
+        let mode = self.conversation_profile().await.mode;
         let Ok(entries) = std::fs::read_dir(&project_dir) else {
             return Vec::new();
         };
@@ -4123,6 +4278,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            if uuid::Uuid::parse_str(stem).is_err()
+                || !entry.file_type().is_ok_and(|kind| kind.is_file())
+            {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !session::JsonlWriter::fixed_session_mode_from_source(&source, stem)
+                .is_ok_and(|profile| profile == mode)
+            {
+                continue;
+            }
             let mtime = entry
                 .metadata()
                 .and_then(|m| m.modified())
@@ -6223,7 +6391,9 @@ mod tests {
             None,
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
+                lifetime_guard: None,
                 transcript_path: None,
+                transcript_source: None,
                 working_directory: None,
                 worktree_session: None,
                 transcript_metadata: None,
@@ -6270,6 +6440,7 @@ mod tests {
                 consecutive_rapid_refills: 1,
                 deferred_tools: Vec::new(),
                 prompt_snapshot: None,
+                prompt_snapshot_epoch: None,
                 context_rendering_hint: None,
                 native_request_history: lingxi_core::host::NativeRequestHistoryMetadata::default(),
             },
@@ -7652,6 +7823,16 @@ mod tests {
         );
         orchestrator.attach_owned_session_switches();
 
+        struct ReservationDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for ReservationDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let reservation_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resume_guard = lingxi_core::host::orchestrator::ResumeLifetimeGuard::new(
+            ReservationDrop(reservation_dropped.clone()),
+        );
         let resuming = {
             let orchestrator = orchestrator.clone();
             tokio::spawn(async move {
@@ -7661,7 +7842,10 @@ mod tests {
                     Vec::new(),
                     None,
                     None,
-                    lingxi_core::host::ResumeRuntimeSnapshot::default(),
+                    lingxi_core::host::ResumeRuntimeSnapshot {
+                        lifetime_guard: Some(resume_guard),
+                        ..Default::default()
+                    },
                 )
                 .await
             })
@@ -7682,6 +7866,7 @@ mod tests {
         tokio::task::yield_now().await;
         resuming.abort();
         let _ = resuming.await;
+        assert!(!reservation_dropped.load(std::sync::atomic::Ordering::SeqCst));
 
         assert_eq!(mounted_a.session_id, session_a);
         assert_eq!(tracker.session_id().await, session_a);
@@ -7708,6 +7893,7 @@ mod tests {
             .expect("owned resume drains")
             .expect("drain task joins");
         assert!(errors.is_empty(), "owned switch errors: {errors:?}");
+        assert!(reservation_dropped.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(orchestrator.current_session_id().await, session_b);
         assert_eq!(tracker.session_id().await, session_b);
         assert_eq!(
@@ -7745,5 +7931,72 @@ mod tests {
     #[test]
     fn default_editor_windows_is_notepad() {
         assert_eq!(default_editor(), "notepad.exe");
+    }
+}
+
+#[cfg(test)]
+mod background_context_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use lingxi_core::host::session_context::ConversationMode;
+    use lingxi_core::types::{ConversationMessage, MessageId};
+    use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
+
+    #[tokio::test]
+    async fn fixed_foreground_mode_is_preserved_in_background_snapshot() {
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_conversation_mode(ConversationMode::Chat);
+        let old_id = MessageId::new();
+        let user_id = MessageId::new();
+        let old = ConversationMessage::user_meta(old_id, "retired skill".into())
+            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
+        let user = ConversationMessage::user(user_id, "retired skill".into());
+        orch.session.lock().await.history.extend([old, user]);
+        let chat = orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .unwrap();
+        assert_eq!(chat.mode, ConversationMode::Chat);
+        orch.save_current_turn_system_prompt(Some(&SystemPromptInput::custom_prompt(
+            "captured chat instructions".into(),
+        )))
+        .await;
+
+        let turn = orch.turn_gate.lock().await;
+        assert!(orch
+            .ensure_conversation_mode(ConversationMode::Code)
+            .await
+            .is_err());
+        let (snapshot, _, prompt) = orch.background_session_snapshot().await;
+        assert_eq!(snapshot.history.len(), 2);
+        assert!(!snapshot.model_context_excluded_messages.contains(&old_id));
+        assert!(!snapshot.model_context_excluded_messages.contains(&user_id));
+        assert_eq!(snapshot.mode, ConversationMode::Chat);
+        assert_eq!(snapshot.instruction_epoch, 0);
+        assert_eq!(
+            prompt.as_ref().and_then(|source| source.string_at("")),
+            Some("captured chat instructions")
+        );
+
+        assert_eq!(
+            orch.conversation_profile().await.mode,
+            ConversationMode::Chat
+        );
+        assert_eq!(orch.profile_epoch().await, 0);
+        assert_eq!(snapshot.mode, ConversationMode::Chat);
+        assert_eq!(snapshot.instruction_epoch, 0);
+        drop(turn);
     }
 }

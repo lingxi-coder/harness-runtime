@@ -45,7 +45,7 @@ async fn assert_pending<F: Future>(mut future: Pin<&mut F>) {
 }
 
 #[tokio::test]
-async fn shutdown_joins_work_even_after_the_first_drain_waiter_is_cancelled() {
+async fn shutdown_joins_work_after_the_first_drain_waiter_is_cancelled() {
     let prewarm = StartupPrewarm::default();
     let (work, started, dropped) = blocking_prewarm();
     prewarm.spawn(work);
@@ -54,21 +54,26 @@ async fn shutdown_joins_work_even_after_the_first_drain_waiter_is_cancelled() {
     assert_pending(abandoned.as_mut()).await;
     assert!(!dropped.load(Ordering::Acquire));
     drop(abandoned);
-    prewarm.close_and_drain().await.unwrap();
+    assert_eq!(
+        prewarm.close_and_drain().await,
+        StartupPrewarmDrainReport::default()
+    );
     assert!(dropped.load(Ordering::Acquire));
     assert!(!prewarm.is_running());
-    prewarm.close_and_drain().await.unwrap();
+    assert_eq!(
+        prewarm.close_and_drain().await,
+        StartupPrewarmDrainReport::default()
+    );
 }
 
 #[tokio::test]
 async fn close_prevents_late_spawn_from_being_polled() {
     let prewarm = StartupPrewarm::default();
-    prewarm.close_and_drain().await.unwrap();
+    prewarm.close_and_drain().await;
     let (work, started, dropped) = blocking_prewarm();
     prewarm.spawn(work);
     assert!(dropped.load(Ordering::Acquire));
     assert!(!prewarm.is_running());
-    // No work task was created, so the start notification has no permit.
     let mut start = Box::pin(started.notified());
     assert_pending(start.as_mut()).await;
 }
@@ -83,7 +88,7 @@ async fn ordinary_abort_allows_replacement_and_shutdown_joins_both_generations()
     let (second, second_started, second_dropped) = blocking_prewarm();
     prewarm.spawn(second);
     second_started.notified().await;
-    prewarm.close_and_drain().await.unwrap();
+    prewarm.close_and_drain().await;
     assert!(first_dropped.load(Ordering::Acquire));
     assert!(second_dropped.load(Ordering::Acquire));
 }
@@ -106,13 +111,13 @@ async fn concurrent_close_and_spawn_cannot_resurrect_a_closed_prewarm() {
     ready.wait();
     prewarm.close();
     spawner.join().unwrap();
-    prewarm.close_and_drain().await.unwrap();
+    prewarm.close_and_drain().await;
     assert!(dropped.load(Ordering::Acquire));
     assert!(!prewarm.is_running());
 }
 
 #[tokio::test]
-async fn panic_is_reported_after_the_join_owner_releases_the_task() {
+async fn completed_panic_remains_diagnostic_without_blocking_drain() {
     let prewarm = StartupPrewarm::default();
     let started = Arc::new(tokio::sync::Notify::new());
     prewarm.spawn({
@@ -123,9 +128,10 @@ async fn panic_is_reported_after_the_join_owner_releases_the_task() {
         }
     });
     started.notified().await;
-    let error = prewarm.close_and_drain().await.unwrap_err();
-    assert!(error.contains("startup prewarm task panicked"));
-    assert!(prewarm.close_and_drain().await.is_err());
+    let report = prewarm.close_and_drain().await;
+    assert_eq!(report.diagnostics.len(), 1);
+    assert!(report.diagnostics[0].contains("startup prewarm task panicked"));
+    assert_eq!(prewarm.close_and_drain().await, report);
 }
 
 #[test]
@@ -141,10 +147,12 @@ fn runtime_shutdown_releases_the_work_claim_without_a_join_task() {
     runtime.shutdown_background();
     let waiter = tokio::runtime::Runtime::new().unwrap();
     waiter.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(2), prewarm.close_and_drain())
-            .await
-            .unwrap()
-            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), prewarm.close_and_drain())
+                .await
+                .unwrap(),
+            StartupPrewarmDrainReport::default()
+        );
     });
     assert!(dropped.load(Ordering::Acquire));
 }

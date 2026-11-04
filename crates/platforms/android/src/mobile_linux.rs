@@ -246,8 +246,8 @@ mod tests {
         use mobile_linux_api::guest_paths as sdk;
         assert_eq!(sdk::HOME, "/home/lingxi");
         assert_eq!(sdk::SCRATCH, &["/tmp", "/var/tmp"]);
-        assert_eq!(sdk::WORKSPACE_ROOT, "/home/lingxi/lingxi");
-        assert_eq!(sdk::workspace("abc-123"), "/home/lingxi/lingxi/abc-123");
+        assert_eq!(sdk::WORKSPACE_ROOT, "/home/lingxi/.lingxi");
+        assert_eq!(sdk::workspace("abc-123"), "/home/lingxi/.lingxi/abc-123");
         assert_eq!(
             sdk::writable_roots(),
             [
@@ -255,7 +255,7 @@ mod tests {
                 "/root",
                 "/tmp",
                 "/var/tmp",
-                "/home/lingxi/lingxi"
+                "/home/lingxi/.lingxi"
             ]
         );
     }

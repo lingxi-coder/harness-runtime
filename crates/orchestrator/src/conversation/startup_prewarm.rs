@@ -8,13 +8,20 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::task::AbortHandle;
 
+/// A completed drain confirms all registered prewarm futures were dropped.
+/// Historical failures remain visible without blocking subsequent cleanup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupPrewarmDrainReport {
+    pub diagnostics: Vec<String>,
+}
+
 #[derive(Default)]
 struct State {
     closed: bool,
     generation: u64,
     current: Option<u64>,
     tasks: HashMap<u64, TaskEntry>,
-    failures: Vec<String>,
+    diagnostics: Vec<String>,
 }
 
 #[derive(Default)]
@@ -63,7 +70,7 @@ impl Future for TrackedPrewarm {
                 .state
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .failures
+                .diagnostics
                 .push("startup prewarm task panicked".into());
         }
         Poll::Ready(())
@@ -79,7 +86,7 @@ impl Drop for TrackedPrewarm {
         let mut state = self.owner.state.lock().unwrap_or_else(|p| p.into_inner());
         if drop_failed || std::thread::panicking() {
             state
-                .failures
+                .diagnostics
                 .push("startup prewarm task panicked while releasing work".into());
         }
         state.tasks.remove(&self.generation);
@@ -155,7 +162,7 @@ impl StartupPrewarm {
         }
     }
 
-    pub(crate) async fn close_and_drain(&self) -> Result<(), String> {
+    pub(crate) async fn close_and_drain(&self) -> StartupPrewarmDrainReport {
         self.close();
         loop {
             let changed = self.owner.changed.notified();
@@ -164,10 +171,8 @@ impl StartupPrewarm {
             {
                 let state = self.owner.state.lock().unwrap_or_else(|p| p.into_inner());
                 if state.tasks.is_empty() {
-                    return if state.failures.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(state.failures.join("; "))
+                    return StartupPrewarmDrainReport {
+                        diagnostics: state.diagnostics.clone(),
                     };
                 }
             }

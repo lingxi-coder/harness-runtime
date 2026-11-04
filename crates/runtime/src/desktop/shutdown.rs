@@ -177,8 +177,9 @@ impl DesktopSessionLifecycle {
         // still holds its own guard and settles on its own.
         let stage =
             |budget: std::time::Duration| deadline.min(tokio::time::Instant::now() + budget);
-        // Fork publication is not a task-registry child. Close its admission
-        // and prewarm registration synchronously before the first drain await.
+        // A background launch can publish outside the task registry, and a
+        // prewarm can retain orchestrator resources. Prevent new admissions
+        // before awaiting either producer.
         self.orchestrator.close_background_producer_admission();
         match tokio::time::timeout_at(
             stage(std::time::Duration::from_secs(2)),
@@ -186,12 +187,19 @@ impl DesktopSessionLifecycle {
         )
         .await
         {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                producers_drained = false;
-                report
-                    .errors
-                    .push(format!("background session launch drain failed: {error}"));
+            Ok(drain) => {
+                // A stopped launch's history is diagnostic, not proof that a
+                // producer is still live. Unconfirmed recovery is different:
+                // it can still need the registry and open session writer.
+                for diagnostic in drain.diagnostics {
+                    tracing::warn!(%diagnostic, "background session launch diagnostic");
+                }
+                for recovery in drain.unconfirmed_recoveries {
+                    producers_drained = false;
+                    report.errors.push(format!(
+                        "background session launch recovery is unconfirmed: {recovery}"
+                    ));
+                }
             }
             Err(_) => {
                 producers_drained = false;
@@ -207,10 +215,13 @@ impl DesktopSessionLifecycle {
         )
         .await
         {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                producers_drained = false;
-                report.errors.push(error);
+            Ok(diagnostics) => {
+                // The join owner has released every work future. In particular,
+                // a panic remains visible without keeping a stopped prewarm's
+                // dependencies alive forever.
+                for diagnostic in diagnostics {
+                    tracing::warn!(%diagnostic, "startup prewarm diagnostic");
+                }
             }
             Err(_) => {
                 producers_drained = false;
@@ -299,14 +310,19 @@ impl DesktopSessionLifecycle {
         }
         self.mcp_registry.abort_background_connects();
         if !background_producers_drained {
-            // A fork may still be completing shell export/rollback, and a
-            // prewarm may still be dropping its tool context. Stop independent
-            // producers above, but keep registry handlers and persistence open
-            // until a later waiter has observed their real completion.
-            if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
-                report
+            // Launch publication or recovery may still use the registry and
+            // session writer. Stop independent producers above, retain their
+            // dependencies, and let a sequential retry observe settlement.
+            match tokio::time::timeout_at(deadline, self.cost_tracker.drain_owned_settlements())
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => report
                     .errors
-                    .push(format!("cost settlement failed: {error}"));
+                    .push(format!("cost settlement failed: {error}")),
+                Err(_) => report
+                    .errors
+                    .push("cost settlement did not drain within the shutdown budget".into()),
             }
             return report;
         }

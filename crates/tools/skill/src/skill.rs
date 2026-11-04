@@ -568,7 +568,7 @@ impl SkillTool {
             ctx.subagent_registry.clone().ok_or_else(|| {
                 ToolError::Internal("Skill: subagent tool registry is not configured".into())
             })?,
-        );
+        ).with_trusted_session(ctx.trusted_session_profile.clone(), ctx.durable_tool_origins.clone());
         // (3b) Gate the fork's tool dispatch with the same permission gate the
         // main loop and the Agent tool use (`tools/agent/src/agent.rs`). Without
         // it `RegistryToolInvoker::gate` is `None` and the ENTIRE permission
@@ -1031,6 +1031,10 @@ fn truncate_source_string(source: &Utf16JsonProjection, limit: usize) -> Utf16Js
 
 fn user_message_from_source(
     source: &Utf16JsonProjection,
+    context_epoch: u64,
+    skill_name: &Utf16JsonProjection,
+    skill_path: &std::path::Path,
+    definition: &Utf16JsonProjection,
 ) -> lingxi_core::types::ConversationMessage {
     let units = source
         .string_units("")
@@ -1050,7 +1054,14 @@ fn user_message_from_source(
         is_visible_in_transcript_only: false,
         turn_companion: None,
         usage_limit_note: None,
-        origin: None,
+        origin: Some(
+            compaction::invoked_skills::skill_activation_origin_with_definition(
+                context_epoch,
+                skill_name,
+                skill_path,
+                definition,
+            ),
+        ),
         turn_origin: None,
     }
 }
@@ -1722,33 +1733,29 @@ a topic not yet loaded retrieves new material; do not repeat a topic already pre
             }
         }
 
-        // P2-12 / `zSr(e.name,u,d,r.agentId??null)`: record this invocation in
-        // the process-global invoked-skill registry so its content can be
-        // re-injected after a compaction (`rRg`) — the model regains the full
-        // skill instructions across the compact boundary even though the
-        // boundary summary drops the verbatim body. The content is the expanded
-        // prompt the model receives (the binary's `d`); the path is the skill's
-        // base dir (`u`). LingXi additionally scopes the registry row by the
-        // live session + agent identity so concurrent orchestrators/subagents
-        // invoking the same skill name do not overwrite each other.
+        // Carry the canonical source identity with the generated row. The host
+        // activates it only after its generation fence, append hook and durable
+        // write have accepted this exact row; an abandoned tool result must not
+        // replace the currently effective Skill.
         let skill_path = desc.skill_root.clone().unwrap_or_default();
         let session_id = if let Some(session) = ctx.session.as_ref() {
             Some(session.lock().await.session_id.to_string())
         } else {
-            self.ctx.session_id.map(|id| id.to_string())
+            ctx.origin_session_id.or(self.ctx.session_id).map(|id| id.to_string())
         };
         let agent_id = ctx.agent_id.as_ref().map(ToString::to_string);
-        compaction::invoked_skills::register_scoped(
-            &command_name,
-            &skill_path,
-            &expanded_prompt,
-            compaction::invoked_skills::InvokedSkillScopeRef::new(
-                session_id.as_deref(),
-                agent_id.as_deref(),
-            ),
+        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(
+            session_id.as_deref(),
+            agent_id.as_deref(),
         );
-
-        let new_messages = vec![user_message_from_source(&expanded_prompt)];
+        let skill_message = user_message_from_source(
+            &expanded_prompt,
+            compaction::invoked_skills::context_epoch(scope),
+            &desc.name,
+            &skill_path,
+            &desc.body,
+        );
+        let new_messages = vec![skill_message];
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(

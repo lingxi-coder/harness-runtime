@@ -210,18 +210,14 @@ impl llm_runtime::client::ModelRuntimeSource for AccountRuntimeSource {
         captured: &llm_runtime::ModelRuntime,
     ) -> std::sync::Arc<llm_runtime::ModelRuntime> {
         let mut config = captured.configuration();
-        if provider_config::assemble_account_client_config(
-            &mut config,
-            &self.pool.snapshot().accounts,
-        )
-        .is_err()
+        let snapshot = self.pool.snapshot();
+        if provider_config::assemble_account_client_config(&mut config, &snapshot.accounts).is_err()
         {
             config.providers.clear();
         }
         captured
-            .reconfigured(config)
+            .reconfigured_with_account_snapshot(config, &snapshot)
             .expect("validated account routing configuration")
-            .with_owner_state(captured)
     }
     fn current(
         &self,
@@ -235,14 +231,14 @@ impl llm_runtime::client::ModelRuntimeSource for AccountRuntimeSource {
             // Fail closed if a binding disappeared from the live catalog.
             config.providers.clear();
         }
-        match base.reconfigured(config) {
-            Ok(runtime) => runtime.with_owner_state(template),
+        match template.reconfigured_with_account_snapshot(config, &snapshot) {
+            Ok(runtime) => runtime,
             Err(_) => {
                 let mut config = base.configuration();
                 config.providers.clear();
-                base.reconfigured(config)
+                template
+                    .reconfigured_with_account_snapshot(config, &snapshot)
                     .expect("empty routing catalog")
-                    .with_owner_state(template)
             }
         }
     }

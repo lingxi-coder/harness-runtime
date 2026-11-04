@@ -31,13 +31,11 @@ fn directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn is_global_controller(config: &MobileConfig) -> bool {
-    let Some(home) = config.lingxi_home.parent() else {
+pub(super) fn is_scheduled_controller_cwd(config: &MobileConfig) -> bool {
+    if !config.scheduler_controller {
         return false;
-    };
-    let expected = home
-        .join(&config.brand_runtime_profile.brand_id)
-        .join("scheduled");
+    }
+    let expected = config.lingxi_home.join("scheduled");
     std::fs::canonicalize(&config.cwd)
         .ok()
         .zip(std::fs::canonicalize(expected).ok())
@@ -51,7 +49,36 @@ impl ScheduledWorkspace {
         title: &str,
         target: Option<uuid::Uuid>,
     ) -> Result<Option<Self>, String> {
-        if !is_global_controller(config) {
+        Self::prepare_inner(config, task_id, title, target, None)
+    }
+
+    /// A selected session borrows scheduled instructions only when the
+    /// manifest identifies the exact captured source and its current cwd.
+    pub fn prepare_selected(
+        config: &MobileConfig,
+        task_id: &str,
+        title: &str,
+        target: uuid::Uuid,
+        current_cwd: &Path,
+        captured_source: &Path,
+    ) -> Result<Option<Self>, String> {
+        Self::prepare_inner(
+            config,
+            task_id,
+            title,
+            Some(target),
+            Some((current_cwd, captured_source)),
+        )
+    }
+
+    fn prepare_inner(
+        config: &MobileConfig,
+        task_id: &str,
+        title: &str,
+        target: Option<uuid::Uuid>,
+        selected: Option<(&Path, &Path)>,
+    ) -> Result<Option<Self>, String> {
+        if !is_scheduled_controller_cwd(config) {
             return Ok(None);
         }
         let canonical_root =
@@ -117,14 +144,23 @@ impl ScheduledWorkspace {
             }
         }
         let host = checked;
-        for child in ["work", "outputs"] {
-            directory(&host.join(child))?;
-        }
         let guest_root = if config.logical_cwd.is_some() {
             config.brand_runtime_profile.config_guest_path()
         } else {
             root.clone()
         };
+        let logical = guest_root.join(&manifest.workspace);
+        if let Some((current_cwd, captured_source)) = selected {
+            let target = target.ok_or("selected scheduled session has no identity")?;
+            let expected_source =
+                session::jsonl::session_path(root, &logical.to_string_lossy(), &target.to_string());
+            if logical.as_path() != current_cwd || expected_source.as_path() != captured_source {
+                return Ok(None);
+            }
+        }
+        for child in ["work", "outputs"] {
+            directory(&host.join(child))?;
+        }
         // A task selecting another task's conversation cannot inherit its memory.
         let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
         directory(&root.join("automations"))?;
@@ -145,7 +181,7 @@ impl ScheduledWorkspace {
         }
         Ok(Some(Self {
             host,
-            logical: guest_root.join(&manifest.workspace),
+            logical,
             memory_host,
             memory_logical: guest_root.join("automations").join(key).join("memory.md"),
             relative: manifest.workspace,
@@ -184,15 +220,54 @@ mod tests {
     use super::*;
 
     fn config(root: &Path) -> MobileConfig {
-        let controller = root.join("atlas/scheduled");
+        let controller = root.join(".atlas/scheduled");
         std::fs::create_dir_all(&controller).unwrap();
         let mut config = crate::mobile::test_support::test_config(&controller);
         config.brand_runtime_profile =
             mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_user", ".atlas");
         config.lingxi_home = root.join(".atlas");
         std::fs::create_dir_all(&config.lingxi_home).unwrap();
-        config.logical_cwd = Some("/home/atlas_user/atlas/scheduled".into());
+        config.logical_cwd = Some("/home/atlas_user/.atlas/scheduled".into());
+        config.scheduler_controller = true;
         config
+    }
+
+    #[test]
+    fn default_and_custom_brand_controllers_use_the_hidden_config_home() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = crate::mobile::mobile_user_directories(
+            root.path().join("runtime").display().to_string(),
+        )
+        .unwrap();
+        dirs.prepare().unwrap();
+        let mut default = crate::mobile::test_support::test_config(Path::new(&dirs.scheduled_cwd));
+        default.lingxi_home = dirs.config_home.clone().into();
+        default.logical_cwd = Some(dirs.scheduled_guest_cwd.clone().into());
+        default.scheduler_controller = true;
+        let workspace = ScheduledWorkspace::prepare(&default, "task", "Default brand", None)
+            .unwrap()
+            .unwrap();
+        assert!(workspace.host.starts_with(
+            Path::new(&dirs.config_home)
+                .canonicalize()
+                .unwrap()
+                .join("workspaces")
+        ));
+        assert!(workspace
+            .logical
+            .starts_with("/home/lingxi/.lingxi/workspaces"));
+
+        let mut custom = config(root.path());
+        assert!(is_scheduled_controller_cwd(&custom));
+        let old = root.path().join("atlas/scheduled");
+        std::fs::create_dir_all(&old).unwrap();
+        custom.cwd = old;
+        assert!(!is_scheduled_controller_cwd(&custom));
+        assert!(
+            ScheduledWorkspace::prepare(&custom, "task", "Old root", None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -232,6 +307,68 @@ mod tests {
     }
 
     #[test]
+    fn selected_manifest_only_applies_to_its_exact_source_and_current_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let workspace = ScheduledWorkspace::prepare(&config, "original", "task", None)
+            .unwrap()
+            .unwrap();
+        let id = uuid::Uuid::new_v4();
+        workspace
+            .bind(&config.lingxi_home, &id.to_string())
+            .unwrap();
+        let source = session::jsonl::session_path(
+            &std::fs::canonicalize(&config.lingxi_home).unwrap(),
+            &workspace.logical.to_string_lossy(),
+            &id.to_string(),
+        );
+        let other = config
+            .lingxi_home
+            .join("projects/other")
+            .join(format!("{id}.jsonl"));
+        assert!(ScheduledWorkspace::prepare_selected(
+            &config,
+            "selected",
+            "task",
+            id,
+            &workspace.logical,
+            &other
+        )
+        .unwrap()
+        .is_none());
+        assert!(ScheduledWorkspace::prepare_selected(
+            &config,
+            "selected",
+            "task",
+            id,
+            Path::new("/elsewhere"),
+            &source
+        )
+        .unwrap()
+        .is_none());
+        let selected_memory_dir = config
+            .lingxi_home
+            .join("automations")
+            .join(format!("{:x}", Sha256::digest(b"selected")));
+        assert!(
+            !selected_memory_dir.exists(),
+            "a source mismatch must not create task memory"
+        );
+        let matching = ScheduledWorkspace::prepare_selected(
+            &config,
+            "selected",
+            "task",
+            id,
+            &workspace.logical,
+            &source,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matching.logical, workspace.logical);
+        assert_ne!(matching.memory_host, workspace.memory_host);
+    }
+
+    #[test]
     fn scheduled_workspace_keeps_project_and_missing_target_semantics() {
         let root = tempfile::tempdir().unwrap();
         let mut config = config(root.path());
@@ -240,7 +377,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let project = root.path().join("atlas/projects/project/workspace");
+        let project = root.path().join(".atlas/projects/project/workspace");
         std::fs::create_dir_all(&project).unwrap();
         config.cwd = project;
         assert!(ScheduledWorkspace::prepare(&config, "task", "title", None)

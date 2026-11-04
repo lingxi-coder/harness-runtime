@@ -461,12 +461,151 @@ mod tests {
     use futures::Stream;
     use lingxi_core::host::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Mutex as TokioMutex;
 
     // ---- Minimal in-memory FileSystem (only read/write/delete are exercised) ----
     struct MemFs {
         files: TokioMutex<HashMap<String, String>>,
+        fail_next_task_write: AtomicBool,
+    }
+
+    /// Real rooted primitives, with a deterministic directory swap immediately
+    /// after the task body is read while the original scope lock is held.
+    struct SwapScopeAfterRead {
+        swap_path: std::path::PathBuf,
+        retired: std::path::PathBuf,
+        replacement: std::path::PathBuf,
+    }
+
+    #[async_trait]
+    impl FileSystem for SwapScopeAfterRead {
+        async fn root_identity_no_follow(
+            &self,
+            root: &Path,
+        ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
+            lingxi_core::host::rooted_fs::root_identity(root).map(Some)
+        }
+        async fn ensure_directory_rooted_identity_pinned(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
+            let expected = expected.ok_or_else(|| FsError::Io("missing test scope".into()))?;
+            lingxi_core::host::rooted_fs::ensure_directory_identity_pinned(root, relative, expected)
+                .map(Some)
+        }
+        async fn flock_exclusive_rooted_pinned(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        ) -> Result<Box<dyn FlockGuard>, FsError> {
+            lingxi_core::host::rooted_fs::lock_exclusive_pinned(
+                root, relative, 0o700, 0o600, expected,
+            )
+            .map(|guard| Box::new(guard) as Box<dyn FlockGuard>)
+        }
+        async fn read_file_rooted_no_follow_window_pinned(
+            &self,
+            root: &Path,
+            relative: &Path,
+            _offset: Option<u64>,
+            _limit: Option<u64>,
+            expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        ) -> Result<FileContent, FsError> {
+            let content =
+                lingxi_core::host::rooted_fs::read_to_string_pinned(root, relative, expected)?;
+            std::fs::rename(&self.swap_path, &self.retired)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            std::fs::rename(&self.replacement, &self.swap_path)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            Ok(FileContent {
+                total_lines: content.lines().count() as u64,
+                content,
+                truncated: false,
+            })
+        }
+        async fn read_file_rooted_single_link_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+        ) -> Result<lingxi_core::host::rooted_fs::CheckedFileSnapshot, FsError> {
+            lingxi_core::host::rooted_fs::read_file_single_link_checked(root, relative)
+        }
+        async fn append_or_sync_file_rooted_durable_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: &lingxi_core::host::rooted_fs::CheckedFileSnapshot,
+            append: Option<&str>,
+        ) -> Result<(), FsError> {
+            lingxi_core::host::rooted_fs::append_or_sync_file_durable_checked(
+                root, relative, expected, append,
+            )
+        }
+        async fn write_file_rooted_atomic_pinned(
+            &self,
+            root: &Path,
+            relative: &Path,
+            content: &str,
+            expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        ) -> Result<(), FsError> {
+            let expected = expected.ok_or_else(|| FsError::Io("missing test root".into()))?;
+            lingxi_core::host::rooted_fs::atomic_write_pinned(
+                root,
+                relative,
+                content.as_bytes(),
+                lingxi_core::host::AtomicWriteOptions::default(),
+                expected,
+            )
+        }
+        async fn read_file(
+            &self,
+            _: &str,
+            _: Option<u64>,
+            _: Option<u64>,
+        ) -> Result<FileContent, FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn write_file(&self, _: &str, _: &str) -> Result<(), FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        fn is_within_workspace(&self, _: &str) -> bool {
+            true
+        }
+        async fn watch(
+            &self,
+            _: &str,
+        ) -> Result<Pin<Box<dyn Stream<Item = FileEvent> + Send>>, FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn append_file(&self, _: &str, _: &str) -> Result<(), FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn truncate(&self, _: &str, _: u64) -> Result<(), FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn file_mtime(&self, _: &str) -> Result<SystemTime, FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn file_size(&self, _: &str) -> Result<u64, FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn delete_file(&self, _: &str) -> Result<(), FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
+            Err(FsError::Io("unused".into()))
+        }
+        async fn fsync(&self, _: &str) -> Result<(), FsError> {
+            Err(FsError::Io("unused".into()))
+        }
     }
     struct MemFlockGuard(String);
     impl FlockGuard for MemFlockGuard {
@@ -480,11 +619,13 @@ mod tests {
             m.insert(path.to_string(), body.to_string());
             Arc::new(Self {
                 files: TokioMutex::new(m),
+                fail_next_task_write: AtomicBool::new(false),
             })
         }
         fn empty() -> Arc<Self> {
             Arc::new(Self {
                 files: TokioMutex::new(HashMap::new()),
+                fail_next_task_write: AtomicBool::new(false),
             })
         }
         async fn get(&self, path: &str) -> Option<String> {
@@ -512,6 +653,9 @@ mod tests {
             }
         }
         async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {
+            if path == AUTOMATION_PATH && self.fail_next_task_write.swap(false, Ordering::SeqCst) {
+                return Err(FsError::Io("injected task write failure".into()));
+            }
             self.files
                 .lock()
                 .await
@@ -534,6 +678,37 @@ mod tests {
                 .entry(path.to_string())
                 .or_default()
                 .push_str(content);
+            Ok(())
+        }
+        async fn read_file_rooted_single_link_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+        ) -> Result<lingxi_core::host::rooted_fs::CheckedFileSnapshot, FsError> {
+            let path = lingxi_core::host::rooted_fs::checked_join(root, relative)?;
+            let content = match self.read_file(&path.to_string_lossy(), None, None).await {
+                Ok(file) => Some(file.content),
+                Err(FsError::NotFound(_)) => None,
+                Err(error) => return Err(error),
+            };
+            Ok(lingxi_core::host::rooted_fs::CheckedFileSnapshot::virtual_snapshot(content))
+        }
+        async fn append_or_sync_file_rooted_durable_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: &lingxi_core::host::rooted_fs::CheckedFileSnapshot,
+            append: Option<&str>,
+        ) -> Result<(), FsError> {
+            let path = lingxi_core::host::rooted_fs::checked_join(root, relative)?;
+            let path = path.to_string_lossy().to_string();
+            let mut files = self.files.lock().await;
+            if files.get(&path).map(String::as_str) != expected.content.as_deref() {
+                return Err(FsError::Io("ledger changed".into()));
+            }
+            if let Some(line) = append {
+                files.entry(path).or_default().push_str(line);
+            }
             Ok(())
         }
         async fn truncate(&self, _: &str, _: u64) -> Result<(), FsError> {
@@ -617,6 +792,9 @@ mod tests {
     const NOW: u64 = 1_700_000_000; // not on a minute boundary (…020 seconds)
     const PATH: &str = "/proj/.lingxi/session-cron/scheduled_tasks.json";
     const AUTOMATION_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
+    const TEST_SESSION_ID: &str = "11111111-2222-4333-8444-555555555555";
+    const TEST_TRANSCRIPT_PATH: &str = "/project/11111111-2222-4333-8444-555555555555.jsonl";
+    const TEST_SESSION_SCOPE: &str = "scope-test";
 
     fn file_with(tasks_json: &str) -> Arc<MemFs> {
         MemFs::with(PATH, tasks_json)
@@ -860,7 +1038,666 @@ mod tests {
         }
     }
     fn v2_file(status: &str, recurring: bool) -> Arc<MemFs> {
-        MemFs::with(AUTOMATION_PATH, &serde_json::json!({"tasks":[{"id":"dv2", "cron":"* * * * *", "prompt":"v2 prompt", "createdAt":(NOW-120)*1000, "recurring":recurring, "automation":{"version":2,"name":"Test task","status":status,"model":"provider/model","reasoning":{"kind":"level","id":"high"},"runMode":"task_session","notificationPolicy":"all"}}]}).to_string())
+        MemFs::with(AUTOMATION_PATH, &serde_json::json!({"tasks":[{"id":"dv2", "cron":"* * * * *", "prompt":"v2 prompt", "createdAt":(NOW-120)*1000, "recurring":recurring, "automation":{"version":2,"name":"Test task","status":status,"model":"provider/model","reasoning":{"kind":"level","id":"high"},"runMode":"task_session","sessionMode":"code","sessionScopeKey":TEST_SESSION_SCOPE,"notificationPolicy":"all"}}]}).to_string())
+    }
+
+    #[tokio::test]
+    async fn owner_reservation_survives_task_write_failure_and_deletion() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let id = "11111111-2222-4333-8444-555555555555";
+        let path = "/home/lingxi/projects/one/11111111-2222-4333-8444-555555555555.jsonl";
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        let tasks_before = fs.get(AUTOMATION_PATH).await.unwrap();
+        fs.fail_next_task_write.store(true, Ordering::SeqCst);
+        assert!(crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            id,
+            path,
+            "code",
+            Some(TEST_SESSION_SCOPE)
+        )
+        .await
+        .is_err());
+        assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), tasks_before);
+        let owners = crate::list_owner_reservations_strict(fs.as_ref(), root)
+            .await
+            .unwrap();
+        assert_eq!(
+            owners,
+            vec![crate::OwnerReservation {
+                session_id: id.into(),
+                session_transcript_path: path.into(),
+                session_mode: "code".into(),
+                session_scope_key: TEST_SESSION_SCOPE.into()
+            }]
+        );
+        let ledger_path = root
+            .join(crate::tasks_file::owner_reservations_relative_path())
+            .to_string_lossy()
+            .to_string();
+        let ledger_before = fs.get(&ledger_path).await.unwrap();
+        crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            id,
+            path,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get(&ledger_path).await.unwrap(), ledger_before);
+        fs.delete_file(AUTOMATION_PATH).await.unwrap();
+        assert_eq!(
+            crate::list_owner_reservations_strict(fs.as_ref(), root)
+                .await
+                .unwrap(),
+            owners
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_reservation_before_creation_keeps_task_unbound_and_retry_uses_fresh_owner() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        let before = fs.get(AUTOMATION_PATH).await.unwrap();
+        let id_a = "11111111-2222-4333-8444-555555555555";
+        let path_a = "/home/lingxi/projects/one/11111111-2222-4333-8444-555555555555.jsonl";
+        let id_b = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let path_b = "/home/lingxi/projects/one/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.jsonl";
+        crate::reserve_automation_owner(
+            fs.as_ref(),
+            root,
+            &request,
+            id_a,
+            path_a,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
+        crate::reserve_automation_owner(
+            fs.as_ref(),
+            root,
+            &request,
+            &format!("sess:{id_a}"),
+            path_a,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), before);
+        // The first child creation fails before a transcript can be bound.
+        crate::reserve_automation_owner(
+            fs.as_ref(),
+            root,
+            &request,
+            id_b,
+            path_b,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), before);
+        crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            id_b,
+            path_b,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
+        let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(task.owned_session_id.as_deref(), Some(id_b));
+        assert_eq!(task.owned_session_transcript_path.as_deref(), Some(path_b));
+        assert_eq!(task.runs[0].session_id.as_deref(), Some(id_b));
+        let owners = crate::list_owner_reservations_strict(fs.as_ref(), root)
+            .await
+            .unwrap();
+        assert_eq!(owners.len(), 2);
+        assert_eq!(owners[0].session_id, id_a);
+        assert_eq!(owners[1].session_id, id_b);
+    }
+
+    #[tokio::test]
+    async fn owner_reservation_rejects_stale_configuration_without_writing_tasks_or_ledger() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        doc.tasks[0].automation.as_mut().unwrap().session_scope_key = Some("new-scope".into());
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        let before = fs.get(AUTOMATION_PATH).await.unwrap();
+        let result = crate::reserve_automation_owner(
+            fs.as_ref(),
+            root,
+            &request,
+            "11111111-2222-4333-8444-555555555555",
+            "/home/lingxi/projects/one/11111111-2222-4333-8444-555555555555.jsonl",
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .starts_with(crate::AUTOMATION_CANCELLED_PREFIX));
+        assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), before);
+        assert!(crate::list_owner_reservations_strict(fs.as_ref(), root)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn owner_reservation_rejects_replaced_scope_after_task_read() {
+        let memory = v2_file("active", true);
+        let request = crate::claim_automation_run(
+            memory.as_ref(),
+            Path::new("/proj"),
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        let body = memory.get(AUTOMATION_PATH).await.unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("scope");
+        let retired = parent.path().join("retired");
+        let replacement = parent.path().join("replacement");
+        for scope in [&root, &replacement] {
+            std::fs::create_dir_all(scope.join(".lingxi")).unwrap();
+            std::fs::write(scope.join(".lingxi/scheduled_tasks.json"), &body).unwrap();
+        }
+        let fs = SwapScopeAfterRead {
+            swap_path: root.clone(),
+            retired: retired.clone(),
+            replacement,
+        };
+        let result = crate::bind_automation_run_session_with_source(
+            &fs,
+            &root,
+            &request,
+            "11111111-2222-4333-8444-555555555555",
+            "/home/lingxi/projects/source/11111111-2222-4333-8444-555555555555.jsonl",
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await;
+        assert!(result.is_err());
+        for scope in [&root, &retired] {
+            assert_eq!(
+                std::fs::read_to_string(scope.join(".lingxi/scheduled_tasks.json")).unwrap(),
+                body
+            );
+            assert!(!scope
+                .join(crate::tasks_file::owner_reservations_relative_path())
+                .exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_reservation_rejects_replaced_state_directory_after_task_read() {
+        let memory = v2_file("active", true);
+        let request = crate::claim_automation_run(
+            memory.as_ref(),
+            Path::new("/proj"),
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        let body = memory.get(AUTOMATION_PATH).await.unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("scope");
+        let state = root.join(".lingxi");
+        let retired = parent.path().join("retired-state");
+        let replacement = parent.path().join("replacement-state");
+        for directory in [&state, &replacement] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(directory.join("scheduled_tasks.json"), &body).unwrap();
+        }
+        let fs = SwapScopeAfterRead {
+            swap_path: state.clone(),
+            retired: retired.clone(),
+            replacement,
+        };
+        assert!(crate::bind_automation_run_session_with_source(
+            &fs,
+            &root,
+            &request,
+            "11111111-2222-4333-8444-555555555555",
+            "/home/lingxi/projects/source/11111111-2222-4333-8444-555555555555.jsonl",
+            "code",
+            Some(TEST_SESSION_SCOPE)
+        )
+        .await
+        .is_err());
+        for directory in [&state, &retired] {
+            assert_eq!(
+                std::fs::read_to_string(directory.join("scheduled_tasks.json")).unwrap(),
+                body
+            );
+            assert!(!directory
+                .join(crate::tasks_file::OWNER_RESERVATIONS_FILE)
+                .exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_reservation_rejects_replaced_lock_after_task_read() {
+        let memory = v2_file("active", true);
+        let request = crate::claim_automation_run(
+            memory.as_ref(),
+            Path::new("/proj"),
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        let body = memory.get(AUTOMATION_PATH).await.unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("scope");
+        let state = root.join(".lingxi");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("scheduled_tasks.json"), &body).unwrap();
+        let replacement = parent.path().join("replacement-lock");
+        std::fs::write(&replacement, "").unwrap();
+        let fs = SwapScopeAfterRead {
+            swap_path: state.join("scheduled_tasks.lock"),
+            retired: parent.path().join("retired-lock"),
+            replacement,
+        };
+        assert!(crate::bind_automation_run_session_with_source(
+            &fs,
+            &root,
+            &request,
+            "11111111-2222-4333-8444-555555555555",
+            "/home/lingxi/projects/source/11111111-2222-4333-8444-555555555555.jsonl",
+            "code",
+            Some(TEST_SESSION_SCOPE)
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(state.join("scheduled_tasks.json")).unwrap(),
+            body
+        );
+        assert!(!state
+            .join(crate::tasks_file::OWNER_RESERVATIONS_FILE)
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn owner_reservations_fail_closed_on_partial_conflicting_or_invalid_rows() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        assert!(crate::list_owner_reservations_strict(fs.as_ref(), root)
+            .await
+            .unwrap()
+            .is_empty());
+        let ledger = root
+            .join(crate::tasks_file::owner_reservations_relative_path())
+            .to_string_lossy()
+            .to_string();
+        let owner = crate::OwnerReservation {
+            session_id: "11111111-2222-4333-8444-555555555555".into(),
+            session_transcript_path: "/workspace/a.jsonl".into(),
+            session_mode: "code".into(),
+            session_scope_key: TEST_SESSION_SCOPE.into(),
+        };
+        let row = serde_json::to_string(&owner).unwrap();
+        let mut conflict = owner.clone();
+        conflict.session_transcript_path = "/workspace/b.jsonl".into();
+        for body in [
+            String::new(),
+            "{broken}\n".into(),
+            row.clone(),
+            format!("{row}\n\n"),
+            format!("{row}\n{}\n", serde_json::to_string(&conflict).unwrap()),
+        ] {
+            fs.write_file(&ledger, &body).await.unwrap();
+            assert!(
+                crate::list_owner_reservations_strict(fs.as_ref(), root)
+                    .await
+                    .is_err(),
+                "must reject {body:?}"
+            );
+        }
+        fs.write_file(&ledger, &format!("{row}\n")).await.unwrap();
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        let tasks_before = fs.get(AUTOMATION_PATH).await.unwrap();
+        assert!(crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            &owner.session_id,
+            &conflict.session_transcript_path,
+            "code",
+            Some(TEST_SESSION_SCOPE)
+        )
+        .await
+        .is_err());
+        assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), tasks_before);
+        assert_eq!(fs.get(&ledger).await.unwrap(), format!("{row}\n"));
+    }
+
+    #[tokio::test]
+    async fn automation_source_binding_persists_run_and_owned_session_atomically() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let id = "11111111-2222-4333-8444-555555555555";
+        let path =
+            "/home/lingxi/.lingxi/projects/selected/11111111-2222-4333-8444-555555555555.jsonl";
+        let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let config = doc.tasks[0].automation.as_mut().unwrap();
+        config.session_mode = Some("chat".into());
+        config.session_scope_key = Some("account-scope".into());
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            &format!("sess:{id}"),
+            path,
+            "chat",
+            Some("account-scope"),
+        )
+        .await
+        .unwrap();
+        let bound = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(bound.owned_session_id.as_deref(), Some(id));
+        assert_eq!(bound.owned_session_transcript_path.as_deref(), Some(path));
+        assert_eq!(bound.owned_session_mode.as_deref(), Some("chat"));
+        assert_eq!(
+            bound.owned_session_scope_key.as_deref(),
+            Some("account-scope")
+        );
+        let run = &bound.runs[0];
+        assert_eq!(run.session_id.as_deref(), Some(id));
+        assert_eq!(run.session_transcript_path.as_deref(), Some(path));
+        assert_eq!(run.session_mode.as_deref(), Some("chat"));
+        assert_eq!(run.session_scope_key.as_deref(), Some("account-scope"));
+
+        let before = fs.get(AUTOMATION_PATH).await.unwrap();
+        assert!(crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            id,
+            "/home/lingxi/other/11111111-2222-4333-8444-555555555555.jsonl",
+            "chat",
+            Some("account-scope"),
+        )
+        .await
+        .is_err());
+        assert_eq!(fs.get(AUTOMATION_PATH).await.unwrap(), before);
+
+        // A completion which omits optional source fields cannot erase the
+        // authoritative identity already bound before the turn.
+        let result = Ok(crate::AutomationRunResult {
+            session_id: id.into(),
+            session_transcript_path: None,
+            session_mode: None,
+            session_scope_key: None,
+            summary: "done".into(),
+        });
+        assert_eq!(
+            crate::finish_automation_run_checked(fs.as_ref(), root, &request, &result, NOW * 1000)
+                .await
+                .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
+        );
+        let finished = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(
+            finished.runs[0].session_transcript_path.as_deref(),
+            Some(path)
+        );
+        assert_eq!(finished.runs[0].session_mode.as_deref(), Some("chat"));
+        assert_eq!(
+            finished.runs[0].session_scope_key.as_deref(),
+            Some("account-scope")
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_source_change_with_same_uuid_cancels_stale_bind_and_preserves_new_config() {
+        let fs = v2_file("active", true);
+        let root = Path::new("/proj");
+        let id = "11111111-2222-4333-8444-555555555555";
+        let path_a = "/home/lingxi/a/11111111-2222-4333-8444-555555555555.jsonl";
+        let path_b = "/home/lingxi/b/11111111-2222-4333-8444-555555555555.jsonl";
+        let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        let config = doc.tasks[0].automation.as_mut().unwrap();
+        config.run_mode = crate::automation::RunMode::SelectedSession;
+        config.target_session_id = Some(format!("sess:{id}"));
+        config.target_session_transcript_path = Some(path_a.into());
+        config.target_session_mode = Some("chat".into());
+        config.target_session_scope_key = Some("scope-a".into());
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&doc),
+        )
+        .await
+        .unwrap();
+        let request = crate::claim_automation_run(
+            fs.as_ref(),
+            root,
+            "dv2",
+            FixedClock::at_secs(NOW).now(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Keep UUID and mode identical while changing the actual source.
+        let mut edited = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+        edited.tasks[0]
+            .automation
+            .as_mut()
+            .unwrap()
+            .target_session_transcript_path = Some(path_b.into());
+        crate::tasks_file::write_automation_tasks_body(
+            fs.as_ref(),
+            root,
+            &crate::serialize_tasks(&edited),
+        )
+        .await
+        .unwrap();
+        let error = crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            id,
+            path_a,
+            "chat",
+            Some("scope-a"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with(crate::AUTOMATION_CANCELLED_PREFIX));
+        let current = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+            .tasks
+            .remove(0)
+            .automation
+            .unwrap();
+        assert_eq!(
+            current.target_session_transcript_path.as_deref(),
+            Some(path_b)
+        );
+        assert_eq!(current.status, crate::AutomationStatus::Active);
+        assert_eq!(
+            current.runs[0].status,
+            crate::AutomationRunStatus::Cancelled
+        );
+        assert!(current.runs[0].session_id.is_none());
+        assert!(current.runs[0].session_transcript_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn automation_source_change_with_same_uuid_does_not_apply_old_run_pause_or_retry() {
+        for reason in ["paused:old source unavailable", "busy:old source occupied"] {
+            let fs = v2_file("active", true);
+            let root = Path::new("/proj");
+            let id = "11111111-2222-4333-8444-555555555555";
+            let path_a = "/home/lingxi/a/11111111-2222-4333-8444-555555555555.jsonl";
+            let path_b = "/home/lingxi/b/11111111-2222-4333-8444-555555555555.jsonl";
+            let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+            let config = doc.tasks[0].automation.as_mut().unwrap();
+            config.run_mode = crate::automation::RunMode::SelectedSession;
+            config.target_session_id = Some(id.into());
+            config.target_session_transcript_path = Some(path_a.into());
+            config.target_session_mode = Some("chat".into());
+            config.target_session_scope_key = Some("scope-a".into());
+            crate::tasks_file::write_automation_tasks_body(
+                fs.as_ref(),
+                root,
+                &crate::serialize_tasks(&doc),
+            )
+            .await
+            .unwrap();
+            let request = crate::claim_automation_run(
+                fs.as_ref(),
+                root,
+                "dv2",
+                FixedClock::at_secs(NOW).now(),
+                None,
+            )
+            .await
+            .unwrap();
+            crate::bind_automation_run_session_with_source(
+                fs.as_ref(),
+                root,
+                &request,
+                id,
+                path_a,
+                "chat",
+                Some("scope-a"),
+            )
+            .await
+            .unwrap();
+
+            let mut edited = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
+            edited.tasks[0]
+                .automation
+                .as_mut()
+                .unwrap()
+                .target_session_transcript_path = Some(path_b.into());
+            crate::tasks_file::write_automation_tasks_body(
+                fs.as_ref(),
+                root,
+                &crate::serialize_tasks(&edited),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                crate::finish_automation_run_checked(
+                    fs.as_ref(),
+                    root,
+                    &request,
+                    &Err(reason.into()),
+                    NOW * 1000,
+                )
+                .await
+                .unwrap(),
+                crate::AutomationFinishDisposition::Terminal,
+            );
+            let current = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
+                .tasks
+                .remove(0)
+                .automation
+                .unwrap();
+            assert_eq!(
+                current.target_session_transcript_path.as_deref(),
+                Some(path_b)
+            );
+            assert_eq!(current.status, crate::AutomationStatus::Active);
+            assert_eq!(current.runs[0].status, crate::AutomationRunStatus::Failed);
+            assert_eq!(current.runs[0].session_id.as_deref(), Some(id));
+            assert_eq!(
+                current.runs[0].session_transcript_path.as_deref(),
+                Some(path_a)
+            );
+        }
     }
     #[tokio::test]
     async fn v2_lifecycle_and_model_snapshot_survive_claim_and_completion() {
@@ -879,18 +1716,29 @@ mod tests {
                 .await
                 .is_none()
         );
-        crate::bind_automation_run_session(fs.as_ref(), root, &request, "owned-chat")
-            .await
-            .unwrap();
+        crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            TEST_SESSION_ID,
+            TEST_TRANSCRIPT_PATH,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
         let bound = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
             .tasks
             .remove(0)
             .automation
             .unwrap();
-        assert_eq!(bound.owned_session_id.as_deref(), Some("owned-chat"));
-        assert_eq!(bound.runs[0].session_id.as_deref(), Some("owned-chat"));
+        assert_eq!(bound.owned_session_id.as_deref(), Some(TEST_SESSION_ID));
+        assert_eq!(bound.runs[0].session_id.as_deref(), Some(TEST_SESSION_ID));
         let result = Ok(crate::AutomationRunResult {
-            session_id: "owned-chat".into(),
+            session_id: TEST_SESSION_ID.into(),
+            session_transcript_path: None,
+            session_mode: None,
+            session_scope_key: None,
             summary: "result".into(),
         });
         assert_eq!(
@@ -910,7 +1758,7 @@ mod tests {
             .remove(0);
         let config = task.automation.unwrap();
         assert_eq!(config.status, crate::AutomationStatus::Completed);
-        assert_eq!(config.owned_session_id.as_deref(), Some("owned-chat"));
+        assert_eq!(config.owned_session_id.as_deref(), Some(TEST_SESSION_ID));
         assert_eq!(config.runs[0].summary.as_deref(), Some("result"));
     }
     #[tokio::test]
@@ -953,9 +1801,17 @@ mod tests {
         let request = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
             .await
             .unwrap();
-        crate::bind_automation_run_session(fs.as_ref(), root, &request, "busy-session")
-            .await
-            .unwrap();
+        crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            TEST_SESSION_ID,
+            TEST_TRANSCRIPT_PATH,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             crate::finish_automation_run_checked(
                 fs.as_ref(),
@@ -975,7 +1831,7 @@ mod tests {
             .unwrap();
         assert_eq!(pending.runs[0].session_id, None);
         assert_eq!(pending.runs[0].owner_pid, None);
-        assert_eq!(pending.owned_session_id.as_deref(), Some("busy-session"));
+        assert_eq!(pending.owned_session_id.as_deref(), Some(TEST_SESSION_ID));
         let next = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
             .await
             .unwrap();
@@ -1094,6 +1950,9 @@ mod tests {
                 &retry,
                 &Ok(crate::AutomationRunResult {
                     session_id: "chat".into(),
+                    session_transcript_path: None,
+                    session_mode: None,
+                    session_scope_key: None,
                     summary: "done".into()
                 }),
                 (NOW + 180) * 1000
@@ -1264,9 +2123,17 @@ mod tests {
             )
             .await
             .unwrap();
-            let error = crate::bind_automation_run_session(fs.as_ref(), root, &request, "chat")
-                .await
-                .unwrap_err();
+            let error = crate::bind_automation_run_session_with_source(
+                fs.as_ref(),
+                root,
+                &request,
+                TEST_SESSION_ID,
+                TEST_TRANSCRIPT_PATH,
+                "code",
+                Some(TEST_SESSION_SCOPE),
+            )
+            .await
+            .unwrap_err();
             assert!(error.starts_with(crate::AUTOMATION_CANCELLED_PREFIX));
             assert_eq!(
                 crate::finish_automation_run_checked(
@@ -1304,9 +2171,17 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::bind_automation_run_session(fs.as_ref(), root, &request, "chat")
-            .await
-            .unwrap();
+        crate::bind_automation_run_session_with_source(
+            fs.as_ref(),
+            root,
+            &request,
+            TEST_SESSION_ID,
+            TEST_TRANSCRIPT_PATH,
+            "code",
+            Some(TEST_SESSION_SCOPE),
+        )
+        .await
+        .unwrap();
         let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
         doc.tasks[0].automation.as_mut().unwrap().status = crate::AutomationStatus::Paused;
         crate::tasks_file::write_automation_tasks_body(
@@ -1322,7 +2197,10 @@ mod tests {
                 root,
                 &request,
                 &Ok(crate::AutomationRunResult {
-                    session_id: "chat".into(),
+                    session_id: TEST_SESSION_ID.into(),
+                    session_transcript_path: None,
+                    session_mode: None,
+                    session_scope_key: None,
                     summary: "finished".into()
                 }),
                 NOW * 1000

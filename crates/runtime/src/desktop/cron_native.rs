@@ -2,7 +2,9 @@
 use crate::desktop::{ConversationOrchestrator, DesktopConfig};
 use async_trait::async_trait;
 use futures::FutureExt as _;
+use lingxi_core::host::session_context::ConversationMode;
 use lingxi_core::host::OrchestratorHandle;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -302,6 +304,95 @@ impl cron::CronJobFirer for NativeCronFirer {
         self.supervisor.cancel_run(run_id).await
     }
 }
+
+#[derive(Debug, Clone)]
+struct ScheduledSource {
+    id: lingxi_core::types::SessionId,
+    path: PathBuf,
+    mode: ConversationMode,
+    scope: String,
+    existing: bool,
+}
+
+fn scheduled_source(
+    config: &DesktopConfig,
+    automation: &cron::CronAutomation,
+) -> Result<ScheduledSource, String> {
+    use cron::automation::RunMode;
+    cron::validate_automation_source(automation).map_err(|error| format!("paused:{error}"))?;
+    let (id, path, mode, scope, existing) = match automation.run_mode {
+        RunMode::SelectedSession => (
+            automation.target_session_id.as_deref(),
+            automation.target_session_transcript_path.as_deref(),
+            automation.target_session_mode.as_deref(),
+            automation.target_session_scope_key.as_deref(),
+            true,
+        ),
+        RunMode::TaskSession if automation.owned_session_id.is_some() => {
+            if automation.owned_session_mode != automation.session_mode
+                || automation.owned_session_scope_key != automation.session_scope_key
+            {
+                return Err("paused:Task session owner or mode changed".into());
+            }
+            (
+                automation.owned_session_id.as_deref(),
+                automation.owned_session_transcript_path.as_deref(),
+                automation.owned_session_mode.as_deref(),
+                automation.owned_session_scope_key.as_deref(),
+                true,
+            )
+        }
+        RunMode::NewSession | RunMode::TaskSession => {
+            if automation.run_mode == RunMode::TaskSession
+                && (automation.owned_session_transcript_path.is_some()
+                    || automation.owned_session_mode.is_some()
+                    || automation.owned_session_scope_key.is_some())
+            {
+                return Err("paused:Task session source is incomplete".into());
+            }
+            (
+                None,
+                None,
+                automation.session_mode.as_deref(),
+                automation.session_scope_key.as_deref(),
+                false,
+            )
+        }
+    };
+    let mode = mode
+        .and_then(ConversationMode::from_str)
+        .ok_or("paused:Scheduled session mode is missing or invalid")?;
+    let scope = scope
+        .filter(|value| !value.trim().is_empty() && value.len() <= 8192)
+        .ok_or("paused:Scheduled session owner is missing or invalid")?
+        .to_owned();
+    let id = match id {
+        Some(id) => lingxi_core::types::SessionId::parse_prefixed(id)
+            .ok_or("paused:Invalid scheduled session ID")?,
+        None if !existing => lingxi_core::types::SessionId::new(),
+        None => return Err("paused:Scheduled session ID is missing".into()),
+    };
+    let path = match path {
+        Some(path) => PathBuf::from(path),
+        None if !existing => session::jsonl::session_path(
+            &config.lingxi_home,
+            &config.cwd.to_string_lossy(),
+            &id.as_uuid().to_string(),
+        ),
+        None => return Err("paused:Scheduled transcript path is missing".into()),
+    };
+    if !path.is_absolute() || path.to_str().is_none() {
+        return Err("paused:Scheduled transcript path is not absolute UTF-8".into());
+    }
+    Ok(ScheduledSource {
+        id,
+        path,
+        mode,
+        scope,
+        existing,
+    })
+}
+
 impl NativeCronFirer {
     async fn fire_owned(
         &self,
@@ -312,22 +403,23 @@ impl NativeCronFirer {
         if cancel.is_cancelled() {
             return Err("cancelled:Scheduled run cancelled".into());
         }
-        use cron::automation::RunMode;
         let automation = request
             .task
             .automation
             .as_ref()
             .ok_or("Missing automation settings")?;
-        let target = match automation.run_mode {
-            RunMode::NewSession => None,
-            RunMode::SelectedSession => Some(
-                automation
-                    .target_session_id
-                    .as_deref()
-                    .ok_or("paused:Choose a target session")?,
-            ),
-            RunMode::TaskSession => automation.owned_session_id.as_deref(),
-        };
+        let mut scheduler_config = self.config.clone();
+        if !scheduler_config.cwd.is_absolute() || !scheduler_config.lingxi_home.is_absolute() {
+            let process_cwd = std::env::current_dir()
+                .map_err(|error| format!("paused:Cannot resolve scheduled workspace: {error}"))?;
+            if !scheduler_config.cwd.is_absolute() {
+                scheduler_config.cwd = process_cwd.join(&scheduler_config.cwd);
+            }
+            if !scheduler_config.lingxi_home.is_absolute() {
+                scheduler_config.lingxi_home = process_cwd.join(&scheduler_config.lingxi_home);
+            }
+        }
+        let source = scheduled_source(&scheduler_config, automation)?;
         let reasoning: client::protocol::controls::ReasoningSelectionDto =
             serde_json::from_value(automation.reasoning.clone())
                 .map_err(|e| format!("paused:Invalid reasoning: {e}"))?;
@@ -353,48 +445,93 @@ impl NativeCronFirer {
         if !owner.workspace_trusted().await {
             return Err("paused:Workspace is not trusted".into());
         }
-        if let Some(target) = target {
-            if lingxi_core::types::SessionId::parse_prefixed(target)
-                == Some(owner.current_session_id().await)
-            {
-                let fs = super::platform::DesktopFileSystem::new(self.config.cwd.clone());
-                let expected = lingxi_core::types::SessionId::parse_prefixed(target)
-                    .ok_or("paused:Invalid session ID")?;
-                let (outcome, captured_session, summary) = owner
-                    .run_scheduled_turn_in_session(
-                        expected,
-                        request.task.prompt.clone(),
-                        &automation.model,
-                        reasoning,
-                        cancel.clone(),
-                        cron::automation::bind_automation_run_session(
-                            &fs,
-                            &self.config.cwd,
-                            request,
-                            target,
-                        ),
-                    )
-                    .await?;
-                validate_outcome(outcome)?;
-                debug_assert_eq!(captured_session, expected);
-                return Ok(cron::automation::AutomationRunResult {
-                    session_id: target.to_string(),
-                    summary,
-                });
-            }
+        if source.existing && source.id == owner.current_session_id().await {
+            let fs = super::platform::DesktopFileSystem::new(scheduler_config.cwd.clone());
+            let expected = source.id;
+            let binding_owner = owner.clone();
+            let binding_source = source.clone();
+            let home = scheduler_config.lingxi_home.clone();
+            let (outcome, captured_session, summary) = owner
+                .run_scheduled_turn_in_session(
+                    expected,
+                    request.task.prompt.clone(),
+                    &automation.model,
+                    reasoning,
+                    cancel.clone(),
+                    async {
+                        validate_live_source(&home, &binding_source, &binding_owner).await?;
+                        bind_source(&fs, &scheduler_config.cwd, request, &binding_source).await
+                    },
+                )
+                .await?;
+            validate_outcome(outcome)?;
+            debug_assert_eq!(captured_session, expected);
+            return Ok(cron::automation::AutomationRunResult {
+                session_id: source.id.as_uuid().to_string(),
+                session_transcript_path: Some(source.path.to_string_lossy().into_owned()),
+                session_mode: Some(source.mode.as_str().into()),
+                session_scope_key: Some(source.scope.clone()),
+                summary,
+            });
         }
-        let id = match target {
-            Some(id) => lingxi_core::types::SessionId::parse_prefixed(id)
-                .ok_or("paused:Invalid session ID")?,
-            None => lingxi_core::types::SessionId::new(),
-        };
-        let (lease, replayed) = claim_and_replay_target(&self.config, id, target.is_some()).await?;
-        let mut cfg = self.config.clone();
-        cfg.session_id_override = Some(id.as_uuid().to_string());
-        cfg.session_writer_lease = Some(lease);
+        let (lease, captured) = claim_and_capture_target(&scheduler_config, &source).await?;
+        let mut cfg = scheduler_config.clone();
+        cfg.session_id_override = Some(source.id.as_uuid().to_string());
+        cfg.session_writer_lease = Some(lease.clone());
         cfg.session_persistence = true;
         cfg.session_agent_observer = None;
         cfg.parent_session_id = None;
+        cfg.initial_conversation_mode = Some(source.mode);
+        cfg.session_transcript_path = Some(source.path.clone());
+        cfg.session_transcript_authority = None;
+        cfg.session_resume_snapshot = None;
+        cfg.session_resume_target_snapshot = None;
+        cfg.session_resume_cost = None;
+        cfg.defer_session_start = false;
+        cfg.restore_draft = !source.existing;
+        cfg.durable_draft_title = (!source.existing).then(|| {
+            automation
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("Scheduled task")
+                .to_owned()
+        });
+        let fs = super::platform::DesktopFileSystem::new(scheduler_config.cwd.clone());
+        if let Some(captured) = captured {
+            cfg.session_transcript_path = Some(captured.path.clone());
+            if let Some(cwd) = captured.cwd.filter(|cwd| cwd.is_dir()) {
+                cfg.cwd = cwd;
+            }
+            cfg.session_resume_cost = super::session_state::capture_resume_cost(
+                &cfg.lingxi_home,
+                source.id.as_uuid(),
+                lease.clone(),
+                &captured.content,
+            )
+            .await
+            .map_err(|error| format!("paused:Cannot capture scheduled session: {error}"))?;
+            bind_source(&fs, &scheduler_config.cwd, request, &source).await?;
+            let verify_home = scheduler_config.lingxi_home.clone();
+            let verify_source = source.clone();
+            let verified = tokio::task::spawn_blocking(move || {
+                capture_target_source(&verify_home, &verify_source)
+            })
+            .await
+            .map_err(|error| format!("paused:Target capture failed: {error}"))??;
+            if verified.path != captured.path
+                || verified.root_identity != captured.root_identity
+                || verified.file_identity != captured.file_identity
+                || verified.content != captured.content
+            {
+                return Err("paused:Target transcript changed before runtime assembly".into());
+            }
+            cfg.session_transcript_authority = Some(captured.authority.clone());
+            cfg.session_resume_snapshot = Some(super::DesktopSessionResumeSnapshot {
+                source_session_id: source.id.as_uuid().to_string(),
+                content: captured.content.into(),
+            });
+        }
         let runtime = CHILD_RUNTIME
             .scope(
                 true,
@@ -410,27 +547,14 @@ impl NativeCronFirer {
             if cancel.is_cancelled() {
                 return Err("cancelled:Scheduled run cancelled".into());
             }
-            let fs = super::platform::DesktopFileSystem::new(self.config.cwd.clone());
-            cron::automation::bind_automation_run_session(
-                &fs,
-                &self.config.cwd,
-                request,
-                &id.as_uuid().to_string(),
-            )
-            .await?;
-            if let Some(replayed) = replayed {
-                let snapshot = replayed.handle_runtime_snapshot();
-                runtime
-                    .orchestrator
-                    .resume_session(
-                        id,
-                        replayed.state.history,
-                        replayed.last_message_uuid.map(|id| id.to_string()),
-                        None,
-                        snapshot,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
+            if !source.existing {
+                validate_live_source(
+                    &scheduler_config.lingxi_home,
+                    &source,
+                    &runtime.orchestrator,
+                )
+                .await?;
+                bind_source(&fs, &scheduler_config.cwd, request, &source).await?;
             }
             let outcome = runtime
                 .orchestrator
@@ -441,7 +565,7 @@ impl NativeCronFirer {
                     cancel.clone(),
                 )
                 .await?;
-            finish(&runtime.orchestrator, outcome).await
+            finish(&runtime.orchestrator, outcome, &source).await
         })
         .catch_unwind()
         .await
@@ -451,19 +575,182 @@ impl NativeCronFirer {
     }
 }
 fn child_build_error(error: crate::desktop::BuildError) -> String {
-    // Writer contention is classified by claim_and_replay_target before build.
+    // Writer contention is classified before building the child runtime.
     // A failed child configuration requires repair, not an unbounded busy retry.
     format!("paused:Cannot initialize scheduled runtime: {error}")
 }
 
-async fn claim_and_replay_target(
+struct CapturedSource {
+    path: PathBuf,
+    content: String,
+    cwd: Option<PathBuf>,
+    root_identity: lingxi_core::host::rooted_fs::RootIdentity,
+    file_identity: lingxi_core::host::rooted_fs::RootIdentity,
+    authority: session::jsonl::writer::TranscriptFileAuthority,
+}
+
+async fn bind_source(
+    fs: &dyn lingxi_core::host::FileSystem,
+    root: &Path,
+    request: &cron::AutomationRunRequest,
+    source: &ScheduledSource,
+) -> Result<(), String> {
+    cron::automation::bind_automation_run_session_with_source(
+        fs,
+        root,
+        request,
+        &source.id.as_uuid().to_string(),
+        source
+            .path
+            .to_str()
+            .ok_or("paused:Invalid scheduled transcript path")?,
+        source.mode.as_str(),
+        Some(&source.scope),
+    )
+    .await
+}
+
+async fn validate_live_source(
+    home: &Path,
+    source: &ScheduledSource,
+    owner: &ConversationOrchestrator,
+) -> Result<(), String> {
+    let mode = owner.conversation_mode().await;
+    if mode.session_id != source.id.as_uuid().to_string() || mode.mode != source.mode {
+        return Err("paused:Live scheduled session mode or identity changed".into());
+    }
+    let writer = owner
+        .session_transcript_writer()
+        .ok_or("paused:Live session has no transcript writer")?;
+    let active = std::fs::canonicalize(writer.active_path())
+        .map_err(|error| format!("paused:Live transcript is unavailable: {error}"))?;
+    let home = home.to_path_buf();
+    let source = source.clone();
+    let captured = tokio::task::spawn_blocking(move || capture_target_source(&home, &source))
+        .await
+        .map_err(|error| format!("paused:Target capture failed: {error}"))??;
+    if active != captured.path {
+        return Err("paused:Selected session belongs to another transcript".into());
+    }
+    writer
+        .verify_active_transcript_source(&captured.authority)
+        .map_err(|error| format!("paused:Live transcript source changed: {error}"))?;
+    Ok(())
+}
+
+/// Read an exact file under the projects root with the same pinned root and
+/// inode across the entire capture. Callers hold the session writer lease or
+/// the live owner's turn gate; neither can authorize a different source.
+fn target_source_error(error: impl std::fmt::Display) -> String {
+    format!("paused:Target session is unavailable: {error}")
+}
+
+fn capture_target_source(home: &Path, source: &ScheduledSource) -> Result<CapturedSource, String> {
+    capture_target_source_with_hook(home, source, || {})
+}
+
+fn capture_target_source_with_hook(
+    home: &Path,
+    source: &ScheduledSource,
+    before_recheck: impl FnOnce(),
+) -> Result<CapturedSource, String> {
+    use lingxi_core::host::rooted_fs::{
+        open_read_file_pinned, opened_file_identity, root_identity, validate_open_file_single_link,
+    };
+    use std::io::Read;
+    let logical_home = if home.is_absolute() {
+        home.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(target_source_error)?
+            .join(home)
+    };
+    // Only the configured home is canonicalized. Keep `projects`, the bucket,
+    // and the selected filename as original relative components for the
+    // no-follow open, so a replaced project directory cannot redirect a run.
+    let root = std::fs::canonicalize(&logical_home).map_err(target_source_error)?;
+    let logical_projects = logical_home.join("projects");
+    let canonical_projects = root.join("projects");
+    let selected = source
+        .path
+        .strip_prefix(&logical_projects)
+        .or_else(|_| source.path.strip_prefix(&canonical_projects))
+        .map_err(|_| "paused:Target transcript is outside the projects root")?;
+    if selected.components().count() != 2
+        || !selected
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        || selected.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        || selected
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            != Some(source.id.as_uuid())
+    {
+        return Err("paused:Target transcript does not match the session identity".into());
+    }
+    let relative = Path::new("projects").join(selected);
+    let path = root.join(&relative);
+    let root_id = root_identity(&root).map_err(target_source_error)?;
+    let mut file =
+        open_read_file_pinned(&root, &relative, Some(&root_id)).map_err(target_source_error)?;
+    validate_open_file_single_link(&file).map_err(target_source_error)?;
+    let identity = opened_file_identity(&file).map_err(target_source_error)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(target_source_error)?;
+    let loaded =
+        session::jsonl::loader::route_captured_session_source(&path, source.id.as_uuid(), &content)
+            .map_err(target_source_error)?;
+    if loaded.malformed_line_count != 0 {
+        return Err("paused:Target transcript is malformed".into());
+    }
+    let actual = session::JsonlWriter::fixed_session_mode_from_source(
+        &content,
+        &source.id.as_uuid().to_string(),
+    )
+    .map_err(target_source_error)?;
+    if actual != source.mode {
+        return Err("paused:Target session mode does not match the selected source".into());
+    }
+    before_recheck();
+    let mut current =
+        open_read_file_pinned(&root, &relative, Some(&root_id)).map_err(target_source_error)?;
+    validate_open_file_single_link(&current).map_err(target_source_error)?;
+    if opened_file_identity(&current).map_err(target_source_error)? != identity {
+        return Err("paused:Target transcript changed during capture".into());
+    }
+    let mut current_content = String::new();
+    current
+        .read_to_string(&mut current_content)
+        .map_err(target_source_error)?;
+    if current_content != content
+        || std::fs::canonicalize(&source.path).map_err(target_source_error)? != path
+    {
+        return Err("paused:Target transcript changed during capture".into());
+    }
+    let cwd = session::jsonl::loader::transcript_workspace_path(&path, &loaded).map(PathBuf::from);
+    let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+        root, relative, root_id, identity,
+    )
+    .map_err(target_source_error)?;
+    Ok(CapturedSource {
+        path,
+        content,
+        cwd,
+        root_identity: root_id,
+        file_identity: identity,
+        authority,
+    })
+}
+
+async fn claim_and_capture_target(
     config: &DesktopConfig,
-    id: lingxi_core::types::SessionId,
-    resume: bool,
+    source: &ScheduledSource,
 ) -> Result<
     (
         lingxi_core::host::live_sessions::SharedSessionWriterLease,
-        Option<orchestrator::resume::ReplayedSession>,
+        Option<CapturedSource>,
     ),
     String,
 > {
@@ -473,7 +760,7 @@ async fn claim_and_replay_target(
     let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
         config.lingxi_home.join("sessions"),
     )
-    .claim_session_id(&id.as_uuid().to_string(), std::process::id())
+    .claim_session_id(&source.id.as_uuid().to_string(), std::process::id())
     .map_err(|error| {
         let prefix = if matches!(
             error.kind(),
@@ -486,27 +773,24 @@ async fn claim_and_replay_target(
         format!("{prefix}:Cannot acquire scheduled session: {error}")
     })?
     .into_shared();
-    let replayed = if resume {
-        let fs = Arc::new(super::platform::DesktopFileSystem::new(config.cwd.clone()));
+    let captured = if source.existing {
+        let home = config.lingxi_home.clone();
+        let source = source.clone();
         Some(
-            orchestrator::replay_session_state(
-                &config.lingxi_home,
-                &config.cwd.to_string_lossy(),
-                id.as_uuid(),
-                fs,
-            )
-            .await
-            .map_err(|error| format!("paused:Target session is unavailable: {error}"))?,
+            tokio::task::spawn_blocking(move || capture_target_source(&home, &source))
+                .await
+                .map_err(|error| format!("paused:Target capture failed: {error}"))??,
         )
     } else {
         None
     };
-    Ok((lease, replayed))
+    Ok((lease, captured))
 }
 
 async fn finish(
     orch: &ConversationOrchestrator,
     outcome: orchestrator::conversation::TurnOutcome,
+    source: &ScheduledSource,
 ) -> Result<cron::automation::AutomationRunResult, String> {
     validate_outcome(outcome)?;
     let summary = orch
@@ -523,7 +807,10 @@ async fn finish(
         .map(lingxi_core::types::ConversationMessage::text_content)
         .unwrap_or_default();
     Ok(cron::automation::AutomationRunResult {
-        session_id: orch.current_session_id().await.as_uuid().to_string(),
+        session_id: source.id.as_uuid().to_string(),
+        session_transcript_path: Some(source.path.to_string_lossy().into_owned()),
+        session_mode: Some(source.mode.as_str().into()),
+        session_scope_key: Some(source.scope.clone()),
         summary,
     })
 }
@@ -541,6 +828,245 @@ fn validate_outcome(outcome: orchestrator::conversation::TurnOutcome) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn automation(value: serde_json::Value) -> cron::CronAutomation {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn scheduled_source_requires_complete_immutable_owner_and_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let config = DesktopConfig {
+            cwd: root.path().join("cwd"),
+            lingxi_home: root.path().join("home"),
+            ..Default::default()
+        };
+        let id = uuid::Uuid::new_v4();
+        let path = root.path().join("selected.jsonl");
+        let mut task = automation(serde_json::json!({
+            "version":2, "model":"test/model", "runMode":"selected_session",
+            "targetSessionId":id, "targetSessionTranscriptPath":path,
+            "targetSessionMode":"chat", "targetSessionScopeKey":"global"
+        }));
+        let selected = scheduled_source(&config, &task).unwrap();
+        assert_eq!(selected.id.as_uuid(), id);
+        assert_eq!(selected.mode, ConversationMode::Chat);
+        assert_eq!(selected.scope, "global");
+        task.target_session_transcript_path = None;
+        assert!(scheduled_source(&config, &task).is_err());
+
+        let mut owned = automation(serde_json::json!({
+            "version":2, "model":"test/model", "runMode":"task_session",
+            "sessionMode":"chat", "sessionScopeKey":"global", "ownedSessionId":id,
+            "ownedSessionTranscriptPath":path, "ownedSessionMode":"chat", "ownedSessionScopeKey":"global"
+        }));
+        assert_eq!(
+            scheduled_source(&config, &owned).unwrap().mode,
+            ConversationMode::Chat
+        );
+        owned.session_mode = Some("code".into());
+        assert!(scheduled_source(&config, &owned).is_err());
+        owned.session_mode = Some("chat".into());
+        owned.owned_session_transcript_path = None;
+        assert!(scheduled_source(&config, &owned).is_err());
+
+        let fresh = automation(serde_json::json!({
+            "version":2, "model":"test/model", "runMode":"new_session",
+            "sessionMode":"chat", "sessionScopeKey":"global"
+        }));
+        let source = scheduled_source(&config, &fresh).unwrap();
+        assert!(!source.existing);
+        assert_eq!(source.mode, ConversationMode::Chat);
+        assert_eq!(source.scope, "global");
+    }
+
+    #[tokio::test]
+    async fn selected_source_never_switches_to_a_same_uuid_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = lingxi_core::types::SessionId::new();
+        let path = |cwd: &Path| {
+            session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.as_uuid().to_string())
+        };
+        let first = path(&a);
+        let other = path(&b);
+        for (file, cwd, text, mode) in [
+            (&first, &a, "selected A", "chat"),
+            (&other, &b, "sibling B", "code"),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, format!("{}\n{}\n",
+                serde_json::json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(), "sessionMode":mode, "instructionEpoch":0}),
+                serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+                    "sessionId":id.as_uuid(), "cwd":cwd, "message":{"role":"user", "content":text}}),
+            )).unwrap();
+        }
+        let config = DesktopConfig {
+            cwd: a,
+            lingxi_home: home.clone(),
+            ..Default::default()
+        };
+        let source = ScheduledSource {
+            id,
+            path: first.clone(),
+            mode: ConversationMode::Chat,
+            scope: "global".into(),
+            existing: true,
+        };
+        let other_before = std::fs::read(&other).unwrap();
+        let (lease, selected) = claim_and_capture_target(&config, &source).await.unwrap();
+        let selected = selected.unwrap();
+        assert_eq!(selected.path, first.canonicalize().unwrap());
+        assert!(selected.content.contains("selected A"));
+        assert!(!selected.content.contains("sibling B"));
+        drop(lease);
+        let mut changed_mode = source.clone();
+        changed_mode.mode = ConversationMode::Code;
+        assert!(claim_and_capture_target(&config, &changed_mode)
+            .await
+            .err()
+            .unwrap()
+            .contains("mode"));
+        std::fs::remove_file(first).unwrap();
+        assert!(claim_and_capture_target(&config, &source).await.is_err());
+        assert_eq!(std::fs::read(other).unwrap(), other_before);
+    }
+
+    #[test]
+    fn target_capture_rejects_inode_or_profile_changes_before_recheck() {
+        for change in ["inode", "profile"] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("home");
+            let cwd = temp.path().join("project");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let id = lingxi_core::types::SessionId::new();
+            let path = session::jsonl::session_path(
+                &home,
+                &cwd.to_string_lossy(),
+                &id.as_uuid().to_string(),
+            );
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(), "sessionMode":"chat", "instructionEpoch":4}),
+                serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+                    "sessionId":id.as_uuid(), "cwd":cwd, "message":{"role":"user", "content":"selected"}}),
+            );
+            std::fs::write(&path, &original).unwrap();
+            let source = ScheduledSource {
+                id,
+                path: path.clone(),
+                mode: ConversationMode::Chat,
+                scope: "global".into(),
+                existing: true,
+            };
+            let error = capture_target_source_with_hook(&home, &source, || {
+                if change == "inode" {
+                    let replacement = path.with_extension("replacement");
+                    std::fs::write(&replacement, &original).unwrap();
+                    std::fs::rename(replacement, &path).unwrap();
+                } else {
+                    let changed =
+                        original.replace("\"instructionEpoch\":4", "\"instructionEpoch\":5");
+                    assert_ne!(changed, original);
+                    std::fs::write(&path, changed).unwrap();
+                }
+            })
+            .err()
+            .expect("changed authority must not be captured");
+            assert!(error.contains("changed"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_target_rejects_symlinked_projects_root_or_bucket() {
+        use std::os::unix::fs::symlink;
+        for changed in ["root", "bucket"] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("home");
+            let a = temp.path().join("a");
+            let b = temp.path().join("b");
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            let id = lingxi_core::types::SessionId::new();
+            let path_for = |cwd: &Path| {
+                session::jsonl::session_path(
+                    &home,
+                    &cwd.to_string_lossy(),
+                    &id.as_uuid().to_string(),
+                )
+            };
+            let selected = path_for(&a);
+            let sibling = path_for(&b);
+            for (path, text) in [(&selected, "selected"), (&sibling, "sibling")] {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, format!("{}\n{}\n",
+                    serde_json::json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(), "sessionMode":"code", "instructionEpoch":0}),
+                    serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+                        "sessionId":id.as_uuid(), "message":{"role":"user", "content":text}}),
+                )).unwrap();
+            }
+            let sibling_before = std::fs::read(&sibling).unwrap();
+            let source = ScheduledSource {
+                id,
+                path: selected.clone(),
+                mode: ConversationMode::Code,
+                scope: "project".into(),
+                existing: true,
+            };
+            if changed == "bucket" {
+                let bucket = selected.parent().unwrap();
+                std::fs::rename(bucket, bucket.with_extension("saved")).unwrap();
+                symlink(sibling.parent().unwrap(), bucket).unwrap();
+            } else {
+                let projects = home.join("projects");
+                let saved = home.join("projects-saved");
+                std::fs::rename(&projects, &saved).unwrap();
+                symlink(saved, projects).unwrap();
+            }
+            assert!(capture_target_source(&home, &source).is_err(), "{changed}");
+            assert_eq!(std::fs::read(&sibling).unwrap(), sibling_before);
+        }
+    }
+
+    #[test]
+    fn selected_target_rejects_malformed_history_without_writes() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = lingxi_core::types::SessionId::new();
+        let path =
+            session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.as_uuid().to_string());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{}\n{}\n{{broken",
+            serde_json::json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(), "sessionMode":"code", "instructionEpoch":0}),
+            serde_json::json!({"type":"user", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+                "sessionId":id.as_uuid(), "message":{"role":"user", "content":"keep"}}),
+        ).unwrap();
+        drop(file);
+        let before = std::fs::read(&path).unwrap();
+        let source = ScheduledSource {
+            id,
+            path: path.clone(),
+            mode: ConversationMode::Code,
+            scope: "project".into(),
+            existing: true,
+        };
+        assert!(capture_target_source(&home, &source)
+            .err()
+            .unwrap()
+            .contains("malformed"));
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
     #[tokio::test]
     async fn target_replay_waits_for_writer_ownership_and_keeps_the_latest_parent() {
         let temp = tempfile::tempdir().unwrap();
@@ -552,6 +1078,18 @@ mod tests {
         };
         std::fs::create_dir_all(&config.cwd).unwrap();
         let id = lingxi_core::types::SessionId::new();
+        let path = orchestrator::transcript_paths::main_transcript_path(
+            &config.lingxi_home,
+            &config.cwd.to_string_lossy(),
+            &id.as_uuid().to_string(),
+        );
+        let source = ScheduledSource {
+            id,
+            path: path.clone(),
+            mode: ConversationMode::Code,
+            scope: "project".into(),
+            existing: true,
+        };
         let writers = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
             config.lingxi_home.join("sessions"),
         );
@@ -560,22 +1098,19 @@ mod tests {
             .unwrap();
         // No transcript exists yet: a premature read would report unavailable
         // instead of busy while the foreground owns this session.
-        let error = claim_and_replay_target(&config, id, true)
+        let error = claim_and_capture_target(&config, &source)
             .await
             .err()
             .unwrap();
         assert!(error.starts_with("busy:"), "{error}");
         let message_id = lingxi_core::types::SessionId::new().as_uuid();
-        let path = orchestrator::transcript_paths::main_transcript_path(
-            &config.lingxi_home,
-            &config.cwd.to_string_lossy(),
-            &id.as_uuid().to_string(),
-        );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
             format!(
-                "{}\n",
+                "{}\n{}\n",
+                serde_json::json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(),
+                    "sessionMode":"code", "instructionEpoch":0}),
                 serde_json::json!({
                     "type": "user", "uuid": message_id, "parentUuid": null,
                     "sessionId": id.as_uuid(), "timestamp": "2026-09-12T12:00:00Z",
@@ -586,14 +1121,14 @@ mod tests {
         )
         .unwrap();
         drop(foreground);
-        let (lease, replayed) = claim_and_replay_target(&config, id, true).await.unwrap();
-        let replayed = replayed.unwrap();
-        assert_eq!(replayed.last_message_uuid, Some(message_id));
-        assert_eq!(replayed.state.history.len(), 1);
-        assert_eq!(
-            replayed.state.history[0].text_content(),
-            "latest foreground message"
-        );
+        let (lease, captured) = claim_and_capture_target(&config, &source).await.unwrap();
+        let captured = captured.unwrap();
+        let loaded = session::jsonl::route_lines(&captured.content);
+        let (messages, _) =
+            session::jsonl::build_conversation_chain(&loaded, &id.as_uuid().to_string());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].uuid, message_id.to_string());
+        assert!(captured.content.contains("latest foreground message"));
         assert!(writers
             .claim_session_id(&id.as_uuid().to_string(), std::process::id())
             .is_err());
@@ -713,6 +1248,9 @@ mod supervision_tests {
                         .await;
                         Ok(cron::AutomationRunResult {
                             session_id: "session".into(),
+                            session_transcript_path: None,
+                            session_mode: None,
+                            session_scope_key: None,
                             summary: "done".into(),
                         })
                     })
@@ -803,7 +1341,14 @@ mod supervision_tests {
             cwd: temp.path().to_path_buf(),
             ..Default::default()
         };
-        let error = claim_and_replay_target(&config, lingxi_core::types::SessionId::new(), false)
+        let source = ScheduledSource {
+            id: lingxi_core::types::SessionId::new(),
+            path: temp.path().join("new.jsonl"),
+            mode: ConversationMode::Code,
+            scope: "project".into(),
+            existing: false,
+        };
+        let error = claim_and_capture_target(&config, &source)
             .await
             .err()
             .unwrap();

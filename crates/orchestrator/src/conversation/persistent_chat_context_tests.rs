@@ -429,6 +429,22 @@ async fn actual_turn_uses_only_the_projection_and_keeps_canonical_history() {
     assert!(!calls[0]
         .iter()
         .any(|message| message.text_content().starts_with("old user 0:")));
+    let manifest = fixture.orch.current_context_manifest().await;
+    assert!(manifest.projected);
+    let recorded = manifest
+        .blocks
+        .iter()
+        .filter_map(|block| block.id.strip_prefix("message:"))
+        .collect::<HashSet<_>>();
+    let sent = calls[0]
+        .iter()
+        .map(|message| message.id().to_string())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        recorded,
+        sent.iter().map(String::as_str).collect::<HashSet<_>>(),
+        "context inventory must describe the actual projected request"
+    );
     let summaries = fixture.summary.calls.lock().await;
     assert_eq!(summaries.len(), 1);
     assert!(matches!(

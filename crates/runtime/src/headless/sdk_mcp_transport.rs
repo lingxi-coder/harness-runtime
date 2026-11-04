@@ -883,7 +883,7 @@ mod tests {
         config.isolated_credential_storage = true;
         config.use_noop_permission_gate = true;
         config.composition = Some(DesktopSessionComposition::HeadlessCli);
-        let prepared = session::prepare(&mut config, &crate::headless::SessionStart::New)
+        let prepared = session::prepare(&mut config, &crate::headless::SessionStart::New, false)
             .await
             .expect("new session preparation");
         let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(

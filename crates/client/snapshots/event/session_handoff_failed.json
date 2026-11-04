@@ -1,0 +1,5 @@
+{
+  "type": "session_handoff_failed",
+  "request_id": "handoff-1",
+  "message": "unavailable"
+}

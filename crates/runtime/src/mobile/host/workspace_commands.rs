@@ -94,6 +94,25 @@ impl MobileWorkspaceCatalog {
 }
 
 impl MobileEngineHandle {
+    pub(super) async fn capture_workspace_session_source(
+        &self,
+        session_id: &str,
+        transcript_path: &str,
+    ) -> Result<super::restoration::InitialMobileSession, ClientError> {
+        let mut config = self.current_mobile_config()?;
+        config.initial_session_id = Some(session_id.to_string());
+        config.initial_session_transcript_path = Some(PathBuf::from(transcript_path));
+        config.session_mode = self.inner.orchestrator.conversation_mode().await.mode;
+        super::restoration::capture_initial_mobile_session(&config, &self.firer_platform)
+            .await
+            .map_err(|error| ClientError::Rejected {
+                message: error.to_string(),
+            })?
+            .ok_or_else(|| ClientError::Rejected {
+                message: "selected session source is missing".into(),
+            })
+    }
+
     pub(super) fn current_mobile_config(&self) -> Result<super::MobileConfig, ClientError> {
         let mut cfg = self.firer_cfg.clone();
         let logical = PathBuf::from(self.session_cwd());
@@ -370,6 +389,7 @@ impl MobileEngineHandle {
         &self,
         scope: MobileSessionDiscoveryScope,
         limit: u32,
+        mode: Option<session::jsonl::SessionMode>,
     ) -> Result<Vec<SessionRowDto>, ClientError> {
         let scope = match scope {
             MobileSessionDiscoveryScope::Current => session::jsonl::SessionDiscoveryScope::Current,
@@ -415,25 +435,28 @@ impl MobileEngineHandle {
                     }
                 }
             }
-            session::jsonl::list_recent_sessions_in_scope_with_worktrees(
+            session::jsonl::list_recent_sessions_in_scope_with_worktrees_and_mode(
                 &self.lingxi_home,
                 &self.session_cwd(),
                 scope,
                 limit as usize,
                 self.host_fs.clone(),
                 &roots,
+                mode,
             )
             .await
             .map(|catalog| catalog.sessions)
         } else {
-            session::jsonl::list_recent_sessions_in_scope(
+            session::jsonl::list_recent_sessions_in_scope_with_mode(
                 &self.lingxi_home,
                 &self.session_cwd(),
                 scope,
                 limit as usize,
                 self.host_fs.clone(),
+                mode,
             )
             .await
+            .map(|catalog| catalog.sessions)
         };
         let rows = match rows {
             Ok(rows) => rows,
@@ -479,6 +502,11 @@ impl MobileEngineHandle {
         path: String,
         expected_session_id: String,
     ) -> Result<(), ClientError> {
+        if self.firer_cfg.scheduler_controller {
+            return Err(ClientError::Rejected {
+                message: "scheduler controller does not own a conversation".into(),
+            });
+        }
         let _transition = self.loop_transition.lock().await;
         self.check_workspace_owner(&expected_session_id)?;
         self.change_workspace_inner(&path).await
@@ -489,6 +517,11 @@ impl MobileEngineHandle {
         path: String,
         expected_session_id: String,
     ) -> Result<(), ClientError> {
+        if self.firer_cfg.scheduler_controller {
+            return Err(ClientError::Rejected {
+                message: "scheduler controller does not own a conversation".into(),
+            });
+        }
         let _transition = self.loop_transition.lock().await;
         self.check_workspace_owner(&expected_session_id)?;
         self.add_workspace_inner(&path).await
@@ -500,52 +533,16 @@ impl MobileEngineHandle {
         session_id: String,
         transcript_path: String,
     ) -> Result<(), ClientError> {
-        let _transition = self.loop_transition.lock().await;
-        let catalog = self
-            .lingxi_home
-            .join("projects")
-            .canonicalize()
-            .map_err(|error| ClientError::Rejected {
-                message: error.to_string(),
-            })?;
-        // Catalog entries can be returned in host coordinates. Only accept a
-        // host path directly after canonicalizing it inside the catalog; all
-        // other inputs still pass through the guest path fence.
-        let native_catalog_path = Path::new(&transcript_path)
-            .canonicalize()
-            .ok()
-            .filter(|path| path.starts_with(&catalog));
-        let path = match native_catalog_path {
-            Some(path) => path,
-            None => self
-                .fs
-                .translate_model_path(&transcript_path, false)
-                .map_err(|error| ClientError::Rejected {
-                    message: error.to_string(),
-                })?
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(&transcript_path))
-                .canonicalize()
-                .map_err(|error| ClientError::Rejected {
-                    message: format!("session source unavailable: {error}"),
-                })?,
-        };
-        let relative = path
-            .strip_prefix(catalog)
-            .map_err(|_| ClientError::Rejected {
-                message: "selected transcript is outside the session catalog".into(),
-            })?;
-        let id = session_id.strip_prefix("sess:").unwrap_or(&session_id);
-        if relative.components().count() != 2
-            || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
-            || path.file_stem().and_then(|value| value.to_str()) != Some(id)
-        {
+        if self.firer_cfg.scheduler_controller {
             return Err(ClientError::Rejected {
-                message: "selected transcript does not match the requested session UUID".into(),
+                message: "scheduler controller does not own a conversation".into(),
             });
         }
-        self.resume_session_impl(session_id, None, None, Some(path))
-            .await
+        let _transition = self.loop_transition.lock().await;
+        let captured = self
+            .capture_workspace_session_source(&session_id, &transcript_path)
+            .await?;
+        self.resume_session_impl(session_id, captured).await
     }
 
     pub async fn workspace_sessions(
@@ -554,7 +551,7 @@ impl MobileEngineHandle {
         limit: u32,
     ) -> Result<Vec<SessionRowDto>, ClientError> {
         let _transition = self.loop_transition.lock().await;
-        self.workspace_sessions_inner(scope, limit).await
+        self.workspace_sessions_inner(scope, limit, None).await
     }
 }
 
@@ -567,6 +564,16 @@ mod tests {
     };
     use mobile_linux_api::MobileLinuxRuntime;
     use std::sync::Arc;
+
+    fn cron_automation() -> String {
+        serde_json::json!({
+            "version": 2, "status": "active", "model": "test/provider",
+            "reasoning": {"type": "automatic"}, "runMode": "new_session",
+            "sessionMode": "code", "sessionScopeKey": "project.test",
+            "notificationPolicy": "all"
+        })
+        .to_string()
+    }
 
     fn fixture() -> (
         tempfile::TempDir,
@@ -637,13 +644,23 @@ mod tests {
             None,
         )
         .unwrap();
-        let id = handle.workspace_state_snapshot().session_id;
+        let initial = handle.workspace_state_snapshot();
+        let id = initial.session_id;
+        let original_path = initial.transcript_path;
         let a = cfg.logical_cwd.as_ref().unwrap().display().to_string();
         let b = format!("{}/b", directories.projects_guest_path);
         let source = handle.inner.session_writer.active_path();
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         let message = serde_json::json!({"type":"user","sessionId":id,"uuid":uuid::Uuid::new_v4().to_string(),"parentUuid":null,"cwd":a,"isSidechain":false,"timestamp":"2026-10-22T12:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"original directory"}]}});
-        std::fs::write(&source, format!("{message}\n")).unwrap();
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&source)
+                .unwrap(),
+            "{message}"
+        )
+        .unwrap();
         let moved = handle.runtime().block_on(async {
             handle
                 .resume_workspace_session(id.clone(), source.display().to_string())
@@ -661,7 +678,8 @@ mod tests {
             assert_eq!(state.session_id, id);
             assert_eq!(state.cwd, b);
             assert_eq!(state.project_root, a);
-            assert!(!source.exists());
+            assert!(source.exists());
+            assert_eq!(state.transcript_path, original_path);
             handle
                 .fs
                 .write_file(&format!("{b}/after-move.txt"), "written in B")
@@ -823,6 +841,37 @@ mod tests {
     }
 
     #[test]
+    fn cwd_alias_failure_leaves_source_and_owner_unchanged() {
+        let (_temp, directories, cfg, platform) = fixture();
+        let home = cfg.lingxi_home.clone();
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        let before = handle.workspace_state_snapshot();
+        let source = handle.inner.session_writer.active_path();
+        let original = std::fs::read(&source).unwrap();
+        let b = format!("{}/b", directories.projects_guest_path);
+        let target_bucket = home
+            .join("projects")
+            .join(session::jsonl::project_dir_name(&b));
+        std::fs::create_dir_all(target_bucket.parent().unwrap()).unwrap();
+        std::fs::write(&target_bucket, b"not a directory").unwrap();
+        handle.runtime().block_on(async {
+            assert!(handle
+                .change_workspace(b, before.session_id.clone())
+                .await
+                .is_err());
+        });
+        assert_eq!(handle.workspace_state_snapshot(), before);
+        assert_eq!(std::fs::read(source).unwrap(), original);
+    }
+
+    #[test]
     fn linked_directory_reloads_skills_and_cron_store_follows_current_cwd() {
         let (_temp, directories, cfg, platform) = fixture();
         let skill = Path::new(&directories.projects)
@@ -857,7 +906,12 @@ mod tests {
             handle.change_workspace(b.clone(), owner).await.unwrap();
             let store = handle.cron_store().await.unwrap();
             store
-                .create("0 9 * * *".into(), "local task".into(), true)
+                .create_configured(
+                    "0 9 * * *".into(),
+                    "local task".into(),
+                    true,
+                    cron_automation(),
+                )
                 .await
                 .unwrap();
             assert!(Path::new(&directories.projects)
@@ -888,7 +942,12 @@ mod tests {
         handle.runtime().block_on(async {
             let store = handle.cron_store().await.unwrap();
             let task = store
-                .create("0 9 * * *".into(), "original".into(), true)
+                .create_configured(
+                    "0 9 * * *".into(),
+                    "original".into(),
+                    true,
+                    cron_automation(),
+                )
                 .await
                 .unwrap();
             let path = Path::new(&directories.projects)
@@ -903,21 +962,197 @@ mod tests {
             }
             linux.configure_mounts(mounts).await.unwrap();
             assert!(store
-                .create("0 9 * * *".into(), "new".into(), true)
+                .create_configured("0 9 * * *".into(), "new".into(), true, cron_automation())
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("read-only"));
             assert!(store
-                .update(task.id.clone(), "0 9 * * *".into(), "changed".into(), true)
+                .update_configured(
+                    task.id.clone(),
+                    "0 9 * * *".into(),
+                    "changed".into(),
+                    true,
+                    cron_automation()
+                )
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("read-only"));
             assert!(!store.delete(task.id.clone()).await);
-            assert!(handle.run_cron_task_now(task.id).await.is_none());
+            assert!(handle
+                .run_cron_task_now(task.id, super::super::automation::allow_cron_owner())
+                .await
+                .is_none());
             assert_eq!(std::fs::read(path).unwrap(), before);
         });
+    }
+
+    #[test]
+    fn mobile_cron_rejects_missing_automation_without_creating_a_session() {
+        let (_temp, directories, cfg, platform) = fixture();
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        handle.runtime().block_on(async {
+            let store = handle.cron_store().await.unwrap();
+            assert!(store.create_configured("0 9 * * *".into(), "missing".into(), true, String::new()).await.is_err());
+            let path = Path::new(&directories.projects).join("a").join(branding::DOT_DIR).join("scheduled_tasks.json");
+            assert!(!path.exists());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut tasks = cron::ScheduledTasks::default();
+            tasks.tasks.push(serde_json::from_value(serde_json::json!({
+                "id":"generic01", "cron":"0 9 * * *", "prompt":"must not execute",
+                "createdAt":1, "recurring":true
+            })).unwrap());
+            std::fs::write(&path, cron::serialize_tasks(&tasks)).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let active = handle.workspace_state_snapshot();
+            for result in [
+                handle.run_cron_task_now("generic01".into(), super::super::automation::allow_cron_owner()).await,
+                handle.run_cron_task_now_at("generic01".into(), 1, super::super::automation::allow_cron_owner()).await,
+                handle.run_cron_task_if_due("generic01".into(), 1, super::super::automation::allow_cron_owner()).await,
+            ] {
+                let result = result.expect("missing automation must be reported");
+                assert!(matches!(result.status, super::super::CronFireStatusDto::Failed { ref message } if message.starts_with("paused:")));
+                assert!(!result.retryable);
+            }
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert_eq!(handle.workspace_state_snapshot(), active);
+        });
+    }
+
+    #[test]
+    fn mobile_cron_mutations_preserve_damaged_task_documents() {
+        let (_temp, directories, cfg, platform) = fixture();
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        let path = Path::new(&directories.projects)
+            .join("a")
+            .join(branding::DOT_DIR)
+            .join("scheduled_tasks.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        handle.runtime().block_on(async {
+            let store = handle.cron_store().await.unwrap();
+            for body in [
+                "{broken".to_string(),
+                serde_json::json!({"tasks":[
+                    {"id":"valid", "cron":"0 9 * * *", "prompt":"ok", "createdAt":1},
+                    {"id":"broken", "cron":"invalid", "prompt":"bad", "createdAt":1}
+                ]})
+                .to_string(),
+            ] {
+                std::fs::write(&path, &body).unwrap();
+                assert!(store
+                    .create_configured("0 9 * * *".into(), "new".into(), true, cron_automation())
+                    .await
+                    .is_err());
+                assert!(store
+                    .update_configured(
+                        "valid".into(),
+                        "0 9 * * *".into(),
+                        "changed".into(),
+                        true,
+                        cron_automation()
+                    )
+                    .await
+                    .is_err());
+                assert!(!store.delete("valid".into()).await);
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+            }
+        });
+    }
+
+    #[test]
+    fn scheduler_controller_never_publishes_a_conversation_before_admission() {
+        let (_temp, _directories, mut cfg, platform) = fixture();
+        cfg.scheduler_controller = true;
+        std::fs::write(
+            cfg.cwd.join(".mcp.json"),
+            r#"{"mcpServers":{"remote":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}"#,
+        )
+        .unwrap();
+        let listener = Arc::new(FakeListener::default());
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            listener.clone(),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        assert!(handle.is_scheduler_controller());
+        assert!(handle.create_session("model".into()).is_err());
+        assert!(handle
+            .inner
+            .mcp_reload_generations
+            .lock()
+            .unwrap()
+            .is_empty());
+        let phantom = handle.inner.session_writer.active_path();
+        assert!(!phantom.exists());
+        handle.runtime().block_on(async {
+            assert!(!listener.received.lock().await.iter().any(|event| matches!(
+                event,
+                ClientEvent::SessionStarted { .. } | ClientEvent::SessionResumed { .. }
+            )));
+            assert!(handle
+                .submit(client::protocol::commands::ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
+                })
+                .await
+                .is_err());
+            assert!(handle
+                .resume_workspace_session(
+                    uuid::Uuid::new_v4().to_string(),
+                    phantom.display().to_string()
+                )
+                .await
+                .is_err());
+        });
+        assert!(!phantom.exists());
+    }
+
+    #[test]
+    fn scheduled_reload_rejects_same_bytes_from_a_different_inode() {
+        let (_temp, _directories, cfg, platform) = fixture();
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        let path = handle.inner.session_writer.active_path();
+        let original = path.with_extension("original");
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        handle
+            .scheduled_reload
+            .store(true, std::sync::atomic::Ordering::Release);
+        handle.runtime().block_on(async {
+            assert!(handle.reload_scheduled_if_needed().await.is_err());
+        });
+        assert!(handle
+            .scheduled_reload
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
     }
     #[test]
     fn empty_session_restores_its_exact_directory_from_another_workspace() {
@@ -933,11 +1168,20 @@ mod tests {
         handle.runtime().block_on(async {
             let id = uuid::Uuid::new_v4();
             let b = format!("{}/b", directories.projects_guest_path);
-            handle
-                .persist_mobile_empty_session_anchor(id, &b, "Empty in B")
+            let path = session::jsonl::session_path(&handle.lingxi_home, &b, &id.to_string());
+            let writer = session::jsonl::JsonlWriter::new(path.clone(), handle.host_fs.clone());
+            writer
+                .initialize_fixed_session_mode(
+                    &id.to_string(),
+                    session::jsonl::SessionMode::Code,
+                    0,
+                )
                 .await
                 .unwrap();
-            let path = session::jsonl::session_path(&handle.lingxi_home, &b, &id.to_string());
+            writer
+                .append_mobile_empty_session(&id.to_string(), "Empty in B", &b)
+                .await
+                .unwrap();
             let rows = handle
                 .workspace_sessions(MobileSessionDiscoveryScope::All, 100)
                 .await
@@ -977,6 +1221,7 @@ mod tests {
                 .submit(client::protocol::commands::ClientCommand::NewSession {
                     cwd: None,
                     model: None,
+                    mode: client::protocol::listings::SessionModeDto::Code,
                 })
                 .await
                 .unwrap();
@@ -987,6 +1232,7 @@ mod tests {
                 .await
                 .unwrap();
             let moved = handle.workspace_state().await;
+            assert_eq!(moved.transcript_path, before.transcript_path);
             (
                 before.session_id,
                 moved.transcript_path,
@@ -1034,7 +1280,10 @@ mod tests {
                 let path = session::jsonl::session_path(&handle.lingxi_home, &cwd, &id);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 let message = serde_json::json!({"type":"user","sessionId":id,"uuid":uuid::Uuid::new_v4().to_string(),"parentUuid":null,"cwd":cwd,"isSidechain":false,"timestamp":"2026-10-22T12:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"must retain recorded cwd"}]}});
-                std::fs::write(&path, format!("{message}\n")).unwrap();
+                let writer = session::jsonl::JsonlWriter::new(path.clone(), handle.host_fs.clone());
+                writer.initialize_fixed_session_mode(&id, session::jsonl::SessionMode::Code, 0).await.unwrap();
+                use std::io::Write;
+                writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{message}").unwrap();
                 assert!(handle.resume_workspace_session(id, path.display().to_string()).await.is_err());
                 assert_eq!(handle.workspace_state_snapshot(), before);
             }
@@ -1054,7 +1303,22 @@ mod tests {
         .unwrap();
         handle.runtime().block_on(async {
             let before = handle.workspace_state().await;
+            let store = handle.cron_store().await.unwrap();
+            let task = store.create_configured(
+                "0 9 * * *".into(), "busy task".into(), true, cron_automation(),
+            ).await.unwrap();
             let lease = handle.loop_transition.lock().await;
+            let busy = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.run_cron_task_now(task.id, super::super::automation::allow_cron_owner()),
+            ).await.unwrap().expect("busy must remain retryable");
+            assert!(busy.retryable);
+            assert!(matches!(busy.status, super::super::CronFireStatusDto::Failed { ref message } if message.starts_with("busy:")));
+            let absent = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.run_cron_task_now("absent-task".into(), super::super::automation::allow_cron_owner()),
+            ).await.unwrap();
+            assert!(absent.is_none());
             assert!(tokio::time::timeout(
                 std::time::Duration::from_millis(10),
                 handle.workspace_state()

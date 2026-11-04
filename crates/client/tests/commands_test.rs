@@ -20,7 +20,7 @@ use client::protocol::commands::{
     ProviderCredentialSecretDto, UiSurfaceDto,
 };
 use client::protocol::controls::ReasoningSelectionDto;
-use client::protocol::listings::TaskStatusDto;
+use client::protocol::listings::{SessionModeDto, TaskStatusDto};
 use client::protocol::permission::PermissionResponseDto;
 use client::protocol::text::ClientTextDto;
 
@@ -426,6 +426,7 @@ fn new_session_round_trips() {
     let cmd = ClientCommand::NewSession {
         cwd: Some("/home/dev/proj".to_string()),
         model: Some(model.clone()),
+        mode: SessionModeDto::Code,
     };
     let json = serde_json::to_string(&cmd).expect("serialize NewSession");
     assert!(json.contains("\"type\":\"new_session\""));
@@ -442,6 +443,7 @@ fn new_session_round_trips() {
     let minimal = ClientCommand::NewSession {
         cwd: None,
         model: None,
+        mode: SessionModeDto::Code,
     };
     let json_min = serde_json::to_value(&minimal).expect("serialize minimal NewSession");
     assert!(json_min.get("cwd").is_none(), "None cwd must be skipped");
@@ -461,6 +463,7 @@ fn resume_session_round_trips_and_carries_session_id() {
     let cmd = ClientCommand::ResumeSession {
         session_id: "9f1c2e3a-...".to_string(),
         cwd: None,
+        expected_mode: SessionModeDto::Code,
     };
     let json = serde_json::to_value(&cmd).expect("serialize ResumeSession");
     assert_eq!(json["type"], "resume_session");
@@ -477,7 +480,10 @@ fn resume_session_round_trips_and_carries_session_id() {
 #[test]
 fn list_sessions_round_trips() {
     for limit in [Some(20u32), None] {
-        let cmd = ClientCommand::ListSessions { limit };
+        let cmd = ClientCommand::ListSessions {
+            limit,
+            mode: Some(SessionModeDto::Chat),
+        };
         let json = serde_json::to_value(&cmd).expect("serialize ListSessions");
         assert_eq!(json["type"], "list_sessions");
         if limit.is_none() {
@@ -783,8 +789,12 @@ fn no_live_command_carries_session_id() {
         ClientCommand::NewSession {
             cwd: Some("/p".to_string()),
             model: Some(ClientTextDto::from_utf8("m")),
+            mode: SessionModeDto::Code,
         },
-        ClientCommand::ListSessions { limit: Some(5) },
+        ClientCommand::ListSessions {
+            limit: Some(5),
+            mode: None,
+        },
         ClientCommand::ForceCompact,
         ClientCommand::ClearSession,
         ClientCommand::TaskList {
@@ -821,6 +831,7 @@ fn no_live_command_carries_session_id() {
     let resume = ClientCommand::ResumeSession {
         session_id: "target-id".to_string(),
         cwd: None,
+        expected_mode: SessionModeDto::Code,
     };
     let resume_json = serde_json::to_value(&resume).expect("serialize ResumeSession");
     assert!(

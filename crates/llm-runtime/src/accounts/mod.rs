@@ -539,11 +539,19 @@ impl AccountPool {
     pub(crate) fn coordinator_from_candidates(
         self: &Arc<Self>,
         model: &str,
-        mut candidates: Vec<ConnectionHop>,
+        candidates: Vec<ConnectionHop>,
         endpoints: &BTreeMap<String, String>,
     ) -> Option<AttemptCoordinator> {
-        let accounts: BTreeMap<_, _> = self
-            .snapshot()
+        self.coordinator_from_snapshot(model, candidates, endpoints, self.snapshot())
+    }
+    pub(crate) fn coordinator_from_snapshot(
+        self: &Arc<Self>,
+        model: &str,
+        mut candidates: Vec<ConnectionHop>,
+        endpoints: &BTreeMap<String, String>,
+        snapshot: AccountSnapshot,
+    ) -> Option<AttemptCoordinator> {
+        let accounts: BTreeMap<_, _> = snapshot
             .accounts
             .into_iter()
             .map(|a| (format!("account.{}", a.account_id), a))

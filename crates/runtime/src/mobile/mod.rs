@@ -95,10 +95,12 @@ pub use client::protocol::listings::{
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
     initialize_mobile_lifecycle_runtime, parse_mobile_provider_config_json,
-    spawn_mobile_lifecycle_task, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
+    spawn_mobile_lifecycle_task, wait_for_mobile_session_release, CronDueOccurrenceDto,
+    CronFireStatusDto, CronOwnerCandidateDto, CronOwnerReservationDto, CronTaskDto,
     FiredCronJobDto, MediaAgentHandoffRequest, MediaConversationAttachment, MediaSessionContext,
-    MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
-    MobileRuntime, MobileSessionDiscoveryScope, ProviderCatalogEntryDto, RealtimeAgentSessionIo,
+    MobileBuildError, MobileConfig, MobileCronAdmission, MobileCronOwnerAdmission,
+    MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileRuntime,
+    MobileSessionDiscoveryScope, ProviderCatalogEntryDto, RealtimeAgentSessionIo,
 };
 #[cfg(feature = "mobile")]
 pub use session::jsonl::SessionMode as MobileSessionMode;
@@ -161,65 +163,6 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     register_mobile_tools(&mut reg, ctx);
     reg
-}
-
-#[cfg(feature = "mobile")]
-pub(crate) const MOBILE_CHAT_TOOL_ALLOWLIST: &[&str] = &[
-    "media_sources",
-    "media_status",
-    "media_capture",
-    "media_record",
-    "media_transcribe",
-    "media_synthesize",
-    "media_play",
-    "media_speak",
-    "media_session_start",
-    "media_session_update",
-    "media_observe",
-    "media_wait",
-    "media_stop",
-    "notification",
-    "clipboard",
-    "share",
-    "location",
-    "device_status",
-    "haptics",
-    "open_url",
-    "calendar",
-    "contacts",
-    "AskUserQuestion",
-    "Glob",
-    "Grep",
-    "Read",
-    "Skill",
-    "StructuredOutput",
-    "WebFetch",
-    "WebSearch",
-    // Chat may write files and run commands; every call still goes through
-    // the permission prompt, and skills keep their shell-expansion ban.
-    "Write",
-    "Shell",
-    "Visualization",
-    "LocalApp",
-];
-
-/// Chat tools that only ever run behind a per-call permission prompt. A
-/// Chat-visible skill may not pre-authorize them through `allowed-tools`.
-#[cfg(feature = "mobile")]
-pub(crate) const MOBILE_CHAT_PROMPTED_TOOLS: &[&str] = &["Write", "Shell"];
-
-#[cfg(feature = "mobile")]
-pub(crate) fn apply_mobile_session_tool_policy(
-    registry: &mut ToolRegistry,
-    mode: session::jsonl::SessionMode,
-) {
-    if mode == session::jsonl::SessionMode::Chat {
-        let allowlist = MOBILE_CHAT_TOOL_ALLOWLIST
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect::<Vec<_>>();
-        registry.set_session_tool_allowlist(&allowlist);
-    }
 }
 
 /// Register the mobile tool set into an existing registry, with the `Skill` tool
@@ -596,52 +539,6 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }
-    }
-
-    #[cfg(feature = "mobile")]
-    #[test]
-    fn chat_profile_exposes_read_tools_and_available_native_device_tools() {
-        let ctx = shell_test_ctx(dummy_out());
-        let code_registry = mobile_tool_registry(ctx.clone());
-        assert!(code_registry.find_by_name("Write").is_some());
-        assert!(code_registry.find_by_name("TaskCreate").is_some());
-
-        let mut chat_registry = mobile_tool_registry(ctx);
-        apply_mobile_session_tool_policy(&mut chat_registry, session::jsonl::SessionMode::Chat);
-        let names = chat_registry
-            .available_tools(&ToolStaticContext::default())
-            .into_iter()
-            .map(|tool| tool.name().to_string())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(names.contains("Read"));
-        assert!(names.contains("WebFetch"));
-        assert!(names.contains("AskUserQuestion"));
-        assert!(
-            names.contains("Write"),
-            "Chat exposes Write behind its per-call permission prompt"
-        );
-        assert!(names
-            .iter()
-            .all(|name| MOBILE_CHAT_TOOL_ALLOWLIST.contains(&name.as_str())));
-        for denied in [
-            "Edit",
-            "NotebookEdit",
-            "Git",
-            "LSP",
-            "Workflow",
-            "TaskCreate",
-            "CronCreate",
-            "ToolSearch",
-        ] {
-            assert!(
-                chat_registry.find_by_name(denied).is_none(),
-                "{denied} must not be reachable in Chat mode"
-            );
-        }
-        assert!(
-            chat_registry.find_by_name("Shell").is_none(),
-            "shell_test_ctx has no enabled mobile shell runtime to register"
-        );
     }
 
     #[cfg(feature = "mobile")]

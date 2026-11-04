@@ -10,21 +10,43 @@ use crate::jsonl::exact_json::{payload_without_delivery_id, ExactJsonError};
 use crate::jsonl::journal::{SESSION_STATE_DIR_MODE, SESSION_STATE_FILE_MODE};
 use crate::jsonl::message_identity::{self, IdentityLogStore};
 use lingxi_core::host::rooted_fs::{
-    atomic_write_pinned, atomic_write_stream_pinned, lock_exclusive_pinned,
-    open_append_file_pinned, open_read_file_pinned, root_identity, sync_parent_pinned,
-    AtomicWriteOptions, RootIdentity,
+    atomic_write_stream_pinned_checked, lock_exclusive_pinned, open_append_file_pinned,
+    open_read_file_pinned, root_identity, sync_parent_pinned, AtomicWriteOptions, RootIdentity,
 };
 use lingxi_core::host::FsError;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 /// Stable lock filename shared by ordinary transcript appends, `/cd`
 /// relocation, and durable outbox delivery.
 pub const TRANSCRIPT_LOCK_FILE_NAME: &str = "transcript.lock";
+
+/// Reject an unterminated source before any sidecar or transcript mutation.
+pub(crate) fn require_complete_transcript_tail(file: &mut std::fs::File) -> Result<(), FsError> {
+    let length = file
+        .metadata()
+        .map_err(|error| FsError::Io(error.to_string()))?
+        .len();
+    if length > 0 {
+        file.seek(SeekFrom::End(-1))
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        if last != [b'\n'] {
+            return Err(FsError::Io(
+                "transcript has an incomplete final record".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 /// In-memory record comparison and new Fusion record bound. Larger ordinary
 /// history rows are validated by streaming, retaining only identity metadata.
 pub const DEFAULT_MAX_TRANSCRIPT_SCAN_BYTES: usize = 2 * 1024 * 1024;
@@ -93,11 +115,33 @@ pub enum TranscriptWriterError {
     },
 }
 
+impl From<lingxi_core::host::rooted_fs::AtomicPublishError> for TranscriptWriterError {
+    fn from(error: lingxi_core::host::rooted_fs::AtomicPublishError) -> Self {
+        if error.published {
+            Self::WrittenButNotDurable(error.error)
+        } else {
+            Self::Fs(error.error)
+        }
+    }
+}
+
 /// Root-pinned transcript append owner.
 #[derive(Debug, Clone)]
 pub struct DurableTranscriptWriter {
     root: PathBuf,
     identity: RootIdentity,
+    transcript_authority: Arc<RwLock<Option<TranscriptFileAuthority>>>,
+    /// A published rewrite whose final state could not be confirmed must not
+    /// be followed by another write using the old in-memory transcript tip.
+    rewrite_uncertain: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    authority_after_scan: Arc<std::sync::Mutex<Option<AuthorityTestGate>>>,
+    #[cfg(test)]
+    authority_after_write: Arc<std::sync::Mutex<Option<AuthorityTestGate>>>,
+    #[cfg(test)]
+    authority_after_rewrite: Arc<std::sync::Mutex<Option<AuthorityTestGate>>>,
+    #[cfg(test)]
+    authority_before_publish: Arc<std::sync::Mutex<Option<AuthorityTestGate>>>,
     max_record_bytes: usize,
     #[cfg(test)]
     fail_next_existing_sync: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -111,6 +155,149 @@ pub struct DurableTranscriptWriter {
     /// which appends pay for durability and which do not.
     #[cfg(test)]
     syncs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+type AuthorityTestGate = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+/// Physical identity of an existing transcript captured by its host.
+/// The root is trusted; each relative component is opened without following
+/// links. Cooperative owners serialize through the session lease and durable
+/// transaction. Observable external replacements fail or produce an uncertain
+/// result; pathname checks do not provide an OS-level inode compare-and-swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptFileAuthority {
+    pub(crate) root: PathBuf,
+    pub(crate) relative: PathBuf,
+    pub(crate) root_identity: RootIdentity,
+    pub(crate) file_identity: RootIdentity,
+}
+
+impl TranscriptFileAuthority {
+    pub fn from_capture(
+        root: PathBuf,
+        relative: PathBuf,
+        root_identity: RootIdentity,
+        file_identity: RootIdentity,
+    ) -> Result<Self, FsError> {
+        if !root.is_absolute() {
+            return Err(FsError::Io(
+                "transcript authority root must be absolute".into(),
+            ));
+        }
+        lingxi_core::host::rooted_fs::validate_relative_path(&relative)?;
+        Ok(Self {
+            root,
+            relative,
+            root_identity,
+            file_identity,
+        })
+    }
+
+    #[must_use]
+    pub fn path(&self) -> PathBuf {
+        self.root.join(&self.relative)
+    }
+
+    /// Compare independently pinned views of the same physical source.
+    #[must_use]
+    pub fn same_source(&self, other: &Self) -> bool {
+        let left = self.path();
+        let right = other.path();
+        let same_path = left == right
+            || std::fs::canonicalize(&left)
+                .ok()
+                .zip(std::fs::canonicalize(&right).ok())
+                .is_some_and(|(left, right)| left == right);
+        same_path && self.file_identity == other.file_identity
+    }
+
+    /// Carry the same captured identity and bytes through a hot resume.
+    #[must_use]
+    pub fn pinned_resume_source(
+        &self,
+        expected_content: String,
+    ) -> lingxi_core::host::PinnedResumeSource {
+        lingxi_core::host::PinnedResumeSource {
+            root: self.root.clone(),
+            relative: self.relative.clone(),
+            root_identity: self.root_identity,
+            file_identity: self.file_identity,
+            expected_content,
+        }
+    }
+
+    /// Capture the first no-follow file identity and a stable source revision.
+    pub fn capture(root: PathBuf, relative: PathBuf) -> Result<(Self, Vec<u8>), FsError> {
+        let root_identity = lingxi_core::host::rooted_fs::root_identity(&root)?;
+        let mut file = open_read_file_pinned(&root, &relative, Some(&root_identity))?;
+        lingxi_core::host::rooted_fs::validate_open_file_single_link(&file)?;
+        let file_identity = lingxi_core::host::rooted_fs::opened_file_identity(&file)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        let authority = Self::from_capture(root, relative, root_identity, file_identity)?;
+        if authority.read_checked()? != bytes {
+            return Err(FsError::Io("transcript changed during capture".into()));
+        }
+        Ok((authority, bytes))
+    }
+
+    /// Reread this same opened-file identity without following path links.
+    pub fn read_checked(&self) -> Result<Vec<u8>, FsError> {
+        let mut file =
+            open_read_file_pinned(&self.root, &self.relative, Some(&self.root_identity))?;
+        lingxi_core::host::rooted_fs::validate_open_file_single_link(&file)?;
+        if lingxi_core::host::rooted_fs::opened_file_identity(&file)? != self.file_identity {
+            return Err(FsError::Io("transcript file identity changed".into()));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        Ok(bytes)
+    }
+
+    /// Recheck the pinned root and file identity without rereading its body.
+    pub fn verify_current(&self) -> Result<(), FsError> {
+        self.open_checked().map(|_| ())
+    }
+
+    pub(crate) fn digest_checked(&self) -> Result<[u8; 32], FsError> {
+        let mut file = self.open_checked()?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        self.verify_current()?;
+        Ok(digest.finalize().into())
+    }
+
+    pub(crate) fn verify_revision(&self, expected: &[u8; 32]) -> Result<(), FsError> {
+        if &self.digest_checked()? != expected {
+            return Err(FsError::Io(
+                "transcript changed while staging rewrite".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn open_checked(&self) -> Result<std::fs::File, FsError> {
+        let file = lingxi_core::host::rooted_fs::open_recovery_file(
+            &self.root,
+            &self.relative,
+            &self.root_identity,
+            &self.file_identity,
+        )?;
+        lingxi_core::host::rooted_fs::validate_open_file_single_link(&file)?;
+        Ok(file)
+    }
 }
 
 /// One stable transcript transaction. Target resolution, relocation, and the
@@ -309,6 +496,28 @@ impl<R: Read> Read for MetadataReader<'_, R> {
 }
 
 impl DurableTranscriptWriter {
+    /// Revert an unacknowledged durable append while the transaction owns
+    /// the transcript lock. Failure stays explicit if rollback cannot sync.
+    fn rollback_undurable_append(
+        &self,
+        file: &mut std::fs::File,
+        previous_len: u64,
+        error: String,
+    ) -> TranscriptWriterError {
+        let rollback = file.set_len(previous_len).and_then(|()| {
+            #[cfg(test)]
+            self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            file.sync_all()
+        });
+        let message = match rollback {
+            Ok(()) => error,
+            Err(rollback) => {
+                format!("{error}; restoring the previous transcript failed: {rollback}")
+            }
+        };
+        TranscriptWriterError::WrittenButNotDurable(FsError::Io(message))
+    }
+
     /// A failed write_all may leave half a JSON row. Roll back only bytes from
     /// this locked append so retrying cannot turn a full disk into lost history.
     fn append_complete_line(
@@ -316,6 +525,10 @@ impl DurableTranscriptWriter {
         file: &mut std::fs::File,
         line: &[u8],
     ) -> Result<(), TranscriptWriterError> {
+        // The admitted read/write handle is append-mode on Unix; Windows
+        // opens it for update, so explicitly seek to the end on both paths.
+        file.seek(SeekFrom::End(0))
+            .map_err(|error| FsError::Io(error.to_string()))?;
         let before = file
             .metadata()
             .map_err(|error| FsError::Io(error.to_string()))?
@@ -358,6 +571,16 @@ impl DurableTranscriptWriter {
         Self {
             root,
             identity,
+            transcript_authority: Arc::new(RwLock::new(None)),
+            rewrite_uncertain: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            authority_after_scan: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            authority_after_write: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            authority_after_rewrite: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            authority_before_publish: Arc::new(std::sync::Mutex::new(None)),
             max_record_bytes: DEFAULT_MAX_TRANSCRIPT_SCAN_BYTES,
             #[cfg(test)]
             fail_next_existing_sync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -369,6 +592,109 @@ impl DurableTranscriptWriter {
             syncs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             duplicate_scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    pub(crate) fn transcript_authority(&self) -> Option<TranscriptFileAuthority> {
+        self.transcript_authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn bind_transcript_authority(
+        &self,
+        path: &Path,
+        authority: Option<TranscriptFileAuthority>,
+    ) -> Result<(), FsError> {
+        let mut current = self
+            .transcript_authority
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(authority) = authority {
+            if authority.path() != path {
+                return Err(FsError::Io(
+                    "transcript authority does not match its target".into(),
+                ));
+            }
+            // Recheck before publishing any part of the destination owner.
+            let _file = authority.open_checked()?;
+            *current = Some(authority);
+        } else if current
+            .as_ref()
+            .is_some_and(|authority| authority.path() != path)
+        {
+            return Err(FsError::Io(
+                "existing transcript authority cannot be discarded".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_authoritative_target(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<Option<std::fs::File>, FsError> {
+        let Some(authority) = self.transcript_authority() else {
+            return Ok(None);
+        };
+        if root.join(relative) != authority.path() {
+            return Err(FsError::Io(
+                "transcript target differs from captured authority".into(),
+            ));
+        }
+        authority.open_checked().map(Some)
+    }
+
+    fn verify_authoritative_target(&self, root: &Path, relative: &Path) -> Result<(), FsError> {
+        self.open_authoritative_target(root, relative).map(|_| ())
+    }
+
+    fn confirm_authoritative_target_after_write(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), TranscriptWriterError> {
+        self.verify_authoritative_target(root, relative)
+            .map_err(TranscriptWriterError::WrittenButNotDurable)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_authority_test_gate(&self, after_write: bool, gate: AuthorityTestGate) {
+        let slot = if after_write {
+            &self.authority_after_write
+        } else {
+            &self.authority_after_scan
+        };
+        *slot.lock().unwrap() = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_authority_rewrite_test_gate(&self, gate: AuthorityTestGate) {
+        *self.authority_after_rewrite.lock().unwrap() = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_authority_rewrite_test_gate(&self) {
+        Self::wait_authority_test_gate(&self.authority_after_rewrite);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_authority_publish_test_gate(&self, gate: AuthorityTestGate) {
+        *self.authority_before_publish.lock().unwrap() = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_authority_publish_test_gate(&self) {
+        Self::wait_authority_test_gate(&self.authority_before_publish);
+    }
+
+    #[cfg(test)]
+    fn wait_authority_test_gate(slot: &std::sync::Mutex<Option<AuthorityTestGate>>) {
+        if let Some((reached, release)) = slot.lock().unwrap().take() {
+            let _ = reached.send(());
+            let _ = release.recv();
         }
     }
 
@@ -390,10 +716,35 @@ impl DurableTranscriptWriter {
             SESSION_STATE_FILE_MODE,
             Some(&self.identity),
         )?;
+        // Check only after taking the shared lock: a previous rewrite can
+        // become uncertain while this transaction is waiting for that lock.
+        self.ensure_rewrite_is_resolved()?;
         Ok(DurableTranscriptTransaction {
             writer: self,
             _lock: lock,
         })
+    }
+
+    /// Fence this owner after an uncertain published rewrite. Call while the
+    /// rewrite's transaction is still held; a validated remount creates a new
+    /// owner after restoring the on-disk state.
+    pub(crate) fn mark_rewrite_uncertain(&self) {
+        self.rewrite_uncertain
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn rewrite_is_uncertain(&self) -> bool {
+        self.rewrite_uncertain
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn ensure_rewrite_is_resolved(&self) -> Result<(), TranscriptWriterError> {
+        if self.rewrite_is_uncertain() {
+            return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
+                "a published transcript rewrite is uncertain; reopen the session".into(),
+            )));
+        }
+        Ok(())
     }
 
     /// Hold the stable session-state transcript lock while a caller resolves
@@ -549,25 +900,36 @@ impl DurableTranscriptWriter {
                 .set_field("deliveryId", Utf16JsonProjection::from(delivery_id))
                 .map_err(crate::jsonl::exact_json::projection_error)?;
         }
-        let (file_present, missing_final_delimiter, existing_match, last_uuid) =
-            match open_read_file_pinned(
+        // Keep the admitted file handle for both the scan and the append. A
+        // later pathname replacement cannot redirect the write to a sibling.
+        let mut admitted_file =
+            self.open_authoritative_target(transcript_root, transcript_relative)?;
+        let scan_file = match admitted_file.as_ref() {
+            Some(file) => Ok(file
+                .try_clone()
+                .map_err(|error| FsError::Io(error.to_string()))?),
+            None => open_read_file_pinned(
                 transcript_root,
                 transcript_relative,
                 Some(transcript_identity),
-            ) {
-                Ok(file) => {
-                    let (missing_delimiter, matching, last_uuid) = self.scan_existing(
-                        file,
-                        delivery_id,
-                        &message_uuid,
-                        &payload,
-                        comparison_policy,
-                    )?;
-                    (true, missing_delimiter, matching, last_uuid)
-                }
-                Err(FsError::NotFound(_)) => (false, false, None, None),
-                Err(error) => return Err(error.into()),
-            };
+            ),
+        };
+        let (file_present, missing_final_delimiter, existing_match, last_uuid) = match scan_file {
+            Ok(file) => {
+                let (missing_delimiter, matching, last_uuid) = self.scan_existing(
+                    file,
+                    delivery_id,
+                    &message_uuid,
+                    &payload,
+                    comparison_policy,
+                )?;
+                (true, missing_delimiter, matching, last_uuid)
+            }
+            Err(FsError::NotFound(_)) => (false, false, None, None),
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(test)]
+        Self::wait_authority_test_gate(&self.authority_after_scan);
         if let Some(outcome) = existing_match {
             if outcome
                 .as_ref()
@@ -577,9 +939,23 @@ impl DurableTranscriptWriter {
                 // write and fsync. Never promote that observation to a durable
                 // duplicate acknowledgement until both file and directory
                 // have crossed the same persistence boundary as a new append.
-                self.sync_existing_match(
+                if let Some(file) = admitted_file.as_mut() {
+                    file.sync_all()
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    sync_parent_pinned(
+                        transcript_root,
+                        transcript_relative,
+                        Some(transcript_identity),
+                    )?;
+                } else {
+                    self.sync_existing_match(
+                        transcript_root,
+                        transcript_identity,
+                        transcript_relative,
+                    )?;
+                }
+                self.confirm_authoritative_target_after_write(
                     transcript_root,
-                    transcript_identity,
                     transcript_relative,
                 )?;
             }
@@ -589,9 +965,16 @@ impl DurableTranscriptWriter {
         // only after the UUID duplicate check, while the same transaction is
         // held, so a retry can keep the original parent even after later
         // messages were appended.
-        let needs_parent = payload
-            .at_pointer("/parentUuid")
-            .is_none_or(|parent| parent.is_null());
+        let exact_boundary = payload.string_at("/type") == Some("system")
+            && payload.string_at("/subtype") == Some("compact_boundary")
+            && payload
+                .at_pointer("/compactMetadata/nativeExactPreserved")
+                .and_then(|value| value.as_bool())
+                == Some(true);
+        let needs_parent = !exact_boundary
+            && payload
+                .at_pointer("/parentUuid")
+                .is_none_or(|parent| parent.is_null());
         if needs_parent {
             let parent = last_uuid.map_or_else(
                 || Utf16JsonProjection::parse("null").expect("null is valid JSON"),
@@ -614,6 +997,7 @@ impl DurableTranscriptWriter {
         if missing_final_delimiter {
             line.insert(0, b'\n');
         }
+        self.verify_authoritative_target(transcript_root, transcript_relative)?;
         if let Some((store, identity_path)) = identity_registration {
             message_identity::append_row_identity_at(
                 store,
@@ -623,26 +1007,54 @@ impl DurableTranscriptWriter {
                 &message_uuid,
             )?;
         }
-        let mut file = open_append_file_pinned(
-            transcript_root,
-            transcript_relative,
-            Some(transcript_identity),
-        )?;
+        let mut file = match admitted_file {
+            Some(file) => file,
+            None => open_append_file_pinned(
+                transcript_root,
+                transcript_relative,
+                Some(transcript_identity),
+            )?,
+        };
+        let exact_previous_len = if exact_boundary {
+            Some(
+                file.metadata()
+                    .map_err(|error| FsError::Io(error.to_string()))?
+                    .len(),
+            )
+        } else {
+            None
+        };
         self.append_complete_line(&mut file, &line)?;
         #[cfg(test)]
         if self
             .fail_next_append_sync
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
+            if let Some(previous_len) = exact_previous_len {
+                return Err(self.rollback_undurable_append(
+                    &mut file,
+                    previous_len,
+                    "synthetic written transcript sync failure".into(),
+                ));
+            }
             return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
                 "synthetic written transcript sync failure".into(),
             )));
         }
         #[cfg(test)]
         self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        file.sync_all().map_err(|error| {
-            TranscriptWriterError::WrittenButNotDurable(FsError::Io(error.to_string()))
-        })?;
+        if let Err(error) = file.sync_all() {
+            if let Some(previous_len) = exact_previous_len {
+                return Err(self.rollback_undurable_append(
+                    &mut file,
+                    previous_len,
+                    error.to_string(),
+                ));
+            }
+            return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
+                error.to_string(),
+            )));
+        }
         if !file_present {
             #[cfg(test)]
             self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -651,8 +1063,16 @@ impl DurableTranscriptWriter {
                 transcript_relative,
                 Some(transcript_identity),
             )
-            .map_err(TranscriptWriterError::WrittenButNotDurable)?;
+            .map_err(|error| match exact_previous_len {
+                Some(previous_len) => {
+                    self.rollback_undurable_append(&mut file, previous_len, error.to_string())
+                }
+                None => TranscriptWriterError::WrittenButNotDurable(error),
+            })?;
         }
+        #[cfg(test)]
+        Self::wait_authority_test_gate(&self.authority_after_write);
+        self.confirm_authoritative_target_after_write(transcript_root, transcript_relative)?;
         Ok((TranscriptAppendOutcome::Appended, Some(message_uuid)))
     }
 
@@ -955,6 +1375,67 @@ impl DurableTranscriptWriter {
 }
 
 impl DurableTranscriptTransaction<'_> {
+    pub(crate) fn transfer_rewritten_target(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected_digest: Option<[u8; 32]>,
+        expected_file_identity: Option<RootIdentity>,
+    ) -> Result<(), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
+        #[cfg(test)]
+        self.writer.wait_authority_rewrite_test_gate();
+        let Some(expected_digest) = expected_digest else {
+            return Ok(());
+        };
+        let previous = self
+            .writer
+            .transcript_authority()
+            .ok_or_else(|| FsError::Io("transcript authority disappeared during rewrite".into()))?;
+        if previous.path() != root.join(relative) {
+            return Err(FsError::Io("rewritten transcript target changed".into()).into());
+        }
+        let mut file = open_read_file_pinned(
+            &previous.root,
+            &previous.relative,
+            Some(&previous.root_identity),
+        )?;
+        lingxi_core::host::rooted_fs::validate_open_file_single_link(&file)?;
+        let file_identity = lingxi_core::host::rooted_fs::opened_file_identity(&file)?;
+        if Some(file_identity) != expected_file_identity {
+            return Err(FsError::Io(
+                "rewritten transcript inode changed before authority transfer".into(),
+            )
+            .into());
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        if <[u8; 32]>::from(hasher.finalize()) != expected_digest {
+            return Err(FsError::Io(
+                "rewritten transcript changed before authority transfer".into(),
+            )
+            .into());
+        }
+        let next = TranscriptFileAuthority::from_capture(
+            previous.root,
+            previous.relative,
+            previous.root_identity,
+            file_identity,
+        )?;
+        self.writer
+            .bind_transcript_authority(&root.join(relative), Some(next))?;
+        Ok(())
+    }
+
     /// Append one source JSON value while this transaction owns the session
     /// lock. This is intentionally not append-once: relocation markers are
     /// ordinary transcript metadata and their caller serializes them with the
@@ -966,32 +1447,207 @@ impl DurableTranscriptTransaction<'_> {
         transcript_relative: &Path,
         payload: Utf16JsonProjection,
     ) -> Result<(), TranscriptWriterError> {
+        self.append_raw_json_at_with_file(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            payload,
+            None,
+        )
+    }
+
+    pub(crate) fn append_raw_json_at_with_file(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        payload: Utf16JsonProjection,
+        admitted_file: Option<std::fs::File>,
+    ) -> Result<(), TranscriptWriterError> {
+        self.append_raw_json_at_with_file_and_sync(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            payload,
+            admitted_file,
+            false,
+        )
+    }
+
+    pub(crate) fn append_raw_json_at_with_file_and_sync(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        payload: Utf16JsonProjection,
+        admitted_file: Option<std::fs::File>,
+        force_sync: bool,
+    ) -> Result<(), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         let mut line = payload
             .to_json_string()
             .map_err(crate::jsonl::exact_json::projection_error)?
             .into_bytes();
         line.push(b'\n');
-        let file_present =
-            lingxi_core::host::rooted_fs::checked_join(transcript_root, transcript_relative)
+        let file_present = admitted_file.is_some()
+            || lingxi_core::host::rooted_fs::checked_join(transcript_root, transcript_relative)
                 .map(|path| path.exists())
                 .unwrap_or(false);
-        let mut file = open_append_file_pinned(
-            transcript_root,
-            transcript_relative,
-            Some(transcript_identity),
-        )?;
+        let admitted_file = match admitted_file {
+            Some(file) => Some(file),
+            None => self
+                .writer
+                .open_authoritative_target(transcript_root, transcript_relative)?,
+        };
+        let mut file = match admitted_file {
+            Some(file) => file,
+            None => open_append_file_pinned(
+                transcript_root,
+                transcript_relative,
+                Some(transcript_identity),
+            )?,
+        };
+        self.writer
+            .verify_authoritative_target(transcript_root, transcript_relative)?;
+        if self.writer.transcript_authority().is_some() {
+            require_complete_transcript_tail(&mut file)?;
+        }
+        // The fixed session mode must survive before its creation is published.
+        let fixed_mode = payload.string_at("/type") == Some("fixed-session-mode");
+        let mobile_anchor = payload.string_at("/type") == Some("custom-title")
+            && payload.number_at("/mobileEmptySession") == Some(1.0);
+        let no_authority = self.writer.transcript_authority().is_none();
+        let fresh_mobile_anchor = no_authority && mobile_anchor;
+        // A normal Desktop session starts with this immutable header. Retain
+        // the inode opened for its first write as the live writer's authority.
+        let fresh_fixed_header =
+            no_authority && fixed_mode && payload.string_at("/sessionId").is_some();
+        let pending_authority = if fresh_mobile_anchor || fresh_fixed_header {
+            let owner = payload
+                .string_at("/sessionId")
+                .ok_or_else(|| FsError::Io("session metadata has no session identity".into()))?;
+            let owner_id = uuid::Uuid::parse_str(owner)
+                .map_err(|_| FsError::Io("session metadata has an invalid identity".into()))?;
+            if transcript_relative
+                .file_stem()
+                .and_then(|part| part.to_str())
+                .and_then(|part| uuid::Uuid::parse_str(part).ok())
+                != Some(owner_id)
+            {
+                return Err(FsError::Io(
+                    "session metadata has a different transcript identity".into(),
+                )
+                .into());
+            }
+            lingxi_core::host::rooted_fs::validate_open_file_single_link(&file)?;
+            let file_identity = lingxi_core::host::rooted_fs::opened_file_identity(&file)?;
+            let authority = TranscriptFileAuthority::from_capture(
+                transcript_root.to_path_buf(),
+                transcript_relative.to_path_buf(),
+                *transcript_identity,
+                file_identity,
+            )?;
+            let source = authority.read_checked()?;
+            if fresh_fixed_header {
+                if !source.is_empty() {
+                    return Err(FsError::Io("new session transcript is not empty".into()).into());
+                }
+                let header =
+                    std::str::from_utf8(&line).map_err(|error| FsError::Io(error.to_string()))?;
+                crate::JsonlWriter::fixed_session_profile_from_source(header, owner)
+                    .map_err(FsError::Io)?;
+            } else {
+                if !source.ends_with(b"\n") {
+                    return Err(
+                        FsError::Io("transcript has an incomplete final record".into()).into(),
+                    );
+                }
+                let source =
+                    std::str::from_utf8(&source).map_err(|error| FsError::Io(error.to_string()))?;
+                crate::JsonlWriter::fixed_session_profile_from_source(source, owner)
+                    .map_err(FsError::Io)?;
+            }
+            Some(authority)
+        } else {
+            None
+        };
+        // A cwd transition must be durable before a host publishes the new
+        // working directory; otherwise a cold resume can restore the old cwd.
+        let relocation = payload.string_at("/type") == Some("relocated");
+        let previous_len = if fixed_mode || mobile_anchor || relocation || force_sync {
+            Some(
+                file.metadata()
+                    .map_err(|error| FsError::Io(error.to_string()))?
+                    .len(),
+            )
+        } else {
+            None
+        };
         self.writer.append_complete_line(&mut file, &line)?;
-        if !file_present {
+        if let Some(previous_len) = previous_len {
+            #[cfg(test)]
+            let injected_error = self
+                .writer
+                .fail_next_append_sync
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                .then(|| std::io::Error::other("synthetic session mode sync failure"));
+            #[cfg(not(test))]
+            let injected_error: Option<std::io::Error> = None;
+            let sync = if let Some(error) = injected_error {
+                Err(error)
+            } else {
+                #[cfg(test)]
+                self.writer
+                    .syncs
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                file.sync_all()
+            };
+            if let Err(error) = sync {
+                // The record was not acknowledged. While still holding the
+                // transaction, attempt to remove its complete line.
+                return Err(self.writer.rollback_undurable_append(
+                    &mut file,
+                    previous_len,
+                    error.to_string(),
+                ));
+            }
+        }
+        // A failed first header attempt can leave an empty created file. The
+        // successful retry must still sync its directory before publishing
+        // the new owner's authority.
+        if !file_present || fresh_fixed_header {
             #[cfg(test)]
             self.writer
                 .syncs
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            sync_parent_pinned(
+            if let Err(error) = sync_parent_pinned(
                 transcript_root,
                 transcript_relative,
                 Some(transcript_identity),
-            )?;
+            ) {
+                if let Some(previous_len) = previous_len {
+                    return Err(self.writer.rollback_undurable_append(
+                        &mut file,
+                        previous_len,
+                        error.to_string(),
+                    ));
+                }
+                return Err(error.into());
+            }
         }
+        if let Some(authority) = pending_authority {
+            // Publish the identity obtained from the original opened file only
+            // after its marker is durable. A replaced path is an uncertain
+            // write, never an opportunity to recapture the replacement.
+            self.writer
+                .bind_transcript_authority(
+                    &transcript_root.join(transcript_relative),
+                    Some(authority),
+                )
+                .map_err(TranscriptWriterError::WrittenButNotDurable)?;
+        }
+        self.writer
+            .confirm_authoritative_target_after_write(transcript_root, transcript_relative)?;
         Ok(())
     }
 
@@ -1008,11 +1664,39 @@ impl DurableTranscriptTransaction<'_> {
         transcript_relative: &Path,
         message_uuid: &str,
     ) -> Result<bool, TranscriptWriterError> {
-        let mut file = match open_read_file_pinned(
+        self.writer.ensure_rewrite_is_resolved()?;
+        let result = self.remove_message_by_uuid_at_inner(
             transcript_root,
+            transcript_identity,
             transcript_relative,
-            Some(transcript_identity),
-        ) {
+            message_uuid,
+        );
+        if matches!(&result, Err(TranscriptWriterError::WrittenButNotDurable(_))) {
+            // Keep the fence inside the transaction even for callers using
+            // DurableTranscriptTransaction directly, before its lock drops.
+            self.writer.mark_rewrite_uncertain();
+        }
+        result
+    }
+
+    fn remove_message_by_uuid_at_inner(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        message_uuid: &str,
+    ) -> Result<bool, TranscriptWriterError> {
+        let admitted = self
+            .writer
+            .open_authoritative_target(transcript_root, transcript_relative)?;
+        let guarded = admitted.is_some();
+        let mut file = match admitted.map(Ok).unwrap_or_else(|| {
+            open_read_file_pinned(
+                transcript_root,
+                transcript_relative,
+                Some(transcript_identity),
+            )
+        }) {
             Ok(file) => file,
             Err(FsError::NotFound(_)) => return Ok(false),
             Err(error) => return Err(error.into()),
@@ -1024,6 +1708,11 @@ impl DurableTranscriptTransaction<'_> {
         if file_len == 0 {
             return Ok(false);
         }
+        let original_authority = self.writer.transcript_authority();
+        let original_revision = original_authority
+            .as_ref()
+            .map(TranscriptFileAuthority::digest_checked)
+            .transpose()?;
 
         let tail_len = file_len.min(TOMBSTONE_TAIL_BYTES);
         let tail_start = file_len - tail_len;
@@ -1066,7 +1755,36 @@ impl DurableTranscriptTransaction<'_> {
             let line_end = tail_start
                 .checked_add(range.end as u64)
                 .ok_or_else(|| FsError::Io("transcript tail offset overflow".into()))?;
-            atomic_write_stream_pinned(
+            let expected_digest = if guarded {
+                let mut hasher = Sha256::new();
+                for (start, length) in [(0, line_start), (line_end, file_len - line_end)] {
+                    file.seek(SeekFrom::Start(start))
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    let mut remaining = length;
+                    let mut buffer = [0u8; 64 * 1024];
+                    while remaining > 0 {
+                        let chunk = remaining.min(buffer.len() as u64) as usize;
+                        let count = file
+                            .read(&mut buffer[..chunk])
+                            .map_err(|error| FsError::Io(error.to_string()))?;
+                        if count == 0 {
+                            return Err(
+                                FsError::Io("transcript changed during rewrite".into()).into()
+                            );
+                        }
+                        hasher.update(&buffer[..count]);
+                        remaining -= count as u64;
+                    }
+                }
+                let _current = self
+                    .writer
+                    .open_authoritative_target(transcript_root, transcript_relative)?;
+                Some(hasher.finalize().into())
+            } else {
+                None
+            };
+            let mut published_identity = None;
+            atomic_write_stream_pinned_checked(
                 transcript_root,
                 transcript_relative,
                 AtomicWriteOptions {
@@ -1077,6 +1795,9 @@ impl DurableTranscriptTransaction<'_> {
                 },
                 transcript_identity,
                 |temporary| {
+                    published_identity = Some(lingxi_core::host::rooted_fs::opened_file_identity(
+                        temporary,
+                    )?);
                     file.seek(SeekFrom::Start(0))
                         .map_err(|error| FsError::Io(error.to_string()))?;
                     let copied_prefix = {
@@ -1100,7 +1821,26 @@ impl DurableTranscriptTransaction<'_> {
                     }
                     Ok(())
                 },
+                || {
+                    #[cfg(test)]
+                    self.writer.wait_authority_publish_test_gate();
+                    if let (Some(authority), Some(revision)) =
+                        (&original_authority, &original_revision)
+                    {
+                        authority.verify_revision(revision)?;
+                    }
+                    Ok(())
+                },
             )?;
+            self.transfer_rewritten_target(
+                transcript_root,
+                transcript_relative,
+                expected_digest,
+                published_identity,
+            )
+            .map_err(|error| {
+                TranscriptWriterError::WrittenButNotDurable(FsError::Io(error.to_string()))
+            })?;
             return Ok(true);
         }
 
@@ -1132,12 +1872,18 @@ impl DurableTranscriptTransaction<'_> {
         };
         body.copy_within(line_end.., line_start);
         body.truncate(body.len() - (line_end - line_start));
+        let expected_digest = guarded.then(|| <[u8; 32]>::from(Sha256::digest(&body)));
+        if guarded {
+            let _current = self
+                .writer
+                .open_authoritative_target(transcript_root, transcript_relative)?;
+        }
         drop(file);
 
-        atomic_write_pinned(
+        let mut published_identity = None;
+        atomic_write_stream_pinned_checked(
             transcript_root,
             transcript_relative,
-            &body,
             AtomicWriteOptions {
                 overwrite: true,
                 create_parents: false,
@@ -1145,7 +1891,33 @@ impl DurableTranscriptTransaction<'_> {
                 file_mode: 0o600,
             },
             transcript_identity,
+            |temporary| {
+                published_identity = Some(lingxi_core::host::rooted_fs::opened_file_identity(
+                    temporary,
+                )?);
+                temporary
+                    .write_all(&body)
+                    .map_err(|error| FsError::Io(error.to_string()))
+            },
+            || {
+                #[cfg(test)]
+                self.writer.wait_authority_publish_test_gate();
+                if let (Some(authority), Some(revision)) = (&original_authority, &original_revision)
+                {
+                    authority.verify_revision(revision)?;
+                }
+                Ok(())
+            },
         )?;
+        self.transfer_rewritten_target(
+            transcript_root,
+            transcript_relative,
+            expected_digest,
+            published_identity,
+        )
+        .map_err(|error| {
+            TranscriptWriterError::WrittenButNotDurable(FsError::Io(error.to_string()))
+        })?;
         Ok(true)
     }
 
@@ -1195,6 +1967,7 @@ impl DurableTranscriptTransaction<'_> {
         delivery_id: &str,
         payload: Utf16JsonProjection,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         self.writer.append_json_once_at_locked(
             transcript_root,
             transcript_identity,
@@ -1219,6 +1992,7 @@ impl DurableTranscriptTransaction<'_> {
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         self.writer.append_json_once_at_locked(
             transcript_root,
             transcript_identity,
@@ -1243,6 +2017,7 @@ impl DurableTranscriptTransaction<'_> {
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         self.writer.append_json_once_at_locked(
             transcript_root,
             transcript_identity,
@@ -1267,6 +2042,7 @@ impl DurableTranscriptTransaction<'_> {
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, Option<String>), TranscriptWriterError> {
+        self.writer.ensure_rewrite_is_resolved()?;
         if payload.string_at("/uuid") != Some(message_uuid) {
             return Err(TranscriptWriterError::DeliveryConflict {
                 delivery_id: message_uuid.to_string(),
@@ -1301,6 +2077,252 @@ fn transcript_line_has_uuid(line: &[u8], expected_uuid: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fresh_fixed_header_binds_only_after_successful_durable_write() {
+        use crate::jsonl::writer::JsonlWriter;
+        use lingxi_core::host::{session_context::ConversationMode, FileSystem};
+        use lingxi_core::types::SessionId;
+        use std::sync::atomic::Ordering;
+
+        for fail_sync in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let id = SessionId::new();
+            let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+            let durable = Arc::new(DurableTranscriptWriter::open(root.path()).unwrap());
+            let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            ));
+            let writer = JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone());
+            writer
+                .activate_session_target(id, path.clone(), root.path().into())
+                .unwrap();
+            if fail_sync {
+                durable.fail_next_append_sync.store(true, Ordering::SeqCst);
+            } else {
+                durable.fail_next_append_write.store(true, Ordering::SeqCst);
+            }
+            assert!(writer
+                .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+                .await
+                .is_err());
+            assert!(writer.active_transcript_authority().is_none());
+            assert!(std::fs::read(&path).unwrap_or_default().is_empty());
+            let before_retry = durable.sync_count_for_test();
+            writer
+                .initialize_fixed_session_mode(&id.as_uuid().to_string(), ConversationMode::Code, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                durable.sync_count_for_test() - before_retry,
+                2,
+                "a successful first header syncs both the file and its directory"
+            );
+            let authority = writer
+                .active_transcript_authority()
+                .expect("durable header binds authority");
+            writer.verify_active_transcript_source(&authority).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::rename(&path, path.with_extension("old")).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(writer.verify_active_transcript_source(&authority).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_and_repeated_mobile_anchors_require_durable_success() {
+        use crate::jsonl::writer::JsonlWriter;
+        use lingxi_core::host::FileSystem;
+        use lingxi_core::types::SessionId;
+        use std::sync::atomic::Ordering;
+
+        for fail_sync in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let id = SessionId::from_uuid(uuid::Uuid::new_v4());
+            let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+            let header = format!(
+                "{}\n",
+                json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(), "sessionMode":"chat", "instructionEpoch":0})
+            );
+            std::fs::write(&path, &header).unwrap();
+            let durable = Arc::new(DurableTranscriptWriter::open(root.path()).unwrap());
+            let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            ));
+            let writer = JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone());
+            writer
+                .activate_session_target(id, path.clone(), root.path().into())
+                .unwrap();
+            if fail_sync {
+                durable.fail_next_append_sync.store(true, Ordering::SeqCst);
+            } else {
+                durable.fail_next_append_write.store(true, Ordering::SeqCst);
+            }
+            assert!(writer
+                .append_mobile_empty_session(&id.as_uuid().to_string(), "Draft", "/workspace")
+                .await
+                .is_err());
+            assert!(writer.active_transcript_authority().is_none());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), header);
+            writer
+                .append_mobile_empty_session(&id.as_uuid().to_string(), "Draft", "/workspace")
+                .await
+                .unwrap();
+            let authority = writer.active_transcript_authority().unwrap();
+            writer.verify_active_transcript_source(&authority).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            durable.fail_next_append_sync.store(true, Ordering::SeqCst);
+            assert!(writer
+                .append_mobile_empty_session(&id.as_uuid().to_string(), "Again", "/workspace")
+                .await
+                .is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            writer.verify_active_transcript_source(&authority).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn same_source_cwd_marker_write_and_sync_failures_do_not_publish_cwd() {
+        use crate::jsonl::writer::JsonlWriter;
+        use lingxi_core::host::FileSystem;
+        use lingxi_core::types::SessionId;
+        use std::sync::atomic::Ordering;
+
+        for fail_sync in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let id = SessionId::from_uuid(uuid::Uuid::new_v4());
+            let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+            std::fs::write(&path, b"{\"type\":\"fixture\"}\n").unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let durable = Arc::new(DurableTranscriptWriter::open(root.path()).unwrap());
+            let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            ));
+            let writer = JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone());
+            writer
+                .activate_session_target(id, path.clone(), "/old".into())
+                .unwrap();
+            if fail_sync {
+                durable.fail_next_append_sync.store(true, Ordering::SeqCst);
+            } else {
+                durable.fail_next_append_write.store(true, Ordering::SeqCst);
+            }
+            assert!(writer
+                .retarget_with_relocation(path.clone(), &id.as_uuid().to_string(), "/new")
+                .await
+                .is_err());
+            assert_eq!(writer.active_path(), path);
+            assert_eq!(
+                writer.session_target_cwd(id).as_deref(),
+                Some(Path::new("/old"))
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            writer
+                .retarget_with_relocation(path.clone(), &id.as_uuid().to_string(), "/new")
+                .await
+                .unwrap();
+            assert_eq!(
+                writer.session_target_cwd(id).as_deref(),
+                Some(Path::new("/new"))
+            );
+            assert!(std::fs::read_to_string(path)
+                .unwrap()
+                .contains("\"relocatedCwd\":\"/new\""));
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_write_or_sync_failure_keeps_uncommitted_stage_out_of_cold_chain() {
+        use crate::jsonl::{loader::build_conversation_chain, reader::JsonlReader};
+        use platform_posix::fs::PosixFileSystem;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        for fail_sync in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+            let path = Path::new("history.jsonl");
+            let owner = Uuid::new_v4().to_string();
+            let old = Uuid::new_v4().to_string();
+            let summary = Uuid::new_v4().to_string();
+            let boundary = Uuid::new_v4().to_string();
+            let after = Uuid::new_v4().to_string();
+            let base = |id: &str, parent: Option<&str>, sidechain: bool, timestamp: &str| {
+                json!({"type":"user", "uuid":id, "parentUuid":parent, "sessionId":owner,
+                    "timestamp":timestamp, "cwd":"/", "version":"test", "isSidechain":sidechain,
+                    "message":{"role":"user", "content":id}})
+            };
+            writer
+                .append_json_once(
+                    path,
+                    &old,
+                    source_payload(base(&old, None, false, "2025-01-01T00:00:00Z")),
+                )
+                .unwrap();
+            let mut stage = base(&summary, Some(&boundary), true, "2025-01-01T00:00:01Z");
+            stage["nativeCompactStage"] = json!(boundary);
+            stage["isCompactSummary"] = json!(true);
+            writer
+                .append_json_once(path, &summary, source_payload(stage))
+                .unwrap();
+            let before_boundary = std::fs::read(dir.path().join(path)).unwrap();
+            let boundary_row = json!({"type":"system", "subtype":"compact_boundary", "uuid":boundary,
+                "parentUuid":null, "sessionId":owner, "timestamp":"2025-01-01T00:00:02Z", "cwd":"/", "version":"test",
+                "isSidechain":false, "compactMetadata":{"nativeExactPreserved":true,
+                    "preservedSegment":{"headUuid":old,"tailUuid":old,"anchorUuid":summary},
+                    "preservedMessages":{"anchorUuid":summary,"uuids":[old],"allUuids":[old]}}});
+            if fail_sync {
+                writer
+                    .fail_next_append_sync
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                writer
+                    .fail_next_append_write
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            assert!(writer
+                .append_json_once(path, &boundary, source_payload(boundary_row))
+                .is_err());
+            assert_eq!(
+                std::fs::read(dir.path().join(path)).unwrap(),
+                before_boundary
+            );
+
+            let read = || {
+                JsonlReader::new(
+                    dir.path().join(path),
+                    Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+                )
+            };
+            let staged_only = read().read_routed().await.unwrap();
+            assert_eq!(
+                build_conversation_chain(&staged_only, &owner)
+                    .0
+                    .iter()
+                    .map(|row| row.uuid.as_str())
+                    .collect::<Vec<_>>(),
+                vec![old.as_str()]
+            );
+
+            writer
+                .append_json_once(
+                    path,
+                    &after,
+                    source_payload(base(&after, Some(&old), false, "2025-01-01T00:00:03Z")),
+                )
+                .unwrap();
+            drop(writer);
+            let cold = read().read_routed().await.unwrap();
+            assert_eq!(
+                build_conversation_chain(&cold, &owner)
+                    .0
+                    .iter()
+                    .map(|row| row.uuid.as_str())
+                    .collect::<Vec<_>>(),
+                vec![old.as_str(), after.as_str()]
+            );
+        }
+    }
 
     #[test]
     fn disk_full_partial_append_preserves_committed_history_and_allows_retry() {
@@ -1440,6 +2462,70 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.path().join(path)).unwrap(), raw);
     }
 
+    #[test]
+    fn fixed_mode_header_is_synced_and_sync_failure_is_not_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+        let path = Path::new("mode.jsonl");
+        let identity = root_identity(dir.path()).unwrap();
+        let append = |payload: Value| {
+            writer.with_transaction(|transaction| {
+                transaction.append_raw_json_at(dir.path(), &identity, path, source_payload(payload))
+            })
+        };
+
+        append(json!({"type":"tag", "tag":"ordinary"})).unwrap();
+        assert_eq!(
+            writer.sync_count_for_test(),
+            1,
+            "ordinary metadata only syncs the new directory entry"
+        );
+        append(json!({"type":"fixed-session-mode", "sessionMode":"chat", "instructionEpoch":1}))
+            .unwrap();
+        assert_eq!(
+            writer.sync_count_for_test(),
+            2,
+            "a fixed mode header fsyncs its file"
+        );
+        let before = std::fs::read(dir.path().join(path)).unwrap();
+        writer
+            .fail_next_append_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            append(
+                json!({"type":"fixed-session-mode", "sessionMode":"code", "instructionEpoch":2})
+            ),
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert_eq!(
+            std::fs::read(dir.path().join(path)).unwrap(),
+            before,
+            "an unacknowledged header cannot be replayed on resume"
+        );
+        append(json!({"type":"fixed-session-mode", "sessionMode":"code", "instructionEpoch":2}))
+            .unwrap();
+        assert_eq!(writer.sync_count_for_test(), 4);
+
+        let fresh = Path::new("fresh-mode.jsonl");
+        writer
+            .with_transaction(|transaction| {
+                transaction.append_raw_json_at(
+                    dir.path(),
+                    &identity,
+                    fresh,
+                    source_payload(
+                        json!({"type":"fixed-session-mode", "sessionMode":"chat", "instructionEpoch":1}),
+                    ),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            writer.sync_count_for_test(),
+            6,
+            "a fresh mode header syncs both file and directory"
+        );
+    }
+
     /// Ordinary rows travel through the durable transaction for ORDERING, not
     /// for durability, and must not pay an fsync each. Only creating the file
     /// is worth a parent sync; a Fusion delivery, whose receipt claims the row
@@ -1568,6 +2654,80 @@ mod tests {
             .unwrap());
         worker.join().unwrap();
         assert_eq!(std::fs::metadata(transcript_path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn uncertain_tombstone_fences_the_existing_transaction_and_future_writers() {
+        let state = tempfile::tempdir().unwrap();
+        let transcript = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(transcript.path()).unwrap();
+        let relative = PathBuf::from("transcript.jsonl");
+        let path = root.join(&relative);
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"uuid\":\"keep\"}\n{\"type\":\"assistant\",\"uuid\":\"remove\"}\n",
+        )
+        .unwrap();
+        let (authority, _) =
+            TranscriptFileAuthority::capture(root.clone(), relative.clone()).unwrap();
+        let identity = root_identity(&root).unwrap();
+        let writer = DurableTranscriptWriter::open(state.path()).unwrap();
+        writer
+            .bind_transcript_authority(&path, Some(authority))
+            .unwrap();
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        writer.install_authority_rewrite_test_gate((reached_tx, release_rx));
+        let worker = std::thread::spawn({
+            let writer = writer.clone();
+            let root = root.clone();
+            let relative = relative.clone();
+            move || {
+                let transaction = writer.begin_transaction().unwrap();
+                let rewrite =
+                    transaction.remove_message_by_uuid_at(&root, &identity, &relative, "remove");
+                let raw = transaction.append_raw_json_at(
+                    &root,
+                    &identity,
+                    &relative,
+                    source_payload(serde_json::json!({"type":"agent-name","agentName":"later"})),
+                );
+                let once = transaction.append_json_once_at(
+                    &root,
+                    &identity,
+                    &relative,
+                    "delivery",
+                    source_payload(serde_json::json!({"type":"user","uuid":"later"})),
+                );
+                (rewrite, raw, once)
+            }
+        });
+        reached_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let published = std::fs::read(&path).unwrap();
+        let saved = path.with_extension("saved");
+        std::fs::rename(&path, &saved).unwrap();
+        std::fs::write(&path, &published).unwrap();
+        release_tx.send(()).unwrap();
+        let (rewrite, raw, once) = worker.join().unwrap();
+        assert!(matches!(
+            rewrite,
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert!(matches!(
+            raw,
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert!(matches!(
+            once,
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert!(matches!(
+            writer.begin_transaction(),
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), published);
     }
 
     #[test]

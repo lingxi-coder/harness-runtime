@@ -6,13 +6,190 @@
 
 use super::path::project_dir_name;
 use std::collections::HashSet;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::io::{self, Write};
+use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use unicode_normalization::UnicodeNormalization;
 
 /// Filename used by the native session-directory link format.
 pub const SESSION_ALIASES_FILE: &str = ".session-aliases";
+
+/// Exact transcript links created by `/cd`, separate from directory-wide
+/// `/add-dir` links. Entries contain one source relative to the projects
+/// directory, one JSON object per line.
+pub const SESSION_CWD_ALIASES_FILE: &str = ".session-cwd-aliases";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CwdAlias {
+    source: String,
+    canonical_home: bool,
+}
+
+fn valid_cwd_alias(relative: &Path) -> bool {
+    let mut components = relative.components();
+    let (Some(Component::Normal(bucket)), Some(Component::Normal(filename)), None) =
+        (components.next(), components.next(), components.next())
+    else {
+        return false;
+    };
+    let Some(bucket) = bucket.to_str() else {
+        return false;
+    };
+    if bucket.is_empty()
+        || !bucket
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return false;
+    }
+    let filename = Path::new(filename);
+    filename.extension().and_then(|s| s.to_str()) == Some("jsonl")
+        && filename
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(super::validate_uuid)
+}
+
+/// Read only direct `/cd` links, rejecting traversal and malformed entries.
+/// A link is only a discovery hint; the loader checks the transcript's fixed
+/// identity and latest relocation cwd before showing it in this directory.
+pub(crate) async fn read_session_cwd_aliases(home: &Path, project_dir: &Path) -> Vec<PathBuf> {
+    let Ok(content) = tokio::fs::read_to_string(project_dir.join(SESSION_CWD_ALIASES_FILE)).await
+    else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let canonical_home = std::fs::canonicalize(home).ok();
+    content
+        .split_inclusive('\n')
+        .filter_map(|line| line.strip_suffix('\n'))
+        .filter_map(|line| serde_json::from_str::<CwdAlias>(line).ok())
+        .filter_map(|entry| {
+            let relative = PathBuf::from(entry.source);
+            if !valid_cwd_alias(&relative) {
+                return None;
+            }
+            let base = if entry.canonical_home {
+                canonical_home.as_deref()?
+            } else {
+                home
+            };
+            let path = base.join("projects").join(relative);
+            seen.insert(path.clone()).then_some(path)
+        })
+        .collect()
+}
+
+/// Durably record one selected source for discovery after `/cd`. The caller
+/// must still persist the relocation marker before publishing its new cwd.
+/// Separate sessions targeting one directory serialize their alias updates.
+pub async fn record_session_cwd_alias(
+    home: &Path,
+    source_path: &Path,
+    new_cwd: &Path,
+) -> io::Result<bool> {
+    // Capture only the trusted home root. Never canonicalize the source's
+    // projects/bucket components, which would change its selected authority.
+    let canonical_home = std::fs::canonicalize(home)?;
+    let (source, uses_canonical_home) = match source_path.strip_prefix(home.join("projects")) {
+        Ok(source) => (source.to_path_buf(), false),
+        Err(_) => (
+            source_path
+                .strip_prefix(canonical_home.join("projects"))
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "session source is outside projects",
+                    )
+                })?
+                .to_path_buf(),
+            true,
+        ),
+    };
+    if !valid_cwd_alias(&source) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid session source path",
+        ));
+    }
+    let target = alias_target_directory(new_cwd);
+    let bucket = project_dir_name(&target.to_string_lossy());
+    if source.parent() == Some(Path::new(&bucket)) {
+        return Ok(false);
+    }
+    let home = canonical_home;
+    tokio::task::spawn_blocking(move || {
+        use lingxi_core::host::{rooted_fs, FsError};
+        let map_error = |error: FsError| io::Error::other(error.to_string());
+        let root = rooted_fs::root_identity(&home).map_err(map_error)?;
+        let dir = Path::new("projects").join(bucket);
+        rooted_fs::ensure_directory_identity_pinned(&home, &dir, &root).map_err(map_error)?;
+        let _lock = rooted_fs::lock_exclusive_pinned(
+            &home,
+            &dir.join(".session-cwd-aliases.lock"),
+            0o700,
+            0o600,
+            Some(&root),
+        )
+        .map_err(map_error)?;
+        let alias_path = dir.join(SESSION_CWD_ALIASES_FILE);
+        let content = match rooted_fs::read_to_string_pinned(&home, &alias_path, Some(&root)) {
+            Ok(content) => content,
+            Err(FsError::NotFound(_)) => String::new(),
+            Err(error) => return Err(map_error(error)),
+        };
+        if !content.is_empty() && !content.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "incomplete session cwd alias file",
+            ));
+        }
+        let mut file = rooted_fs::open_append_file_pinned(&home, &alias_path, Some(&root))
+            .map_err(map_error)?;
+        rooted_fs::validate_open_file_single_link(&file).map_err(map_error)?;
+        let already_present = content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<CwdAlias>(line).ok())
+            .any(|entry| {
+                Path::new(&entry.source) == source.as_path()
+                    && entry.canonical_home == uses_canonical_home
+            });
+        if !already_present {
+            let entry = serde_json::to_string(&CwdAlias {
+                source: source.to_string_lossy().into_owned(),
+                canonical_home: uses_canonical_home,
+            })
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+                + "\n";
+            let previous_len = file.metadata()?.len();
+            if let Err(error) = file
+                .write_all(entry.as_bytes())
+                .and_then(|()| file.sync_all())
+            {
+                return match file.set_len(previous_len).and_then(|()| file.sync_all()) {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(io::Error::other(format!(
+                        "{error}; alias rollback failed: {rollback}"
+                    ))),
+                };
+            }
+        } else {
+            // A previous attempt may have synced the file but failed to sync a
+            // directory entry. Re-establish the full durability boundary.
+            file.sync_all()?;
+        }
+        // Persist both the file entry and any newly created bucket/projects
+        // entries before the caller can publish the matching cwd marker.
+        rooted_fs::sync_parent_pinned(&home, &alias_path, Some(&root)).map_err(map_error)?;
+        rooted_fs::sync_parent_pinned(&home, &dir, Some(&root)).map_err(map_error)?;
+        rooted_fs::sync_parent_pinned(&home, Path::new("projects"), Some(&root))
+            .map_err(map_error)?;
+        Ok(!already_present)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
 
 /// Read direct linked project directories in their first-seen order.
 ///

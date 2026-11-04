@@ -131,7 +131,6 @@ impl StreamingApiClient for PendingStream {
 #[tokio::test]
 async fn fixed_legal_busy_context_ready_models_and_global_flags() {
     lingxi_core::host::session_flags::set_non_interactive_session(false);
-    lingxi_core::host::session_flags::set_tool_search_enabled(true);
     let entered = Arc::new(Notify::new());
     let mut config = OrchestratorConfig::default();
     config.model = "keyless-current".into();
@@ -151,7 +150,6 @@ async fn fixed_legal_busy_context_ready_models_and_global_flags() {
         .with_side_chat_model_refs(vec!["keyless-current".into()]),
     );
     assert!(!lingxi_core::host::session_flags::is_non_interactive_session());
-    assert!(lingxi_core::host::session_flags::tool_search_enabled());
     assert!(parent.switch_model("keyless-current", None).await.is_ok());
     assert!(parent
         .select_model(lingxi_core::host::ModelSelectionRequest::Select {
@@ -200,7 +198,6 @@ async fn fixed_legal_busy_context_ready_models_and_global_flags() {
         .unwrap()
         .unwrap();
     assert!(!lingxi_core::host::session_flags::is_non_interactive_session());
-    assert!(lingxi_core::host::session_flags::tool_search_enabled());
 }
 
 #[test]

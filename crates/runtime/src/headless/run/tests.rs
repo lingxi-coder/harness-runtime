@@ -1337,7 +1337,7 @@ pub(super) async fn fixture_runtime(
     );
     let native_catalog_user_agent = config.user_agent_environment.clone();
     let prepared =
-        crate::headless::session::prepare(&mut config, &crate::headless::SessionStart::New)
+        crate::headless::session::prepare(&mut config, &crate::headless::SessionStart::New, false)
             .await
             .unwrap();
     let inner = crate::headless::session::build_prepared(

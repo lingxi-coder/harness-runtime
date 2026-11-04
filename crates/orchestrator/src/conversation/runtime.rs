@@ -169,7 +169,9 @@ pub(crate) struct TranscriptStore {
     /// writer `insertMessageChain` (BIN off **237862200**) then derives
     /// `parentUuid` FROM this field, which is why the two are equal on all
     /// 96 794 real 2.1.220 lines that carry it.
-    pub(crate) tool_source_assistant_uuids: Mutex<std::collections::HashMap<String, String>>,
+    pub(crate) tool_source_assistant_uuids: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    pub(crate) tool_persisted_origins: Arc<Mutex<std::collections::HashMap<(String, String), Result<String, String>>>>,
+    pub(crate) tool_source_assistant_notify: Arc<tokio::sync::Notify>,
     /// `tool_use_id` → hook `attachment` PAYLOADS produced while dispatching
     /// that tool, awaiting persistence.
     ///
@@ -251,7 +253,9 @@ impl TranscriptStore {
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
             tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
             pending_tool_result_turn_end: Mutex::new(std::collections::HashMap::new()),
-            tool_source_assistant_uuids: Mutex::new(std::collections::HashMap::new()),
+            tool_source_assistant_uuids: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            tool_persisted_origins: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            tool_source_assistant_notify: Arc::new(tokio::sync::Notify::new()),
             pending_hook_attachments: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
             post_compact_skill_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -272,6 +276,7 @@ impl TranscriptStore {
         self.tool_use_mcp_meta.lock().await.clear();
         self.pending_tool_result_turn_end.lock().await.clear();
         self.tool_source_assistant_uuids.lock().await.clear();
+        self.tool_persisted_origins.lock().await.clear();
         self.pending_hook_attachments.lock().await.clear();
         *self.git_branch_cache.lock().await = None;
         self.post_compact_skill_attachments
@@ -1096,6 +1101,9 @@ pub(crate) struct PromptRuntime {
     /// Optional carved-slate snapshot of the static prompt and inline tool
     /// descriptions. Dynamic system context remains live per request.
     pub(crate) prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    /// Admitted conversation epoch that produced the static snapshot and
+    /// its rendering hint. Legacy transcripts belong to epoch zero.
+    pub(crate) prompt_snapshot_epoch: Mutex<Option<u64>>,
     /// Exact source vector built with the current provider gate, held only
     /// between prompt rendering and the first request's snapshot capture.
     pub(crate) pending_prompt_source_vector:
@@ -1200,6 +1208,7 @@ impl PromptRuntime {
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
+            prompt_snapshot_epoch: Mutex::new(None),
             pending_prompt_source_vector: Mutex::new(None),
             context_rendering_hint: Mutex::new(None),
             prompt_snapshot_resume: std::sync::atomic::AtomicBool::new(false),
@@ -1300,6 +1309,7 @@ impl PromptRuntime {
         *self.pending_skill_prefetch.lock().await = None;
         *self.pending_prompt_source_vector.lock().await = None;
         *self.prompt_snapshot.lock().await = None;
+        *self.prompt_snapshot_epoch.lock().await = None;
         *self.context_rendering_hint.lock().await = None;
         self.prompt_snapshot_resume
             .store(false, std::sync::atomic::Ordering::Release);
@@ -1705,8 +1715,9 @@ pub(crate) struct LifecycleRuntime {
         Option<Arc<dyn crate::stop_hook_snapshot::StopHookSnapshotProvider>>,
     /// Best-effort startup Responses WebSocket prewarm task.
     ///
-    /// Lifecycle operations abort this before clearing or exiting the session;
-    /// host shutdown permanently closes admission and joins every retired task.
+    /// Lifecycle operations abort this before clearing or exiting the session so
+    /// a stale prewarm cannot later seed `previous_response_id`. Host shutdown
+    /// closes admission and joins all replaced or aborted generations.
     pub(crate) startup_responses_websocket_prewarm:
         super::model_impl::startup_prewarm::StartupPrewarm,
     /// Weak self-link installed after a production builder wraps the

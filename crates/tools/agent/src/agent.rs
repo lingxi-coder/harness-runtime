@@ -2804,7 +2804,8 @@ impl AgentTool {
             .clone()
             .unwrap_or_else(|| Arc::new(tool_api::ToolRegistry::new()));
         let mut invoker_impl =
-            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry);
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry)
+                .with_trusted_session(ctx.trusted_session_profile.clone(), ctx.durable_tool_origins.clone());
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
@@ -4088,6 +4089,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         // no inheritance at all).
         let mut invoker_impl =
             tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry)
+                .with_trusted_session(ctx.trusted_session_profile.clone(), ctx.durable_tool_origins.clone())
                 .with_background_owned(true);
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
@@ -4849,6 +4851,7 @@ impl Tool for AgentTool {
                 ToolError::Internal("AgentTool: parent ToolRegistry not threaded via ToolUseContext.subagent_registry".into())
             })?;
             let mut invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(registry)
+                .with_trusted_session(ctx.trusted_session_profile.clone(), ctx.durable_tool_origins.clone())
                 .with_background_owned(true);
             if let Some(gate) = self.ctx.permission_gate.clone() {
                 invoker = invoker.with_gate(gate);
@@ -6068,7 +6071,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // the main loop uses, when one is wired. `None` → unconditional dispatch
         // (legacy). The gate rides into the spawner via the inheritance bundle.
         let mut invoker_impl =
-            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone());
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone())
+                .with_trusted_session(ctx.trusted_session_profile.clone(), ctx.durable_tool_origins.clone());
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }

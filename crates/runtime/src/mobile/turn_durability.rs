@@ -32,6 +32,8 @@ pub(crate) struct DurableSkillPrompt {
     pub(crate) body: Utf16JsonProjection,
     #[serde(with = "source_projection_vec_serde")]
     pub(crate) hook_messages: Vec<Utf16JsonProjection>,
+    /// Trusted producer identity; absent for an ordinary Native prompt pair.
+    pub(crate) skill: Option<lingxi_core::host::SlashSkillIdentity>,
     /// Stable identities for the command and expanded-body user rows.
     pub(crate) input_message_ids: [MessageId; 2],
     /// Stable identities for raw hook rows, in `hook_messages` order.
@@ -108,12 +110,14 @@ impl DurableSkillPrompt {
         command: Utf16JsonProjection,
         body: Utf16JsonProjection,
         hook_messages: Vec<Utf16JsonProjection>,
+        skill: Option<lingxi_core::host::SlashSkillIdentity>,
     ) -> Self {
         Self {
             command,
             body,
             hook_message_ids: (0..hook_messages.len()).map(|_| MessageId::new()).collect(),
             hook_messages,
+            skill,
             input_message_ids: [MessageId::new(), MessageId::new()],
             input_prompt_ids: [
                 uuid::Uuid::new_v4().to_string(),
@@ -130,6 +134,7 @@ impl DurableSkillPrompt {
             self.command.clone(),
             self.body.clone(),
             self.hook_messages.clone(),
+            self.skill.clone(),
         );
         if let Some(first) = inputs.first_mut() {
             first
@@ -1698,6 +1703,39 @@ impl DurableTurnStore {
         })
     }
 
+    /// Settle a real admitted prompt that was cancelled before dispatch. This
+    /// is only used while its live initial owner is being released; ordinary
+    /// queued follow-ups retain their existing private-queue semantics.
+    pub(crate) fn cancel_unstarted_initial(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<TurnRecoverySnapshotDto, DurableTurnStoreError> {
+        self.update(session_id, turn_id, |checkpoint| {
+            if checkpoint.state == Some(TurnRecoveryStateDto::Cancelled) {
+                return Ok(checkpoint.snapshot());
+            }
+            if checkpoint.state.is_some()
+                || !matches!(
+                    checkpoint.queue_delivery,
+                    QueueDeliveryState::Pending
+                        | QueueDeliveryState::SlashClaimed
+                        | QueueDeliveryState::Cancelled
+                )
+            {
+                return Err(DurableTurnStoreError::Terminal {
+                    session_id: session_id.to_string(),
+                    turn_id,
+                });
+            }
+            checkpoint.state = Some(TurnRecoveryStateDto::Cancelled);
+            checkpoint.queue_delivery = QueueDeliveryState::Cancelled;
+            checkpoint.safe_to_resume = false;
+            checkpoint.reason = Some("explicit_cancel".into());
+            Ok(checkpoint.snapshot())
+        })
+    }
+
     pub(crate) fn cancel(
         &self,
         session_id: &str,
@@ -2662,6 +2700,10 @@ mod tests {
                     "/skill".into(),
                     "expanded body".into(),
                     Vec::new(),
+                    Some(lingxi_core::host::SlashSkillIdentity {
+                        name: "skill".into(),
+                        path: "/skills/skill".into(),
+                    }),
                 )),
             ),
         ] {
@@ -3120,8 +3162,21 @@ mod tests {
             r#"{"role":"assistant","content":[{"type":"text","text":"later hook"}]}"#,
         )
         .expect("later hook row projection");
-        let skill_prompt =
-            DurableSkillPrompt::new(command.clone(), body.clone(), vec![hook, later_hook]);
+        let name_units = "skill ".encode_utf16().chain([0xd800]).collect::<Vec<_>>();
+        let name = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&name_units),
+            name_units.clone(),
+        )
+        .unwrap();
+        let skill_prompt = DurableSkillPrompt::new(
+            command.clone(),
+            body.clone(),
+            vec![hook, later_hook],
+            Some(lingxi_core::host::SlashSkillIdentity {
+                name,
+                path: "/skills/skill".into(),
+            }),
+        );
         let input_message_ids = skill_prompt.input_message_ids;
         let hook_message_ids = skill_prompt.hook_message_ids.clone();
         let input_prompt_ids = skill_prompt.input_prompt_ids.clone();
@@ -3154,6 +3209,10 @@ mod tests {
         assert_eq!(
             stored_source.string_units("/skill_prompt/body"),
             Some(body_units.clone())
+        );
+        assert_eq!(
+            stored_source.string_units("/skill_prompt/skill/name"),
+            Some(name_units.clone())
         );
         assert_eq!(
             stored_source.string_units("/skill_prompt/hook_messages/0/content/0/text"),
@@ -3193,10 +3252,19 @@ mod tests {
             .expect("skill batch survives process restart");
         assert_eq!(restored.command.string_units(""), Some(command_units));
         assert_eq!(restored.body.string_units(""), Some(body_units));
+        assert_eq!(
+            restored.skill.as_ref().unwrap().name.string_units(""),
+            Some(name_units)
+        );
+        assert_eq!(
+            restored.skill.as_ref().unwrap().path,
+            std::path::PathBuf::from("/skills/skill")
+        );
         assert_eq!(restored.input_message_ids, input_message_ids);
         assert_eq!(restored.hook_message_ids, hook_message_ids);
         assert_eq!(restored.input_prompt_ids, input_prompt_ids);
         let queued_inputs = restored.queued_prompt_inputs(&[]);
+        assert_eq!(queued_inputs[1].skill_identity, restored.skill);
         assert_eq!(queued_inputs.len(), 2);
         assert_eq!(
             queued_inputs[0].message_id,
@@ -3276,6 +3344,36 @@ mod tests {
                 .string_units("/content/0/text"),
             Some(later_hook_units)
         );
+    }
+
+    #[test]
+    fn cold_restart_preserves_ordinary_prompt_pair_without_skill_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("turns");
+        let ordinary = DurableSkillPrompt::new(
+            "<command-message>mcp</command-message>".into(),
+            "evidence".into(),
+            Vec::new(),
+            None,
+        );
+        let store = DurableTurnStore::new(root.clone());
+        store
+            .begin_with_skill_prompt(
+                "session",
+                44,
+                ordinary.command.clone(),
+                None,
+                Vec::new(),
+                Some(ordinary),
+            )
+            .unwrap();
+        drop(store);
+        let checkpoint = DurableTurnStore::new(root).load("session", 44).unwrap();
+        let restored = checkpoint.skill_prompt.unwrap();
+        assert!(restored.skill.is_none());
+        let inputs = restored.queued_prompt_inputs(&[]);
+        assert!(inputs[1].skill_identity.is_none());
+        assert_eq!(inputs[1].text.string_at(""), Some("evidence"));
     }
 
     #[test]

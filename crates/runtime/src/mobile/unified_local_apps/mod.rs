@@ -4,7 +4,8 @@ mod gateway;
 mod process;
 
 use local_app::v2::{
-    AppError, AppLibrary, AppRun, AuthoringRef, PublishRequest, RunPhase, RuntimeLease, Target,
+    AppError, AppLibrary, AppRun, AuthoringRef, MarketRemixInput, ProjectRef, PublishRequest,
+    RunPhase, RuntimeLease, Target,
 };
 use mobile_linux_api::MobileLinuxRuntime;
 use serde_json::{json, Value};
@@ -309,7 +310,6 @@ impl MobileLocalAppServiceHandle {
             "start" | "resume" | "restart" | "repair" => Some(&["op", "appId", "revision"]),
             "stop" | "suspend" | "status" => Some(&["op", "appId"]),
             "configureTarget" => Some(&["op", "target"]),
-            "createAuthoring" => Some(&["op", "name"]),
             _ => None,
         };
         if let Some(allowed) = allowed {
@@ -394,13 +394,27 @@ impl MobileLocalAppServiceHandle {
                     .authoring
                     .as_ref()
                     .map(|r| r.source_directory.as_str())
-                    .unwrap_or("");
-                let exists = self.host_path(source).is_ok_and(|p| p.is_dir());
+                    .unwrap_or("")
+                    .to_owned();
+                let exists = self.host_path(&source).is_ok_and(|p| p.is_dir());
                 let mut request = request;
                 request["sourceExists"] = json!(exists);
-                self.library_request(request).await
+                let mut response = self.library_request(request).await?;
+                if exists
+                    && self
+                        .canonical_owned_authoring_source(&self.host_path(&source)?)?
+                        .is_some()
+                {
+                    let proof = self.prepare_authoring_source(source, None).await?;
+                    response["sourceId"] = proof["sourceId"].clone();
+                    response["sourcePath"] = proof["sourcePath"].clone();
+                }
+                Ok(response)
             }
-            "createAuthoring" => self.create_authoring(required(&request, "name")?).await,
+            "createAuthoring" => Err(ServiceError::new(
+                "invalidOperation",
+                "authoring bindings require the trusted native host",
+            )),
             // These mutations belong to the runtime, never a UI/web page.
             "prepareRun" | "updateRun" | "activateRelease" => Err(ServiceError::new(
                 "invalidOperation",
@@ -422,26 +436,14 @@ impl MobileLocalAppServiceHandle {
                 let source = required(&request, "sourcePath")?.to_owned();
                 let host_source = self.host_path(&source)?;
                 request["sourcePath"] = json!(host_source.to_string_lossy());
-                if is_publish && request.get("appId").and_then(Value::as_str).is_none() {
-                    if let Some(source_directory) =
-                        self.canonical_owned_authoring_source(&host_source)?
-                    {
-                        let mut publish_request = request;
-                        publish_request
-                            .as_object_mut()
-                            .expect("request was checked as an object")
-                            .remove("op");
-                        let publish_request: PublishRequest =
-                            serde_json::from_value(publish_request)?;
-                        let library = self.library.clone();
-                        let published = tokio::task::spawn_blocking(move || {
-                            library
-                                .publish_with_pending_authoring(publish_request, &source_directory)
-                        })
-                        .await
-                        .map_err(join_error)??;
-                        return Ok(serde_json::to_value(published)?);
-                    }
+                if self
+                    .canonical_owned_authoring_source(&host_source)?
+                    .is_some()
+                {
+                    return Err(ServiceError::new(
+                        "invalidOperation",
+                        "managed authoring publication requires the active engine owner",
+                    ));
                 }
                 self.library_request(request).await
             }
@@ -457,17 +459,10 @@ impl MobileLocalAppServiceHandle {
         original_source_path: Option<&str>,
         app_id: Option<&str>,
         expected_revision: u64,
+        request_id: String,
+        engine_session: String,
+        active_session: Arc<Mutex<String>>,
     ) -> Result<Value, ServiceError> {
-        if let Some(app_id) = app_id {
-            return self
-                .request_value(json!({
-                    "op":"publish",
-                    "appId":app_id,
-                    "expectedRevision":expected_revision,
-                    "sourcePath":staged_source_path
-                }))
-                .await;
-        }
         let pending_source_directory = if let Some(original_source_path) = original_source_path {
             let host_source = self.host_path(original_source_path)?;
             self.canonical_owned_authoring_source(&host_source)?
@@ -475,25 +470,69 @@ impl MobileLocalAppServiceHandle {
             None
         };
         let Some(source_directory) = pending_source_directory else {
-            return self
-                .request_value(json!({
-                    "op":"publish",
-                    "expectedRevision":expected_revision,
-                    "sourcePath":staged_source_path
-                }))
-                .await;
+            let staged_path = self.host_path(staged_source_path)?;
+            let request = PublishRequest {
+                app_id: app_id.map(str::to_owned),
+                expected_revision,
+                source_path: staged_path.to_string_lossy().into_owned(),
+                authoring: None,
+                market_origin: None,
+            };
+            let library = self.library.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                // Hold the same native owner cell across the synchronous
+                // ordinary publication commit. Retargeting cannot relabel an
+                // already admitted operation or race its final record write.
+                let live = active_session
+                    .lock()
+                    .map_err(|_| AppError::Invalid("engine owner unavailable".into()))?;
+                if *live != engine_session {
+                    return Err(AppError::Invalid(
+                        "engine session changed during publication".into(),
+                    ));
+                }
+                let digest = library.fingerprint_publication(Path::new(&request.source_path))?;
+                library.publish_once(&request_id, &digest, request, None)
+            })
+            .await
+            .map_err(join_error)??;
+            return Ok(serde_json::to_value(result)?);
         };
         let staged_path = self.host_path(staged_source_path)?;
         let request = PublishRequest {
-            app_id: None,
+            app_id: app_id.map(str::to_owned),
             expected_revision,
             source_path: staged_path.to_string_lossy().into_owned(),
             authoring: None,
             market_origin: None,
         };
+        let set_current = app_id.is_none();
         let library = self.library.clone();
+        let host = Arc::clone(self);
         let published = tokio::task::spawn_blocking(move || {
-            library.publish_with_pending_authoring(request, &source_directory)
+            let staged_digest = library.fingerprint_publication(Path::new(&request.source_path))?;
+            library.publish_native_authoring_once(
+                &request_id,
+                &staged_digest,
+                request,
+                &source_directory,
+                &engine_session,
+                None,
+                None,
+                set_current,
+                |authoring| {
+                    let live = active_session
+                        .lock()
+                        .map_err(|_| AppError::Invalid("engine owner unavailable".into()))?;
+                    if *live != engine_session {
+                        return Err(AppError::Invalid(
+                            "engine session changed during publication".into(),
+                        ));
+                    }
+                    host.validate_registered_authoring_source(authoring)
+                        .map_err(|e| AppError::Invalid(e.to_string()))
+                },
+            )
         })
         .await
         .map_err(join_error)??;
@@ -753,14 +792,18 @@ impl MobileLocalAppServiceHandle {
         }
         Ok(Some(self.guest_path(&host_source)?))
     }
-    async fn create_authoring(&self, name: &str) -> Result<Value, ServiceError> {
+    async fn create_authoring(
+        self: &Arc<Self>,
+        name: &str,
+        request_id: &str,
+    ) -> Result<Value, ServiceError> {
         if name.trim().is_empty() || name.chars().count() > 80 {
             return Err(ServiceError::new(
                 "invalidRequest",
                 "name must contain 1–80 characters",
             ));
         }
-        let slug: String = name
+        let mut slug: String = name
             .trim()
             .chars()
             .map(|c| {
@@ -771,40 +814,273 @@ impl MobileLocalAppServiceHandle {
                 }
             })
             .collect();
+        // A valid 80-character display name can exceed a filesystem's
+        // per-component byte limit (for example, non-BMP letters). Keep the
+        // complete display name while bounding only the generated directory.
+        if slug.len() > 120 {
+            let mut end = 120;
+            while !slug.is_char_boundary(end) {
+                end -= 1;
+            }
+            slug.truncate(end);
+        }
         let slug = if slug.trim_matches('-').is_empty() {
             "app"
         } else {
             slug.trim_matches('-')
         };
-        let directory = self
-            .config_home
-            .join(".apps")
-            .join(format!("{slug}-{}", &uuid::Uuid::new_v4().to_string()[..8]));
-        let source_directory = self.guest_path(&directory)?;
+        let apps_root = self.config_home.join(".apps");
+        let leaf = format!("{slug}-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let directory = apps_root.join(&leaf);
+        let proposed_source = self.guest_path(&directory)?;
         let display = name.to_owned();
-        let path = directory.clone();
-        let targets: Vec<_> = ["android", "ios", "macos", "windows", "linux", "web"]
-            .into_iter()
-            .map(|platform| json!({"platform":platform,"environment":"web"}))
-            .collect();
-        tokio::task::spawn_blocking(move||->Result<(),ServiceError>{
-            std::fs::create_dir_all(&path)?;
-            let manifest=json!({"schema":2,"name":display,"entry":{"type":"static","path":"index.html"},"targets":targets,"package":{"files":["index.html","lingxi-app.json"],"dependencyLocks":[]}});
-            std::fs::write(path.join("lingxi-app.json"),serde_json::to_vec_pretty(&manifest)?)?;
-            std::fs::write(path.join("index.html"),"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Local App</title></head><body><main><h1>Local App</h1><p>Build your application here.</p></main></body></html>")?;
-            Ok(())
+        let returned_request_id = request_id.to_owned();
+        let request_id = request_id.to_owned();
+        let payload = json!({"op":"createAuthoring","name":name});
+        let host = Arc::clone(self);
+        let library = Arc::clone(&self.library);
+        let (source_id, source_directory) = tokio::task::spawn_blocking(move || {
+            library.create_native_authoring_source(&request_id, &payload, None, None, || {
+                std::fs::create_dir_all(&apps_root)?;
+                let metadata = std::fs::symlink_metadata(&apps_root)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(AppError::Invalid("application source root is not a real directory".into()));
+                }
+                let root_pin = rooted_fs::root_identity(&apps_root).map_err(|e| AppError::Invalid(e.to_string()))?;
+                let opened = rooted_fs::create_directory_new_pinned(&apps_root, Path::new(&leaf), 0o700, &root_pin)
+                    .map_err(|e| AppError::Invalid(e.to_string()))?;
+                let source_pin = rooted_fs::opened_file_identity(&opened).map_err(|e| AppError::Invalid(e.to_string()))?;
+                let targets: Vec<_> = ["android", "ios", "macos", "windows", "linux", "web"].into_iter()
+                    .map(|platform| json!({"platform":platform,"environment":"web"})).collect();
+                let manifest=json!({"schema":2,"name":display,"entry":{"type":"static","path":"index.html"},"targets":targets,"package":{"files":["index.html","lingxi-app.json"],"dependencyLocks":[]}});
+                let options = rooted_fs::AtomicWriteOptions { overwrite:false, create_parents:false, ..Default::default() };
+                rooted_fs::atomic_write_pinned(&directory, Path::new("lingxi-app.json"), &serde_json::to_vec_pretty(&manifest)?, options, &source_pin)
+                    .map_err(|e| AppError::Invalid(e.to_string()))?;
+                rooted_fs::atomic_write_pinned(&directory, Path::new("index.html"), b"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Local App</title></head><body><main><h1>Local App</h1><p>Build your application here.</p></main></body></html>", options, &source_pin)
+                    .map_err(|e| AppError::Invalid(e.to_string()))?;
+                Ok(proposed_source)
+            }, |source| host.validate_authoring_source_directory(source).map_err(|e| AppError::Invalid(e.to_string())))
         }).await.map_err(join_error)??;
-        Ok(json!({"sourceDirectory":source_directory,"sourcePath":directory.to_string_lossy()}))
+        let source_path = self
+            .host_path(&source_directory)?
+            .to_string_lossy()
+            .into_owned();
+        Ok(
+            json!({"requestId":returned_request_id,"sourceId":source_id,"sourceDirectory":source_directory,"sourcePath":source_path}),
+        )
     }
 
-    async fn register_authoring(&self, request: Value) -> Result<Value, ServiceError> {
+    async fn restore_authoring_source(
+        self: &Arc<Self>,
+        request_id: String,
+        app_id: String,
+        revision: u64,
+    ) -> Result<Value, ServiceError> {
+        if revision == 0 {
+            return Err(ServiceError::new(
+                "invalidRequest",
+                "revision must be positive",
+            ));
+        }
+        let apps_root = self.config_home.join(".apps");
+        let leaf = format!("restored-{}", uuid::Uuid::new_v4());
+        let destination = apps_root.join(leaf);
+        let proposed_source = self.guest_path(&destination)?;
+        let payload = json!({"op":"restoreAuthoringSource","appId":app_id,"revision":revision});
+        let host = Arc::clone(self);
+        let library = Arc::clone(&self.library);
+        let request_for_task = request_id.clone();
+        let app_for_task = app_id.clone();
+        let (source_id, source_directory) = tokio::task::spawn_blocking(move || {
+            library.create_native_authoring_source(
+                &request_for_task,
+                &payload,
+                Some(&app_for_task),
+                None,
+                || {
+                    std::fs::create_dir_all(&apps_root)?;
+                    library.copy_native_authoring_source(&app_for_task, revision, &destination)?;
+                    Ok(proposed_source)
+                },
+                |source| {
+                    host.validate_authoring_source_directory(source)
+                        .map_err(|e| AppError::Invalid(e.to_string()))
+                },
+            )
+        })
+        .await
+        .map_err(join_error)??;
+        let source_path = self
+            .host_path(&source_directory)?
+            .to_string_lossy()
+            .into_owned();
+        let library = Arc::clone(&self.library);
+        let record = tokio::task::spawn_blocking(move || library.get(&app_id))
+            .await
+            .map_err(join_error)??;
+        Ok(
+            json!({"requestId":request_id,"sourceId":source_id,"sourceDirectory":source_directory,"sourcePath":source_path,"record":record}),
+        )
+    }
+
+    async fn remix_authoring_source(
+        self: &Arc<Self>,
+        request_id: String,
+        app_id: String,
+        revision: u64,
+        name: Option<String>,
+        mut payload: Value,
+    ) -> Result<Value, ServiceError> {
+        payload
+            .as_object_mut()
+            .expect("validated request")
+            .remove("requestId");
+        let apps_root = self.config_home.join(".apps");
+        let destination = apps_root.join(format!("remix-{}", uuid::Uuid::new_v4()));
+        let proposed_source = self.guest_path(&destination)?;
+        let host = Arc::clone(self);
+        let library = Arc::clone(&self.library);
+        let request_for_task = request_id.clone();
+        let (source_id, source_directory, result) = tokio::task::spawn_blocking(move || {
+            if let Some(result) = library.replay_native_remix(&request_for_task, &payload)? {
+                return Ok::<_, AppError>(result);
+            }
+            let (digest, origin) =
+                library.native_remix_source_metadata(&app_id, revision, name.as_deref())?;
+            let (source_id, source_directory) = library.create_native_authoring_source(
+                &request_for_task,
+                &payload,
+                None,
+                None,
+                || {
+                    std::fs::create_dir_all(&apps_root)?;
+                    library.copy_native_remix_source(
+                        &app_id,
+                        revision,
+                        &destination,
+                        name.as_deref(),
+                    )?;
+                    Ok(proposed_source)
+                },
+                |source| {
+                    host.validate_authoring_source_directory(source)
+                        .map_err(|error| AppError::Invalid(error.to_string()))
+                },
+            )?;
+            let source_path = host
+                .host_path(&source_directory)
+                .map_err(|error| AppError::Invalid(error.to_string()))?;
+            let result = library.publish_native_remix_once(
+                &request_for_task,
+                &payload,
+                &source_id,
+                &source_directory,
+                &source_path,
+                &digest,
+                origin,
+                |source| {
+                    host.validate_authoring_source_directory(source)
+                        .map_err(|error| AppError::Invalid(error.to_string()))
+                },
+            )?;
+            Ok((source_id, source_directory, result))
+        })
+        .await
+        .map_err(join_error)??;
+        let source_path = self
+            .host_path(&source_directory)?
+            .to_string_lossy()
+            .into_owned();
+        Ok(
+            json!({"requestId":request_id,"sourceId":source_id,"sourceDirectory":source_directory,
+            "sourcePath":source_path,"record":result.record,"release":result.release}),
+        )
+    }
+
+    async fn import_remix_source(
+        self: &Arc<Self>,
+        request_id: String,
+        request: Value,
+    ) -> Result<Value, ServiceError> {
+        let mut payload = request.clone();
+        payload
+            .as_object_mut()
+            .expect("validated request")
+            .remove("requestId");
+        let apps_root = self.config_home.join(".apps");
+        let destination = apps_root.join(format!("remix-{}", uuid::Uuid::new_v4()));
+        let proposed_source = self.guest_path(&destination)?;
+        let host = Arc::clone(self);
+        let library = Arc::clone(&self.library);
+        let request_for_task = request_id.clone();
+        let (source_id, source_directory, result) = tokio::task::spawn_blocking(move || {
+            if let Some(result) = library.replay_native_remix(&request_for_task, &payload)? {
+                return Ok::<_, AppError>(result);
+            }
+            let input = MarketRemixInput::parse(&request, &host.config_home)?;
+            let (source_id, source_directory) = library.create_native_authoring_source(
+                &request_for_task,
+                &payload,
+                None,
+                None,
+                || {
+                    std::fs::create_dir_all(&apps_root)?;
+                    input.extract(&host.config_home, &destination)?;
+                    Ok(proposed_source)
+                },
+                |source| {
+                    let path = host
+                        .host_path(source)
+                        .map_err(|error| AppError::Invalid(error.to_string()))?;
+                    input.verify_source(&path)?;
+                    host.validate_authoring_source_directory(source)
+                        .map_err(|error| AppError::Invalid(error.to_string()))
+                },
+            )?;
+            let source_path = host
+                .host_path(&source_directory)
+                .map_err(|error| AppError::Invalid(error.to_string()))?;
+            let result = library.publish_native_remix_once(
+                &request_for_task,
+                &payload,
+                &source_id,
+                &source_directory,
+                &source_path,
+                &input.expected_digest,
+                Some(input.origin.clone()),
+                |source| {
+                    let path = host
+                        .host_path(source)
+                        .map_err(|error| AppError::Invalid(error.to_string()))?;
+                    input.verify_source(&path)?;
+                    host.validate_authoring_source_directory(source)
+                        .map_err(|error| AppError::Invalid(error.to_string()))
+                },
+            )?;
+            Ok((source_id, source_directory, result))
+        })
+        .await
+        .map_err(join_error)??;
+        let source_path = self
+            .host_path(&source_directory)?
+            .to_string_lossy()
+            .into_owned();
+        Ok(
+            json!({"requestId":request_id,"sourceId":source_id,"sourceDirectory":source_directory,
+            "sourcePath":source_path,"record":result.record,"release":result.release}),
+        )
+    }
+
+    async fn register_authoring(self: &Arc<Self>, request: Value) -> Result<Value, ServiceError> {
         let request_object = request
             .as_object()
             .ok_or_else(|| ServiceError::new("invalidRequest", "request must be an object"))?;
-        if request_object
-            .keys()
-            .any(|key| !matches!(key.as_str(), "op" | "authoring"))
-        {
+        if request_object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "op" | "authoring" | "sourceId" | "requestId" | "setCurrent" | "sessionMode"
+            )
+        }) {
             return Err(ServiceError::new(
                 "invalidRequest",
                 "unknown registerAuthoring field",
@@ -851,30 +1127,124 @@ impl MobileLocalAppServiceHandle {
                 ));
             }
         }
-        if authoring_value
-            .get("appId")
-            .is_some_and(|app_id| !app_id.is_null())
-        {
+        let source_id = required(&request, "sourceId")?.to_owned();
+        let verified_source_id = source_id.clone();
+        let request_id = required(&request, "requestId")?.to_owned();
+        if required(&request, "sessionMode")? != "code" {
             return Err(ServiceError::new(
                 "invalidRequest",
-                "registerAuthoring cannot bind an application id before publish",
+                "authoring requires a Code session",
             ));
         }
+        let set_current = request
+            .get("setCurrent")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| ServiceError::new("invalidRequest", "setCurrent must be a boolean"))?;
         let authoring: AuthoringRef = serde_json::from_value(authoring_value.clone())?;
-        self.validate_registered_authoring_source(&authoring)?;
         let library = self.library.clone();
-        let saved =
-            tokio::task::spawn_blocking(move || library.register_pending_authoring(authoring))
-                .await
-                .map_err(join_error)??;
-        Ok(serde_json::to_value(saved)?)
+        let host = Arc::clone(self);
+        let saved = tokio::task::spawn_blocking(move || {
+            library.register_native_authoring(
+                authoring,
+                &source_id,
+                &request_id,
+                set_current,
+                |authoring| {
+                    host.validate_registered_authoring_source(authoring)
+                        .map_err(|error| AppError::Invalid(error.to_string()))
+                },
+            )
+        })
+        .await
+        .map_err(join_error)??;
+        let mut value = serde_json::to_value(saved)?;
+        value["sessionMode"] = json!("code");
+        value["sourceId"] = json!(verified_source_id);
+        Ok(value)
+    }
+
+    async fn get_authoring_grant(self: &Arc<Self>, request: Value) -> Result<Value, ServiceError> {
+        let fields = request
+            .as_object()
+            .ok_or_else(|| ServiceError::new("invalidRequest", "request must be an object"))?;
+        if fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "op" | "sourceDirectory" | "projectId" | "authoringSessionId" | "sessionMode"
+            )
+        }) {
+            return Err(ServiceError::new(
+                "invalidRequest",
+                "unknown getAuthoringGrant field",
+            ));
+        }
+        let source = required(&request, "sourceDirectory")?.to_owned();
+        let project = required(&request, "projectId")?.to_owned();
+        let session = required(&request, "authoringSessionId")?.to_owned();
+        if required(&request, "sessionMode")? != "code" {
+            return Err(ServiceError::new(
+                "invalidRequest",
+                "authoring requires a Code session",
+            ));
+        }
+        let host = Arc::clone(self);
+        let library = Arc::clone(&self.library);
+        let (source_id, authoring, owner_app_id) = tokio::task::spawn_blocking(move || {
+            library.resolve_native_authoring_with_source_id(
+                &source,
+                &ProjectRef::MobileProject {
+                    project_id: project,
+                },
+                &session,
+                |authoring| {
+                    host.validate_registered_authoring_source(authoring)
+                        .map_err(|error| AppError::Invalid(error.to_string()))
+                },
+            )
+        })
+        .await
+        .map_err(join_error)??;
+        let mut value = serde_json::to_value(authoring)?;
+        value["sessionMode"] = json!("code");
+        value["sourceId"] = json!(source_id);
+        if let Some(owner) = owner_app_id {
+            value["ownerAppId"] = json!(owner);
+        }
+        Ok(value)
+    }
+
+    async fn prepare_authoring_source(
+        self: &Arc<Self>,
+        source: String,
+        expected_id: Option<String>,
+    ) -> Result<Value, ServiceError> {
+        let source_path = self.host_path(&source)?.to_string_lossy().into_owned();
+        let host = Arc::clone(self);
+        let library = Arc::clone(&self.library);
+        let source_copy = source.clone();
+        let source_id = tokio::task::spawn_blocking(move || {
+            library.prepare_native_authoring_source(&source_copy, expected_id.as_deref(), || {
+                host.validate_authoring_source_directory(&source_copy)
+                    .map_err(|error| AppError::Invalid(error.to_string()))
+            })
+        })
+        .await
+        .map_err(join_error)??;
+        Ok(json!({"sourceId":source_id,"sourceDirectory":source,"sourcePath":source_path}))
     }
 
     fn validate_registered_authoring_source(
         &self,
         authoring: &AuthoringRef,
-    ) -> Result<(), ServiceError> {
-        let source_path = self.host_path(&authoring.source_directory)?;
+    ) -> Result<rooted_fs::RootIdentity, ServiceError> {
+        self.validate_authoring_source_directory(&authoring.source_directory)
+    }
+
+    fn validate_authoring_source_directory(
+        &self,
+        source_directory: &str,
+    ) -> Result<rooted_fs::RootIdentity, ServiceError> {
+        let source_path = self.host_path(source_directory)?;
         let apps_root = self.config_home.join(".apps");
         let apps_metadata = std::fs::symlink_metadata(&apps_root).map_err(|error| {
             ServiceError::new(
@@ -900,8 +1270,17 @@ impl MobileLocalAppServiceHandle {
                 "authoring source must be a real directory",
             ));
         }
-        let canonical_root = std::fs::canonicalize(apps_root)?;
-        let canonical_source = std::fs::canonicalize(source_path)?;
+        // Retain and recheck physical directory identities across the path
+        // mapping. Neither a symlink nor a same-name replacement is a valid
+        // native authoring source.
+        let root_identity = rooted_fs::root_identity(&apps_root).map_err(|error| {
+            ServiceError::new("invalidPath", format!("invalid application root: {error}"))
+        })?;
+        let source_identity = rooted_fs::root_identity(&source_path).map_err(|error| {
+            ServiceError::new("invalidPath", format!("invalid authoring source: {error}"))
+        })?;
+        let canonical_root = std::fs::canonicalize(&apps_root)?;
+        let canonical_source = std::fs::canonicalize(&source_path)?;
         let relative = canonical_source
             .strip_prefix(&canonical_root)
             .map_err(|_| {
@@ -912,14 +1291,22 @@ impl MobileLocalAppServiceHandle {
             })?;
         if relative.components().count() != 1
             || canonical_source == canonical_root
-            || self.guest_path(&canonical_source)? != authoring.source_directory
+            || self.guest_path(&canonical_source)? != source_directory
         {
             return Err(ServiceError::new(
                 "invalidPath",
                 "authoring source must be a canonical direct child of this brand's application source root",
             ));
         }
-        Ok(())
+        if rooted_fs::root_identity(&apps_root).ok().as_ref() != Some(&root_identity)
+            || rooted_fs::root_identity(&source_path).ok().as_ref() != Some(&source_identity)
+        {
+            return Err(ServiceError::new(
+                "invalidPath",
+                "authoring source changed during validation",
+            ));
+        }
+        Ok(source_identity)
     }
 
     async fn start(
@@ -1350,8 +1737,229 @@ impl MobileLocalAppServiceHandle {
             Ok(request) => request,
             Err(_) => return agent_envelope(Err("invalid_agent_input".into())),
         };
-        if request.get("op").and_then(Value::as_str) == Some("registerAuthoring") {
-            return match self.register_authoring(request).await {
+        if matches!(
+            request.get("op").and_then(Value::as_str),
+            Some(
+                "createAuthoring"
+                    | "restoreAuthoringSource"
+                    | "remixAuthoringSource"
+                    | "importRemixSource"
+                    | "registerAuthoring"
+                    | "getAuthoringGrant"
+                    | "prepareAuthoringSource"
+                    | "bindAuthoringSource"
+            )
+        ) {
+            let result = match request.get("op").and_then(Value::as_str) {
+                Some("createAuthoring") => {
+                    let parsed = || -> Result<(String, String), ServiceError> {
+                        let fields = request.as_object().ok_or_else(|| {
+                            ServiceError::new("invalidRequest", "request must be an object")
+                        })?;
+                        if fields
+                            .keys()
+                            .any(|k| !matches!(k.as_str(), "op" | "name" | "requestId"))
+                        {
+                            return Err(ServiceError::new(
+                                "invalidRequest",
+                                "unknown createAuthoring field",
+                            ));
+                        }
+                        Ok((
+                            required(&request, "name")?.to_owned(),
+                            required(&request, "requestId")?.to_owned(),
+                        ))
+                    };
+                    match parsed() {
+                        Ok((name, id)) => self.create_authoring(&name, &id).await,
+                        Err(error) => Err(error),
+                    }
+                }
+                Some("restoreAuthoringSource") => {
+                    let parsed = || -> Result<(String, String, u64), ServiceError> {
+                        let fields = request.as_object().ok_or_else(|| {
+                            ServiceError::new("invalidRequest", "request must be an object")
+                        })?;
+                        if fields.keys().any(|key| {
+                            !matches!(key.as_str(), "op" | "requestId" | "appId" | "revision")
+                        }) {
+                            return Err(ServiceError::new(
+                                "invalidRequest",
+                                "unknown restoreAuthoringSource field",
+                            ));
+                        }
+                        let revision = request
+                            .get("revision")
+                            .and_then(Value::as_u64)
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                ServiceError::new("invalidRequest", "positive revision required")
+                            })?;
+                        Ok((
+                            required(&request, "requestId")?.to_owned(),
+                            required(&request, "appId")?.to_owned(),
+                            revision,
+                        ))
+                    };
+                    match parsed() {
+                        Ok((request_id, app_id, revision)) => {
+                            self.restore_authoring_source(request_id, app_id, revision)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Some("remixAuthoringSource") => {
+                    let parsed =
+                        || -> Result<(String, String, u64, Option<String>), ServiceError> {
+                            let fields = request.as_object().ok_or_else(|| {
+                                ServiceError::new("invalidRequest", "request must be an object")
+                            })?;
+                            if fields.keys().any(|key| {
+                                !matches!(
+                                    key.as_str(),
+                                    "op" | "requestId" | "appId" | "revision" | "name"
+                                )
+                            }) {
+                                return Err(ServiceError::new(
+                                    "invalidRequest",
+                                    "unknown remixAuthoringSource field",
+                                ));
+                            }
+                            let revision = request
+                                .get("revision")
+                                .and_then(Value::as_u64)
+                                .filter(|value| *value > 0)
+                                .ok_or_else(|| {
+                                    ServiceError::new(
+                                        "invalidRequest",
+                                        "positive revision required",
+                                    )
+                                })?;
+                            let name = match fields.get("name") {
+                                None => None,
+                                Some(Value::String(name)) if !name.trim().is_empty() => {
+                                    Some(name.clone())
+                                }
+                                _ => {
+                                    return Err(ServiceError::new(
+                                        "invalidRequest",
+                                        "invalid remix name",
+                                    ))
+                                }
+                            };
+                            Ok((
+                                required(&request, "requestId")?.to_owned(),
+                                required(&request, "appId")?.to_owned(),
+                                revision,
+                                name,
+                            ))
+                        };
+                    match parsed() {
+                        Ok((request_id, app_id, revision, name)) => {
+                            self.remix_authoring_source(request_id, app_id, revision, name, request)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Some("importRemixSource") => match required(&request, "requestId") {
+                    Ok(request_id) => {
+                        self.import_remix_source(request_id.to_owned(), request)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                },
+                Some("registerAuthoring") => self.register_authoring(request).await,
+                Some("getAuthoringGrant") => self.get_authoring_grant(request).await,
+                Some("prepareAuthoringSource") => {
+                    let parsed = || -> Result<(String, String), ServiceError> {
+                        let fields = request.as_object().ok_or_else(|| {
+                            ServiceError::new("invalidRequest", "request must be an object")
+                        })?;
+                        if fields
+                            .keys()
+                            .any(|k| !matches!(k.as_str(), "op" | "sourceId" | "sourceDirectory"))
+                        {
+                            return Err(ServiceError::new(
+                                "invalidRequest",
+                                "unknown prepareAuthoringSource field",
+                            ));
+                        }
+                        Ok((
+                            required(&request, "sourceDirectory")?.to_owned(),
+                            required(&request, "sourceId")?.to_owned(),
+                        ))
+                    };
+                    match parsed() {
+                        Ok((source, id)) => self.prepare_authoring_source(source, Some(id)).await,
+                        Err(error) => Err(error),
+                    }
+                }
+                Some("bindAuthoringSource") => {
+                    let parsed = || -> Result<(String, String, String, String), ServiceError> {
+                        let fields = request.as_object().ok_or_else(|| {
+                            ServiceError::new("invalidRequest", "request must be an object")
+                        })?;
+                        if fields.keys().any(|k| {
+                            !matches!(
+                                k.as_str(),
+                                "op" | "requestId" | "sourceId" | "sourceDirectory" | "targetAppId"
+                            )
+                        }) {
+                            return Err(ServiceError::new(
+                                "invalidRequest",
+                                "unknown bindAuthoringSource field",
+                            ));
+                        }
+                        Ok((
+                            required(&request, "requestId")?.to_owned(),
+                            required(&request, "sourceId")?.to_owned(),
+                            required(&request, "sourceDirectory")?.to_owned(),
+                            required(&request, "targetAppId")?.to_owned(),
+                        ))
+                    };
+                    match parsed() {
+                        Ok((request_id, source_id, source, target)) => {
+                            let host = Arc::clone(&self);
+                            let library = Arc::clone(&self.library);
+                            let request_copy = request_id.clone();
+                            let source_copy = source.clone();
+                            let target_copy = target.clone();
+                            let source_id_copy = source_id.clone();
+                            let payload = json!({"op":"bindAuthoringSource","sourceId":source_id,"sourceDirectory":source,"targetAppId":target});
+                            let result = tokio::task::spawn_blocking(move || {
+                                library.create_native_authoring_source(
+                                    &request_copy,
+                                    &payload,
+                                    Some(&target_copy),
+                                    Some(&source_id_copy),
+                                    || Ok(source_copy.clone()),
+                                    |value| {
+                                        host.validate_authoring_source_directory(value)
+                                            .map_err(|e| AppError::Invalid(e.to_string()))
+                                    },
+                                )
+                            })
+                            .await
+                            .map_err(join_error);
+                            match result {
+                                Ok(Ok((id, path))) => match self.host_path(&path) {
+                                    Ok(host_path) => Ok(
+                                        json!({"requestId":request_id,"sourceId":id,"sourceDirectory":path,"sourcePath":host_path.to_string_lossy(),"targetAppId":target}),
+                                    ),
+                                    Err(error) => Err(error),
+                                },
+                                Ok(Err(error)) => Err(error.into()),
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                _ => unreachable!(),
+            };
+            return match result {
                 Ok(value) => json!({"ok":true,"value":value}).to_string(),
                 Err(error) => {
                     json!({"ok":false,"error":{"code":error.code,"message":error.message}})

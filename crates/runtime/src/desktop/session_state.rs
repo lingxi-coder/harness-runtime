@@ -28,9 +28,16 @@ use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 
 const COST_QUEUE_CAPACITY: usize = 64;
 
+/// Reject malformed or foreign records in an unprompted desktop draft.
+#[must_use]
+pub fn is_mode_only_draft(source: &str, session_id: &str) -> bool {
+    session::jsonl::is_mode_only_draft(source, session_id)
+}
+
 mod attempts;
 mod resume;
 mod retention;
+pub use crate::branch_recovery::capture_branch_recovery;
 pub use resume::capture_resume_cost;
 mod storage_recovery;
 mod tool_execution;
@@ -2177,6 +2184,21 @@ fn hydrate_from_journal(
     journal: &DurableJournal,
     session_id: SessionId,
 ) -> Result<HydratedCostLedger, CostPersistError> {
+    hydrate_from_journal_with_mode(journal, session_id, false)
+}
+
+fn hydrate_from_journal_read_only(
+    journal: &DurableJournal,
+    session_id: SessionId,
+) -> Result<HydratedCostLedger, CostPersistError> {
+    hydrate_from_journal_with_mode(journal, session_id, true)
+}
+
+fn hydrate_from_journal_with_mode(
+    journal: &DurableJournal,
+    session_id: SessionId,
+    read_only: bool,
+) -> Result<HydratedCostLedger, CostPersistError> {
     let mut latest = CostState {
         session_id,
         ..Default::default()
@@ -2189,28 +2211,33 @@ fn hydrate_from_journal(
     let mut attempts = AttemptProjection::new(session_id);
     let mut tools = ToolProjection::default();
     let mut fold_error = None;
-    let replay = journal
-        .replay_durable_with(|entry| {
-            // Keep validating the physical WAL after a cost semantic error so
-            // replay never publishes a prefix merely because its fold failed.
-            if fold_error.is_none() {
-                if let Err(error) = fold_session_entry(
-                    entry,
-                    session_id,
-                    &mut last_cost_revision,
-                    &mut latest,
-                    &mut durable_results,
-                    &mut fusion_terminals,
-                    &mut fusion_outbox,
-                    &mut fusion_acks,
-                    &mut attempts,
-                    &mut tools,
-                ) {
-                    fold_error = Some(error);
-                }
+    let mut visitor = |entry| {
+        // Keep validating the physical WAL after a cost semantic error so
+        // replay never publishes a prefix merely because its fold failed.
+        if fold_error.is_none() {
+            if let Err(error) = fold_session_entry(
+                entry,
+                session_id,
+                &mut last_cost_revision,
+                &mut latest,
+                &mut durable_results,
+                &mut fusion_terminals,
+                &mut fusion_outbox,
+                &mut fusion_acks,
+                &mut attempts,
+                &mut tools,
+            ) {
+                fold_error = Some(error);
             }
-        })
-        .map_err(map_journal_error)?;
+        }
+    };
+    let replay = if read_only {
+        journal.replay_read_only_with(&mut visitor)
+    } else {
+        journal.replay_durable_with(&mut visitor)
+    }
+    .map_err(map_journal_error)?;
+    drop(visitor);
     if let Some(error) = fold_error {
         return Err(error);
     }
@@ -2249,11 +2276,15 @@ fn hydrate_from_journal(
         fusion_outbox: fusion_outbox.values().cloned().collect(),
     };
     let snapshot = encode_projection_snapshot(&snapshot);
-    let snapshot_present = match journal.write_snapshot(replay.last_revision, &snapshot) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!("cost snapshot rebuild deferred: {error}");
-            false
+    let snapshot_present = if read_only {
+        false
+    } else {
+        match journal.write_snapshot(replay.last_revision, &snapshot) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!("cost snapshot rebuild deferred: {error}");
+                false
+            }
         }
     };
     Ok(HydratedCostLedger {

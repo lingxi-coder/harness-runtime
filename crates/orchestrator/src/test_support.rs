@@ -280,6 +280,16 @@ impl MockApiClient {
 
 #[async_trait]
 impl OrchestratorApiClient for MockApiClient {
+    async fn audio_account_binding_is_current(
+        &self,
+        original_profile: &str,
+        actual_profile: &str,
+        scope: &str,
+    ) -> bool {
+        // Match the explicit-service branch of ApiService's account check.
+        original_profile == actual_profile && scope.starts_with("explicit-service.")
+    }
+
     fn is_first_party_route(&self, _model: &str, _profile: Option<&str>) -> bool {
         *self.native_request_first_party.lock().unwrap()
     }
@@ -1172,6 +1182,7 @@ type EffortCommandSource = std::sync::Arc<
 /// return `Ok(())` (or appropriate success defaults); flags are recorded
 /// for later assertion via `was_*_called()` accessors.
 pub struct MockOrchestratorHandle {
+    conversation_profile: StdMutex<lingxi_core::host::session_context::ConversationMode>,
     /// Stable session id returned by `current_session_id`.
     session_id: SessionId,
     /// Number of `clear_session` calls.
@@ -1299,6 +1310,7 @@ impl MockOrchestratorHandle {
     pub fn new() -> Self {
         Self {
             session_id: SessionId::new(),
+            conversation_profile: StdMutex::new(Default::default()),
             clear_calls: AtomicUsize::new(0),
             clear_error: StdMutex::new(None),
             compact_summary: StdMutex::new(None),
@@ -1561,6 +1573,14 @@ impl Default for MockOrchestratorHandle {
 
 #[async_trait]
 impl OrchestratorHandle for MockOrchestratorHandle {
+    async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
+        let mode = *self.conversation_profile.lock().unwrap();
+        lingxi_core::host::session_context::SessionModeSnapshot {
+            session_id: self.session_id.as_uuid().to_string(),
+            mode,
+        }
+    }
+
     async fn current_session_id(&self) -> SessionId {
         self.session_id
     }

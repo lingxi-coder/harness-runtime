@@ -27,7 +27,6 @@ use crate::jsonl::exact_json::{
     native_message_bytes, parse_exact_json, to_vec_with_overrides, Utf16Overrides,
 };
 use crate::jsonl::re_append::iso_now;
-#[cfg(test)]
 use crate::jsonl::JsonlMessage;
 use crate::jsonl::{derive_fork_name, list_recent_sessions, route_lines, session_path};
 
@@ -51,6 +50,14 @@ pub enum BranchError {
     NoConversation,
     /// The source has no main-conversation messages (`"No messages to branch"`).
     NoMessages,
+    /// Raw-history forks cannot cross the fixed conversation-mode boundary.
+    ModeMismatch,
+    /// The captured source contains malformed mode metadata.
+    InvalidModeMetadata(String),
+    /// A fresh instruction provenance epoch cannot be represented.
+    InstructionEpochExhausted,
+    /// An independent branch must have a different identity from its source.
+    TargetIsSource,
     /// A filesystem read/write failed.
     Io(std::io::Error),
 }
@@ -60,6 +67,10 @@ impl std::fmt::Display for BranchError {
         match self {
             Self::NoConversation => write!(f, "No conversation to branch"),
             Self::NoMessages => write!(f, "No messages to branch"),
+            Self::ModeMismatch => write!(f, "cannot fork a session into another mode"),
+            Self::InvalidModeMetadata(error) => write!(f, "invalid session mode: {error}"),
+            Self::InstructionEpochExhausted => write!(f, "instruction epoch exhausted"),
+            Self::TargetIsSource => write!(f, "branch target must differ from the source session"),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -70,11 +81,12 @@ impl std::error::Error for BranchError {}
 ///
 /// `custom_title` is the trimmed `/branch [name]` argument (empty / `None` ⇒
 /// derive the base name from the first user message). Returns the new session
-/// id + saved title so the caller can switch into the branch.
+/// id + saved title so the caller can switch into the branch. A branch is a
+/// new task: it retains the source's fixed mode and starts a fresh instruction epoch.
 ///
 /// # Errors
 /// [`BranchError::NoConversation`] when the source file is missing/empty,
-/// [`BranchError::NoMessages`] when it holds no chain messages, and
+/// [`BranchError::NoMessages`] when it holds no chain messages,
 /// [`BranchError::Io`] on any read/write failure.
 pub async fn create_branch(
     lingxi_home: &Path,
@@ -83,7 +95,67 @@ pub async fn create_branch(
     custom_title: Option<&str>,
     fs: Arc<dyn FileSystem>,
 ) -> Result<BranchResult, BranchError> {
-    create_branch_in(lingxi_home, cwd, cwd, source_session_id, custom_title, fs).await
+    create_branch_in(
+        lingxi_home,
+        cwd,
+        cwd,
+        source_session_id,
+        custom_title,
+        None,
+        None,
+        fs,
+    )
+    .await
+}
+
+/// Branch the exact transcript already selected by the caller, while placing
+/// the new branch in the current workspace. The caller validates the path and
+/// protects the source session against concurrent writers.
+pub async fn create_branch_from_path(
+    lingxi_home: &Path,
+    cwd: &str,
+    source_session_id: Uuid,
+    source_path: &Path,
+    custom_title: Option<&str>,
+    fs: Arc<dyn FileSystem>,
+) -> Result<BranchResult, BranchError> {
+    create_branch_in(
+        lingxi_home,
+        cwd,
+        cwd,
+        source_session_id,
+        custom_title,
+        None,
+        Some(source_path),
+        fs,
+    )
+    .await
+}
+
+/// Create a branch only when the requested mode matches the source. The
+/// captured profile and history are published atomically as one file.
+///
+/// # Errors
+/// Returns the same errors as [`create_branch`], including mode mismatch.
+pub async fn create_branch_with_mode(
+    lingxi_home: &Path,
+    cwd: &str,
+    source_session_id: Uuid,
+    custom_title: Option<&str>,
+    mode: crate::jsonl::SessionMode,
+    fs: Arc<dyn FileSystem>,
+) -> Result<BranchResult, BranchError> {
+    create_branch_in(
+        lingxi_home,
+        cwd,
+        cwd,
+        source_session_id,
+        custom_title,
+        Some(mode),
+        None,
+        fs,
+    )
+    .await
 }
 
 /// Fork `source_session_id` (living under `source_cwd`'s project dir) into a
@@ -92,8 +164,6 @@ pub async fn create_branch(
 /// workspace-scoped catalog while the source session stays untouched.
 ///
 /// Differences from the same-cwd [`create_branch`]:
-/// - every copied entry's `cwd` field is rewritten to `target_cwd` (the
-///   fork lives there now; a resume must not leak the old root),
 /// - the TARGET project dir is created if missing (the same-cwd path can
 ///   assume it exists because it just read the source from it; a fresh app
 ///   workspace has no catalog yet),
@@ -120,9 +190,194 @@ pub async fn create_branch_to_cwd(
         target_cwd,
         source_session_id,
         custom_title,
+        None,
+        None,
         fs,
     )
     .await
+}
+
+/// Input for publishing an independent branch from an already captured source.
+///
+/// The caller supplies the source snapshot and the selected, possibly
+/// truncated messages from that same snapshot. It must hold any necessary
+/// source/target writer claims and reject unfinished source recovery before
+/// calling [`create_branch_from_captured`].
+#[derive(Debug, Clone, Copy)]
+pub struct CapturedBranch<'a> {
+    /// Home containing the project session catalog.
+    pub lingxi_home: &'a Path,
+    /// Workspace of the source transcript.
+    pub source_cwd: &'a str,
+    /// Workspace in which the independent branch is published.
+    pub target_cwd: &'a str,
+    /// Identity of the captured source session.
+    pub source_session_id: Uuid,
+    /// Preselected identity of the independent branch.
+    pub target_session_id: Uuid,
+    /// Exact source transcript captured while the source is protected.
+    pub source_content: &'a str,
+    /// Selected source messages, in branch order, retaining their exact JSON.
+    pub messages: &'a [JsonlMessage],
+    /// Optional branch-title base; otherwise derive it from the messages.
+    pub custom_title: Option<&'a str>,
+    /// Expected source mode; a different value is rejected.
+    pub mode: Option<crate::jsonl::SessionMode>,
+}
+
+/// A branch rendered from a captured transcript, before durable publication.
+#[derive(Debug, Clone)]
+pub struct RenderedBranch {
+    /// The target identity, title and source-revision information.
+    pub result: BranchResult,
+    /// Complete native JSONL, including the new independent profile.
+    pub content: String,
+}
+
+/// Exact bytes and physical target published for an independent branch.
+#[derive(Debug, Clone)]
+pub struct PublishedBranch {
+    pub result: BranchResult,
+    pub content: String,
+    pub authority: crate::jsonl::writer::TranscriptFileAuthority,
+}
+
+/// Publish selected history and its fresh independent profile in one atomic,
+/// no-overwrite operation. The captured source is never reopened or modified.
+///
+/// # Errors
+/// Returns [`BranchError`] if the capture is empty, its target is the source,
+/// the requested mode differs from the source, or publication fails (including
+/// an existing target). The caller must validate source recovery first.
+pub async fn create_branch_from_captured(
+    options: CapturedBranch<'_>,
+    fs: Arc<dyn FileSystem>,
+) -> Result<PublishedBranch, BranchError> {
+    create_branch_from_captured_with_hook(options, fs, || {}).await
+}
+
+async fn create_branch_from_captured_with_hook(
+    options: CapturedBranch<'_>,
+    fs: Arc<dyn FileSystem>,
+    after_publication: impl FnOnce(),
+) -> Result<PublishedBranch, BranchError> {
+    let rendered = render_branch_from_captured(options, fs.clone()).await?;
+    let dst_path = session_path(
+        options.lingxi_home,
+        options.target_cwd,
+        &options.target_session_id.to_string(),
+    );
+    let logical_home = if options.lingxi_home.is_absolute() {
+        options.lingxi_home.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(BranchError::Io)?
+            .join(options.lingxi_home)
+    };
+    let absolute_path = if dst_path.is_absolute() {
+        dst_path
+    } else {
+        std::env::current_dir()
+            .map_err(BranchError::Io)?
+            .join(dst_path)
+    };
+    let relative = absolute_path
+        .strip_prefix(&logical_home)
+        .map_err(|_| BranchError::Io(std::io::Error::other("branch target escaped its home")))?
+        .to_path_buf();
+    if relative.components().count() != 3
+        || relative.components().next().map(|part| part.as_os_str())
+            != Some(std::ffi::OsStr::new("projects"))
+    {
+        return Err(BranchError::Io(std::io::Error::other(
+            "branch target is outside its project catalog",
+        )));
+    }
+    let root = std::fs::canonicalize(&logical_home).map_err(BranchError::Io)?;
+    let body = rendered.content.clone();
+    let authority = tokio::task::spawn_blocking(move || {
+        use lingxi_core::host::rooted_fs::{
+            atomic_write_stream_pinned, ensure_directory_identity_pinned, opened_file_identity,
+            root_identity, AtomicWriteOptions,
+        };
+        use std::io::Write;
+        let identity =
+            root_identity(&root).map_err(|error| std::io::Error::other(error.to_string()))?;
+        ensure_directory_identity_pinned(&root, Path::new("projects"), &identity)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        ensure_directory_identity_pinned(
+            &root,
+            relative.parent().expect("validated branch parent"),
+            &identity,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let mut published_identity = None;
+        atomic_write_stream_pinned(
+            &root,
+            &relative,
+            AtomicWriteOptions {
+                overwrite: false,
+                create_parents: false,
+                dir_mode: 0o700,
+                file_mode: 0o600,
+            },
+            &identity,
+            |temporary| {
+                published_identity = Some(opened_file_identity(temporary)?);
+                temporary
+                    .write_all(body.as_bytes())
+                    .map_err(|error| lingxi_core::host::FsError::Io(error.to_string()))
+            },
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let authority = crate::jsonl::writer::TranscriptFileAuthority::from_capture(
+            root,
+            relative,
+            identity,
+            published_identity
+                .ok_or_else(|| std::io::Error::other("branch publication has no file identity"))?,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if authority
+            .read_checked()
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            != body.as_bytes()
+        {
+            return Err(std::io::Error::other(
+                "published branch changed before admission",
+            ));
+        }
+        Ok::<_, std::io::Error>(authority)
+    })
+    .await
+    .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?
+    .map_err(BranchError::Io)?;
+    after_publication();
+
+    // A failed visualization copy degrades widgets to unavailable cards, but
+    // must not lose an already-published branch.
+    let visualizations =
+        visualization::VisualizationStore::new(fs, options.lingxi_home.to_path_buf());
+    if let Err(error) = visualizations
+        .copy_session(options.source_session_id, options.target_session_id)
+        .await
+    {
+        tracing::warn!(%error, "branch: inline visualizations were not copied");
+    }
+    if authority
+        .read_checked()
+        .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?
+        != rendered.content.as_bytes()
+    {
+        return Err(BranchError::Io(std::io::Error::other(
+            "published branch changed before return",
+        )));
+    }
+    Ok(PublishedBranch {
+        result: rendered.result,
+        content: rendered.content,
+        authority,
+    })
 }
 
 async fn create_branch_in(
@@ -131,11 +386,15 @@ async fn create_branch_in(
     target_cwd: &str,
     source_session_id: Uuid,
     custom_title: Option<&str>,
+    mode: Option<crate::jsonl::SessionMode>,
+    source_path: Option<&Path>,
     fs: Arc<dyn FileSystem>,
 ) -> Result<BranchResult, BranchError> {
     let cwd = source_cwd;
     // 1. Read the current transcript. Missing / empty ⇒ nothing to branch.
-    let src_path = session_path(lingxi_home, cwd, &source_session_id.to_string());
+    let src_path = source_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| session_path(lingxi_home, cwd, &source_session_id.to_string()));
     let content = match tokio::fs::read_to_string(&src_path).await {
         Ok(c) if !c.trim().is_empty() => c,
         Ok(_) => return Err(BranchError::NoConversation),
@@ -152,24 +411,109 @@ async fn create_branch_in(
     if routed.messages_in_order.is_empty() {
         return Err(BranchError::NoMessages);
     }
+    create_branch_from_captured(
+        CapturedBranch {
+            lingxi_home,
+            source_cwd,
+            target_cwd,
+            source_session_id,
+            target_session_id: Uuid::new_v4(),
+            source_content: &content,
+            messages: &routed.messages_in_order,
+            custom_title,
+            mode,
+        },
+        fs,
+    )
+    .await
+    .map(|published| published.result)
+}
+
+/// Render exactly the branch that would be published by
+/// [`create_branch_from_captured`], without creating a target transcript.
+///
+/// The same source-recovery validation requirements apply to both operations.
+/// This may read the target catalog to derive a collision-numbered title.
+///
+/// # Errors
+/// Returns an error for an empty capture, an invalid or existing target,
+/// an exhausted profile epoch, or a filesystem inspection failure.
+pub async fn render_branch_from_captured(
+    options: CapturedBranch<'_>,
+    fs: Arc<dyn FileSystem>,
+) -> Result<RenderedBranch, BranchError> {
+    let CapturedBranch {
+        lingxi_home,
+        source_cwd,
+        target_cwd,
+        source_session_id,
+        target_session_id: new_session_id,
+        source_content: content,
+        messages,
+        custom_title,
+        mode,
+    } = options;
+    if content.trim().is_empty() {
+        return Err(BranchError::NoConversation);
+    }
+    if messages.is_empty() {
+        return Err(BranchError::NoMessages);
+    }
+    if new_session_id == source_session_id {
+        return Err(BranchError::TargetIsSource);
+    }
+    let target_path = session_path(lingxi_home, target_cwd, &new_session_id.to_string());
+    match tokio::fs::symlink_metadata(&target_path).await {
+        Ok(_) => {
+            return Err(BranchError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("branch target already exists: {}", target_path.display()),
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BranchError::Io(error)),
+    }
+    let routed = route_lines(content);
+    let src_sid = source_session_id.to_string();
+    let profile = crate::jsonl::JsonlWriter::fixed_session_profile_from_source(content, &src_sid)
+        .map_err(BranchError::InvalidModeMetadata)?;
+    if mode.is_some_and(|mode| mode != profile.mode) {
+        return Err(BranchError::ModeMismatch);
+    }
+    let mode = profile.mode;
+    // A new UUID is a new authorization scope. Copied skill activations must
+    // remain historical evidence, never become instructions in the fork.
+    let copied_epoch = messages
+        .iter()
+        .filter_map(|message| message.origin_projection.as_ref())
+        .filter(|origin| origin.string_at("/type") == Some("skill_activation"))
+        .filter_map(|origin| origin.number_at("/context_epoch"))
+        .filter(|epoch| epoch.is_finite() && *epoch >= 0.0 && epoch.fract() == 0.0)
+        .map(|epoch| epoch as u64)
+        .max()
+        .unwrap_or(0);
+    let instruction_epoch = profile
+        .instruction_epoch
+        .max(copied_epoch)
+        .checked_add(1)
+        .filter(|epoch| *epoch <= (1_u64 << 53) - 1)
+        .ok_or(BranchError::InstructionEpochExhausted)?;
 
     // 3. Base name = provided title, else the first-prompt derivation
     //    (`deriveFirstPrompt`). Then append the collision-numbered "(Branch)".
     let base = match custom_title {
         Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => derive_fork_name(&routed.messages_in_order),
+        _ => derive_fork_name(messages),
     };
     // Collision numbering runs against the catalog the fork will LIVE in.
     let title = unique_fork_name(lingxi_home, target_cwd, &base, &fs).await;
 
     // 4. Rewrite each entry: new sessionId, rechained parentUuid, cleared
     //    sidechain flag, plus a `forkedFrom` back-reference to the origin.
-    let new_session_id = Uuid::new_v4();
     let new_sid = new_session_id.to_string();
-    let src_sid = source_session_id.to_string();
-    let carried_replacements = carried_content_replacements(&content, src_sid.as_str());
+    let carried_replacements = carried_content_replacements(content, src_sid.as_str());
     let mut parent: Option<String> = None;
-    let message_count = routed.messages_in_order.len();
+    let message_count = messages.len();
     let carries_content_replacements = !carried_replacements.values.is_empty();
     let carries_relocated =
         target_cwd == source_cwd && routed.relocated_cwds.contains_key(src_sid.as_str());
@@ -181,6 +525,17 @@ async fn create_branch_in(
             + usize::from(carries_relocated)
             + usize::from(carries_atis)
             + 1,
+    );
+
+    // Publish the fixed owner in the same atomic file as the copied history.
+    lines.push(
+        serde_json::to_string(&json!({
+            "type": "fixed-session-mode",
+            "sessionId": new_sid,
+            "sessionMode": mode.as_str(),
+            "instructionEpoch": instruction_epoch,
+        }))
+        .expect("fork mode serializes"),
     );
 
     // `createFork` stamps inherited history suppression BEFORE transcript
@@ -197,17 +552,15 @@ async fn create_branch_in(
             .expect("history-suppression serializes"),
         );
     }
-    for mut entry in routed.messages_in_order {
+    for mut entry in messages.iter().cloned() {
         let original_uuid = entry.uuid.clone();
         entry.session_id = new_sid.clone();
         entry.parent_uuid = parent.clone();
         entry.is_sidechain = false;
-        // A cross-cwd fork lives under the target root from now on; keeping
-        // the source cwd would make a later resume re-anchor file context on
-        // a directory the session no longer belongs to.
-        if target_cwd != source_cwd {
-            entry.cwd = target_cwd.to_string();
-        }
+        // Historical entries can name older workspaces even when the source
+        // and target roots match. The independent branch belongs to the
+        // target root from its first entry onward.
+        entry.cwd = target_cwd.to_string();
         let forked_from = Utf16JsonProjection::from_serde_value(
             &json!({ "sessionId": src_sid, "messageUuid": original_uuid }),
         )
@@ -278,44 +631,14 @@ async fn create_branch_in(
         }))
         .expect("custom-title serializes"),
     );
-    // 6. Write the branch file (0o600 like claude). Same-cwd: the project
-    //    dir already exists (it holds the source we just read). Cross-cwd:
-    //    a fresh app workspace has no catalog dir yet — create it.
-    let dst_path = session_path(lingxi_home, target_cwd, &new_sid);
-    if target_cwd != source_cwd {
-        if let Some(parent_dir) = dst_path.parent() {
-            tokio::fs::create_dir_all(parent_dir)
-                .await
-                .map_err(BranchError::Io)?;
-        }
-    }
-    let body = format!("{}\n", lines.join("\n"));
-    tokio::fs::write(&dst_path, body.as_bytes())
-        .await
-        .map_err(BranchError::Io)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(&dst_path, std::fs::Permissions::from_mode(0o600)).await;
-    }
-
-    // Inline visualizations are owned by the root session. The branch gets
-    // its own copy (same ids) so widget state diverges independently from
-    // here on. A failed copy degrades the branch's widgets to "unavailable"
-    // cards; it must not lose the branch itself.
-    let visualizations = visualization::VisualizationStore::new(fs, lingxi_home.to_path_buf());
-    if let Err(error) = visualizations
-        .copy_session(source_session_id, new_session_id)
-        .await
-    {
-        tracing::warn!(%error, "branch: inline visualizations were not copied");
-    }
-
-    Ok(BranchResult {
-        new_session_id,
-        source_session_id,
-        title,
-        message_count,
+    Ok(RenderedBranch {
+        result: BranchResult {
+            new_session_id,
+            source_session_id,
+            title,
+            message_count,
+        },
+        content: format!("{}\n", lines.join("\n")),
     })
 }
 
@@ -442,6 +765,56 @@ mod tests {
         .to_string()
     }
 
+    fn fixed_header(sid: &str, mode: &str, epoch: u64) -> String {
+        json!({"type":"fixed-session-mode", "sessionId":sid, "sessionMode":mode, "instructionEpoch":epoch}).to_string()
+    }
+
+    #[tokio::test]
+    async fn published_branch_rejects_same_bytes_replacement_before_receipt() {
+        let home = tempfile::tempdir().unwrap();
+        let src = Uuid::new_v4();
+        let dst = Uuid::new_v4();
+        let content = format!(
+            "{}\n{}\n",
+            fixed_header(&src.to_string(), "code", 0),
+            user_line(
+                "11111111-1111-4111-8111-111111111111",
+                &src.to_string(),
+                None,
+                "selected"
+            )
+        );
+        let loaded = route_lines(&content);
+        let target = session_path(home.path(), "/target", &dst.to_string());
+        let saved = target.with_extension("published");
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+        let result = create_branch_from_captured_with_hook(
+            CapturedBranch {
+                lingxi_home: home.path(),
+                source_cwd: "/tmp/proj",
+                target_cwd: "/target",
+                source_session_id: src,
+                target_session_id: dst,
+                source_content: &content,
+                messages: &loaded.messages_in_order,
+                custom_title: None,
+                mode: None,
+            },
+            fs,
+            || {
+                let bytes = std::fs::read(&target).unwrap();
+                std::fs::rename(&target, &saved).unwrap();
+                std::fs::write(&target, bytes).unwrap();
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            std::fs::read(saved).unwrap()
+        );
+    }
+
     fn content_replacement_line(sid: &str, path: &str, agent_id: Option<&str>) -> String {
         let mut value = json!({
             "type": "content-replacement",
@@ -464,6 +837,283 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captured_branch_publishes_selected_exact_history_with_a_fresh_profile() {
+        use crate::jsonl::exact_json::parse_exact_json;
+
+        let home = tempfile::tempdir().unwrap();
+        let source_cwd = "/captured-source";
+        let target_cwd = "/captured-target";
+        let src = Uuid::new_v4();
+        let dst = Uuid::new_v4();
+        let first_uuid = "11111111-1111-1111-1111-111111111111";
+        let second_uuid = "22222222-2222-2222-2222-222222222222";
+        let first = format!(
+            r#"{{"type":"user","uuid":"{first_uuid}","parentUuid":null,"sessionId":"{src}","timestamp":"2026-05-25T12:00:00.000Z","cwd":"{source_cwd}","version":"0.0.0","origin":{{"type":"skill_activation","context_epoch":12,"skill_name":"copied"}},"message":{{"role":"user","content":"exact \ud83d"}}}}"#
+        );
+        let second = user_line(second_uuid, &src.to_string(), Some(first_uuid), "selected");
+        let mut excluded: serde_json::Value = serde_json::from_str(&user_line(
+            "33333333-3333-3333-3333-333333333333",
+            &src.to_string(),
+            Some(second_uuid),
+            "excluded",
+        ))
+        .unwrap();
+        excluded["origin"] = json!({"type":"skill_activation", "context_epoch":99});
+        let captured = format!(
+            "{}\n{first}\n{second}\n{excluded}\n{}\n{}\n{}\n",
+            fixed_header(&src.to_string(), "code", 8),
+            format!(
+                r#"{{"type":"content-replacement","sessionId":"{src}","replacements":[{{"text":"\ude00"}}]}}"#
+            ),
+            json!({"type":"history-suppression", "sessionId":src.to_string(), "cause":"manual"}),
+            json!({"type":"atis-latch", "sessionId":src.to_string(), "atis":"token"}),
+        );
+        let routed = route_lines(&captured);
+        assert_eq!(routed.messages_in_order.len(), 3);
+
+        // The file may change after capture; the helper must neither reread nor
+        // overwrite it and must construct the branch from the captured bytes.
+        let source = session_path(home.path(), source_cwd, &src.to_string());
+        tokio::fs::create_dir_all(source.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&source, "later source contents\n")
+            .await
+            .unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+        let options = CapturedBranch {
+            lingxi_home: home.path(),
+            source_cwd,
+            target_cwd,
+            source_session_id: src,
+            target_session_id: dst,
+            source_content: &captured,
+            messages: &routed.messages_in_order[..2],
+            custom_title: None,
+            mode: None,
+        };
+        let rendered = render_branch_from_captured(options, fs.clone())
+            .await
+            .unwrap();
+        assert!(!session_path(home.path(), target_cwd, &dst.to_string()).exists());
+        assert_eq!(rendered.result.new_session_id, dst);
+        let rendered_route = route_lines(&rendered.content);
+        assert_eq!(rendered_route.messages_in_order.len(), 2);
+        let result = create_branch_from_captured(options, fs).await.unwrap();
+        assert_eq!(result.result.new_session_id, dst);
+        assert_eq!(result.result.message_count, 2);
+        assert_eq!(
+            tokio::fs::read_to_string(source).await.unwrap(),
+            "later source contents\n"
+        );
+
+        let output =
+            tokio::fs::read_to_string(session_path(home.path(), target_cwd, &dst.to_string()))
+                .await
+                .unwrap();
+        let target = route_lines(&output);
+        assert_eq!(target.messages_in_order.len(), 2);
+        assert!(target.session_history_suppressed);
+        assert_eq!(
+            target
+                .atis_latches
+                .get(&dst.to_string())
+                .map(String::as_str),
+            Some("token")
+        );
+        for (index, message) in target.messages_in_order.iter().enumerate() {
+            assert_eq!(message.session_id, dst.to_string());
+            assert_eq!(message.cwd, target_cwd);
+            assert_eq!(
+                message.extra.string_at("/forkedFrom/sessionId"),
+                Some(src.to_string().as_str())
+            );
+            assert_eq!(
+                message.extra.string_at("/forkedFrom/messageUuid"),
+                Some(message.uuid.as_str())
+            );
+            assert_eq!(
+                message.parent_uuid.as_deref(),
+                (index == 1).then_some(first_uuid)
+            );
+        }
+        let copied_first = output
+            .lines()
+            .find(|line| line.contains(first_uuid))
+            .unwrap();
+        let original = parse_exact_json(&first).unwrap();
+        let copied = parse_exact_json(copied_first).unwrap();
+        assert_eq!(copied.value["message"], original.value["message"]);
+        assert_eq!(copied.value["origin"], original.value["origin"]);
+        assert_eq!(copied.utf16_overrides, original.utf16_overrides);
+        let replacement = output
+            .lines()
+            .find_map(|line| {
+                let exact = parse_exact_json(line).ok()?;
+                (exact.value["type"] == "content-replacement").then_some(exact)
+            })
+            .unwrap();
+        assert_eq!(replacement.value["sessionId"], dst.to_string());
+        assert_eq!(
+            replacement.utf16_overrides.get("/replacements/0/text"),
+            Some(&vec![0xde00])
+        );
+        let profile = output
+            .lines()
+            .find_map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).ok()?;
+                (value["type"] == "fixed-session-mode").then_some(value)
+            })
+            .unwrap();
+        assert_eq!(profile["sessionMode"], "code");
+        assert_eq!(profile["instructionEpoch"], 13);
+    }
+
+    #[tokio::test]
+    async fn captured_branch_rejects_collision_source_identity_and_exhausted_epoch() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = "/captured-failures";
+        let src = Uuid::new_v4();
+        let dst = Uuid::new_v4();
+        let source = user_line(
+            "11111111-1111-1111-1111-111111111111",
+            &src.to_string(),
+            None,
+            "test",
+        );
+        let captured = format!("{}\n{source}\n", fixed_header(&src.to_string(), "code", 0));
+        let routed = route_lines(&captured);
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+        let target = session_path(home.path(), cwd, &dst.to_string());
+        tokio::fs::create_dir_all(target.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&target, "existing target\n")
+            .await
+            .unwrap();
+        let options = CapturedBranch {
+            lingxi_home: home.path(),
+            source_cwd: cwd,
+            target_cwd: cwd,
+            source_session_id: src,
+            target_session_id: dst,
+            source_content: &captured,
+            messages: &routed.messages_in_order,
+            custom_title: None,
+            mode: None,
+        };
+        assert!(create_branch_from_captured(options, fs.clone())
+            .await
+            .is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(&target).await.unwrap(),
+            "existing target\n"
+        );
+        assert!(matches!(
+            create_branch_from_captured(
+                CapturedBranch {
+                    target_session_id: src,
+                    ..options
+                },
+                fs.clone()
+            )
+            .await,
+            Err(BranchError::TargetIsSource)
+        ));
+
+        let override_target = Uuid::new_v4();
+        assert!(matches!(
+            render_branch_from_captured(
+                CapturedBranch {
+                    target_session_id: override_target,
+                    mode: Some(crate::jsonl::SessionMode::Chat),
+                    ..options
+                },
+                fs.clone(),
+            )
+            .await,
+            Err(BranchError::ModeMismatch)
+        ));
+        assert!(!session_path(home.path(), cwd, &override_target.to_string()).exists());
+
+        let invalid = format!("{source}\n{{\"type\":\"session-mode\",\"sessionId\":\"{src}\",\"sessionMode\":\"unknown\"}}\n");
+        assert!(matches!(
+            create_branch_from_captured(
+                CapturedBranch {
+                    target_session_id: Uuid::new_v4(),
+                    source_content: &invalid,
+                    ..options
+                },
+                fs,
+            )
+            .await,
+            Err(BranchError::InvalidModeMetadata(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn branch_keeps_fixed_mode_and_uses_fresh_instruction_epoch() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = "/profiled-branch";
+        let src = Uuid::new_v4();
+        let sid = src.to_string();
+        let path = session_path(home.path(), cwd, &sid);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let message = user_line(
+            "11111111-1111-1111-1111-111111111111",
+            &sid,
+            None,
+            "copied instruction",
+        );
+        tokio::fs::write(
+            &path,
+            format!("{}\n{message}\n", fixed_header(&sid, "code", 7)),
+        )
+        .await
+        .unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+        assert!(matches!(
+            create_branch_with_mode(
+                home.path(),
+                cwd,
+                src,
+                None,
+                crate::jsonl::SessionMode::Chat,
+                fs.clone()
+            )
+            .await,
+            Err(BranchError::ModeMismatch)
+        ));
+        let branch = create_branch_with_mode(
+            home.path(),
+            cwd,
+            src,
+            None,
+            crate::jsonl::SessionMode::Code,
+            fs,
+        )
+        .await
+        .unwrap();
+        let raw = tokio::fs::read_to_string(session_path(
+            home.path(),
+            cwd,
+            &branch.new_session_id.to_string(),
+        ))
+        .await
+        .unwrap();
+        let profile = crate::jsonl::JsonlWriter::fixed_session_profile_from_source(
+            &raw,
+            &branch.new_session_id.to_string(),
+        )
+        .unwrap();
+        assert_eq!(profile.mode, crate::jsonl::SessionMode::Code);
+        assert_eq!(profile.instruction_epoch, 8);
+        assert!(raw.contains("copied instruction"));
+    }
+
+    #[tokio::test]
     async fn branch_copies_inline_visualizations_under_the_new_root_session() {
         let home = tempfile::tempdir().unwrap();
         let cwd = "/viz-fixture";
@@ -479,9 +1129,12 @@ mod tests {
             None,
             "plot it",
         );
-        tokio::fs::write(&source, format!("{line}\n"))
-            .await
-            .unwrap();
+        tokio::fs::write(
+            &source,
+            format!("{}\n{line}\n", fixed_header(&src_sid, "code", 0)),
+        )
+        .await
+        .unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
         let store = visualization::VisualizationStore::new(fs.clone(), home.path().to_path_buf());
         let reference = store
@@ -532,7 +1185,7 @@ mod tests {
         tokio::fs::create_dir_all(source.parent().unwrap())
             .await
             .unwrap();
-        let body = format!("{fixture}{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ud83d\"}}]}}\n{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ude00\"}}]}}\n");
+        let body = format!("{}\n{fixture}{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ud83d\"}}]}}\n{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ude00\"}}]}}\n", fixed_header(&src.to_string(), "code", 0));
         tokio::fs::write(&source, &body).await.unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
         let fork = create_branch(home.path(), cwd, src, Some("Exact peer history"), fs)
@@ -551,6 +1204,7 @@ mod tests {
         assert_eq!(restored.messages_in_order.len(), 4);
         for ((native, original), message) in written
             .lines()
+            .skip(1)
             .take(4)
             .zip(fixture.lines())
             .zip(&restored.messages_in_order)
@@ -609,6 +1263,7 @@ mod tests {
                 "second",
             ),
         );
+        let body = format!("{}\n{body}", fixed_header(&src_sid, "code", 0));
         tokio::fs::write(&path, body.clone()).await.unwrap();
 
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(std::path::PathBuf::from(cwd)));
@@ -624,22 +1279,22 @@ mod tests {
             .await
             .unwrap();
         let lines: Vec<&str> = written.lines().collect();
-        // 2 conversation lines + 1 custom-title line.
-        assert_eq!(lines.len(), 3);
-        let first = read_row(lines[0]);
+        // 2 conversation lines + custom-title + fresh profile.
+        assert_eq!(lines.len(), 4);
+        let first = read_row(lines[1]);
         assert_eq!(first.session_id, new_sid);
         assert_eq!(first.parent_uuid, None, "first entry re-roots the chain");
         assert_eq!(
             first.extra.string_at("/forkedFrom/sessionId").unwrap(),
             src_sid
         );
-        let second = read_row(lines[1]);
+        let second = read_row(lines[2]);
         assert_eq!(
             second.parent_uuid.as_deref(),
             Some("11111111-1111-1111-1111-111111111111"),
             "parentUuid rechained to the prior ORIGINAL uuid"
         );
-        let title_line: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        let title_line: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
         assert_eq!(title_line["type"], "custom-title");
         assert_eq!(title_line["sessionId"], new_sid);
         let _ = std::fs::remove_dir_all(&home);
@@ -707,6 +1362,7 @@ mod tests {
                 "atis": "invalid token",
             }),
         );
+        let body = format!("{}\n{body}", fixed_header(&src_sid, "code", 0));
         tokio::fs::write(&path, body.clone()).await.unwrap();
 
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(std::path::PathBuf::from(cwd)));
@@ -719,9 +1375,9 @@ mod tests {
             .await
             .unwrap();
         let lines: Vec<&str> = written.lines().collect();
-        assert_eq!(lines.len(), 7);
+        assert_eq!(lines.len(), 8);
 
-        let suppression: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let suppression: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(suppression["type"], "history-suppression");
         assert_eq!(suppression["sessionId"], json!(new_sid));
         assert_eq!(suppression["cause"], "fork_inherit");
@@ -729,12 +1385,12 @@ mod tests {
             .as_str()
             .is_some_and(|ts| ts.ends_with('Z') && ts.contains('T')));
 
-        let first = read_row(lines[1]);
-        let second = read_row(lines[2]);
+        let first = read_row(lines[2]);
+        let second = read_row(lines[3]);
         assert_eq!(first.uuid, "11111111-1111-1111-1111-111111111111");
         assert_eq!(second.uuid, "22222222-2222-2222-2222-222222222222");
 
-        let sidecar: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+        let sidecar: serde_json::Value = serde_json::from_str(lines[4]).unwrap();
         assert_eq!(sidecar["type"], "content-replacement");
         assert_eq!(sidecar["sessionId"], json!(new_sid));
         assert_eq!(
@@ -752,17 +1408,17 @@ mod tests {
             "agent-level replacements must not be carried onto the branch transcript",
         );
 
-        let relocated: serde_json::Value = serde_json::from_str(lines[4]).unwrap();
+        let relocated: serde_json::Value = serde_json::from_str(lines[5]).unwrap();
         assert_eq!(relocated["type"], "relocated");
         assert_eq!(relocated["sessionId"], json!(new_sid));
         assert_eq!(relocated["relocatedCwd"], "/tmp/new");
 
-        let atis: serde_json::Value = serde_json::from_str(lines[5]).unwrap();
+        let atis: serde_json::Value = serde_json::from_str(lines[6]).unwrap();
         assert_eq!(atis["type"], "atis-latch");
         assert_eq!(atis["sessionId"], json!(new_sid));
         assert_eq!(atis["atis"], "atis-token");
 
-        let title: serde_json::Value = serde_json::from_str(lines[6]).unwrap();
+        let title: serde_json::Value = serde_json::from_str(lines[7]).unwrap();
         assert_eq!(title["type"], "custom-title");
 
         let source_after = tokio::fs::read_to_string(&path).await.unwrap();
@@ -811,6 +1467,7 @@ mod tests {
                 "it tracks habits",
             ),
         );
+        let body = format!("{}\n{body}", fixed_header(&src_sid, "code", 0));
         tokio::fs::write(&path, body.clone()).await.unwrap();
 
         let fs: Arc<dyn FileSystem> =
@@ -825,8 +1482,8 @@ mod tests {
         let dst = session_path(&home, target_cwd, &new_sid);
         let written = tokio::fs::read_to_string(&dst).await.expect("fork exists");
         let lines: Vec<&str> = written.lines().collect();
-        assert_eq!(lines.len(), 3);
-        for line in &lines[..2] {
+        assert_eq!(lines.len(), 4);
+        for line in &lines[1..3] {
             let entry = read_row(line);
             assert_eq!(entry.session_id, new_sid);
             assert_eq!(

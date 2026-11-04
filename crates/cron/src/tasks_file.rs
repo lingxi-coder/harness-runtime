@@ -30,6 +30,13 @@ pub const CLAUDE_DIR: &str = branding::DOT_DIR;
 pub const SCHEDULED_TASKS_FILE: &str = "scheduled_tasks.json";
 /// Lock-file name beside the tasks file (claude-code `scheduled_tasks.lock`).
 pub const SCHEDULED_TASKS_LOCK: &str = "scheduled_tasks.lock";
+/// Append-only record of allocated session owners, independent of task history.
+pub const OWNER_RESERVATIONS_FILE: &str = "scheduled_owner_reservations.jsonl";
+
+/// Path of the owner ledger relative to the scheduler scope.
+pub fn owner_reservations_relative_path() -> PathBuf {
+    Path::new(CLAUDE_DIR).join(OWNER_RESERVATIONS_FILE)
+}
 
 /// One persisted scheduled cron job — the EXACT on-disk shape of a claude-code
 /// `CronTask`, in the canonical key order
@@ -139,6 +146,7 @@ pub static RUNTIME_EXCLUDE_PATTERNS: std::sync::LazyLock<Vec<String>> =
             format!("**/{dir}/session-cron/scheduled_tasks.mutation.lock"),
             format!("**/{dir}/scheduled_tasks.lock"),
             format!("**/{dir}/scheduled_tasks.json"),
+            format!("**/{dir}/scheduled_owner_reservations.jsonl"),
             format!("**/{dir}/routines/.state/"),
             format!("**/{dir}/worktrees/"),
             format!("**/{dir}/checkpoints/"),
@@ -368,6 +376,16 @@ pub async fn lock_automation_tasks(
         .await
 }
 
+/// Acquire the task-center lock under the captured state-directory root.
+pub async fn lock_automation_tasks_pinned(
+    fs: &dyn FileSystem,
+    root: &Path,
+    expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+) -> Result<Box<dyn FlockGuard>, FsError> {
+    fs.flock_exclusive_rooted_pinned(root, Path::new(SCHEDULED_TASKS_LOCK), expected)
+        .await
+}
+
 /// Read the scheduled-task document without following project-local symlinks.
 pub async fn read_tasks_body(fs: &dyn FileSystem, project_root: &Path) -> Result<String, FsError> {
     fs.read_file_rooted_no_follow(
@@ -414,6 +432,27 @@ pub async fn read_automation_tasks_body(
         .map(|content| content.content)
 }
 
+/// Read the task document from the same scope whose lock is held.
+pub async fn read_automation_tasks_body_pinned(
+    fs: &dyn FileSystem,
+    root: &Path,
+    expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+) -> Result<String, FsError> {
+    let file = fs
+        .read_file_rooted_no_follow_window_pinned(
+            root,
+            Path::new(SCHEDULED_TASKS_FILE),
+            None,
+            None,
+            expected,
+        )
+        .await?;
+    if file.truncated {
+        return Err(FsError::Io("truncated task document".into()));
+    }
+    Ok(file.content)
+}
+
 /// Write only the independent v2 task-center document.
 pub async fn write_automation_tasks_body(
     fs: &dyn FileSystem,
@@ -421,6 +460,17 @@ pub async fn write_automation_tasks_body(
     body: &str,
 ) -> Result<(), FsError> {
     fs.write_file_rooted_atomic(project_root, &scheduled_tasks_relative_path(), body)
+        .await
+}
+
+/// Commit the task document only under the root whose lock is held.
+pub async fn write_automation_tasks_body_pinned(
+    fs: &dyn FileSystem,
+    root: &Path,
+    body: &str,
+    expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+) -> Result<(), FsError> {
+    fs.write_file_rooted_atomic_pinned(root, Path::new(SCHEDULED_TASKS_FILE), body, expected)
         .await
 }
 

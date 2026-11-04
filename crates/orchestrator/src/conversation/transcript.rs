@@ -1147,6 +1147,14 @@ fn refused_message_id_is_persisted_after_timestamp_with_exact_utf16_units() {
 }
 
 impl ConversationOrchestrator {
+    pub(crate) fn ensure_transcript_rewrite_resolved(&self) -> Result<(), OrchestratorError> {
+        if let Some(writer) = self.transcript.jsonl_writer.as_ref() {
+            writer.ensure_rewrite_is_resolved().map_err(|error| {
+                OrchestratorError::TranscriptRewriteUncertain(error.to_string())
+            })?;
+        }
+        Ok(())
+    }
     async fn mod_append_tool_name(&self, id: &lingxi_core::types::ToolUseId) -> String {
         self.session
             .lock()
@@ -3174,6 +3182,11 @@ impl ConversationOrchestrator {
         source_id: lingxi_core::types::ToolUseId,
         publication_guard: Arc<dyn HookPublicationGuard>,
     ) -> bool {
+        if compaction::invoked_skills::is_individual_skill_activation(message) {
+            return self
+                .append_committed_tool_skill(message, source_id, Some(publication_guard))
+                .await;
+        }
         if !publication_guard.is_current() {
             return false;
         }
@@ -3227,6 +3240,65 @@ impl ConversationOrchestrator {
             .await;
         };
         publication_guard.commit_if_current(Box::pin(commit)).await
+    }
+
+    /// Accept a trusted Skill tool row and make its activation effective in
+    /// the same generation lease as its durable write and history publication.
+    pub(crate) async fn append_committed_tool_skill(
+        &self,
+        message: &ConversationMessage,
+        source_id: lingxi_core::types::ToolUseId,
+        guard: Option<Arc<dyn HookPublicationGuard>>,
+    ) -> bool {
+        if guard.as_ref().is_some_and(|guard| !guard.is_current()) {
+            return false;
+        }
+        let accepted = self
+            .mod_session_append_row(message, None, false, guard.clone())
+            .await;
+        if guard.as_ref().is_some_and(|guard| !guard.is_current()) {
+            return false;
+        }
+        let mut committed = false;
+        let remember_guard = guard.clone();
+        let commit = async {
+            let session_id = self.session.lock().await.session_id.to_string();
+            let scope =
+                compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+            if !compaction::invoked_skills::is_current_individual_skill_activation(&accepted, scope)
+            {
+                return;
+            }
+            if self
+                .persist_message_to_jsonl_inner_with_pending_prompt_identity(
+                    &accepted, None, None, false, None, None, true, None,
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+            {
+                let mut session = self.session.lock().await;
+                session.history.push(accepted.clone());
+                session
+                    .injected_message_sources
+                    .insert(accepted.id(), source_id);
+            }
+            if let Some(guard) = remember_guard {
+                self.prompt_runtime
+                    .remember_guarded_prompt_message(accepted.id(), guard)
+                    .await;
+            }
+            committed =
+                compaction::invoked_skills::register_accepted_skill_message(&accepted, scope);
+        };
+        if let Some(guard) = guard {
+            guard.commit_if_current(Box::pin(commit)).await;
+        } else {
+            commit.await;
+        }
+        committed
     }
 
     /// Run the stream append bridge and return the accepted row that Native's
@@ -3301,8 +3373,64 @@ impl ConversationOrchestrator {
         parent_override: Option<String>,
         timestamp: &str,
         publication_guard: Option<std::sync::Arc<dyn HookPublicationGuard>>,
-    ) {
+        source_id: Option<lingxi_core::types::ToolUseId>,
+    ) -> bool {
         let sanitized = redact_ephemeral_tool_result_images(stored);
+        if compaction::invoked_skills::is_individual_skill_activation(&sanitized) {
+            let mut committed = false;
+            let remember_guard = publication_guard.clone();
+            let commit = async {
+                let session_id = self.session.lock().await.session_id.to_string();
+                let scope =
+                    compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+                if !compaction::invoked_skills::is_current_individual_skill_activation(
+                    &sanitized, scope,
+                ) {
+                    return;
+                }
+                if self
+                    .persist_message_to_jsonl_inner_with_pending_prompt_identity(
+                        &sanitized,
+                        parent_override,
+                        None,
+                        false,
+                        None,
+                        Some(PreappendedRowMetadata {
+                            timestamp,
+                            api_error: None,
+                        }),
+                        false,
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                {
+                    let mut session = self.session.lock().await;
+                    session.history.push(sanitized.clone());
+                    if let Some(source_id) = source_id {
+                        session
+                            .injected_message_sources
+                            .insert(sanitized.id(), source_id);
+                    }
+                }
+                if let Some(guard) = remember_guard {
+                    self.prompt_runtime
+                        .remember_guarded_prompt_message(sanitized.id(), guard)
+                        .await;
+                }
+                committed =
+                    compaction::invoked_skills::register_accepted_skill_message(&sanitized, scope);
+            };
+            if let Some(guard) = publication_guard {
+                guard.commit_if_current(Box::pin(commit)).await;
+            } else {
+                commit.await;
+            }
+            return committed;
+        }
         let persist = self.persist_message_to_jsonl_inner_with_queue_metadata(
             &sanitized,
             parent_override,
@@ -3316,9 +3444,10 @@ impl ConversationOrchestrator {
             false,
         );
         if let Some(guard) = publication_guard {
-            guard.commit_if_current(Box::pin(persist)).await;
+            guard.commit_if_current(Box::pin(persist)).await
         } else {
             persist.await;
+            true
         }
     }
 
@@ -3362,6 +3491,31 @@ impl ConversationOrchestrator {
             false,
         )
         .await;
+    }
+
+    /// Persist a Skill companion before activating it, and return the body
+    /// accepted by `session.append`. A configured writer failure aborts this
+    /// admission rather than making an uncommitted body effective.
+    pub(super) async fn persist_admitted_skill_prompt(
+        &self,
+        msg: &ConversationMessage,
+        input: &QueuedPromptInput,
+    ) -> Result<ConversationMessage, OrchestratorError> {
+        let sanitized = redact_ephemeral_tool_result_images(msg);
+        self.persist_message_to_jsonl_inner_with_pending_prompt_identity(
+            &sanitized,
+            None,
+            None,
+            false,
+            Some(input),
+            None,
+            false,
+            None,
+        )
+        .await?
+        .ok_or_else(|| {
+            OrchestratorError::Internal("Skill admission produced no accepted row".into())
+        })
     }
 
     /// Append a checkpointed user row by its stable pending-prompt identity.
@@ -4130,7 +4284,7 @@ impl ConversationOrchestrator {
         &self,
         assistant_id: MessageId,
         persisted_row_ids: &[MessageId],
-    ) {
+    ) -> Result<(), OrchestratorError> {
         self.session
             .lock()
             .await
@@ -4143,9 +4297,19 @@ impl ConversationOrchestrator {
             message_ids.extend(persisted_row_ids.iter().map(|id| id.as_uuid().to_string()));
             match writer.remove_retry_attempt_rows(&message_ids).await {
                 Ok(tail) => *self.transcript.last_jsonl_uuid.lock().await = tail,
+                Err(
+                    error @ session::jsonl::writer::WriterError::Durable(
+                        session::jsonl::TranscriptWriterError::WrittenButNotDurable(_),
+                    ),
+                ) => {
+                    return Err(OrchestratorError::TranscriptRewriteUncertain(
+                        error.to_string(),
+                    ));
+                }
                 Err(error) => tracing::warn!(%error, "failed to remove rejected retry attempt"),
             }
         }
+        Ok(())
     }
 
     /// Persist the latest active-goal snapshot as a transcript metadata line.
@@ -4298,7 +4462,12 @@ impl ConversationOrchestrator {
         let rewritten = if preappended.is_some() || session_append_preaccepted {
             msg.clone()
         } else {
-            self.mod_session_append_row(msg, None, true, None).await
+            // Skill companions are published only after their append succeeds.
+            // In particular, a pending retry must not rewrite an already-live
+            // row before its idempotent durable append has been accepted.
+            let update_history = !queued_input.is_some_and(|input| input.skill_identity.is_some());
+            self.mod_session_append_row(msg, None, update_history, None)
+                .await
         };
         let compact_summary_content =
             compact_summary_content_source_if_unmodified(msg, &rewritten, compact_summary);
@@ -4343,7 +4512,7 @@ impl ConversationOrchestrator {
                     "pending prompt append requires a durable transcript writer".into(),
                 ))
             } else {
-                Ok(None)
+                Ok(Some(rewritten))
             };
         };
         let (session_id_str, plan_mode, parent_uuid) = {
@@ -4680,9 +4849,19 @@ impl ConversationOrchestrator {
                 }
             }
             Err(error) => {
+                self.ensure_transcript_rewrite_resolved()?;
                 if pending_prompt_id.is_some() {
                     return Err(OrchestratorError::Internal(format!(
                         "pending prompt transcript append failed: {error}"
+                    )));
+                }
+                if queued_input.is_some_and(|input| input.skill_identity.is_some())
+                    || compaction::invoked_skills::is_individual_skill_activation(msg)
+                {
+                    self.record_transcript_append_failure(&session_id_str, "message", &error)
+                        .await;
+                    return Err(OrchestratorError::Internal(format!(
+                        "Skill prompt transcript append failed: {error}"
                     )));
                 }
                 self.record_transcript_append_failure(&session_id_str, "message", &error)
@@ -5039,6 +5218,12 @@ impl ConversationOrchestrator {
                 self.replace_session_history_row(*turn_id, rewritten_merged)
                     .await;
                 let Some(writer) = writer_for_commit else {
+                    self.fail_local_app_publication_origins(
+                        std::slice::from_ref(&block_for_commit),
+                        &turn_id.as_uuid().to_string(),
+                        "assistant transcript is unavailable",
+                    )
+                    .await;
                     let _ = result_tx.send(None::<String>);
                     return;
                 };
@@ -5076,7 +5261,7 @@ impl ConversationOrchestrator {
                             &session_id_for_commit,
                             &line_uuid_for_commit,
                         );
-                        if let lingxi_core::types::ContentBlock::ToolUse { id, .. } =
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } =
                             &block_for_commit
                         {
                             self.record_source_tool_assistant_uuid(
@@ -5084,10 +5269,30 @@ impl ConversationOrchestrator {
                                 line_uuid_for_commit.clone(),
                             )
                             .await;
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &turn_id.as_uuid().to_string(),
+                                    Ok(line_uuid_for_commit.clone()),
+                                )
+                                .await;
+                            }
                         }
                         let _ = result_tx.send(Some(line_uuid_for_commit));
                     }
                     Err(error) => {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } =
+                            &block_for_commit
+                        {
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &turn_id.as_uuid().to_string(),
+                                    Err("assistant transcript write failed".into()),
+                                )
+                                .await;
+                            }
+                        }
                         self.record_transcript_append_failure(
                             &session_id_for_commit,
                             "assistant_block",
@@ -5105,6 +5310,12 @@ impl ConversationOrchestrator {
                 true
             };
             if !committed {
+                self.fail_local_app_publication_origins(
+                    &content[block_index..],
+                    &turn_id.as_uuid().to_string(),
+                    "assistant publication fence closed",
+                )
+                .await;
                 return map;
             }
             block_groups = next_block_groups;
@@ -5208,6 +5419,29 @@ impl ConversationOrchestrator {
         row.session_append_dispatched = true;
     }
 
+    async fn fail_local_app_publication_origins(
+        &self,
+        content: &[lingxi_core::types::ContentBlock],
+        assistant: &str,
+        reason: &str,
+    ) {
+        for block in content {
+            if let lingxi_core::types::ContentBlock::ToolUse {
+                id, name, input, ..
+            } = block
+            {
+                if name == "LocalApp"
+                    && input
+                        .string_at("/action")
+                        .is_none_or(|action| action == "publish")
+                {
+                    self.record_durable_tool_origin(id, assistant, Err(reason.to_owned()))
+                        .await;
+                }
+            }
+        }
+    }
+
     /// Commit one content-block row after terminal metadata is available.
     /// Native's interactive recorder excludes the incomplete assistant tail.
     /// Its event journal cursor and the headless shared-message write queue
@@ -5221,19 +5455,40 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|guard| !guard.is_current())
         {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant publication fence closed",
+            )
+            .await;
             return None;
         }
         if let Some(link) = &row.persisted_link {
             return Some(link.clone());
         }
         if row.stop_reason.is_none() || row.is_api_error {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant row has no durable terminal state",
+            )
+            .await;
             return None;
         }
         let inner_id = if self.is_persistent_app_chat() {
             // Replay groups the per-block rows into the exact live assistant
             // identity. A provider id is neither that host UUID nor a replay
             // authority; retain it separately as response metadata.
-            row.logical_message_id?.as_uuid().to_string()
+            let Some(logical) = row.logical_message_id else {
+                self.fail_local_app_publication_origins(
+                    &row.content,
+                    &row.row_id.as_uuid().to_string(),
+                    "assistant origin is unavailable",
+                )
+                .await;
+                return None;
+            };
+            logical.as_uuid().to_string()
         } else {
             row.provider_message_id.clone()
         };
@@ -5244,10 +5499,24 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|guard| !guard.is_current())
         {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant publication fence closed",
+            )
+            .await;
             return None;
         }
 
-        let writer = self.transcript.jsonl_writer.as_ref()?;
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant transcript is unavailable",
+            )
+            .await;
+            return None;
+        };
 
         let single = ConversationMessage::Assistant {
             per_turn_effort: (!row.is_api_error)
@@ -5341,9 +5610,17 @@ impl ConversationOrchestrator {
                     *self.transcript.last_jsonl_uuid.lock().await = Some(row_uuid.clone());
                     telemetry::emit_session_appended(&session_id_for_write, &row_uuid);
                     for block in &row_content {
-                        if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
                             self.record_source_tool_assistant_uuid(id, row_uuid.clone())
                                 .await;
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &row_uuid,
+                                    Ok(row_uuid.clone()),
+                                )
+                                .await;
+                            }
                         }
                     }
                     Some(crate::streaming_loop::PersistedAssistantRowLink {
@@ -5365,12 +5642,27 @@ impl ConversationOrchestrator {
         };
         if let Some(fence) = publication_guard {
             if !fence.commit_if_current(Box::pin(persist)).await {
+                self.fail_local_app_publication_origins(
+                    &row.content,
+                    &row.row_id.as_uuid().to_string(),
+                    "assistant publication fence closed",
+                )
+                .await;
                 return None;
             }
         } else {
             persist.await;
         }
-        result_rx.await.ok().flatten()
+        let result = result_rx.await.ok().flatten();
+        if result.is_none() {
+            self.fail_local_app_publication_origins(
+                &row.content,
+                &row.row_id.as_uuid().to_string(),
+                "assistant transcript write failed",
+            )
+            .await;
+        }
+        result
     }
 
     /// Physically remove transcript rows named by Native tombstones. Children
@@ -5379,9 +5671,9 @@ impl ConversationOrchestrator {
     pub(crate) async fn remove_assistant_stream_rows(
         &self,
         rows: &[crate::streaming_loop::PersistedAssistantRowLink],
-    ) {
+    ) -> Result<(), OrchestratorError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
-            return;
+            return Ok(());
         };
         let mut removed = std::collections::HashMap::new();
         for row in rows {
@@ -5390,6 +5682,15 @@ impl ConversationOrchestrator {
                     removed.insert(row.uuid.clone(), row.parent_uuid.clone());
                 }
                 Ok(false) => {}
+                Err(
+                    error @ session::jsonl::writer::WriterError::Durable(
+                        session::jsonl::TranscriptWriterError::WrittenButNotDurable(_),
+                    ),
+                ) => {
+                    return Err(OrchestratorError::TranscriptRewriteUncertain(
+                        error.to_string(),
+                    ));
+                }
                 Err(error) => tracing::warn!(
                     uuid = %row.uuid,
                     %error,
@@ -5398,7 +5699,7 @@ impl ConversationOrchestrator {
             }
         }
         if removed.is_empty() {
-            return;
+            return Ok(());
         }
 
         // The live append cursor follows the surviving transcript tail, but
@@ -5416,6 +5717,7 @@ impl ConversationOrchestrator {
             tail.clone_from(parent);
         }
         *cursor = tail;
+        Ok(())
     }
 
     /// Persist a NON-streaming (batched) assistant turn as ONE merged JSONL line
@@ -5453,6 +5755,14 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|fence| !fence.is_current())
         {
+            if let ConversationMessage::Assistant { id, content, .. } = &rewritten {
+                self.fail_local_app_publication_origins(
+                    content,
+                    &id.as_uuid().to_string(),
+                    "assistant publication fence closed",
+                )
+                .await;
+            }
             return rewritten;
         }
         let msg = &rewritten;
@@ -5467,6 +5777,14 @@ impl ConversationOrchestrator {
             return rewritten.clone();
         };
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            if let ConversationMessage::Assistant { content, .. } = msg {
+                self.fail_local_app_publication_origins(
+                    content,
+                    &turn_id.as_uuid().to_string(),
+                    "assistant transcript is unavailable",
+                )
+                .await;
+            }
             let note = self.note_assistant_commit(msg);
             if let Some(fence) = publication_fence {
                 fence.commit_if_current(Box::pin(note)).await;
@@ -5538,14 +5856,34 @@ impl ConversationOrchestrator {
                     // `tool_use` block in it shares that line's uuid as its
                     // `sourceToolAssistantUUID`.
                     for block in &assistant_content_for_write {
-                        if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
                             self.record_source_tool_assistant_uuid(id, line_uuid_for_write.clone())
                                 .await;
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &assistant_id.as_uuid().to_string(),
+                                    Ok(line_uuid_for_write.clone()),
+                                )
+                                .await;
+                            }
                         }
                     }
                     true
                 }
                 Err(error) => {
+                    for block in &assistant_content_for_write {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, name, .. } = block {
+                            if name == "LocalApp" {
+                                self.record_durable_tool_origin(
+                                    id,
+                                    &assistant_id.as_uuid().to_string(),
+                                    Err("assistant transcript write failed".into()),
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     self.record_transcript_append_failure(
                         &session_id_for_write,
                         "assistant_merged",
@@ -5563,6 +5901,14 @@ impl ConversationOrchestrator {
             persist.await;
             true
         };
+        if !admitted {
+            self.fail_local_app_publication_origins(
+                &assistant_content,
+                &assistant_id.as_uuid().to_string(),
+                "assistant publication fence closed",
+            )
+            .await;
+        }
         if admitted && result_rx.await.unwrap_or(false) {
             let output = self.output.clone();
             let published_uuids = [Some(line_uuid)];

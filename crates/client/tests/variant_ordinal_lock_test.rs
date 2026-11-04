@@ -1,4 +1,4 @@
-//! Positional ABI baseline for Client protocol 31.0.0.
+//! Positional ABI baseline for Client protocol 32.0.0.
 
 const COMMANDS_SRC: &str = include_str!("../src/protocol/commands.rs");
 const COMMAND_ORDINALS: &[&str] = &[
@@ -85,6 +85,10 @@ const COMMAND_ORDINALS: &[&str] = &[
     "MediaControlResponse",
     "UpdateMediaSessionModes",
     "RefreshProviderCatalog",
+    "GetContextManifest",
+    "PrepareSessionHandoff",
+    "CancelSessionHandoff",
+    "RetrySessionHandoff",
     "SideChatRestore",
 ];
 
@@ -203,6 +207,9 @@ const EVENT_ORDINALS: &[&str] = &[
     "MediaDeviceRequest",
     "MediaServiceResponse",
     "MediaControlRequest",
+    "ContextManifest",
+    "SessionHandoffPrepared",
+    "SessionHandoffFailed",
     "SideChatCheckpoint",
 ];
 

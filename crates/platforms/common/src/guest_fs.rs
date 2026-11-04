@@ -88,8 +88,27 @@ impl GuestPathFileSystem {
 
 #[async_trait]
 impl FileSystem for GuestPathFileSystem {
+    async fn ensure_directory_rooted_identity_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner
+            .ensure_directory_rooted_identity_pinned(&root, relative, expected)
+            .await
+    }
     fn host_filesystem(&self) -> Option<Arc<dyn FileSystem>> {
         Some(self.inner.clone())
+    }
+
+    async fn root_identity_no_follow(
+        &self,
+        root: &Path,
+    ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
+        let root = self.resolve_root(root, false)?;
+        self.inner.root_identity_no_follow(&root).await
     }
 
     async fn read_file(
@@ -174,6 +193,44 @@ impl FileSystem for GuestPathFileSystem {
         self.inner.read_file_rooted_no_follow(&root, relative).await
     }
 
+    async fn read_file_rooted_no_follow_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<FileContent, FsError> {
+        let root = self.resolve_root(root, false)?;
+        self.inner
+            .read_file_rooted_no_follow_window_pinned(&root, relative, offset, limit, expected)
+            .await
+    }
+
+    async fn read_file_rooted_single_link_checked(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<lingxi_core::host::rooted_fs::CheckedFileSnapshot, FsError> {
+        let root = self.resolve_root(root, false)?;
+        self.inner
+            .read_file_rooted_single_link_checked(&root, relative)
+            .await
+    }
+
+    async fn append_or_sync_file_rooted_durable_checked(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: &lingxi_core::host::rooted_fs::CheckedFileSnapshot,
+        append: Option<&str>,
+    ) -> Result<(), FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner
+            .append_or_sync_file_rooted_durable_checked(&root, relative, expected, append)
+            .await
+    }
+
     async fn write_file_rooted_atomic(
         &self,
         root: &Path,
@@ -183,6 +240,31 @@ impl FileSystem for GuestPathFileSystem {
         let root = self.resolve_root(root, true)?;
         self.inner
             .write_file_rooted_atomic(&root, relative, content)
+            .await
+    }
+
+    async fn write_file_rooted_atomic_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<(), FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner
+            .write_file_rooted_atomic_pinned(&root, relative, content, expected)
+            .await
+    }
+
+    async fn flock_exclusive_rooted_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<Box<dyn FlockGuard>, FsError> {
+        let root = self.resolve_root(root, true)?;
+        self.inner
+            .flock_exclusive_rooted_pinned(&root, relative, expected)
             .await
     }
 
@@ -369,6 +451,30 @@ mod tests {
 
     #[async_trait]
     impl FileSystem for RecordingFs {
+        async fn read_file_rooted_single_link_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+        ) -> Result<lingxi_core::host::rooted_fs::CheckedFileSnapshot, FsError> {
+            self.record("checked-read", &root.join(relative).to_string_lossy());
+            Ok(
+                lingxi_core::host::rooted_fs::CheckedFileSnapshot::virtual_snapshot(Some(
+                    "owner\n".into(),
+                )),
+            )
+        }
+        async fn append_or_sync_file_rooted_durable_checked(
+            &self,
+            root: &Path,
+            relative: &Path,
+            expected: &lingxi_core::host::rooted_fs::CheckedFileSnapshot,
+            append: Option<&str>,
+        ) -> Result<(), FsError> {
+            assert_eq!(expected.content.as_deref(), Some("owner\n"));
+            assert_eq!(append, Some("next\n"));
+            self.record("checked-append", &root.join(relative).to_string_lossy());
+            Ok(())
+        }
         async fn read_file(
             &self,
             path: &str,
@@ -451,6 +557,48 @@ mod tests {
         let inner = Arc::new(RecordingFs::default());
         let fs = GuestPathFileSystem::new(inner.clone(), Arc::new(MountsOnlyRuntime { mounts }));
         (inner, fs)
+    }
+
+    #[tokio::test]
+    async fn checked_owner_ledger_preserves_identity_through_guest_mapping() {
+        let (inner, fs) = fs_with(vec![workspace_mount()]);
+        let root = Path::new("/home/lingxi/lingxi/abc");
+        let relative = Path::new(".lingxi/owners.jsonl");
+        let snapshot = fs
+            .read_file_rooted_single_link_checked(root, relative)
+            .await
+            .unwrap();
+        assert_eq!(
+            inner.last(),
+            (
+                "checked-read".into(),
+                "/host/workspace/abc/.lingxi/owners.jsonl".into()
+            )
+        );
+        fs.append_or_sync_file_rooted_durable_checked(root, relative, &snapshot, Some("next\n"))
+            .await
+            .unwrap();
+        assert_eq!(
+            inner.last(),
+            (
+                "checked-append".into(),
+                "/host/workspace/abc/.lingxi/owners.jsonl".into()
+            )
+        );
+
+        let mut readonly = workspace_mount();
+        readonly.read_only = true;
+        let (_, fs) = fs_with(vec![readonly]);
+        assert!(matches!(
+            fs.append_or_sync_file_rooted_durable_checked(
+                root,
+                relative,
+                &snapshot,
+                Some("next\n")
+            )
+            .await,
+            Err(FsError::PermissionDenied(_))
+        ));
     }
 
     #[tokio::test]

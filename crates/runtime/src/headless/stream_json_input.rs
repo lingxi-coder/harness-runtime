@@ -1511,6 +1511,17 @@ mod tests {
     }
 
     #[test]
+    fn compact_boundary_replay_preserves_native_exact_authority() {
+        let action = process_line(
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"11111111-1111-1111-1111-111111111111","compact_metadata":{"native_exact_preserved":true}}"#,
+            &mut fresh_seen(),
+        ).unwrap();
+        assert!(matches!(action, FrameAction::History(HistoryInput {
+            message: ConversationMessage::System { compact_metadata: Some(metadata), .. }, ..
+        }) if metadata.native_exact_preserved == Some(true)));
+    }
+
+    #[test]
     fn compact_boundary_history_preserves_camelized_active_goal() {
         let action = process_line(
             r#"{"type":"system","subtype":"compact_boundary","uuid":"11111111-1111-1111-1111-111111111111","compact_metadata":{"trigger":"manual","active_goal":{"condition":"finish","set_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"last_reason":"working"}}}"#,

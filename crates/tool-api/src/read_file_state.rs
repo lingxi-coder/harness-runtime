@@ -43,7 +43,7 @@
 //! omitted so the seam does not have to re-derive the semantics — a named
 //! pending consumer, not dead code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -123,7 +123,7 @@ pub struct ReadFileEntry {
 }
 
 /// One LRU slot: the entry plus its recency stamp and cached byte size.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Node {
     entry: ReadFileEntry,
     /// Original and translated pre-canonicalization spellings for each model
@@ -150,7 +150,7 @@ struct Node {
 /// least-recently-used entry (lowest `last_used`) is dropped — never the key
 /// just inserted (it always carries the highest stamp), so a lone over-budget
 /// entry is retained, matching lru-cache.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadFileStateLru {
     map: HashMap<PathBuf, Node>,
     /// Monotonic clock; every `get`/`set` bumps it to stamp recency.
@@ -162,6 +162,29 @@ pub struct ReadFileStateLru {
 }
 
 impl ReadFileStateLru {
+    /// Apply a compact prepared on an isolated cache, without overwriting an
+    /// entry read or edited concurrently after the original snapshot.
+    pub fn apply_compaction_transition(&mut self, before: &Self, after: &Self) {
+        if self == before {
+            *self = after.clone();
+            return;
+        }
+        let keys: HashSet<_> = before.map.keys().chain(after.map.keys()).cloned().collect();
+        for key in keys {
+            if self.map.get(&key) != before.map.get(&key) {
+                continue;
+            }
+            if let Some(node) = after.map.get(&key) {
+                self.map.insert(key, node.clone());
+            } else {
+                self.map.remove(&key);
+            }
+        }
+        self.total_bytes = self.map.values().map(|node| node.size).sum();
+        self.clock = self.clock.max(after.clock);
+        self.evict();
+    }
+
     /// Construct with explicit limits.
     #[must_use]
     fn with_limits(max_entries: usize, max_bytes: u64) -> Self {
@@ -606,6 +629,26 @@ mod tests {
             seeded_from_context: false,
             is_partial_view: false,
         }
+    }
+
+    #[test]
+    fn isolated_compaction_commit_preserves_concurrent_file_updates() {
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        let c = PathBuf::from("/c");
+        let mut before = ReadFileStateLru::with_limits(100, u64::MAX);
+        before.set(a.clone(), entry("a before"));
+        before.set(b.clone(), entry("b before"));
+        let mut after = before.clone();
+        after.remove(&a);
+        after.set(b.clone(), entry("b compact"));
+        let mut current = before.clone();
+        current.set(b.clone(), entry("b concurrent"));
+        current.set(c.clone(), entry("c concurrent"));
+        current.apply_compaction_transition(&before, &after);
+        assert_eq!(current.peek(&a), None);
+        assert_eq!(current.peek(&b), Some(entry("b concurrent")));
+        assert_eq!(current.peek(&c), Some(entry("c concurrent")));
     }
 
     #[test]

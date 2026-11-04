@@ -21,10 +21,12 @@ use lingxi_core::{
 };
 use orchestrator::{ConversationOrchestrator, SideChatParentSnapshot};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
+
+pub(crate) const TURN_CANCELLED_BEFORE_ADMISSION: &str = "turn_cancelled_before_admission";
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -255,6 +257,7 @@ struct SideState {
     closing: bool,
     submissions: HashMap<String, ()>,
     running: Option<RunningTurn>,
+    cancelled_turn_ids: HashSet<u64>,
 }
 struct Side {
     session: SideChatSession,
@@ -458,6 +461,7 @@ impl SideChatManager {
                 closing: false,
                 submissions: HashMap::new(),
                 running: None,
+                cancelled_turn_ids: HashSet::new(),
             }),
         });
         self.state.lock().await.sides.insert(side_id.clone(), side);
@@ -626,6 +630,9 @@ impl SideChatManager {
             return Ok(());
         }
         if let ClientCommand::Cancel { turn_id } = command {
+            if let Some(turn_id) = turn_id {
+                state.cancelled_turn_ids.insert(turn_id);
+            }
             let wait = state
                 .running
                 .as_ref()
@@ -654,6 +661,19 @@ impl SideChatManager {
                 })
                 .await;
             return Ok(());
+        }
+        if let ClientCommand::SendPrompt {
+            turn_id: Some(turn_id),
+            ..
+        }
+        | ClientCommand::RunSlashCommand {
+            turn_id: Some(turn_id),
+            ..
+        } = &command
+        {
+            if state.cancelled_turn_ids.contains(turn_id) {
+                return Err(TURN_CANCELLED_BEFORE_ADMISSION.into());
+            }
         }
         let raw = match &command {
             ClientCommand::RunSlashCommand { raw, .. } => Some(raw.clone().into_projection()),
@@ -1212,6 +1232,7 @@ async fn dispatch(
                     command,
                     body,
                     hook_messages,
+                    skill,
                 } => {
                     if cancel.is_cancelled() {
                         emit_cancelled_slash_result(side, turn_id).await;
@@ -1242,7 +1263,7 @@ async fn dispatch(
                     }
                     side.replay.emit(ClientEvent::TurnStarted { turn_id }).await;
                     let mut inputs =
-                        orchestrator::skill_prompt_inputs(command, body, hook_messages);
+                        orchestrator::skill_prompt_inputs(command, body, hook_messages, skill);
                     if let Some(input) = inputs.iter_mut().find(|input| !input.is_meta) {
                         input.images = image_sources;
                     }

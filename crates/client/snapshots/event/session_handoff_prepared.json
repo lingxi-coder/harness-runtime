@@ -1,0 +1,9 @@
+{
+  "type": "session_handoff_prepared",
+  "request_id": "handoff-1",
+  "source_session_id": "session-1",
+  "source_mode": "code",
+  "target_mode": "chat",
+  "cutoff": "sha256:example:42",
+  "summary": "Summary"
+}

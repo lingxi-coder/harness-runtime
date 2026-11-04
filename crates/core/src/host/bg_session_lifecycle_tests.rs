@@ -1,8 +1,9 @@
 use super::*;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 
-async fn assert_pending<F: Future>(future: std::pin::Pin<&mut F>) {
-    let mut future = future;
+async fn assert_pending<F: Future>(mut future: Pin<&mut F>) {
     std::future::poll_fn(|cx| {
         assert!(future.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -11,37 +12,38 @@ async fn assert_pending<F: Future>(future: std::pin::Pin<&mut F>) {
 }
 
 #[tokio::test]
-async fn closed_admission_rejects_new_claims_while_an_earlier_claim_drains() {
+async fn closed_admission_is_permanent_while_an_earlier_claim_drains() {
     let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let retained = lifecycle.clone();
     let claim = lifecycle.claim().unwrap();
     let mut drain = Box::pin(lifecycle.close_and_drain());
     assert_pending(drain.as_mut()).await;
-    assert!(lifecycle.claim().is_err());
-    assert!(lifecycle.ensure_open().is_err());
+    assert!(retained.claim().is_err());
+    assert!(retained.ensure_open().is_err());
     drop(claim);
-    drain.await.unwrap();
-    lifecycle.close_and_drain().await.unwrap();
-    assert!(lifecycle.claim().is_err());
+    assert_eq!(drain.await, BackgroundLaunchDrainReport::default());
+    assert_eq!(
+        lifecycle.close_and_drain().await,
+        BackgroundLaunchDrainReport::default()
+    );
+    assert!(retained.claim().is_err());
 }
 
 #[tokio::test]
-async fn cancelled_caller_and_drain_waiter_cannot_release_a_publication_claim() {
+async fn cancelled_caller_and_waiter_cannot_hide_a_late_publication_error() {
     let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
     let claim = lifecycle.claim().unwrap();
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let caller = tokio::spawn({
         let started = started.clone();
         let release = release.clone();
-        let published = published.clone();
         async move {
             claim
                 .run_owned(async move {
                     started.notify_one();
                     release.notified().await;
-                    published.store(true, std::sync::atomic::Ordering::Release);
-                    Ok(())
+                    Err::<(), _>(BgForkError::Dispatch("handoff rollback failed".into()))
                 })
                 .await
         }
@@ -54,14 +56,18 @@ async fn cancelled_caller_and_drain_waiter_cannot_release_a_publication_claim() 
     drop(abandoned);
     let mut retry = Box::pin(lifecycle.close_and_drain());
     assert_pending(retry.as_mut()).await;
-    assert!(!published.load(std::sync::atomic::Ordering::Acquire));
     release.notify_one();
-    retry.await.unwrap();
-    assert!(published.load(std::sync::atomic::Ordering::Acquire));
+    let report = retry.await;
+    assert!(report.unconfirmed_recoveries.is_empty());
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|error| error.contains("handoff rollback failed")));
+    assert_eq!(lifecycle.close_and_drain().await, report);
 }
 
 #[tokio::test]
-async fn panicked_publication_is_retained_as_a_shutdown_error() {
+async fn completed_panic_is_a_diagnostic_not_an_unresolved_producer() {
     let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
     let error = lifecycle
         .claim()
@@ -74,12 +80,357 @@ async fn panicked_publication_is_retained_as_a_shutdown_error() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("owner panicked"));
-    assert!(lifecycle.close_and_drain().await.is_err());
-    assert!(lifecycle.close_and_drain().await.is_err());
+    let report = lifecycle.close_and_drain().await;
+    assert!(report.unconfirmed_recoveries.is_empty());
+    assert_eq!(report.diagnostics.len(), 1);
+    assert!(report.diagnostics[0].contains("owner panicked"));
+    assert_eq!(lifecycle.close_and_drain().await, report);
+}
+
+struct RetryRecovery {
+    attempts: AtomicUsize,
+    may_recover: AtomicBool,
+}
+
+#[async_trait]
+impl BackgroundLaunchRecovery for RetryRecovery {
+    fn description(&self) -> String {
+        "shell handoff job-1".into()
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self.may_recover.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err("durable decision unavailable".into())
+        }
+    }
 }
 
 #[tokio::test]
-async fn unresolved_handoff_is_retained_even_when_the_caller_saw_the_error() {
+async fn unconfirmed_recovery_retains_owner_until_real_recovery_succeeds() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(RetryRecovery {
+        attempts: AtomicUsize::new(0),
+        may_recover: AtomicBool::new(false),
+    });
+    let weak = Arc::downgrade(&recovery);
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(recovery.clone());
+    let error = claim
+        .run_owned(async move {
+            drop(ticket);
+            Err::<(), _>(BgForkError::Dispatch("shell handoff failed".into()))
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("shell handoff failed"));
+    let first = lifecycle.close_and_drain().await;
+    assert_eq!(recovery.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(first.unconfirmed_recoveries.len(), 1);
+    assert!(first.unconfirmed_recoveries[0].contains("durable decision unavailable"));
+    assert!(first
+        .diagnostics
+        .iter()
+        .any(|error| error.contains("shell handoff failed")));
+    drop(recovery);
+    let retained = weak
+        .upgrade()
+        .expect("unresolved recovery must retain owner");
+    retained.may_recover.store(true, Ordering::SeqCst);
+    let second = lifecycle.close_and_drain().await;
+    assert!(second.unconfirmed_recoveries.is_empty());
+    assert_eq!(retained.attempts.load(Ordering::SeqCst), 2);
+    assert!(second
+        .diagnostics
+        .iter()
+        .any(|error| error.contains("durable decision unavailable")));
+    drop(retained);
+    assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn panic_during_handoff_keeps_recovery_until_ownership_is_confirmed() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(RetryRecovery {
+        attempts: AtomicUsize::new(0),
+        may_recover: AtomicBool::new(false),
+    });
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(recovery.clone());
+    assert!(claim
+        .run_owned(async move {
+            let _ticket = ticket;
+            panic!("injected handoff panic");
+            #[allow(unreachable_code)]
+            Ok::<_, BgForkError>(())
+        })
+        .await
+        .is_err());
+    let report = lifecycle.close_and_drain().await;
+    assert_eq!(report.unconfirmed_recoveries.len(), 1);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("owner panicked")));
+    recovery.may_recover.store(true, Ordering::SeqCst);
+    let report = lifecycle.close_and_drain().await;
+    assert!(report.unconfirmed_recoveries.is_empty());
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("owner panicked")));
+}
+
+#[tokio::test]
+async fn stale_ticket_cannot_clear_an_unconfirmed_handoff() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(Arc::new(RetryRecovery {
+        attempts: AtomicUsize::new(0),
+        may_recover: AtomicBool::new(false),
+    }));
+    drop(claim);
+    ticket.confirm_resolved();
+    assert_eq!(
+        lifecycle
+            .close_and_drain()
+            .await
+            .unconfirmed_recoveries
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn confirmed_handoff_does_not_start_recovery() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(RetryRecovery {
+        attempts: AtomicUsize::new(0),
+        may_recover: AtomicBool::new(false),
+    });
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(recovery.clone());
+    claim
+        .run_owned(async move {
+            ticket.confirm_resolved();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(lifecycle
+        .close_and_drain()
+        .await
+        .unconfirmed_recoveries
+        .is_empty());
+    assert_eq!(recovery.attempts.load(Ordering::SeqCst), 0);
+}
+
+struct ReentrantDropRecovery {
+    lifecycle: std::sync::Weak<BackgroundLaunchLifecycle>,
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[async_trait]
+impl BackgroundLaunchRecovery for ReentrantDropRecovery {
+    fn description(&self) -> String {
+        "reentrant drop".into()
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl Drop for ReentrantDropRecovery {
+    fn drop(&mut self) {
+        self.lifecycle.upgrade().unwrap().close();
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+    }
+}
+
+fn drain_on_thread(
+    lifecycle: Arc<BackgroundLaunchLifecycle>,
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<BackgroundLaunchDrainReport>,
+) {
+    let (sent, received) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        sent.send(runtime.block_on(lifecycle.close_and_drain()))
+            .unwrap();
+    });
+    (worker, received)
+}
+
+#[test]
+fn confirmed_ticket_drops_recovery_outside_lock_and_drain_waits_for_drop() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(Arc::new(ReentrantDropRecovery {
+        lifecycle: Arc::downgrade(&lifecycle),
+        entered: entered_tx,
+        release: std::sync::Mutex::new(release_rx),
+    }));
+    let confirm = std::thread::spawn(move || ticket.confirm_resolved());
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    drop(claim);
+    let (drainer, report) = drain_on_thread(lifecycle);
+    assert!(matches!(
+        report.recv_timeout(std::time::Duration::from_millis(50)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    release_tx.send(()).unwrap();
+    confirm.join().unwrap();
+    assert_eq!(
+        report
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        BackgroundLaunchDrainReport::default()
+    );
+    drainer.join().unwrap();
+}
+
+#[test]
+fn recovered_ticket_drops_recovery_outside_lock_and_drain_waits_for_drop() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let claim = lifecycle.claim().unwrap();
+    drop(claim.register_recovery(Arc::new(ReentrantDropRecovery {
+        lifecycle: Arc::downgrade(&lifecycle),
+        entered: entered_tx,
+        release: std::sync::Mutex::new(release_rx),
+    })));
+    drop(claim);
+    let (drainer, report) = drain_on_thread(lifecycle);
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        report.recv_timeout(std::time::Duration::from_millis(50)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        report
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        BackgroundLaunchDrainReport::default()
+    );
+    drainer.join().unwrap();
+}
+
+struct BlockingRecovery {
+    attempts: AtomicUsize,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl BackgroundLaunchRecovery for BlockingRecovery {
+    fn description(&self) -> String {
+        "blocked handoff".into()
+    }
+
+    async fn recover(&self) -> Result<(), String> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.started.notify_one();
+        self.release.notified().await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        if attempt == 0 {
+            Err("still pending".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelled_recovery_waiter_does_not_abort_or_duplicate_the_owned_attempt() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(BlockingRecovery {
+        attempts: AtomicUsize::new(0),
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(recovery.clone());
+    drop(ticket);
+    drop(claim);
+    let first = tokio::spawn({
+        let lifecycle = lifecycle.clone();
+        async move { lifecycle.close_and_drain().await }
+    });
+    recovery.started.notified().await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let second = tokio::spawn({
+        let lifecycle = lifecycle.clone();
+        async move { lifecycle.close_and_drain().await }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(recovery.attempts.load(Ordering::SeqCst), 1);
+    recovery.release.notify_one();
+    recovery.started.notified().await;
+    assert_eq!(recovery.attempts.load(Ordering::SeqCst), 2);
+    recovery.release.notify_one();
+    let report = second.await.unwrap();
+    assert!(report.unconfirmed_recoveries.is_empty());
+    assert_eq!(recovery.max_active.load(Ordering::SeqCst), 1);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|error| error.contains("still pending")));
+}
+
+#[tokio::test]
+async fn concurrent_close_and_claim_have_one_admission_order() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let ready = Arc::new(std::sync::Barrier::new(2));
+    let claimant = std::thread::spawn({
+        let lifecycle = lifecycle.clone();
+        let ready = ready.clone();
+        move || {
+            ready.wait();
+            lifecycle.claim()
+        }
+    });
+    ready.wait();
+    lifecycle.close();
+    let admitted = claimant.join().unwrap();
+    assert!(lifecycle.claim().is_err());
+    if let Ok(claim) = admitted {
+        let mut drain = Box::pin(lifecycle.close_and_drain());
+        assert_pending(drain.as_mut()).await;
+        drop(claim);
+        assert_eq!(drain.await, BackgroundLaunchDrainReport::default());
+    } else {
+        assert_eq!(
+            lifecycle.close_and_drain().await,
+            BackgroundLaunchDrainReport::default()
+        );
+    }
+}
+
+#[tokio::test]
+async fn uncertain_handoff_without_recovery_keeps_shutdown_incomplete() {
     let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
     let error = lifecycle
         .claim()
@@ -92,29 +443,51 @@ async fn unresolved_handoff_is_retained_even_when_the_caller_saw_the_error() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("export fence failed"));
+    for _ in 0..2 {
+        let report = lifecycle.close_and_drain().await;
+        assert!(report
+            .unconfirmed_recoveries
+            .iter()
+            .any(|error| error.contains("export fence failed")));
+    }
+}
+
+#[tokio::test]
+async fn uncertain_handoff_with_recovery_can_settle_on_a_later_drain() {
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(RetryRecovery {
+        attempts: AtomicUsize::new(0),
+        may_recover: AtomicBool::new(false),
+    });
+    let claim = lifecycle.claim().unwrap();
+    let ticket = claim.register_recovery(recovery.clone());
+    assert!(claim
+        .run_owned(async move {
+            drop(ticket);
+            Err::<(), _>(BgForkError::OwnershipUncertain(
+                "export fence failed".into(),
+            ))
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        lifecycle
+            .close_and_drain()
+            .await
+            .unconfirmed_recoveries
+            .len(),
+        1
+    );
+    recovery.may_recover.store(true, Ordering::SeqCst);
     assert!(lifecycle
         .close_and_drain()
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("export fence failed"));
-    assert!(lifecycle.close_and_drain().await.is_err());
+        .unconfirmed_recoveries
+        .is_empty());
 }
 
 #[tokio::test]
-async fn ordinary_launch_error_does_not_prevent_shutdown() {
-    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
-    assert!(lifecycle
-        .claim()
-        .unwrap()
-        .run_owned(async { Err::<(), _>(BgForkError::Snapshot("no transcript written".into())) })
-        .await
-        .is_err());
-    lifecycle.close_and_drain().await.unwrap();
-}
-
-#[tokio::test]
-async fn rejected_duplicate_does_not_poison_an_active_owner_or_shutdown() {
+async fn rejected_duplicate_does_not_block_an_active_owner_or_shutdown() {
     let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -147,34 +520,35 @@ async fn rejected_duplicate_does_not_poison_an_active_owner_or_shutdown() {
     assert_pending(drain.as_mut()).await;
     release.notify_one();
     first.await.unwrap().unwrap();
-    drain.await.unwrap();
+    let report = drain.await;
+    assert!(report.unconfirmed_recoveries.is_empty());
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|s| s.contains("already pending")));
 }
 
 #[test]
 fn runtime_shutdown_drops_publication_before_releasing_its_claim() {
     struct PendingPublication {
         started: Arc<tokio::sync::Notify>,
-        dropped: Arc<std::sync::atomic::AtomicBool>,
+        dropped: Arc<AtomicBool>,
     }
     impl Future for PendingPublication {
         type Output = Result<(), BgForkError>;
-        fn poll(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> Poll<Self::Output> {
+        fn poll(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<Self::Output> {
             self.started.notify_one();
             Poll::Pending
         }
     }
     impl Drop for PendingPublication {
         fn drop(&mut self) {
-            self.dropped
-                .store(true, std::sync::atomic::Ordering::Release);
+            self.dropped.store(true, Ordering::Release);
         }
     }
     let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
     let started = Arc::new(tokio::sync::Notify::new());
-    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let claim = lifecycle.claim().unwrap();
@@ -188,42 +562,79 @@ fn runtime_shutdown_drops_publication_before_releasing_its_claim() {
     runtime.shutdown_background();
     let waiter = tokio::runtime::Runtime::new().unwrap();
     waiter.block_on(async {
-        let result = tokio::time::timeout(
+        let report = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             lifecycle.close_and_drain(),
         )
         .await
         .unwrap();
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("before ownership settled"));
+        assert!(report
+            .unconfirmed_recoveries
+            .iter()
+            .any(|s| s.contains("before ownership settled")));
+        assert!(dropped.load(Ordering::Acquire));
     });
-    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
 }
 
-#[tokio::test]
-async fn concurrent_close_and_claim_have_one_admission_order() {
-    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
-    let ready = Arc::new(std::sync::Barrier::new(2));
-    let claimant = std::thread::spawn({
-        let lifecycle = lifecycle.clone();
-        let ready = ready.clone();
-        move || {
-            ready.wait();
-            lifecycle.claim()
+#[test]
+fn cancelled_recovery_runtime_releases_attempt_before_retry() {
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
         }
-    });
-    ready.wait();
-    lifecycle.close();
-    let admitted = claimant.join().unwrap();
-    assert!(lifecycle.claim().is_err());
-    if let Ok(claim) = admitted {
-        let mut drain = Box::pin(lifecycle.close_and_drain());
-        assert_pending(drain.as_mut()).await;
-        drop(claim);
-        drain.await.unwrap();
-    } else {
-        lifecycle.close_and_drain().await.unwrap();
     }
+    struct InterruptedRecovery {
+        attempts: AtomicUsize,
+        started: tokio::sync::Notify,
+        first_dropped: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl BackgroundLaunchRecovery for InterruptedRecovery {
+        fn description(&self) -> String {
+            "interrupted recovery".into()
+        }
+        async fn recover(&self) -> Result<(), String> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _dropped = DropFlag(self.first_dropped.clone());
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            assert!(self.first_dropped.load(Ordering::Acquire));
+            Ok(())
+        }
+    }
+    let lifecycle = Arc::new(BackgroundLaunchLifecycle::default());
+    let recovery = Arc::new(InterruptedRecovery {
+        attempts: AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
+        first_dropped: Arc::new(AtomicBool::new(false)),
+    });
+    let claim = lifecycle.claim().unwrap();
+    drop(claim.register_recovery(recovery.clone()));
+    drop(claim);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        drop(tokio::spawn({
+            let lifecycle = lifecycle.clone();
+            async move { lifecycle.close_and_drain().await }
+        }));
+        recovery.started.notified().await;
+    });
+    runtime.shutdown_background();
+    let waiter = tokio::runtime::Runtime::new().unwrap();
+    waiter.block_on(async {
+        let report = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            lifecycle.close_and_drain(),
+        )
+        .await
+        .unwrap();
+        assert!(report.unconfirmed_recoveries.is_empty());
+        assert_eq!(recovery.attempts.load(Ordering::SeqCst), 2);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|s| s.contains("stopped before settlement")));
+    });
 }

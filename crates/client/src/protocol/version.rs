@@ -180,5 +180,9 @@
 /// Version 30 adds attachment-scoped media/audio owners and requires an opaque
 /// operation incarnation in media references, responses, and cancellation.
 /// Native bindings and bridge peers must be regenerated together.
-/// Version 31.1 adds host-private Side Chat checkpoints and non-executing restore.
-pub const CLIENT_PROTOCOL_VERSION: &str = "31.1.0";
+/// Version 31 introduces provider-account routing.
+/// Version 32 combines fixed session modes, context manifests and handoffs with
+/// provider accounts, and removes the mutable-mode notification. Native
+/// bindings must be regenerated together with the host.
+/// Version 32.1 adds host-private Side Chat checkpoints and non-executing restore.
+pub const CLIENT_PROTOCOL_VERSION: &str = "32.1.0";

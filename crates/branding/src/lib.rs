@@ -96,10 +96,22 @@ impl BrandRuntimeProfile {
         Path::new("/home").join(self.linux_user)
     }
 
-    /// Brand-scoped workspace root within the guest home.
+    /// Brand-owned container for configuration, project and scheduled data.
     #[must_use]
-    pub fn workspace_root_guest_path(self) -> PathBuf {
-        self.guest_home().join(self.brand_id)
+    pub fn workspace_container_guest_path(self) -> PathBuf {
+        self.config_guest_path()
+    }
+
+    /// Default guest working directory for a new Global Chat conversation.
+    #[must_use]
+    pub fn chat_workspace_guest_path(self) -> PathBuf {
+        self.workspace_container_guest_path().join("chat")
+    }
+
+    /// Default guest working directory for a new Global Code conversation.
+    #[must_use]
+    pub fn code_workspace_guest_path(self) -> PathBuf {
+        self.workspace_container_guest_path().join("code")
     }
 
     /// Guest config directory within the user's home.
@@ -111,7 +123,7 @@ impl BrandRuntimeProfile {
     /// Stable guest projects directory for this brand.
     #[must_use]
     pub fn projects_guest_path(self) -> PathBuf {
-        self.workspace_root_guest_path().join("projects")
+        self.workspace_container_guest_path().join("projects")
     }
 
     /// Guest path of the mobile authoring source directory root.
@@ -437,6 +449,34 @@ pub fn render_namespace_template(template: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_defaults_are_separate_from_the_hidden_brand_container() {
+        for profile in [
+            BrandRuntimeProfile::LINGXI,
+            BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas"),
+        ] {
+            assert_eq!(
+                profile.workspace_container_guest_path(),
+                profile.config_guest_path()
+            );
+            assert_eq!(
+                profile.chat_workspace_guest_path(),
+                profile.config_guest_path().join("chat")
+            );
+            assert_eq!(
+                profile.code_workspace_guest_path(),
+                profile.config_guest_path().join("code")
+            );
+            assert_eq!(
+                profile.projects_guest_path(),
+                profile.config_guest_path().join("projects")
+            );
+        }
+        assert_eq!(
+            BrandRuntimeProfile::LINGXI.workspace_container_guest_path(),
+            Path::new("/home/lingxi/.lingxi")
+        );
+    }
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;

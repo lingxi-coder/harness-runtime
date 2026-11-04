@@ -351,6 +351,13 @@ pub(crate) async fn continue_media_handoff(
             "media service epoch changed before Agent realtime started".into(),
         ));
     }
+    // The host resolves only the audio profile/account binding. Preserve the
+    // captured session profile, mode, epoch, history and tools from this
+    // runtime; the Agent revalidates both profiles and the selected account.
+    let mut prepared = prepared;
+    prepared.audio_profile_name = io.audio_profile_name;
+    prepared.profile_name = Some(io.provider_profile);
+    prepared.account_scope = Some(io.provider_account_scope);
     let result = orchestrator
         .run_realtime_agent(
             prepared,

@@ -3233,7 +3233,7 @@ async fn preappended_stream_result_keeps_raw_query_history_and_dispatches_append
 
     let parent = Uuid::new_v4().to_string();
     let timestamp = "2026-10-04T00:00:00.123Z";
-    orch.persist_preappended_stream_row(&stored, Some(parent.clone()), timestamp, None)
+    orch.persist_preappended_stream_row(&stored, Some(parent.clone()), timestamp, None, None)
         .await;
 
     assert_eq!(orch.session.lock().await.history, vec![raw.clone()]);

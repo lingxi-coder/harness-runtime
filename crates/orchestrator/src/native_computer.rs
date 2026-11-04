@@ -6,6 +6,7 @@ use hooks::attachment::HookPublicationGuard;
 use lingxi_core::host::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,
     ToolExecutionIdentity, ToolExecutionOutcome, ToolExecutionRecord, ToolExecutionStage,
+    ToolJournalRecovery,
 };
 use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId, ToolUseId,
@@ -49,6 +50,8 @@ struct StoredReceipt {
     utf16_overrides: session::jsonl::exact_json::Utf16Overrides,
     call: NativeComputerCall,
     frame: ComputerFrame,
+    #[serde(default)]
+    context_epoch: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -58,6 +61,8 @@ struct StoredExecutionBinding {
     frame: ComputerFrame,
     binding: NativeContinuationBinding,
     provider_response_id: String,
+    #[serde(default)]
+    context_epoch: u64,
 }
 
 #[derive(Serialize)]
@@ -70,6 +75,7 @@ struct NativeBindingPayload<'a> {
     frame: &'a ComputerFrame,
     binding: &'a NativeContinuationBinding,
     provider_response_id: &'a str,
+    context_epoch: u64,
 }
 
 #[derive(Serialize)]
@@ -77,6 +83,7 @@ struct NativeContinuationPayload<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     continuation: &'a wire::ContinuationRef,
+    context_epoch: u64,
 }
 
 #[derive(Serialize)]
@@ -96,6 +103,7 @@ struct NativeReceiptPayload<'a> {
     provider_response_id: &'a str,
     receipt_id: &'a str,
     block: &'a wire::ContentBlock,
+    context_epoch: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -144,6 +152,7 @@ pub(crate) struct Work {
     pub(crate) frame: ComputerFrame,
     pub(crate) tool: Arc<dyn Tool>,
     pub(crate) binding: NativeContinuationBinding,
+    pub(crate) context_epoch: u64,
 }
 
 #[derive(Default)]
@@ -152,6 +161,8 @@ struct RoundState {
     next_native: bool,
     active: Option<Binding>,
     continuation: Option<wire::ContinuationRef>,
+    continuation_epoch: u64,
+    ordinary_history_fallback: bool,
     continuation_binding: Option<NativeContinuationBinding>,
     pending_receipts: Vec<NativeReceiptRecord>,
     fallback_reason: Option<String>,
@@ -285,6 +296,15 @@ fn decode_payload_field<T: serde::de::DeserializeOwned>(
     decode_payload(&field)
 }
 
+fn continuation_context_epoch(value: &Utf16JsonProjection) -> Result<u64, OrchestratorError> {
+    if value.get_property("context_epoch").is_none() {
+        // The initial, unversioned conversation has epoch zero.
+        Ok(0)
+    } else {
+        decode_payload_field(value, "/context_epoch")
+    }
+}
+
 fn sdk_payload_from_core(
     value: &Utf16JsonProjection,
 ) -> Result<wire::JsonPayload, OrchestratorError> {
@@ -401,8 +421,72 @@ pub(crate) async fn recover_before_request(
 pub(crate) async fn preserve_pending_compaction_tail(
     orch: &ConversationOrchestrator,
     preserved: &[ConversationMessage],
-) -> Result<Vec<ConversationMessage>, OrchestratorError> {
+) -> Result<(Vec<ConversationMessage>, bool), OrchestratorError> {
     recovery::preserve_pending_compaction_tail(orch, preserved).await
+}
+
+/// Fsync a compact prelude without exposing it as a main-thread tip before its
+/// exact boundary is committed. Its parent can point to that future boundary.
+pub(crate) async fn stage_exact_compaction_row(
+    orch: &ConversationOrchestrator,
+    original: &ConversationMessage,
+    accepted: &ConversationMessage,
+    boundary: MessageId,
+    parent: MessageId,
+    summary: bool,
+) -> Result<(), OrchestratorError> {
+    if original.id() != accepted.id() {
+        return Err(internal("compaction hook changed staged row identity"));
+    }
+    let writer = orch
+        .tool_execution_journal
+        .as_ref()
+        .and(orch.transcript.jsonl_writer.as_ref())
+        .ok_or_else(|| internal("native compaction staging requires a durable transcript"))?;
+    let mut row = prepare_stored_row(orch, accepted).await?;
+    row.parent_uuid = Some(parent.as_uuid().to_string());
+    row.is_sidechain = true;
+    row.extra
+        .set_field(
+            "nativeCompactStage",
+            source_payload(&boundary.as_uuid().to_string())?,
+        )
+        .map_err(internal)?;
+    if summary {
+        row.extra
+            .set_field("isVisibleInTranscriptOnly", source_payload(&true)?)
+            .map_err(internal)?;
+        row.extra
+            .set_field("isCompactSummary", source_payload(&true)?)
+            .map_err(internal)?;
+        if original == accepted && original.is_compact_summary() {
+            if let ConversationMessage::User { content, .. } = original {
+                let units = match content.as_slice() {
+                    [ContentBlock::Text {
+                        text,
+                        citations: None,
+                    }] => Some(text.encode_utf16().collect()),
+                    [ContentBlock::TextJsUtf16 {
+                        utf16_code_units,
+                        citations: None,
+                        ..
+                    }] => Some(utf16_code_units.clone()),
+                    _ => None,
+                };
+                if let Some(units) = units {
+                    let source =
+                        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                            .map_err(internal)?;
+                    row.message.set_field("content", source).map_err(internal)?;
+                }
+            }
+        }
+    }
+    writer
+        .append_native_message_once(&row)
+        .await
+        .map_err(internal)?;
+    Ok(())
 }
 
 /// Select from the prepared catalog without appending rows to its history snapshot.
@@ -412,6 +496,7 @@ pub(crate) async fn prepare_projection(
     profile: Option<&str>,
     tools: &[lingxi_core::host::SourceToolWireDefinition],
 ) -> Result<Option<llm_runtime::computer::ComputerRequestProjection>, OrchestratorError> {
+    let active_epoch = orch.profile_epoch().await;
     let available = tools
         .iter()
         .any(|tool| tool.name == "computer" && !tool.defer_loading);
@@ -423,7 +508,7 @@ pub(crate) async fn prepare_projection(
         None
     };
     let provider = orch.api.native_computer_provider(model, profile);
-    let retained_continuations = orch
+    let retained_markers = orch
         .session
         .lock()
         .await
@@ -436,14 +521,36 @@ pub(crate) async fn prepare_projection(
         })
         .filter_map(|block| match block {
             ContentBlock::ProviderContent { value, .. }
-                if value.string_at("/type") == Some("lingxi_computer_continuation") =>
+                if matches!(
+                    value.string_at("/type"),
+                    Some("lingxi_computer_continuation" | "lingxi_computer_binding")
+                ) =>
             {
-                value.subprojection("/continuation").ok()
+                Some(value.clone())
             }
             _ => None,
         })
         .collect::<Vec<_>>();
+    let mut retained_continuations = Vec::new();
+    let mut has_older_history = false;
+    for marker in &retained_markers {
+        has_older_history |= continuation_context_epoch(marker)? != active_epoch;
+        if marker.string_at("/type") == Some("lingxi_computer_continuation") {
+            retained_continuations.push(marker.subprojection("/continuation").map_err(internal)?);
+        }
+    }
     let mut state = orch.computer_runtime.state.lock().await;
+    if state.continuation.is_some() && state.continuation_epoch != active_epoch {
+        if !state.pending_receipts.is_empty() {
+            return Err(internal(
+                "pending computer receipt belongs to an earlier conversation profile; its original continuation is retained for recovery",
+            ));
+        }
+        state.continuation = None;
+        state.continuation_binding = None;
+        state.next_native = false;
+        state.ordinary_history_fallback = true;
+    }
     let retained_continuation = state
         .continuation
         .as_ref()
@@ -457,6 +564,9 @@ pub(crate) async fn prepare_projection(
         state.continuation = None;
         state.continuation_binding = None;
         state.next_native = false;
+    }
+    if state.continuation.is_none() && has_older_history {
+        state.ordinary_history_fallback = true;
     }
     // A submitted receipt is never recreated after an uncertain provider response.
     if let Some(journal) = &orch.tool_execution_journal {
@@ -485,6 +595,16 @@ pub(crate) async fn prepare_projection(
         state.fallback_reason = Some("selected protocol has no native desktop projection".into());
         if !state.pending_receipts.is_empty() || state.continuation.is_some() {
             return Err(internal("computer continuation cannot change provider"));
+        }
+        if state.ordinary_history_fallback {
+            return Ok(Some(llm_runtime::computer::ComputerRequestProjection {
+                native: None,
+                continuation: None,
+                binding: None,
+                submission: None,
+                ordinary_history: true,
+                context_epoch: active_epoch,
+            }));
         }
         return Ok(None);
     };
@@ -576,7 +696,11 @@ pub(crate) async fn prepare_projection(
             .into(),
         );
     }
-    if !available && state.pending_receipts.is_empty() && state.continuation.is_none() {
+    if !available
+        && state.pending_receipts.is_empty()
+        && state.continuation.is_none()
+        && !state.ordinary_history_fallback
+    {
         return Ok(None);
     }
     let submission = orch
@@ -598,6 +722,8 @@ pub(crate) async fn prepare_projection(
             .map(|r| r.binding.clone())
             .or_else(|| state.continuation_binding.clone()),
         submission,
+        ordinary_history: state.ordinary_history_fallback,
+        context_epoch: active_epoch,
     }))
 }
 
@@ -666,6 +792,7 @@ pub(crate) async fn bind_response(
         let call_ids: std::collections::HashSet<_> =
             calls.iter().map(|c| c.context.call_id.clone()).collect();
         let session_id = orch.session.lock().await.session_id;
+        let context_epoch = orch.profile_epoch().await;
         let execution_binding = llm_runtime::computer::response_execution_binding(response)
             .ok_or_else(|| internal("native response has no trusted route/account binding"))?;
         let mut pending = Vec::new();
@@ -716,6 +843,7 @@ pub(crate) async fn bind_response(
                         frame: binding.frame.clone(),
                         tool: binding.tool.clone(),
                         binding: execution_binding.clone(),
+                        context_epoch,
                     },
                 ));
             }
@@ -730,6 +858,7 @@ pub(crate) async fn bind_response(
                     frame: &binding.frame,
                     binding: &execution_binding,
                     provider_response_id: &response.id,
+                    context_epoch,
                 })?,
             });
             replacements.insert(call_id, replacement);
@@ -775,6 +904,7 @@ pub(crate) async fn bind_response(
         }
     }
     if let Some(continuation) = continuation {
+        let context_epoch = orch.profile_epoch().await;
         blocks.push(ContentBlock::ProviderContent {
             protocol: serde_json::to_value(continuation.protocol)
                 .map_err(internal)?
@@ -784,6 +914,7 @@ pub(crate) async fn bind_response(
             value: source_payload(&NativeContinuationPayload {
                 kind: "lingxi_computer_continuation",
                 continuation: &continuation,
+                context_epoch,
             })?,
         });
         let mut state = orch.computer_runtime.state.lock().await;
@@ -802,6 +933,8 @@ pub(crate) async fn bind_response(
                 })
             });
         state.continuation = Some(continuation);
+        state.continuation_epoch = context_epoch;
+        state.ordinary_history_fallback = false;
     }
     if !acknowledged.is_empty() {
         let (model, profile) = {
@@ -1330,6 +1463,7 @@ async fn store_execution_binding(
         frame: work.frame.clone(),
         binding: work.binding.clone(),
         provider_response_id: work.identity.provider_response_id.clone(),
+        context_epoch: work.context_epoch,
     };
     store_payload(
         orch,
@@ -1487,10 +1621,13 @@ pub(crate) async fn persist_native_assistant(
     if let Some(reference) =
         llm_runtime::computer::response_continuation(response).map_err(internal)?
     {
+        let context_epoch = orch.profile_epoch().await;
         if !content.iter().any(|block| {
             matches!(block, ContentBlock::ProviderContent { value, .. }
             if value.string_at("/type") == Some("lingxi_computer_continuation")
-                && decode_payload_field::<wire::ContinuationRef>(value, "/continuation").ok().as_ref() == Some(&reference))
+                && decode_payload_field::<wire::ContinuationRef>(value, "/continuation").ok().as_ref() == Some(&reference)
+                && value.get_property("context_epoch").is_some()
+                && continuation_context_epoch(value).ok() == Some(context_epoch))
         }) {
             return Err(internal(
                 "append hook removed or changed the response continuation",
@@ -1546,6 +1683,7 @@ pub(crate) async fn persist_native_assistant(
                 || !saved_call_matches
                 || saved_frame != member.frame
                 || saved_binding != member.binding
+                || continuation_context_epoch(binding)? != member.context_epoch
                 || binding.string_at("/provider_response_id") != Some(response.id.as_str())
                 || !saved_originals_match
             {
@@ -1893,6 +2031,7 @@ pub(crate) async fn prepare_receipts(
             provider_response_id: &members[0].1.identity.provider_response_id,
             receipt_id: &receipt_id,
             block: &block,
+            context_epoch: members[0].1.context_epoch,
         })?;
         let message = ConversationMessage::User {
             api_message_override: None,
@@ -1919,6 +2058,7 @@ pub(crate) async fn prepare_receipts(
             message: message.clone(),
             call: call.as_ref().clone(),
             frame: members[0].1.frame.clone(),
+            context_epoch: members[0].1.context_epoch,
         };
         let payload = store_payload(orch, &receipt_id, &stored).await?;
         let record = NativeReceiptRecord {
@@ -1959,6 +2099,136 @@ pub(crate) async fn has_pending_receipts(orch: &ConversationOrchestrator) -> boo
         .await
         .pending_receipts
         .is_empty()
+}
+
+/// Check durable ownership before a profile boundary; this does not replay or
+/// change a receipt. A cold owner may not have reconstructed its in-memory
+/// native state yet.
+pub(crate) async fn has_unsettled_profile_receipts(
+    orch: &ConversationOrchestrator,
+) -> Result<bool, OrchestratorError> {
+    let session_id = orch.session.lock().await.session_id;
+    {
+        let state = orch.computer_runtime.state.lock().await;
+        if state.session_id == Some(session_id) && !state.pending_receipts.is_empty() {
+            return Ok(true);
+        }
+    }
+    let Some(journal) = &orch.tool_execution_journal else {
+        return Ok(false);
+    };
+    let recovered = journal
+        .recover_session(session_id)
+        .await
+        .map_err(internal)?;
+    let history = orch.session.lock().await.history.clone();
+    recovery_has_unsettled_profile_receipts(&recovered, &history)
+}
+
+fn recovery_has_unsettled_profile_receipts(
+    recovered: &ToolJournalRecovery,
+    history: &[ConversationMessage],
+) -> Result<bool, OrchestratorError> {
+    if recovered
+        .receipts
+        .iter()
+        .any(|receipt| receipt.stage != NativeReceiptStage::ResponseReceived)
+    {
+        return Ok(true);
+    }
+    let completed: std::collections::HashSet<_> = recovered
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.stage == NativeReceiptStage::ResponseReceived)
+        .flat_map(|receipt| receipt.execution_ids.iter().cloned())
+        .collect();
+    let mut abandoned = std::collections::HashSet::new();
+    for value in history
+        .iter()
+        .flat_map(|message| match message {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => content.as_slice(),
+            ConversationMessage::System { .. } => &[],
+        })
+        .filter_map(|block| match block {
+            ContentBlock::ProviderContent { value, .. }
+                if value.string_at("/type") == Some("lingxi_computer_abandoned") =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+    {
+        let calls: Vec<(String, String)> = decode_payload_field(value, "/call_identities")?;
+        abandoned.extend(calls);
+    }
+    Ok(recovered.executions.iter().any(|execution| {
+        !completed.contains(&execution.execution_id())
+            && !abandoned.contains(&execution.identity.call_identity())
+    }))
+}
+
+/// Validate that an independently published branch will not inherit an
+/// unfinished tool or native-computer continuation. The caller must hold the
+/// source writer claim while capturing both the transcript and its journal.
+/// This check is read-only and does not execute or settle source operations.
+///
+/// # Errors
+/// Returns an actionable error when the source must be resumed first, journal
+/// ownership does not match the captured session, or recovery data is invalid.
+pub fn validate_independent_branch(
+    session_id: uuid::Uuid,
+    source: &str,
+    branch_messages: &[session::jsonl::JsonlMessage],
+    recovered: Option<&ToolJournalRecovery>,
+) -> Result<(), String> {
+    let id = lingxi_core::types::SessionId::from_uuid(session_id);
+    if let Some(recovered) = recovered {
+        if recovered
+            .executions
+            .iter()
+            .any(|execution| execution.identity.session_id != id)
+            || recovered
+                .receipts
+                .iter()
+                .any(|receipt| receipt.session_id != id)
+        {
+            return Err("branch recovery journal does not match the source session".into());
+        }
+    }
+    let loaded = session::jsonl::route_lines(source);
+    if !crate::resume::deferred_tool_replays_from_messages(&loaded.messages_in_order).is_empty()
+        || !crate::resume::deferred_tool_replays_from_messages(branch_messages).is_empty()
+    {
+        return Err("This session has deferred tools. Resume the original session first before creating a branch.".into());
+    }
+    let (source_messages, _) =
+        session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+    let state = crate::resume::state_from_messages(session_id, &source_messages);
+    if let Some(recovered) = recovered {
+        if recovery_has_unsettled_profile_receipts(recovered, &state.history)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("This session has an unsettled computer receipt. Resume the original session first before creating a branch.".into());
+        }
+    } else {
+        // A native marker without its durable journal cannot prove that its
+        // execution and receipt settled. Never guess from transcript text.
+        let branch = crate::resume::state_from_messages(session_id, branch_messages);
+        if state.history.iter().chain(&branch.history).any(|message| {
+            let content = match message {
+                ConversationMessage::User { content, .. }
+                | ConversationMessage::Assistant { content, .. } => content.as_slice(),
+                ConversationMessage::System { .. } => &[],
+            };
+            content.iter().any(|block| matches!(block,
+                ContentBlock::ProviderContent { value, .. }
+                    if value.string_at("/type").is_some_and(|kind| kind.starts_with("lingxi_computer_"))))
+        }) {
+            return Err("This session's computer recovery journal is unavailable. Resume the original session first before creating a branch.".into());
+        }
+    }
+    Ok(())
 }
 
 async fn receipt_acknowledgements(

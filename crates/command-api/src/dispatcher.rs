@@ -95,6 +95,19 @@ fn native_skill_turn_projections(
     Ok((command_row, body_row))
 }
 
+/// Only a directory-format Skill has restoration semantics. Native prompt
+/// commands, including legacy Markdown and MCP prompts, carry ordinary task
+/// content even when they use the same two-row expansion envelope.
+fn directory_skill_identity(command: &crate::model::SlashCommand) -> Option<lingxi_core::host::SlashSkillIdentity> {
+    if matches!(command.source, CommandSource::Mcp) {
+        return None;
+    }
+    command.skill_root.as_ref().map(|path| lingxi_core::host::SlashSkillIdentity {
+        name: command.name.clone(),
+        path: path.clone(),
+    })
+}
+
 fn user_prompt_expansion_control_result(
     aggregate: &hooks::response::AggregateHookResult,
     command_name: &Ujp,
@@ -1094,6 +1107,7 @@ impl RegistrySlashDispatcher {
                             command: command_row,
                             body: body_row,
                             hook_messages: aggregate.prompt_expansion_history_rows,
+                            skill: directory_skill_identity(&command),
                         }
                     } else {
                         // Keep the established route for local bundled builders
@@ -1173,6 +1187,7 @@ impl RegistrySlashDispatcher {
                                     command: command_row,
                                     body: body_row,
                                     hook_messages: aggregate.prompt_expansion_history_rows,
+                                    skill: None,
                                 }
                             }
                             None => SlashDispatchResult::RunAsTurn { prompt },
@@ -1297,6 +1312,7 @@ impl RegistrySlashDispatcher {
                             command: command_row,
                             body: body_row,
                             hook_messages: aggregate.prompt_expansion_history_rows,
+                            skill: directory_skill_identity(&command),
                         };
                     }
                     // Preserve the prior post-expansion hook behavior for
@@ -1492,6 +1508,7 @@ impl RegistrySlashDispatcher {
                         command: command_row,
                         body: body_row,
                         hook_messages: aggregate.prompt_expansion_history_rows,
+                        skill: directory_skill_identity(&command),
                     }
                 } else {
                     self.injected_message_result(content)
@@ -2032,6 +2049,7 @@ mod tests {
             command,
             body,
             hook_messages,
+            ..
         } = dispatcher
             .dispatch_without_mod_hooks(&raw, lingxi_core::host::CancellationToken::new())
             .await
@@ -2046,6 +2064,35 @@ mod tests {
         );
         assert_eq!(body.string_units(""), Some(args_units));
         assert!(hook_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn directory_skill_dispatch_carries_canonical_identity_beside_xml_header() {
+        let mut registry = CommandRegistry::new();
+        let name = Ujp::root_string("review�".into(), "review".encode_utf16().chain([0xd800]).collect()).unwrap();
+        let path = PathBuf::from("/skills/review");
+        registry.register_command(SlashCommand {
+            name: name.clone(),
+            aliases: vec!["alias".into()],
+            description: "review".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
+            skill_root: Some(path.clone()),
+            kind: SlashCommandKind::Markdown {
+                file_path: path.join("SKILL.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "review $ARGUMENTS".into(),
+            },
+            ..SlashCommand::default()
+        });
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+        let SlashDispatchResult::RunSkillAsTurn { command, body, skill: Some(skill), .. } =
+            dispatcher.dispatch("/alias task".into(), lingxi_core::host::CancellationToken::new()).await
+        else { panic!("directory Skill must retain its producer identity"); };
+        assert!(command.string_at("").unwrap().starts_with("<command-message>"));
+        assert_eq!(skill.name.string_units(""), name.string_units(""));
+        assert_eq!(skill.path, path);
+        assert!(body.string_at("").unwrap().contains("review task"));
     }
 
     #[tokio::test]
@@ -2095,6 +2142,7 @@ mod tests {
             command,
             body,
             hook_messages,
+            ..
         } = dispatcher
             .dispatch_without_mod_hooks(&raw, lingxi_core::host::CancellationToken::new())
             .await
@@ -2494,6 +2542,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -2558,6 +2607,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -2577,6 +2627,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -2719,6 +2770,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -3324,6 +3376,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -3437,6 +3490,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+                skill,
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -3444,6 +3498,7 @@ mod tests {
                 );
                 assert_eq!(prompt_text(&body), "Review src/lib.rs");
                 assert!(hook_messages.is_empty());
+                assert!(skill.is_none(), "MCP prompt evidence is not a Skill activation");
             }
             other => panic!("expected Native MCP prompt turn, got {other:?}"),
         }
@@ -3732,6 +3787,7 @@ mod tests {
                     command,
                     body,
                     hook_messages,
+            ..
                 } => {
                     assert_eq!(
                         prompt_text(&command),
@@ -4320,6 +4376,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -4398,6 +4455,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),
@@ -4777,6 +4835,7 @@ mod tests {
                 command,
                 body,
                 hook_messages,
+            ..
             } => {
                 assert_eq!(
                     prompt_text(&command),

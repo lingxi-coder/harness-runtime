@@ -332,6 +332,8 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             assistant_message_id: None,
+            trusted_session_profile: None,
+            durable_tool_origins: None,
             assistant_message: None,
             same_turn_tool_uses: Vec::new(),
             agent_id: None,

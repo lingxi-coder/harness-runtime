@@ -334,6 +334,12 @@ pub(crate) async fn append_tool_injected_messages(
             }
             continue;
         }
+        if compaction::invoked_skills::is_individual_skill_activation(&message) {
+            if orch.append_committed_tool_skill(&message, source_id, None).await && is_user_row {
+                orch.note_query_user_event();
+            }
+            continue;
+        }
         let append = async {
             {
                 let mut session = orch.session.lock().await;

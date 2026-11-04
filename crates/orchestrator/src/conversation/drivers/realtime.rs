@@ -5,9 +5,9 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId, ToolUseId};
 use lingxi_llm_client::realtime::{
     RealtimeClose, RealtimeControl, RealtimeEvent, RealtimeEvents, RealtimeHistoryItem,
-    RealtimeInput, RealtimeRole, RealtimeTranscriptDirection,
+    RealtimeInput, RealtimeOrderedEvent, RealtimeRole, RealtimeTranscriptDirection,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -18,10 +18,19 @@ pub use tool_api::{MediaAgentCapabilityContext, MediaAgentHandoffRequest};
 pub struct RealtimeAgentContext {
     /// Owning current Agent session.
     pub session_id: String,
-    /// Exact current session provider profile.
+    /// Session's logical provider profile when this snapshot was captured.
+    pub session_profile_name: String,
+    /// Logical audio profile selected by the host before account resolution.
+    pub audio_profile_name: String,
+    /// Logical audio profile at preparation; the host replaces it with the
+    /// selected account's exact execution profile before admission.
     pub profile_name: Option<String>,
-    /// Trusted profile/account namespace pinned for this realtime session.
+    /// Unbound at preparation; the host supplies the selected account scope.
     pub account_scope: Option<String>,
+    /// Conversation behavior admitted when the instructions were assembled.
+    pub conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot,
+    /// Effective skill-instruction epoch used to project this history.
+    pub conversation_profile_epoch: u64,
     /// Host-issued engine attachment selected by media handoff admission.
     pub attachment_id: Option<media_api::MediaAttachmentId>,
     /// Current Agent system instructions.
@@ -32,7 +41,7 @@ pub struct RealtimeAgentContext {
     pub tools: Vec<serde_json::Value>,
 }
 /// Bounded host controls and native playback evidence.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RealtimeAgentInput {
     /// Provider-neutral input, excluding model-controlled route/configuration.
     Provider(RealtimeInput),
@@ -40,11 +49,328 @@ pub enum RealtimeAgentInput {
     PlaybackCompleted { item_id: Option<String> },
 }
 
+/// Events from the provider and lifecycle evidence owned by the Agent loop.
+/// A provider event cannot construct either of the local lifecycle variants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RealtimeAgentOutput {
+    Provider(RealtimeEvent),
+    /// A locally identified input and its Agent work have begun.
+    AgentResponseStarted { turn_id: String },
+    /// The input's Agent work, including tool continuations, has completed.
+    AgentTurnCompleted { turn_id: String },
+}
+
+#[derive(Clone, Copy)]
+enum ExplicitCancelTailStage { ToolCancelled, Interrupted, Raw }
+
+struct ExplicitCancelTail {
+    stage: ExplicitCancelTailStage,
+    response_id: Option<String>,
+    belongs_to_current: bool,
+}
+
+enum FencedLocalInput {
+    Audio,
+    CommitAudio,
+    Text(String),
+}
+
+struct PendingLocalInput {
+    id: u64,
+    input: FencedLocalInput,
+}
+
+// One large input can arrive as the queue reaches its high-water mark. Reserve
+// space for it, then let the bounded input channel apply backpressure until the
+// previous owner and its tools drain. All data-bearing inputs count, not only
+// PCM; image limits are also enforced before an image enters the queue.
+const MAX_DEFERRED_AUDIO_CHUNK_BYTES: usize = 1024 * 1024;
+const MAX_DEFERRED_ITEM_BYTES: usize = 8 * 1024 * 1024 + 1024;
+const MAX_DEFERRED_PAYLOAD_BYTES: usize = MAX_DEFERRED_ITEM_BYTES + MAX_DEFERRED_AUDIO_CHUNK_BYTES;
+
+fn deferred_input_bytes(input: &RealtimeInput) -> Result<usize, OrchestratorError> {
+    let size = match input {
+        RealtimeInput::Audio { data, .. } => {
+            if data.len() > MAX_DEFERRED_AUDIO_CHUNK_BYTES {
+                return Err(failure("realtime deferred audio chunk is too large"));
+            }
+            Some(data.len())
+        }
+        RealtimeInput::Image { data, mime_type } => data.len().checked_add(mime_type.len()),
+        RealtimeInput::Text(text) => Some(text.len()),
+        RealtimeInput::RetrieveItem { item_id }
+        | RealtimeInput::DeleteItem { item_id }
+        | RealtimeInput::TruncateAudio { item_id, .. } => Some(item_id.len()),
+        RealtimeInput::ImportHistory { .. } | RealtimeInput::ToolResult { .. }
+        | RealtimeInput::ToolResults { .. } => return Err(failure("host realtime input cannot replace Agent history or tool results")),
+        _ => Some(0),
+    };
+    let size = size.ok_or_else(|| failure("realtime deferred input size overflow"))?;
+    if size > MAX_DEFERRED_ITEM_BYTES { return Err(failure("realtime deferred input is too large")); }
+    Ok(size)
+}
+
+/// Associate provider transcription with locally admitted audio, including
+/// completion events that arrive after the Agent turn has finished.
+#[derive(Default)]
+struct AudioInputAdmissions {
+    pending_openai_commits: usize,
+    openai_items: HashSet<String>,
+    openai_tainted_items: HashSet<String>,
+    early_openai_finals: HashMap<String, RealtimeEvent>,
+    streaming_audio: bool,
+    gemini_current: Option<Option<String>>,
+    gemini_provisional_turn: Option<String>,
+    gemini_turns: HashSet<String>,
+    gemini_tainted_turns: HashSet<String>,
+}
+
+impl AudioInputAdmissions {
+    fn admit_audio(
+        &mut self,
+        boundary: RealtimeCompletionBoundary,
+        limit: usize,
+    ) -> Result<(), OrchestratorError> {
+        match boundary {
+            RealtimeCompletionBoundary::ExplicitResponse => {
+                if self.pending_openai_commits >= limit {
+                    return Err(failure("realtime pending audio commit queue is full"));
+                }
+                self.pending_openai_commits += 1;
+            }
+            RealtimeCompletionBoundary::Gemini38 => {
+                self.gemini_current = Some(None);
+                if let Some(turn_id) = self.gemini_provisional_turn.take() {
+                    self.bind_gemini_turn(&turn_id, true);
+                }
+            }
+        }
+        self.streaming_audio = false;
+        Ok(())
+    }
+
+    fn admit_text(&mut self) {
+        self.gemini_current = None;
+        self.clear_audio();
+    }
+
+    fn clear_audio(&mut self) {
+        self.streaming_audio = false;
+        if let Some(turn_id) = self.gemini_provisional_turn.take() {
+            self.gemini_tainted_turns.insert(turn_id);
+        }
+    }
+
+    fn bind_gemini_turn(&mut self, turn_id: &str, local_turn_active: bool) {
+        let Some(number) = turn_id.strip_prefix("gemini-turn-") else { return };
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return;
+        }
+        if self.gemini_turns.contains(turn_id) || self.gemini_tainted_turns.contains(turn_id) {
+            return;
+        }
+        if local_turn_active {
+            if let Some(current) = self.gemini_current.as_mut() {
+                if current.is_none() {
+                    *current = Some(turn_id.to_owned());
+                    self.gemini_turns.insert(turn_id.to_owned());
+                }
+            }
+        }
+    }
+
+    fn openai_committed(&mut self, item_id: &str) -> Option<RealtimeEvent> {
+        if item_id.is_empty() || self.openai_items.contains(item_id) || self.openai_tainted_items.contains(item_id) {
+            return None;
+        }
+        if self.pending_openai_commits == 0 {
+            self.openai_tainted_items.insert(item_id.to_owned());
+            return None;
+        }
+        self.pending_openai_commits -= 1;
+        self.openai_items.insert(item_id.to_owned());
+        let early = self.early_openai_finals.remove(item_id)
+            .filter(|_| !self.openai_tainted_items.contains(item_id));
+        // Unmatched events cannot borrow authorization from a future commit.
+        if self.pending_openai_commits == 0 {
+            self.early_openai_finals.clear();
+        }
+        early
+    }
+
+    fn transcript(
+        &mut self,
+        boundary: RealtimeCompletionBoundary,
+        item_id: Option<&str>,
+        turn_id: Option<&str>,
+        text: &str,
+        final_chunk: bool,
+        local_turn_active: bool,
+        limit: usize,
+        event: &RealtimeEvent,
+    ) -> Result<(Option<String>, bool), OrchestratorError> {
+        let Some(item_id) = item_id.filter(|id| !id.is_empty()) else {
+            return Ok((None, false));
+        };
+        match boundary {
+            RealtimeCompletionBoundary::ExplicitResponse => {
+                if self.openai_tainted_items.contains(item_id) {
+                    return Ok((None, false));
+                }
+                if self.openai_items.contains(item_id) {
+                    return Ok((final_chunk.then(|| text.to_owned()), true));
+                }
+                if !self.streaming_audio && self.pending_openai_commits == 0 {
+                    self.openai_tainted_items.insert(item_id.to_owned());
+                    return Ok((None, false));
+                }
+                if final_chunk && self.pending_openai_commits > 0 {
+                    if !self.early_openai_finals.contains_key(item_id)
+                        && self.early_openai_finals.len() >= limit
+                    {
+                        return Err(failure("realtime pending input transcripts are full"));
+                    }
+                    self.early_openai_finals
+                        .entry(item_id.to_owned())
+                        .or_insert_with(|| event.clone());
+                }
+                Ok((None, !final_chunk && self.streaming_audio))
+            }
+            RealtimeCompletionBoundary::Gemini38 => {
+                let Some(turn_id) = turn_id else { return Ok((None, false)) };
+                let Some(number) = turn_id.strip_prefix("gemini-turn-") else { return Ok((None, false)) };
+                if item_id != format!("gemini-input-{number}") {
+                    return Ok((None, false));
+                }
+                if self.gemini_tainted_turns.contains(turn_id) {
+                    return Ok((None, false));
+                }
+                self.bind_gemini_turn(turn_id, local_turn_active);
+                if self.gemini_turns.contains(turn_id) {
+                    return Ok((final_chunk.then(|| text.to_owned()), true));
+                }
+                if self.streaming_audio {
+                    let provisional = self.gemini_provisional_turn.get_or_insert_with(|| turn_id.to_owned());
+                    return Ok((None, !final_chunk && provisional == turn_id));
+                }
+                // The codec accumulates interim text until turn completion. A
+                // later commit cannot make an earlier unowned fragment safe.
+                self.gemini_tainted_turns.insert(turn_id.to_owned());
+                Ok((None, false))
+            }
+        }
+    }
+
+    fn retained_identity_count(&self) -> usize {
+        self.openai_items.len() + self.openai_tainted_items.len() + self.early_openai_finals.len() + self.gemini_turns.len() + self.gemini_tainted_turns.len()
+    }
+}
+
+#[derive(Default)]
+struct RealtimeTurnTracker {
+    next_id: u64,
+    current: Option<String>,
+    response_started: bool,
+    response_done: bool,
+    response_had_tool: bool,
+    continuation_requested: bool,
+    provider_id: Option<String>,
+    completed_provider_ids: HashSet<String>,
+    completed_anonymous: bool,
+    cancelled_terminal: bool,
+    interrupted: bool,
+    google_candidate: Option<(bool, bool)>,
+    google_projection_seen: bool,
+}
+
+impl RealtimeTurnTracker {
+    fn begin(&mut self) -> Result<Option<String>, OrchestratorError> {
+        if self.current.is_some() { return Ok(None); }
+        self.next_id = self.next_id.checked_add(1).ok_or_else(|| failure("realtime turn identity exhausted"))?;
+        let id = format!("agent-{}", self.next_id);
+        self.current = Some(id.clone());
+        self.response_started = false;
+        self.response_done = false;
+        self.response_had_tool = false;
+        self.continuation_requested = false;
+        self.provider_id = None;
+        self.cancelled_terminal = false;
+        self.interrupted = false;
+        self.google_candidate = None;
+        self.google_projection_seen = false;
+        Ok(Some(id))
+    }
+
+    fn response_started(&mut self, provider_id: &Option<String>, pending_tools: bool) -> Result<(), OrchestratorError> {
+        if provider_id.as_ref().is_some_and(|id| self.completed_provider_ids.contains(id)) {
+            return Err(failure("realtime provider reused a completed response identity"));
+        }
+        if self.continuation_requested && !pending_tools {
+            if self.response_started && self.response_had_tool && !self.response_done {
+                return Err(failure("realtime continuation started before its prior response completed"));
+            }
+            self.response_had_tool = false;
+            self.continuation_requested = false;
+        }
+        self.response_started = true;
+        self.response_done = false;
+        self.provider_id = provider_id.clone();
+        Ok(())
+    }
+
+    fn tool_called(&mut self) { self.response_had_tool = true; }
+
+    fn continued(&mut self) { self.continuation_requested = true; }
+
+    fn completed(&mut self, provider_id: &Option<String>, interrupted: bool, pending_tools: bool) -> Result<Option<String>, OrchestratorError> {
+        if !self.response_started { return Ok(None); }
+        if let Some(id) = provider_id {
+            if self.completed_provider_ids.contains(id) { return Ok(None); }
+            if self.provider_id.as_ref().is_some_and(|expected| expected != id) { return Ok(None); }
+            self.completed_provider_ids.insert(id.clone());
+        } else {
+            if self.provider_id.is_some() || self.completed_anonymous {
+                return Err(failure("realtime provider completion has ambiguous response identity"));
+            }
+            self.completed_anonymous = true;
+        }
+        self.response_done = true;
+        if interrupted && pending_tools { self.cancelled_terminal = true; }
+        if interrupted && !pending_tools { return Ok(self.finish()); }
+        if pending_tools || self.response_had_tool { return Ok(None); }
+        Ok(self.finish())
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        let id = self.current.take()?;
+        self.response_started = false;
+        self.response_done = false;
+        self.response_had_tool = false;
+        self.continuation_requested = false;
+        self.provider_id = None;
+        self.cancelled_terminal = false;
+        self.interrupted = false;
+        self.google_candidate = None;
+        self.google_projection_seen = false;
+        Some(id)
+    }
+
+    fn cancelled_tools_drained(&mut self) -> Option<String> {
+        if self.cancelled_terminal { self.finish() } else { None }
+    }
+}
+
 /// Bounded transport endpoints for one host-opened native realtime session.
 ///
 /// This contract lives with the Agent orchestration layer so app hosts can
 /// implement it without depending on the full Harness runtime.
 pub struct RealtimeAgentSessionIo {
+    /// Logical audio profile selected by the trusted host.
+    pub audio_profile_name: String,
+    /// Exact provider profile selected by the trusted host for this session.
+    pub provider_profile: String,
+    /// Exact account scope selected by the trusted host for this session.
+    pub provider_account_scope: String,
     /// Provider-neutral control with bounded input queues.
     pub control: RealtimeControl,
     /// Bounded normalized provider event stream.
@@ -52,7 +378,7 @@ pub struct RealtimeAgentSessionIo {
     /// Bounded host audio, image, and transcript input queue.
     pub inputs: mpsc::Receiver<RealtimeAgentInput>,
     /// Bounded native playback/event output queue.
-    pub output: mpsc::Sender<RealtimeEvent>,
+    pub output: mpsc::Sender<RealtimeAgentOutput>,
     /// Realtime session limits.
     pub limits: RealtimeAgentLimits,
     /// Whether the selected realtime provider accepts image inputs.
@@ -147,8 +473,18 @@ pub trait MediaConversationAttachment: Send + Sync {
 }
 
 /// Hard session and resource bounds, independent from chat retry budgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealtimeCompletionBoundary {
+    /// OpenAI response IDs and a separate response after each tool batch.
+    ExplicitResponse,
+    /// Gemini 3.8 Live requires the same-frame interactionStatus to be IDLE.
+    Gemini38,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RealtimeAgentLimits {
+    /// Contract selected from the trusted, pinned provider and model route.
+    pub completion_boundary: RealtimeCompletionBoundary,
     /// Absolute session lifetime, including tool and permission waits.
     pub max_duration: Duration,
     /// Idle lifetime; paused while a tool or permission request is pending.
@@ -169,6 +505,7 @@ pub struct RealtimeAgentLimits {
 impl Default for RealtimeAgentLimits {
     fn default() -> Self {
         Self {
+            completion_boundary: RealtimeCompletionBoundary::ExplicitResponse,
             max_duration: Duration::from_secs(30 * 60),
             idle_timeout: Duration::from_secs(2 * 60),
             max_pending_tools: 8,
@@ -527,6 +864,35 @@ pub fn realtime_history(
     }
     Ok(output)
 }
+// Model-facing realtime history skips transcript-only rows and nonportable
+// reasoning. Use the same projection when recording context metadata.
+fn realtime_manifest_message(message: &ConversationMessage) -> Option<ConversationMessage> {
+    let mut message = message.clone();
+    match &mut message {
+        ConversationMessage::System { api_system, .. } => {
+            api_system.as_ref()?;
+        }
+        ConversationMessage::User {
+            is_visible_in_transcript_only: true,
+            ..
+        } => return None,
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => {
+            content.retain(|block| match block {
+                ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
+                    !text.is_empty()
+                }
+                ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
+                _ => false,
+            });
+            if content.is_empty() {
+                return None;
+            }
+        }
+    }
+    Some(message)
+}
+
 struct RealtimeGuard {
     control: RealtimeControl,
     cancel: CancellationToken,
@@ -721,7 +1087,13 @@ impl ConversationOrchestrator {
     /// Prepare current Agent history and tool policy for an SDK native connector.
     pub async fn prepare_realtime_agent(&self) -> Result<RealtimeAgentContext, OrchestratorError> {
         self.cancel_idle_compaction();
-        let _gate = self.turn_gate.lock().await;
+        let gate = Arc::new(self.turn_gate.clone().lock_owned().await);
+        // Realtime preparation is a query boundary: a profile chosen during a
+        // previous turn must be admitted before capturing history or prompts.
+        self.admit_conversation_profile(&gate).await?;
+        self.refresh_effective_skill_projection().await?;
+        let conversation_mode = self.conversation_profile().await;
+        let conversation_profile_epoch = self.profile_epoch().await;
         let (session_id, history) = {
             let session = self.session.lock().await;
             (
@@ -731,7 +1103,7 @@ impl ConversationOrchestrator {
         };
         let profile_name = self.current_audio_profile().await?;
         let account_scope = lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned();
-        let tools = self
+        let mut wire_tools = self
             .build_wire_tools()
             .await?
             .0
@@ -744,21 +1116,44 @@ impl ConversationOrchestrator {
                             .conflicts_with(&REALTIME_HELD_MEDIA_RESOURCES)
                     })
             })
+            .collect::<Vec<_>>();
+        let tools = wire_tools
+            .iter_mut()
             .map(|tool| {
+                // Realtime sends full function schemas without these ordinary
+                // provider-specific flags; its manifest should reflect that.
+                tool.strict = false;
+                tool.defer_loading = false;
                 Ok(serde_json::json!({
-                    "name": tool.name,
+                    "name": tool.name.as_str(),
                     "description": source_value(&tool.description)?,
                     "parameters": source_value(&tool.input_schema)?,
                 }))
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
+        let realtime_history = realtime_history(&history)?;
+        let manifest_history = history
+            .iter()
+            .filter_map(realtime_manifest_message)
+            .collect::<Vec<_>>();
+        let system = self.provider_system_prompt().await?;
+        let instructions = Self::system_prompt_source_text(&system)
+            .string_at("")
+            .map(str::to_owned)
+            .ok_or_else(|| failure("realtime system instructions are not a string"))?;
+        self.record_context_projection(Some(&system), &manifest_history, &wire_tools)
+            .await;
         Ok(RealtimeAgentContext {
             session_id,
+            session_profile_name: profile_name.clone(),
+            audio_profile_name: profile_name.clone(),
             profile_name: Some(profile_name),
             account_scope: Some(account_scope),
+            conversation_mode,
+            conversation_profile_epoch,
             attachment_id: None,
-            instructions: self.effective_system_prompt().await?,
-            history: realtime_history(&history)?,
+            instructions,
+            history: realtime_history,
             tools,
         })
     }
@@ -918,9 +1313,9 @@ impl ConversationOrchestrator {
         self: &Arc<Self>,
         prepared: RealtimeAgentContext,
         control: RealtimeControl,
-        mut events: RealtimeEvents,
+        events: RealtimeEvents,
         mut inputs: mpsc::Receiver<RealtimeAgentInput>,
-        output: mpsc::Sender<RealtimeEvent>,
+        output: mpsc::Sender<RealtimeAgentOutput>,
         limits: RealtimeAgentLimits,
         image_input_supported: bool,
         cancel: CancellationToken,
@@ -947,7 +1342,19 @@ impl ConversationOrchestrator {
             return Err(failure("native realtime resource limits must be positive"));
         }
         self.cancel_idle_compaction();
-        let _gate = tokio::select! {biased;_ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),gate=self.turn_gate.lock()=>gate};
+        let gate = tokio::select! {biased;_ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),gate=self.turn_gate.clone().lock_owned()=>Arc::new(gate)};
+        // Connector creation happens outside the gate. Reject a context
+        // captured for another fixed conversation profile.
+        // The guard closes already-opened realtime IO on this error path.
+        self.admit_conversation_profile(&gate).await?;
+        self.refresh_effective_skill_projection().await?;
+        if self.conversation_profile().await != prepared.conversation_mode
+            || self.profile_epoch().await != prepared.conversation_profile_epoch
+        {
+            return Err(failure(
+                "Agent conversation mode changed before realtime admission",
+            ));
+        }
         {
             let session = self.session.lock().await;
             if session.session_id.as_uuid().to_string() != prepared.session_id
@@ -959,10 +1366,15 @@ impl ConversationOrchestrator {
             }
         }
         let current_profile = self.current_audio_profile().await?;
+        if current_profile != prepared.session_profile_name {
+            return Err(failure(
+                "Agent provider profile changed before realtime admission",
+            ));
+        }
         if !self
             .api
             .audio_account_binding_is_current(
-                &current_profile,
+                &prepared.audio_profile_name,
                 prepared.profile_name.as_deref().unwrap_or_default(),
                 prepared.account_scope.as_deref().unwrap_or_default(),
             )
@@ -984,6 +1396,16 @@ impl ConversationOrchestrator {
         let deadline = Instant::now() + limits.max_duration;
         let mut idle = Instant::now() + limits.idle_timeout;
         let mut ledger = TranscriptLedger::default();
+        let mut turn = RealtimeTurnTracker::default();
+        let mut audio_admissions = AudioInputAdmissions::default();
+        let mut ordered_events = events.into_ordered();
+        let mut next_input_id = 0_u64;
+        let mut pending_local_input: Option<PendingLocalInput> = None;
+        let mut deferred_inputs = VecDeque::new();
+        let mut deferred_payload_bytes = 0_usize;
+        let mut replay_deferred = false;
+        let mut explicit_cancel_tail: Option<ExplicitCancelTail> = None;
+        let mut deferred_terminal: Option<String> = None;
         let mut tool_tokens: HashMap<String, CancellationToken> = HashMap::new();
         let mut seen_calls = HashSet::new();
         let mut usage_turns = HashSet::new();
@@ -1003,7 +1425,26 @@ impl ConversationOrchestrator {
         // per-batch scheduler's concurrency safety boundary.
         let tool_dispatch = Arc::new(tokio::sync::Mutex::new(()));
         let result = async {
+        macro_rules! emit_agent_output {
+            ($event:expr) => {{
+                tokio::select! {
+                    biased;
+                    _ = session_cancel.cancelled() => return Ok(RealtimeAgentEnd::Cancelled),
+                    _ = tokio::time::sleep_until(deadline) => return Ok(RealtimeAgentEnd::Deadline),
+                    sent = output.send($event) => sent.map_err(|error| failure(format!("realtime output queue unavailable: {error}")))?,
+                }
+            }};
+        }
         loop {
+            // After an interrupted owner settles, replay its queued successor
+            // before polling later provider events. Cancellation/deadline still
+            // take precedence and close the entire transport.
+            if turn.current.is_none() && pending.is_empty() && explicit_cancel_tail.is_none() && !deferred_inputs.is_empty() { replay_deferred = true; }
+            if replay_deferred && deferred_inputs.is_empty() { replay_deferred = false; }
+            let deferred = if replay_deferred && pending_local_input.is_none() { deferred_inputs.front().cloned() } else { None };
+            let replaying = deferred.is_some();
+            let input_capacity = replaying || (deferred_inputs.len() < limits.max_pending_transcripts
+                && deferred_payload_bytes <= MAX_DEFERRED_PAYLOAD_BYTES - MAX_DEFERRED_ITEM_BYTES);
             tokio::select! {
                 biased;
                 _ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),
@@ -1011,7 +1452,15 @@ impl ConversationOrchestrator {
                 _ = tokio::time::sleep_until(idle), if pending.is_empty()=>return Ok(RealtimeAgentEnd::Idle),
                 completed = pending.next(), if !pending.is_empty()=>{
                     let completed=completed.expect("nonempty tool futures")?;let cancelled = tool_tokens.remove(&completed.call_id).is_some_and(|token| token.is_cancelled());idle=Instant::now()+limits.idle_timeout;
-                    if cancelled { continue; }
+                    if cancelled {
+                        if pending.is_empty() {
+                            if let Some(turn_id) = turn.cancelled_tools_drained() {
+                                if explicit_cancel_tail.is_some() { deferred_terminal = Some(turn_id); }
+                                else { emit_agent_output!(RealtimeAgentOutput::AgentTurnCompleted { turn_id }); }
+                            }
+                        }
+                        continue;
+                    }
                     for image in &completed.images {
                         accept_realtime_image(&image.data, &image.mime_type, image_input_supported, limits, &mut image_input_count, &mut image_input_bytes)?;
                     }
@@ -1021,32 +1470,151 @@ impl ConversationOrchestrator {
                     }
                     if completed.prevent{return Ok(RealtimeAgentEnd::ToolStopped);}
                     // Submit every concurrent result before requesting the next response.
-                    if pending.is_empty(){control.continue_response().map_err(|error|failure(error.to_string()))?;}
+                    if pending.is_empty(){control.continue_response().map_err(|error|failure(error.to_string()))?;turn.continued();}
                 },
-                input = inputs.recv()=>{
+                input = async { match deferred { Some(input) => Some(input), None => inputs.recv().await } }, if pending_local_input.is_none() && input_capacity=>{
                     let Some(input)=input else{return Ok(RealtimeAgentEnd::Closed);};idle=Instant::now()+limits.idle_timeout;
+                    if replaying {
+                        let consumed = deferred_inputs.pop_front().expect("deferred input was peeked");
+                        if let RealtimeAgentInput::Provider(input) = consumed {
+                            deferred_payload_bytes -= deferred_input_bytes(&input)?;
+                        }
+                        if deferred_inputs.is_empty() { replay_deferred = false; }
+                    }
                     match input {
                         RealtimeAgentInput::PlaybackCompleted{item_id}=>{if let Some(text)=ledger.playback(item_id){self.append_realtime_text(text,false).await;}},
                         RealtimeAgentInput::Provider(input)=>{
                             // Hosts cannot bypass the Agent dispatcher with forged results/history.
                             if matches!(input,RealtimeInput::ImportHistory{..}|RealtimeInput::DeleteItem{..}|RealtimeInput::ToolResult{..}|RealtimeInput::ToolResults{..}){return Err(failure("host realtime input cannot replace Agent history or tool results"));}
-                            if let RealtimeInput::Image { data, mime_type } = &input {
-                                accept_realtime_image(data.as_ref(), mime_type, image_input_supported, limits, &mut image_input_count, &mut image_input_bytes)?;
+                            let starts_turn = matches!(&input, RealtimeInput::CommitAudio | RealtimeInput::Text(_));
+                            let streams_audio = matches!(&input, RealtimeInput::Audio { .. });
+                            // Capture can hand off one final chunk after its commit
+                            // was queued. A new input during this turn must first
+                            // interrupt it; that late chunk belongs to neither one.
+                            if !replaying && streams_audio && turn.current.is_some()
+                                && !turn.interrupted && deferred_inputs.is_empty() { continue; }
+                            if replaying && starts_turn && turn.current.is_some() { return Err(failure("more than one realtime input was queued while interrupting")); }
+                            if !replaying {
+                                if let RealtimeInput::Image { data, mime_type } = &input {
+                                    accept_realtime_image(data.as_ref(), mime_type, image_input_supported, limits, &mut image_input_count, &mut image_input_bytes)?;
+                                }
                             }
-                            if matches!(input,RealtimeInput::Interrupt){ledger.interrupt();for token in tool_tokens.values(){CancellationToken::cancel(token);}}
-                            if let RealtimeInput::Text(text)=&input{self.append_realtime_text(text.clone(),true).await;}
+                            if !replaying && (!deferred_inputs.is_empty() || ((starts_turn || streams_audio) && (turn.current.is_some() || explicit_cancel_tail.is_some()))) {
+                                if deferred_inputs.is_empty() && turn.current.is_some() && !turn.interrupted { return Err(failure("a realtime Agent input is already unsettled")); }
+                                if deferred_inputs.len() >= limits.max_pending_transcripts { return Err(failure("realtime deferred input queue is full")); }
+                                deferred_payload_bytes = deferred_payload_bytes.checked_add(deferred_input_bytes(&input)?).ok_or_else(|| failure("realtime deferred input size overflow"))?;
+                                if deferred_payload_bytes > MAX_DEFERRED_PAYLOAD_BYTES { return Err(failure("realtime deferred input queue is full")); }
+                                deferred_inputs.push_back(RealtimeAgentInput::Provider(input));
+                                continue;
+                            }
+                            if matches!(input,RealtimeInput::Interrupt) {
+                                ledger.interrupt();
+                                if turn.current.is_none() { continue; }
+                                turn.interrupted=true;
+                                for token in tool_tokens.values(){CancellationToken::cancel(token);}
+                                // A completed provider response has nothing left to
+                                // cancel; the interrupted Agent still owns its
+                                // tools until their cancellation cleanup drains.
+                                if turn.response_done && !turn.continuation_requested {
+                                    if pending.is_empty() {
+                                        if let Some(turn_id) = turn.finish() {
+                                            if explicit_cancel_tail.is_some() { deferred_terminal = Some(turn_id); }
+                                            else { emit_agent_output!(RealtimeAgentOutput::AgentTurnCompleted { turn_id }); }
+                                        }
+                                    } else { turn.cancelled_terminal=true; }
+                                    continue;
+                                }
+                            }
+                            let commits_audio = matches!(&input, RealtimeInput::CommitAudio);
+                            let clears_audio = matches!(&input, RealtimeInput::ClearAudio);
+                            if commits_audio && limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse
+                                && audio_admissions.pending_openai_commits >= limits.max_pending_transcripts {
+                                return Err(failure("realtime pending audio commit queue is full"));
+                            }
+                            let fenced = match &input {
+                                RealtimeInput::Audio { .. } => Some(FencedLocalInput::Audio),
+                                RealtimeInput::CommitAudio => Some(FencedLocalInput::CommitAudio),
+                                RealtimeInput::Text(text) => Some(FencedLocalInput::Text(text.clone())),
+                                _ => None,
+                            };
+                            if let Some(fenced) = fenced {
+                                next_input_id = next_input_id.checked_add(1).ok_or_else(|| failure("realtime input identity exhausted"))?;
+                                control.send_with_fence(input, next_input_id).map_err(|error|failure(error.to_string()))?;
+                                pending_local_input = Some(PendingLocalInput { id: next_input_id, input: fenced });
+                                continue;
+                            }
                             control.send(input).map_err(|error|failure(error.to_string()))?;
+                            if clears_audio { audio_admissions.clear_audio(); }
                         }
                     }
                 },
-                event = events.next()=>{
+                event = ordered_events.next()=>{
                     let Some(event)=event else{return Ok(RealtimeAgentEnd::Closed);};idle=Instant::now()+limits.idle_timeout;
-                    if seen_calls.len() + usage_turns.len() + ledger.finalized_input.len() + ledger.finalized_output.len() + ledger.discarded.len() > limits.max_pending_transcripts.saturating_mul(64) { return Err(failure("realtime session history resource bound reached")); }
+                    let event = match event {
+                        RealtimeOrderedEvent::Provider(event) => event,
+                        RealtimeOrderedEvent::InputSent { id } => {
+                            let pending_input = pending_local_input.take().ok_or_else(|| failure("unexpected realtime input fence"))?;
+                            if pending_input.id != id { return Err(failure("realtime input fence identity mismatch")); }
+                            match pending_input.input {
+                                FencedLocalInput::Audio => audio_admissions.streaming_audio = true,
+                                FencedLocalInput::CommitAudio => {
+                                    audio_admissions.admit_audio(limits.completion_boundary, limits.max_pending_transcripts)?;
+                                    if let Some(turn_id) = turn.begin()? {
+                                        emit_agent_output!(RealtimeAgentOutput::AgentResponseStarted { turn_id });
+                                    }
+                                },
+                                FencedLocalInput::Text(text) => {
+                                    audio_admissions.admit_text();
+                                    let turn_id = turn.begin()?;
+                                    self.append_realtime_text(text, true).await;
+                                    if let Some(turn_id) = turn_id {
+                                        emit_agent_output!(RealtimeAgentOutput::AgentResponseStarted { turn_id });
+                                    }
+                                },
+                            }
+                            continue;
+                        }
+                    };
+                    if seen_calls.len() + usage_turns.len() + turn.completed_provider_ids.len() + ledger.finalized_input.len() + ledger.finalized_output.len() + ledger.discarded.len() + audio_admissions.retained_identity_count() > limits.max_pending_transcripts.saturating_mul(64) { return Err(failure("realtime session history resource bound reached")); }
+                    let mut finished_cancel_tail = false;
+                    let mut suppress_cancel_projection = false;
+                    if let Some(tail) = explicit_cancel_tail.as_mut() {
+                        match (tail.stage, &event) {
+                            (ExplicitCancelTailStage::ToolCancelled, RealtimeEvent::Usage { .. }) => {},
+                            (ExplicitCancelTailStage::ToolCancelled, RealtimeEvent::ToolCancelled { .. }) => {
+                                tail.stage = ExplicitCancelTailStage::Interrupted;
+                                suppress_cancel_projection = !tail.belongs_to_current;
+                            },
+                            (ExplicitCancelTailStage::Interrupted, RealtimeEvent::Interrupted) => {
+                                tail.stage = ExplicitCancelTailStage::Raw;
+                                suppress_cancel_projection = !tail.belongs_to_current;
+                            },
+                            (ExplicitCancelTailStage::Raw, RealtimeEvent::ProviderEvent { name, native }) if name == "response.done" => {
+                                let id = native.get("response_id").and_then(serde_json::Value::as_str).or_else(|| native.pointer("/response/id").and_then(serde_json::Value::as_str));
+                                if id != tail.response_id.as_deref() || native.pointer("/response/status").and_then(serde_json::Value::as_str) != Some("cancelled") { return Err(failure("OpenAI cancellation frame identity is inconsistent")); }
+                                finished_cancel_tail = true;
+                            },
+                            _ => return Err(failure("OpenAI cancellation frame has an incomplete event tail")),
+                        }
+                    }
+                    if suppress_cancel_projection { continue; }
+                    if turn.current.is_none() && matches!(&event, RealtimeEvent::TurnStarted { .. } | RealtimeEvent::ToolCall { .. } | RealtimeEvent::AudioDelta { .. } | RealtimeEvent::TextDelta { .. } | RealtimeEvent::Transcript { direction: RealtimeTranscriptDirection::Output, .. }) {
+                        return Err(failure("realtime provider output arrived without an admitted local input"));
+                    }
+                    if turn.current.is_none() && matches!(&event, RealtimeEvent::TurnCompleted { .. } | RealtimeEvent::ToolCancelled { .. } | RealtimeEvent::Interrupted | RealtimeEvent::UserSpeechStarted)
+                        && !(explicit_cancel_tail.as_ref().is_some_and(|tail| tail.belongs_to_current) && matches!(&event, RealtimeEvent::ToolCancelled { .. } | RealtimeEvent::Interrupted))
+                        && !(limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse && matches!(&event, RealtimeEvent::TurnCompleted { status: Some(status), .. } if status == "cancelled")) {
+                        continue;
+                    }
+                    let mut terminal = if finished_cancel_tail { explicit_cancel_tail = None; deferred_terminal.take() } else { None };
+                    let mut forward_event = true;
                     match &event {
+                        RealtimeEvent::TurnStarted { turn_id } if limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse => turn.response_started(turn_id, !pending.is_empty())?,
                         RealtimeEvent::ToolCall{call_id,name,arguments}=>{
                             if !seen_calls.insert(call_id.clone()){return Err(failure("provider repeated a realtime tool call identity"));}
                             if pending.len()>=limits.max_pending_tools{return Err(failure("realtime tool queue is full"));}
                             if !allowed.contains(name)||self.find_dispatchable_tool(name).is_none(){return Err(failure("provider requested an unavailable realtime Agent tool"));}
+                            turn.tool_called();
                             let id=ToolUseId::new();let assistant=MessageId::new();let message=ConversationMessage::Assistant{id:assistant,content:vec![ContentBlock::ToolUse{id:id.clone(),name:name.clone(),input:Utf16JsonProjection::from_serde_value(arguments).map_err(|error|failure(error.to_string()))?,provider_id:Some(call_id.clone())}],stop_reason:Some("tool_use".into()),per_turn_effort:None,resumable:None};
                             self.session.lock().await.history.push(message.clone());self.persist_message_to_jsonl(&message).await;
                             let token=session_cancel.child_token();tool_tokens.insert(call_id.clone(),token.clone());let orch=self.clone();let call_id=call_id.clone();let name=name.clone();let arguments=arguments.clone();
@@ -1057,7 +1625,13 @@ impl ConversationOrchestrator {
                             }));
                         },
                         RealtimeEvent::ToolCancelled{call_ids}=>{for id in call_ids{if let Some(token)=tool_tokens.get(id){token.cancel();}}},
-                        RealtimeEvent::Interrupted|RealtimeEvent::UserSpeechStarted=>{ ledger.interrupt(); for token in tool_tokens.values() { token.cancel(); } },
+                        RealtimeEvent::Interrupted|RealtimeEvent::UserSpeechStarted=>{
+                            turn.interrupted=true; ledger.interrupt(); for token in tool_tokens.values() { token.cancel(); }
+                            if turn.response_done && !turn.continuation_requested {
+                                if pending.is_empty() { terminal = turn.finish(); }
+                                else { turn.cancelled_terminal=true; }
+                            }
+                        },
                         RealtimeEvent::AudioDelta { item_id, .. } => {
                             if !ledger.generated.contains(item_id) && ledger.generated.len() >= limits.max_pending_transcripts { return Err(failure("realtime pending playback queue is full")); }
                             ledger.generated.insert(item_id.clone());
@@ -1069,18 +1643,87 @@ impl ConversationOrchestrator {
                                 session.usage.0.output_tokens = session.usage.0.output_tokens.saturating_add(output_tokens.unwrap_or(0));
                             }
                         },
-                        RealtimeEvent::Transcript{direction,text,item_id,final_chunk:true,..}=>{
-                            if text.len()>limits.max_transcript_bytes{return Err(failure("realtime transcript exceeds its byte bound"));}
+                        RealtimeEvent::Transcript{direction,text,item_id,turn_id,final_chunk,..}=>{
+                            if *final_chunk && text.len()>limits.max_transcript_bytes{return Err(failure("realtime transcript exceeds its byte bound"));}
                             match direction {
-                                RealtimeTranscriptDirection::Input=>{if ledger.finalized_input.insert(item_id.clone()){self.append_realtime_text(text.clone(),true).await;}},
-                                RealtimeTranscriptDirection::Output=>{if let Some(text)=ledger.output_final(item_id.clone(),text.clone(),limits)?{self.append_realtime_text(text,false).await;}},
+                                RealtimeTranscriptDirection::Input=>{
+                                    let (text, forward) = audio_admissions.transcript(
+                                        limits.completion_boundary, item_id.as_deref(), turn_id.as_deref(),
+                                        text, *final_chunk, turn.current.is_some(), limits.max_pending_transcripts, &event,
+                                    )?;
+                                    forward_event = forward;
+                                    if let Some(text) = text {
+                                        if ledger.finalized_input.insert(item_id.clone()){self.append_realtime_text(text,true).await;}
+                                    }
+                                },
+                                RealtimeTranscriptDirection::Output if *final_chunk=>{if let Some(text)=ledger.output_final(item_id.clone(),text.clone(),limits)?{self.append_realtime_text(text,false).await;}},
+                                RealtimeTranscriptDirection::Output=>{},
+                            }
+                        },
+                        RealtimeEvent::TurnCompleted { turn_id, status } => {
+                            if limits.completion_boundary == RealtimeCompletionBoundary::Gemini38 {
+                                if let Some(id) = turn_id { audio_admissions.bind_gemini_turn(id, turn.current.is_some()); }
+                            }
+                            let stale_response_id = turn_id.as_ref().is_some_and(|id| turn.completed_provider_ids.contains(id) || turn.provider_id.as_ref().is_some_and(|expected| expected != id));
+                            if limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse && status.as_deref() == Some("cancelled") {
+                                let belongs = turn.current.is_some() && turn.response_started && !stale_response_id;
+                                explicit_cancel_tail = Some(ExplicitCancelTail { stage: ExplicitCancelTailStage::ToolCancelled, response_id: turn_id.clone(), belongs_to_current: belongs });
+                                if !belongs { continue; }
+                            }
+                            if limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse && stale_response_id { continue; }
+                            let interrupted = turn.interrupted || matches!(status.as_deref(), Some("cancelled" | "interrupted"));
+                            if interrupted { for token in tool_tokens.values() { token.cancel(); } }
+                            match limits.completion_boundary {
+                                RealtimeCompletionBoundary::ExplicitResponse => terminal = turn.completed(turn_id, interrupted, !pending.is_empty())?,
+                                RealtimeCompletionBoundary::Gemini38 => {
+                                    if turn.google_candidate.is_some() { return Err(failure("Gemini completion lacks its matching provider frame")); }
+                                    turn.google_candidate = Some((!pending.is_empty(), interrupted));
+                                    turn.google_projection_seen = false;
+                                }
+                            }
+                        },
+                        RealtimeEvent::ProviderEvent { name, native } if limits.completion_boundary == RealtimeCompletionBoundary::ExplicitResponse && name == "input_audio_buffer.committed" => {
+                            if let Some(item_id) = native.get("item_id").and_then(serde_json::Value::as_str) {
+                                if let Some(buffered) = audio_admissions.openai_committed(item_id) {
+                                    if let RealtimeEvent::Transcript { text, .. } = &buffered {
+                                        if ledger.finalized_input.insert(Some(item_id.to_owned())) { self.append_realtime_text(text.clone(), true).await; }
+                                    }
+                                    emit_agent_output!(RealtimeAgentOutput::Provider(buffered));
+                                }
+                            }
+                        },
+                        RealtimeEvent::ProviderEvent { name, native } if limits.completion_boundary == RealtimeCompletionBoundary::Gemini38 && turn.google_candidate.is_some() => {
+                            // The pinned codec may insert this projection from the
+                            // same frame before it forwards the full serverContent.
+                            if name == "generationComplete" && native == &serde_json::Value::Bool(true) {
+                                if turn.google_projection_seen { return Err(failure("Gemini completion has repeated provider projections")); }
+                                turn.google_projection_seen = true;
+                                emit_agent_output!(RealtimeAgentOutput::Provider(event.clone()));
+                                continue;
+                            }
+                            let Some(content) = (name == "serverContent").then(|| native.get("serverContent")).flatten() else { return Err(failure("Gemini completion lacks its matching provider frame")); };
+                            if content.get("turnComplete").and_then(serde_json::Value::as_bool) != Some(true) { return Err(failure("Gemini completion frame is inconsistent")); }
+                            let (was_pending, interrupted) = turn.google_candidate.take().expect("checked candidate");
+                            let interrupted = interrupted || turn.interrupted;
+                            match content.get("interactionStatus").and_then(serde_json::Value::as_str) {
+                                Some("IN_PROGRESS") => { turn.response_done=false; },
+                                Some("IDLE") => {
+                                    turn.response_done=true;
+                                    if interrupted && (was_pending || !pending.is_empty()) { turn.cancelled_terminal = true; }
+                                    if pending.is_empty() && (interrupted || (!was_pending && (!turn.response_had_tool || turn.continuation_requested))) { terminal = turn.finish(); }
+                                },
+                                _ => return Err(failure("Gemini completion cannot confirm interactionStatus IDLE")),
                             }
                         },
                         RealtimeEvent::ProviderError{message,..}|RealtimeEvent::ConnectionInterrupted{message}=>return Err(failure(format!("native realtime provider failed: {message}"))),
                         RealtimeEvent::Closed{..}=>return Ok(RealtimeAgentEnd::Closed),
                         _=>{},
                     }
-                    output.try_send(event).map_err(|error|failure(format!("realtime output queue unavailable: {error}")))?;
+                    if forward_event { emit_agent_output!(RealtimeAgentOutput::Provider(event)); }
+                    if let Some(turn_id) = terminal {
+                        if explicit_cancel_tail.is_some() { deferred_terminal = Some(turn_id); }
+                        else { emit_agent_output!(RealtimeAgentOutput::AgentTurnCompleted { turn_id }); }
+                    }
                 }
             }
         }

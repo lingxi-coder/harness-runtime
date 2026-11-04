@@ -13,37 +13,8 @@
 //! - `title` — M5-08 first-user-message title extraction.
 //! - `transcript_compact` — SC-08 transcript-file rewrite (`performCompactTranscript`).
 
-/// Persisted capability profile for one immutable session transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SessionMode {
-    /// Conversational profile: device, read, web and inline-visualization
-    /// tools plus `Write` and `Shell`, each call confirmed through the
-    /// permission prompt. Skills never get shell expansion here.
-    Chat,
-    /// Full development profile and legacy fallback.
-    Code,
-}
-
-impl SessionMode {
-    /// Stable JSONL wire value.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Chat => "chat",
-            Self::Code => "code",
-        }
-    }
-
-    /// Parse a stable JSONL wire value.
-    #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "chat" => Some(Self::Chat),
-            "code" => Some(Self::Code),
-            _ => None,
-        }
-    }
-}
+/// Persisted behavior profile shared with the host and orchestrator.
+pub use lingxi_core::host::session_context::ConversationMode as SessionMode;
 
 pub mod aliases;
 pub mod djb2;
@@ -56,6 +27,7 @@ pub mod path;
 pub mod re_append;
 pub mod reader;
 pub mod recover;
+mod scheduled_anchor;
 pub mod schema;
 pub mod title;
 pub mod transcript_compact;
@@ -63,8 +35,12 @@ pub mod uuid;
 pub mod writer;
 
 // Re-export pre-existing public surface so dependents keep their imports.
-pub use aliases::{read_session_aliases, record_session_alias, SESSION_ALIASES_FILE};
+pub use aliases::{
+    read_session_aliases, record_session_alias, record_session_cwd_alias, SESSION_ALIASES_FILE,
+    SESSION_CWD_ALIASES_FILE,
+};
 pub use recover::{read_recover, RecoveryResult, StorageError};
+pub use scheduled_anchor::{is_mode_only_draft, validated_empty_draft_cwd};
 
 // New M5-07 public surface.
 pub use durable_writer::{
@@ -107,19 +83,22 @@ pub use writer::{CapturedChatTranscript, ChatTranscriptCheckpoint, JsonlWriter};
 
 // New M5-08 public surface.
 pub use loader::{
-    build_conversation_chain, discovered_tool_names, find_session_exact_raw_with_diagnostics,
-    find_session_exact_with_diagnostics, find_session_in_scope_with_diagnostics,
-    find_session_with_diagnostics, find_tip, list_recent_sessions, list_recent_sessions_in_scope,
-    list_recent_sessions_in_scope_with_diagnostics, list_recent_sessions_in_scope_with_worktrees,
-    list_recent_sessions_with_diagnostics, load_routed_session_across_worktrees,
-    load_routed_session_across_worktrees_with_path, load_routed_session_from_path_with_source,
-    load_routed_session_with_path, load_routed_session_with_source, load_session,
-    load_session_across_worktrees, load_session_entries, load_session_entries_across_worktrees,
-    pre_compact_discovered_tools, read_agent_resume_state, read_agent_snapshot,
-    resolve_job_transcript_raw, resolve_session_path, resolve_session_path_across_worktrees,
-    resolve_session_path_in_scope, resolve_session_path_raw, search_sessions_by_custom_title,
-    select_session_interactive, transcript_workspace_path, JobTranscriptResolveOptions,
-    LoaderError, ResolvedJobTranscriptPath, SessionCatalog, SessionDiscoveryScope, SessionMetadata,
+    build_conversation_chain, describe_session_source, discovered_tool_names,
+    find_session_exact_raw_with_diagnostics, find_session_exact_with_diagnostics,
+    find_session_in_scope_with_diagnostics, find_session_with_diagnostics, find_tip,
+    list_recent_sessions, list_recent_sessions_in_scope,
+    list_recent_sessions_in_scope_with_diagnostics, list_recent_sessions_in_scope_with_mode,
+    list_recent_sessions_in_scope_with_worktrees,
+    list_recent_sessions_in_scope_with_worktrees_and_mode, list_recent_sessions_with_diagnostics,
+    load_routed_session_across_worktrees, load_routed_session_across_worktrees_with_path,
+    load_routed_session_from_path_with_source, load_routed_session_with_path,
+    load_routed_session_with_source, load_session, load_session_across_worktrees,
+    load_session_entries, load_session_entries_across_worktrees, pre_compact_discovered_tools,
+    read_agent_resume_state, read_agent_snapshot, resolve_job_transcript_raw, resolve_session_path,
+    resolve_session_path_across_worktrees, resolve_session_path_in_scope, resolve_session_path_raw,
+    search_sessions_by_custom_title, select_session_interactive, transcript_workspace_path,
+    DescribedSessionSource, JobTranscriptResolveOptions, LoaderError, ResolvedJobTranscriptPath,
+    SessionCatalog, SessionDiscoveryScope, SessionMetadata,
 };
 pub use message_identity::SessionMessageIdentitySnapshot;
 pub use title::{derive_fork_name, extract_title, FORK_NAME_FALLBACK};

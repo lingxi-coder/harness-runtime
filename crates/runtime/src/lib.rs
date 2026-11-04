@@ -17,6 +17,12 @@ pub use provider_config::startup_catalog::{CatalogPlatform, CatalogTrigger, Star
 
 #[cfg(feature = "engine")]
 pub mod api;
+/// Read-only recovery inspection for independent session branches.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod branch_recovery;
+/// Independent, cancellable read-only conversation handoffs.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod handoff;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod media_handoff;
 #[cfg(any(feature = "desktop", feature = "mobile"))]

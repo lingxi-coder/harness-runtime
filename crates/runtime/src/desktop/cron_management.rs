@@ -239,6 +239,7 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
             {
                 return Err("Choose a target session".to_string());
             }
+            cron::validate_automation_source(&automation)?;
             Ok(automation)
         })
         .transpose()?;
@@ -300,6 +301,9 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
         let automation = incoming_automation.map(|mut automation| {
             automation.runs.clear();
             automation.owned_session_id = None;
+            automation.owned_session_transcript_path = None;
+            automation.owned_session_mode = None;
+            automation.owned_session_scope_key = None;
             automation.status_reason = None;
             automation
         });
@@ -393,7 +397,28 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
             if let Some(mut automation) = incoming_automation {
                 if let Some(old) = &task.automation {
                     automation.runs = old.runs.clone();
-                    automation.owned_session_id = old.owned_session_id.clone();
+                    if old.run_mode == cron::RunMode::TaskSession
+                        && automation.run_mode == cron::RunMode::TaskSession
+                        && old.owned_session_id.is_some()
+                        && (automation.session_mode != old.owned_session_mode
+                            || automation.session_scope_key != old.owned_session_scope_key)
+                    {
+                        return Err(
+                            "Create a new task to change an owned session's mode or owner".into(),
+                        );
+                    }
+                    if old.run_mode == automation.run_mode {
+                        automation.owned_session_id = old.owned_session_id.clone();
+                        automation.owned_session_transcript_path =
+                            old.owned_session_transcript_path.clone();
+                        automation.owned_session_mode = old.owned_session_mode.clone();
+                        automation.owned_session_scope_key = old.owned_session_scope_key.clone();
+                    } else {
+                        automation.owned_session_id = None;
+                        automation.owned_session_transcript_path = None;
+                        automation.owned_session_mode = None;
+                        automation.owned_session_scope_key = None;
+                    }
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -422,6 +447,9 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
                 } else {
                     automation.runs.clear();
                     automation.owned_session_id = None;
+                    automation.owned_session_transcript_path = None;
+                    automation.owned_session_mode = None;
+                    automation.owned_session_scope_key = None;
                 }
                 automation.status_reason = None;
                 task.automation = Some(automation);
@@ -458,7 +486,26 @@ mod tests {
         }
     }
     fn automation() -> client::protocol::commands::CronAutomationDto {
-        serde_json::from_value(serde_json::json!({"version":2,"status":"active","model":"openai/gpt-test","reasoning":{"type":"automatic"},"runMode":"new_session","notificationPolicy":"all"})).unwrap()
+        serde_json::from_value(serde_json::json!({"version":2,"status":"active","model":"openai/gpt-test","reasoning":{"type":"automatic"},"runMode":"new_session","sessionMode":"code","sessionScopeKey":"project.test","notificationPolicy":"all"})).unwrap()
+    }
+    #[test]
+    fn configured_runs_require_their_explicit_mode_and_source_owner() {
+        let mut value: cron::CronAutomation = serde_json::from_value(serde_json::json!({
+            "version":2, "model":"openai/model", "runMode":"new_session",
+            "sessionMode":"chat", "sessionScopeKey":"global"
+        }))
+        .unwrap();
+        assert!(cron::validate_automation_source(&value).is_ok());
+        value.session_mode = None;
+        assert!(cron::validate_automation_source(&value).is_err());
+        value.run_mode = cron::RunMode::SelectedSession;
+        value.target_session_id = Some(uuid::Uuid::new_v4().to_string());
+        value.target_session_transcript_path = Some("/catalog/source.jsonl".into());
+        value.target_session_mode = Some("code".into());
+        value.target_session_scope_key = Some("project.test".into());
+        assert!(cron::validate_automation_source(&value).is_ok());
+        value.target_session_transcript_path = None;
+        assert!(cron::validate_automation_source(&value).is_err());
     }
     #[test]
     fn history_pruning_removes_only_named_terminal_runs_from_current_state() {

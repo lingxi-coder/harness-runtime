@@ -1669,7 +1669,7 @@ impl ConversationOrchestrator {
         let (messages, message_grouping) = {
             let session = self.session.lock().await;
             (
-                session.history.clone(),
+                session.model_context_history(),
                 session.hook_message_grouping.clone(),
             )
         };

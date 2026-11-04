@@ -293,6 +293,7 @@ platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
 mobile-linux-android.workspace = true
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 # Native replay fixtures verify their bytes in desktop-only test builds too.
 sha2 = "0.10"
 # Shared host-side filesystem fixtures also run with only the mobile feature.
@@ -307,7 +308,7 @@ async-trait = { workspace = true }
 base64 = { version = "0.22" }
 client = { path = "../client", features = ["test-support"] }
 insta = { version = "1.40", features = ["yaml"] }
-orchestrator = { path = "../orchestrator" }
+orchestrator = { path = "../orchestrator", features = ["test-support"] }
 tempfile = { version = "3", features = [] }
 test-harness = { path = "../test-harness" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }

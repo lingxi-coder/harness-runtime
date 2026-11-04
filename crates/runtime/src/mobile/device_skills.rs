@@ -236,7 +236,7 @@ mod tests {
             let descriptor = loader.load(&"visualize".into()).await.unwrap().unwrap();
             assert!(descriptor.allowed_tools.is_empty());
             assert!(descriptor.shell.is_none() && descriptor.context.is_none());
-            assert_eq!(descriptor.skip_shell_expansion, mode == SessionMode::Chat);
+            assert!(!descriptor.skip_shell_expansion);
             assert!(descriptor
                 .dynamic_body
                 .unwrap()
@@ -247,25 +247,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_app_skill_follows_the_local_app_tool_in_both_modes() {
+    async fn local_app_authoring_skill_is_visible_only_to_code_owners() {
         let mut registry = CommandRegistry::new();
         register_mobile_device_skills(&mut registry, &tool_names(&["Read"]));
         assert!(registry.resolve(&"local-app".into()).is_none());
         register_mobile_device_skills(&mut registry, &tool_names(&["LocalApp", "Shell"]));
         let registry = Arc::new(RwLock::new(registry));
-        for mode in [SessionMode::Chat, SessionMode::Code] {
-            let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
-            assert_eq!(loader.list_names().await, ["local-app".into()]);
-            let descriptor = loader.load(&"local-app".into()).await.unwrap().unwrap();
-            assert!(descriptor.allowed_tools.is_empty());
-            assert!(descriptor.shell.is_none() && descriptor.context.is_none());
-            assert!(descriptor
-                .dynamic_body
-                .unwrap()
-                .build(&"".into())
-                .string_at("")
-                .is_some_and(|text| text.contains("with the `Shell` tool")));
-        }
+        let chat = MobileDiskSkillLoader::for_mode(registry.clone(), SessionMode::Chat);
+        assert!(chat.list_names().await.is_empty());
+        assert!(chat.load(&"local-app".into()).await.unwrap().is_none());
+        assert!(
+            lingxi_core::host::skill_loader::SkillLoader::resolve_and_load(
+                &chat,
+                "local-app",
+                "coder",
+                None,
+                None,
+                &[],
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        let code = MobileDiskSkillLoader::for_mode(registry, SessionMode::Code);
+        assert_eq!(code.list_names().await, ["local-app".into()]);
+        let descriptor = code.load(&"local-app".into()).await.unwrap().unwrap();
+        assert!(descriptor.allowed_tools.is_empty());
+        assert!(descriptor.shell.is_none() && descriptor.context.is_none());
+        assert!(descriptor
+            .dynamic_body
+            .unwrap()
+            .build(&"".into())
+            .string_at("")
+            .is_some_and(|text| text.contains("with the `Shell` tool")));
+        assert!(
+            lingxi_core::host::skill_loader::SkillLoader::resolve_and_load(
+                &code,
+                "local-app",
+                "coder",
+                None,
+                None,
+                &[],
+                lingxi_core::host::CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
     }
 
     #[tokio::test]

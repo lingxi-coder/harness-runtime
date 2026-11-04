@@ -13,10 +13,14 @@ thiserror.workspace = true
 uuid = { version = "1.10", features = ["v4"] }
 sha2 = "0.10"
 tracing.workspace = true
+rooted-fs.workspace = true
 base64 = "0.22"
 jsonschema = { version = "=0.46.10", default-features = false }
 fs2 = "0.4"
 semver = "1"
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
+unicode-normalization = "=0.1.25"
+ryu-js = "1"
 
 [dev-dependencies]
 core = { path = "../core" }

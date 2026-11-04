@@ -216,6 +216,9 @@ mod mod_model_fork_tests;
 #[path = "conversation/tests/prompt_snapshot_tests.rs"]
 mod prompt_snapshot_tests;
 
+#[path = "conversation/tests/context_profile_recovery_tests.rs"]
+mod context_profile_recovery_tests;
+
 #[path = "conversation/tests/bounded_post_compact_read_tests.rs"]
 mod bounded_post_compact_read_tests;
 
@@ -291,6 +294,9 @@ mod session_usage_tests;
 
 #[path = "conversation/tests/session_append_tests.rs"]
 mod session_append_tests;
+
+#[path = "conversation/tests/session_handoff_tests.rs"]
+mod session_handoff_tests;
 
 #[path = "conversation/tests/mod_session_receive_tests.rs"]
 mod mod_session_receive_tests;

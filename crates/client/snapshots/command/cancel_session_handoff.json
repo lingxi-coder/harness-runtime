@@ -1,0 +1,4 @@
+{
+  "type": "cancel_session_handoff",
+  "request_id": "handoff-1"
+}

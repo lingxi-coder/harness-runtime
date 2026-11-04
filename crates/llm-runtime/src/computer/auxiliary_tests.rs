@@ -145,6 +145,8 @@ async fn auxiliary_builders_and_dispatch_never_submit_parent_receipts() {
         continuation: None,
         binding: None,
         submission: Some(submission.clone()),
+        ordinary_history: false,
+        context_epoch: 0,
     };
     scope_computer_request(Some(projection), async {
         for tools in [vec![], vec![computer_tool().into()]] {
@@ -223,6 +225,8 @@ async fn scheduled_main_request_keeps_its_native_projection_and_receipt_authorit
             continuation: None,
             binding: None,
             submission: Some(submission.clone()),
+            ordinary_history: false,
+            context_epoch: 0,
         }),
         async {
             let mut request = MessagesCreateRequest::new(
@@ -281,6 +285,8 @@ async fn auxiliary_history_conversion_does_not_use_the_parent_continuation_bound
                 continuation: Some(continuation.clone()),
                 binding: None,
                 submission: None,
+                ordinary_history: false,
+                context_epoch: 0,
             }),
             async {
                 let messages = vec![user("early context"), user("summarize all context")];
@@ -439,6 +445,117 @@ impl crate::Transport for CaptureAuxiliary {
 }
 
 #[tokio::test]
+async fn submitted_anthropic_receipt_is_in_the_dispatched_bytes_after_old_epoch() {
+    let capture = Arc::new(CaptureAuxiliary::default());
+    let service = service_with_transport(wire::ProtocolFamily::AnthropicMessages, capture.clone());
+    let (mut messages, _) = gemini_native_history();
+    let original: wire::ContentBlock = serde_json::from_value(json!({
+        "type":"tool_use", "id":"fresh-native-call", "name":"screenshot", "input":{}, "toolset_name":"computer"
+    })).unwrap();
+    let frame = ComputerFrame {
+        width: 800,
+        height: 600,
+        geometry_version: "frame".into(),
+    };
+    let call = wire::decode_computer_calls(
+        NativeComputerProvider::Anthropic,
+        std::slice::from_ref(&original),
+        None,
+        &frame,
+    )
+    .unwrap()
+    .remove(0);
+    let image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let receipt = wire::encode_computer_receipt(&call, &wire::ComputerReceiptInput {
+        results: vec![wire::NativeComputerResult { operation_index: 0, status: wire::NativeExecutionStatus::Succeeded,
+            content: "fresh observation".into(), blocks: Some(wire::JsonPayload::from_generated_value(&json!([{
+                "type":"image", "source":{"type":"base64", "media_type":"image/png", "data":image}
+            }])).unwrap()) }],
+        acknowledged_safety_checks: vec![],
+    }).unwrap();
+    messages.push(ConversationMessage::Assistant { per_turn_effort: None, id: MessageId::new(),
+        stop_reason: Some("tool_use".into()), resumable: None, content: vec![
+            ContentBlock::ToolUse { id:"fresh-synthetic".into(), name:"computer".into(),
+                input: Source::from_serde_value(&json!({"action":"screenshot"})).unwrap(), provider_id: None },
+            ContentBlock::ProviderContent { protocol:"anthropic_messages".into(), value: Source::from_serde_value(&json!({
+                "type":"lingxi_computer_binding", "provider_response_id":"fresh-response", "context_epoch":1,
+                "call":call, "tool_use_ids":["fresh-synthetic"], "original_blocks":[original]
+            })).unwrap() },
+        ]
+    });
+    messages.push(history_user(vec![
+        ContentBlock::ToolResult { tool_use_id:"fresh-synthetic".into(), content:"fresh observation".into(),
+            is_error:Some(false), content_blocks:None, provider_tool_use_id:None },
+        ContentBlock::ProviderContent { protocol:"anthropic_messages".into(), value:Source::from_serde_value(&json!({
+            "type":"lingxi_computer_receipt", "provider_response_id":"fresh-response", "context_epoch":1,
+            "call_id":"fresh-native-call", "receipt_id":"receipt-1", "block":receipt
+        })).unwrap() },
+    ]));
+    let journal = Arc::new(Journal::default());
+    let submission = submission(journal.clone());
+    journal
+        .record_receipt(submission.receipts[0].clone())
+        .await
+        .unwrap();
+    scope_computer_request(
+        Some(ComputerRequestProjection {
+            native: Some(ComputerNativeDeclaration {
+                provider: NativeComputerProvider::Anthropic,
+                capabilities: ComputerCapabilities {
+                    operations: vec![wire::computer::ComputerOperationKind::Screenshot],
+                },
+                frame,
+            }),
+            continuation: None,
+            binding: None,
+            submission: Some(submission),
+            ordinary_history: true,
+            context_epoch: 1,
+        }),
+        async {
+            let result = service
+                .messages_create(MessagesCreateRequest::new(
+                    "model",
+                    Some("test"),
+                    None,
+                    messages,
+                    vec![computer_tool()],
+                ))
+                .await;
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("fixture stopped after capture"));
+        },
+    )
+    .await;
+    let body = capture.0.lock().unwrap();
+    assert_eq!(body.len(), 1);
+    let body_text = body[0].to_string();
+    assert!(body_text.contains("synthetic"));
+    assert!(!body_text.contains("fresh-synthetic"));
+    let typed_receipt = body[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == "fresh-native-call")
+        .expect("the submitted receipt must be present in the actual transport body");
+    assert_eq!(typed_receipt["toolset_name"], "computer");
+    assert_eq!(
+        typed_receipt["content"],
+        json!([{
+            "type":"image", "source":{"type":"base64", "media_type":"image/png", "data":image}
+        }])
+    );
+    assert_eq!(
+        journal.receipt("receipt-1").await.unwrap().unwrap().stage,
+        NativeReceiptStage::Submitted
+    );
+}
+
+#[tokio::test]
 async fn auxiliary_dispatch_projects_actual_native_history_as_ordinary_tools() {
     for destination in [
         wire::ProtocolFamily::GeminiInteractions,
@@ -456,6 +573,8 @@ async fn auxiliary_dispatch_projects_actual_native_history_as_ordinary_tools() {
             .unwrap();
         scope_computer_request(Some(ComputerRequestProjection {
             native: None, continuation: Some(continuation), binding: None, submission: Some(submission.clone()),
+                ordinary_history: false,
+                context_epoch: 0,
         }), async {
             let plain = auxiliary(&service, messages.clone(), vec![]);
             assert_independent(&plain);

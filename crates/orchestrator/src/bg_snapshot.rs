@@ -269,6 +269,38 @@ pub fn history_to_jsonl_lines(
             attachment_projection = Some((*attachment).clone());
             inner = source(&());
             extra = Source::parse("{}").expect("empty attachment metadata");
+            // Prompt-ingress attachments replay their model-facing message
+            // from the durable rendered cache, not from the raw payload. The
+            // live history already owns that rendering and its UTF-16 units.
+            if let ConversationMessage::User {
+                content,
+                is_meta,
+                api_message_override,
+                ..
+            } = msg
+            {
+                let rendered = crate::request_context::rendered_system_message(msg).or_else(|| {
+                    (content.is_empty()
+                        && attachment.string_at("/type") == Some("deferred_tools_delta"))
+                    .then(|| Source::array(Vec::new()).expect("empty rendered array"))
+                });
+                if let Some(rendered) = rendered {
+                    let role = if attachment.string_at("/type") == Some("unknown_command_fallback")
+                    {
+                        "user"
+                    } else if *is_meta || api_message_override.is_some() {
+                        "system"
+                    } else {
+                        "user"
+                    };
+                    extra
+                        .set_field("rendered", rendered)
+                        .expect("attachment metadata is an object");
+                    extra
+                        .set_field("renderedRole", role.into())
+                        .expect("attachment metadata is an object");
+                }
+            }
         }
         if kind == "attachment"
             && conversation
@@ -387,6 +419,7 @@ mod tests {
             history: history.to_vec(),
             model_reminder_attachments: Vec::new(),
             native_request_history: lingxi_core::host::NativeRequestHistoryMetadata::default(),
+            ..Default::default()
         }
     }
 
@@ -450,7 +483,10 @@ mod tests {
             "model",
         );
         let row = source(&lines[0]);
-        assert_eq!(row.string_units("/message/content/0/text"), Some(units));
+        assert_eq!(
+            row.string_units("/message/content/0/text"),
+            Some(units.clone())
+        );
         assert_eq!(row.string_units("/origin/text"), Some(vec![0xd800]));
         assert_eq!(lines[0].turn_companion, Some(Some(true)));
 
@@ -469,6 +505,8 @@ mod tests {
         let row = source(&lines[0]);
         assert_eq!(row.string_at("/type"), Some("attachment"));
         assert_eq!(row.string_units("/attachment/body"), Some(vec![0xd800]));
+        assert_eq!(row.string_units("/rendered/0/content"), Some(units));
+        assert_eq!(row.string_at("/renderedRole"), Some("system"));
         assert_eq!(lines[0].attachment_projection.as_ref(), Some(&attachment));
     }
 
@@ -941,11 +979,13 @@ mod tests {
                 &token_attachment,
             )
             .unwrap();
+        let token_content = format!("<system-reminder>\n{token_text}\n</system-reminder>");
         let token_message = orch
             .persist_model_reminder(
-                ConversationMessage::user_meta(
+                ConversationMessage::user_meta_js_utf16(
                     lingxi_core::types::MessageId::new(),
-                    format!("<system-reminder>\n{token_text}\n</system-reminder>"),
+                    token_content.clone(),
+                    token_content.encode_utf16().collect(),
                 ),
                 token_attachment_source.clone(),
             )

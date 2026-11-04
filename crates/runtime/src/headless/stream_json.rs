@@ -1684,6 +1684,7 @@ impl StreamJsonStream {
             ("messagesSummarized", "messages_summarized"),
             ("precomputed", "precomputed"),
             ("preCompactDiscoveredTools", "pre_compact_discovered_tools"),
+            ("nativeExactPreserved", "native_exact_preserved"),
         ] {
             if let Some(value) = source.get(camel) {
                 compact.insert(snake.into(), value.clone());
@@ -4648,6 +4649,17 @@ mod tests {
                 "\n"
             )
         );
+    }
+
+    #[test]
+    fn compact_boundary_exports_native_exact_preserved_authority() {
+        let metadata = lingxi_core::types::CompactBoundaryMetadata {
+            native_exact_preserved: Some(true),
+            ..Default::default()
+        };
+        let frame =
+            StreamJsonStream::build_compact_boundary_frame("session", "boundary", &metadata);
+        assert_eq!(frame["compact_metadata"]["native_exact_preserved"], true);
     }
 
     #[test]

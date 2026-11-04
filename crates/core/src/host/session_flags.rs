@@ -84,23 +84,6 @@ pub const BRIEF_MODE_ENABLED_REMINDER: &str = "<system-reminder>\nBrief mode is 
 /// Model-facing reminder emitted after `/brief` disables Brief-only mode.
 pub const BRIEF_MODE_DISABLED_REMINDER: &str = "<system-reminder>\nBrief mode is now disabled. The SendUserMessage tool is no longer available — reply with plain text.\n</system-reminder>";
 
-/// `$U()` (the "optimistic" tool-search gate) analog. SESSION-scoped in Claude
-/// Code: `$U()` reads the tool-search MODE (`ENABLE_TOOL_SEARCH` env /
-/// experimental-betas kill switch) and the active PROVIDER — never the current
-/// request's tools array. Every request assembly (main loop AND side queries)
-/// branches its `tool_reference` normalization on `$U()`
-/// (`if(!$U())W=j6s(W);else W=xPy(W,a)`), so a side query built with an EMPTY
-/// toolset (compaction summarizer, recap) in a tool-search-enabled session still
-/// takes the ENABLED branch and emits "[Tool references removed - tools no
-/// longer available]" — not the disabled branch's "[…tool search not enabled]".
-///
-/// The request builder (`llm-runtime`) is provider-agnostic and has no session
-/// handle, so it cannot compute this itself; the orchestrator — which knows the
-/// mode and resolved provider — publishes the decision here and the builder
-/// reads it. Defaults `false` (tool search off / no provider support). Set by
-/// the orchestrator at session init and refreshed as the model/profile resolve.
-static TOOL_SEARCH_ENABLED: AtomicBool = AtomicBool::new(false);
-
 /// Session-scoped dynamic Workflow availability, resolved by the composition
 /// root after managed policy and environment gates are known.
 static DYNAMIC_WORKFLOWS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -551,24 +534,6 @@ pub fn take_brief_mode_reminder() -> Option<&'static str> {
     }
 }
 
-/// Publish the session-scoped tool-search gate (Claude Code `$U()`) for the
-/// request builder's `tool_reference` normalization branch. Set by the
-/// orchestrator from the session mode + resolved provider support; the value is
-/// stable within a session (it changes only if the model/provider is switched).
-pub fn set_tool_search_enabled(enabled: bool) {
-    TOOL_SEARCH_ENABLED.store(enabled, Ordering::Relaxed);
-}
-
-/// Whether tool search is enabled for this session (Claude Code `$U()`), default
-/// `false`. Read by the request builder to select the `tool_reference`
-/// normalization branch for EVERY request — including side queries whose
-/// per-request toolset is empty — instead of inferring it from whether the
-/// request's tools array happens to carry a `ToolSearch` declaration.
-#[must_use]
-pub fn tool_search_enabled() -> bool {
-    TOOL_SEARCH_ENABLED.load(Ordering::Relaxed)
-}
-
 /// Publish whether dynamic workflows are available for this session.
 pub fn set_dynamic_workflows_enabled(enabled: bool) {
     DYNAMIC_WORKFLOWS_ENABLED.store(enabled, Ordering::Relaxed);
@@ -656,19 +621,6 @@ mod tests {
         assert_eq!(observed.1.unwrap().string_units(""), Some(Vec::new()));
 
         set_attribution(prior.0, prior.1);
-    }
-
-    #[test]
-    fn tool_search_flag_round_trips() {
-        // Serialize with the interactivity test which mutates a sibling global —
-        // these are process-wide, so keep tool-search mutation self-contained and
-        // restore the prior value so parallel tests observe no side effect.
-        let prior = tool_search_enabled();
-        set_tool_search_enabled(true);
-        assert!(tool_search_enabled(), "true must be observable");
-        set_tool_search_enabled(false);
-        assert!(!tool_search_enabled(), "false must be observable");
-        set_tool_search_enabled(prior);
     }
 
     #[test]

@@ -66,6 +66,20 @@ pub(crate) fn log_path(transcript_path: &Path) -> Result<PathBuf, FsError> {
     Ok(PathBuf::from(sidecar))
 }
 
+fn transcript_relative_at(transcript_path: &Path, root: &Path) -> Result<PathBuf, FsError> {
+    let relative = transcript_path
+        .strip_prefix(root)
+        .map_err(|_| FsError::Io("transcript is outside its pinned root".into()))?;
+    lingxi_core::host::rooted_fs::validate_relative_path(relative)?;
+    Ok(relative.to_path_buf())
+}
+
+fn log_path_at(transcript_path: &Path, root: &Path) -> Result<PathBuf, FsError> {
+    let relative = transcript_relative_at(transcript_path, root)?;
+    let name = log_path(&relative)?;
+    Ok(relative.with_file_name(name))
+}
+
 pub(crate) fn lock_path(transcript_path: &Path) -> Result<PathBuf, FsError> {
     let name = transcript_path
         .file_name()
@@ -251,15 +265,12 @@ pub(crate) fn append_row_identity_at(
     if uuid.is_empty() {
         return Err(FsError::Io("session message UUID must not be empty".into()));
     }
-    let sidecar_relative = log_path(transcript_path)?;
+    let sidecar_relative = log_path_at(transcript_path, root)?;
     if matches!(
         open_read_file_pinned(root, &sidecar_relative, Some(identity)),
         Err(FsError::NotFound(_))
     ) {
-        let transcript_relative = transcript_path
-            .file_name()
-            .map(PathBuf::from)
-            .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
+        let transcript_relative = transcript_relative_at(transcript_path, root)?;
         match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
             Ok(transcript)
                 if transcript
@@ -310,7 +321,7 @@ pub(crate) fn remove_row_identity_at(
     identity: &RootIdentity,
     uuid: &str,
 ) -> Result<(), FsError> {
-    let sidecar_relative = log_path(transcript_path)?;
+    let sidecar_relative = log_path_at(transcript_path, root)?;
     refresh_cache_at(store, transcript_path, root, identity, &sidecar_relative)?;
     let next_message_index = store
         .lock()
@@ -341,7 +352,7 @@ pub(crate) fn initialize_empty_host_log_at(
     root: &Path,
     identity: &RootIdentity,
 ) -> Result<(), FsError> {
-    let sidecar = log_path(transcript_path)?;
+    let sidecar = log_path_at(transcript_path, root)?;
     match open_read_file_pinned(root, &sidecar, Some(identity)) {
         Ok(_) => return Ok(()),
         Err(FsError::NotFound(_)) => {}
@@ -364,14 +375,11 @@ pub(crate) fn require_initialized_at(
     root: &Path,
     identity: &RootIdentity,
 ) -> Result<(), FsError> {
-    let sidecar_relative = log_path(transcript_path)?;
+    let sidecar_relative = log_path_at(transcript_path, root)?;
     match open_read_file_pinned(root, &sidecar_relative, Some(identity)) {
         Ok(_) => Ok(()),
         Err(FsError::NotFound(_)) => {
-            let transcript_relative = transcript_path
-                .file_name()
-                .map(PathBuf::from)
-                .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
+            let transcript_relative = transcript_relative_at(transcript_path, root)?;
             match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
                 Ok(file)
                     if file
@@ -401,7 +409,18 @@ pub(crate) fn bootstrap_at(
     root: &Path,
     identity: &RootIdentity,
 ) -> Result<SessionMessageIdentitySnapshot, FsError> {
-    let sidecar_relative = log_path(transcript_path)?;
+    bootstrap_from_source_at(store, transcript_path, root, identity, None)
+}
+
+/// Bootstrap using a source already read through the caller's pinned handle.
+pub(crate) fn bootstrap_from_source_at(
+    store: &IdentityLogStore,
+    transcript_path: &Path,
+    root: &Path,
+    identity: &RootIdentity,
+    verified_source: Option<&str>,
+) -> Result<SessionMessageIdentitySnapshot, FsError> {
+    let sidecar_relative = log_path_at(transcript_path, root)?;
     match open_read_file_pinned(root, &sidecar_relative, Some(identity)) {
         Ok(mut file) => {
             let mut bytes = Vec::new();
@@ -413,29 +432,35 @@ pub(crate) fn bootstrap_at(
                 .lock()
                 .map_err(|_| cache_lock_error())?
                 .insert(transcript_path.to_path_buf(), cache.clone());
-            return read_snapshot_at(transcript_path, root, identity);
+            return match verified_source {
+                Some(source) => Ok(intersect_snapshot_with_source(cache.snapshot, source)),
+                None => read_snapshot_at(transcript_path, root, identity),
+            };
         }
         Err(FsError::NotFound(_)) => {}
         Err(error) => return Err(error),
     }
 
-    let transcript_relative = transcript_path
-        .file_name()
-        .map(PathBuf::from)
-        .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
-    let transcript = match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
-        Ok(file) => Some(file),
-        Err(FsError::NotFound(_)) => None,
-        Err(error) => return Err(error),
-    };
     let mut entries = Vec::new();
     let mut next_message_index = 0u64;
     let mut seen_uuids = HashSet::new();
-    if let Some(mut file) = transcript {
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|error| FsError::Io(error.to_string()))?;
-        for uuid in outer_uuids(&content).into_iter().flatten() {
+    let mut loaded = String::new();
+    let content = if let Some(source) = verified_source {
+        Some(source)
+    } else {
+        let transcript_relative = transcript_relative_at(transcript_path, root)?;
+        match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
+            Ok(mut file) => {
+                file.read_to_string(&mut loaded)
+                    .map_err(|error| FsError::Io(error.to_string()))?;
+                Some(loaded.as_str())
+            }
+            Err(FsError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        }
+    };
+    if let Some(content) = content {
+        for uuid in outer_uuids(content).into_iter().flatten() {
             if !uuid.is_empty() && seen_uuids.insert(uuid.clone()) {
                 entries.push(IdentityLogEntry::Append {
                     uuid,
@@ -479,7 +504,16 @@ pub(crate) fn read_snapshot_at(
     root: &Path,
     identity: &RootIdentity,
 ) -> Result<SessionMessageIdentitySnapshot, FsError> {
-    let sidecar_relative = log_path(transcript_path)?;
+    read_snapshot_from_source_at(transcript_path, root, identity, None)
+}
+
+pub(crate) fn read_snapshot_from_source_at(
+    transcript_path: &Path,
+    root: &Path,
+    identity: &RootIdentity,
+    verified_source: Option<&str>,
+) -> Result<SessionMessageIdentitySnapshot, FsError> {
+    let sidecar_relative = log_path_at(transcript_path, root)?;
     let mut sidecar = match open_read_file_pinned(root, &sidecar_relative, Some(identity)) {
         Ok(file) => file,
         Err(FsError::NotFound(_)) => return Ok(SessionMessageIdentitySnapshot::default()),
@@ -491,14 +525,14 @@ pub(crate) fn read_snapshot_at(
         .map_err(|error| FsError::Io(error.to_string()))?;
     let mut cache = IdentityLogCache::default();
     apply_entries(&mut cache, &bytes, true)?;
+    if let Some(source) = verified_source {
+        return Ok(intersect_snapshot_with_source(cache.snapshot, source));
+    }
 
     // A crash may happen after a durable tombstone replacement but before its
     // sidecar Remove event. Intersect with current outer UUIDs so the reader
     // never advertises a row that is no longer present in Native JSONL.
-    let transcript_relative = transcript_path
-        .file_name()
-        .map(PathBuf::from)
-        .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
+    let transcript_relative = transcript_relative_at(transcript_path, root)?;
     let mut transcript = match open_read_file_pinned(root, &transcript_relative, Some(identity)) {
         Ok(file) => file,
         Err(FsError::NotFound(_)) => {
@@ -513,15 +547,19 @@ pub(crate) fn read_snapshot_at(
     transcript
         .read_to_string(&mut content)
         .map_err(|error| FsError::Io(error.to_string()))?;
-    let present = outer_uuids(&content)
+    Ok(intersect_snapshot_with_source(cache.snapshot, &content))
+}
+
+fn intersect_snapshot_with_source(
+    mut snapshot: SessionMessageIdentitySnapshot,
+    content: &str,
+) -> SessionMessageIdentitySnapshot {
+    let present = outer_uuids(content)
         .into_iter()
         .flatten()
         .collect::<HashSet<_>>();
-    cache
-        .snapshot
-        .by_uuid
-        .retain(|uuid, _| present.contains(uuid));
-    Ok(cache.snapshot)
+    snapshot.by_uuid.retain(|uuid, _| present.contains(uuid));
+    snapshot
 }
 
 /// The outer `uuid` of each transcript line, in file order: `None` for a line

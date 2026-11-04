@@ -2335,6 +2335,7 @@ fn run_slash_skill_as_turn_future<'a>(
     command: Utf16JsonProjection,
     body: Utf16JsonProjection,
     hook_messages: Vec<Utf16JsonProjection>,
+    skill: Option<lingxi_core::host::SlashSkillIdentity>,
     max_budget_usd: Option<f64>,
     no_stream: bool,
     sink: &'a dyn OutputSink,
@@ -2342,7 +2343,7 @@ fn run_slash_skill_as_turn_future<'a>(
     Box::pin(async move {
         sink.turn_start().await;
         let cancel = runtime.turn_cancel();
-        let inputs = orchestrator::skill_prompt_inputs(command, body, hook_messages);
+        let inputs = orchestrator::skill_prompt_inputs(command, body, hook_messages, skill);
         let turn_result = if no_stream {
             Box::pin(orchestrator::native_user_message_source::with_sdk_source(
                 orchestrator::mod_prompt_origin::with_origin(
@@ -2474,12 +2475,14 @@ async fn run_slash_command_with_budget(
             command,
             body,
             hook_messages,
+            skill,
         } => {
             run_slash_skill_as_turn_future(
                 runtime,
                 command,
                 body,
                 hook_messages,
+                skill,
                 max_budget_usd,
                 no_stream,
                 sink,

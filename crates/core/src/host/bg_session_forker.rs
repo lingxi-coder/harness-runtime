@@ -34,6 +34,12 @@ pub mod lifecycle;
 pub struct BgSessionSnapshot {
     /// Live transcript messages in their original order and identity.
     pub history: Vec<crate::types::ConversationMessage>,
+    /// Transcript rows retained for audit but excluded from model context.
+    pub model_context_excluded_messages: std::collections::HashSet<crate::types::MessageId>,
+    /// The fixed profile captured for this independent task.
+    pub mode: crate::host::session_context::ConversationMode,
+    /// Instruction provenance to preserve when copying the conversation.
+    pub instruction_epoch: u64,
     /// Original payloads for retained durable model reminders.
     pub model_reminder_attachments: Vec<(
         crate::types::MessageId,
@@ -71,10 +77,9 @@ pub enum BgForkError {
 /// `ActionFailed` rather than panicking.
 #[async_trait]
 pub trait BgSessionForker: Send + Sync {
-    /// The foreground owner's admission fence. All three launch paths must
-    /// claim this same owner before I/O and retain the claim until their owned
-    /// publication or recovery finishes. Closing it is permanent, independent
-    /// of any remaining orchestrator references.
+    /// The foreground owner's permanent admission fence for every background
+    /// launch path. A claim covers owned publication and any recovery registration,
+    /// even when the original caller or another orchestrator reference disappears.
     fn lifecycle(&self) -> Arc<lifecycle::BackgroundLaunchLifecycle>;
 
     /// Late binding after the host has constructed its session registry.

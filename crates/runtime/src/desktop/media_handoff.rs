@@ -315,7 +315,9 @@ mod tests {
                 session_id: "session-a".into(),
                 model: "test-model".into(),
                 profile_name: Some("trusted-profile".into()),
-                account_scope: Some("profile:trusted-profile".into()),
+                account_scope: Some(
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into(),
+                ),
                 attachment_id: None,
             },
             assistant_message_id: MessageId::new(),
@@ -381,7 +383,7 @@ mod tests {
             session_id: "session-a".into(),
             model: "test-model".into(),
             profile_name: Some("trusted-profile".into()),
-            account_scope: Some("profile:trusted-profile".into()),
+            account_scope: Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into()),
             attachment_id: None,
         };
         let request = MediaAgentHandoffRequest {

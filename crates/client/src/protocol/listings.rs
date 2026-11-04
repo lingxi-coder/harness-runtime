@@ -50,14 +50,14 @@ use serde::{Deserialize, Serialize};
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
-/// Which capability profile a mobile session runs under.
+/// Conversation behavior, independent of the host capability and permission policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
 pub enum SessionModeDto {
-    /// Read-only conversational profile.
+    /// General assistant behavior with the host's eligible tools.
     Chat,
-    /// Full development profile.
+    /// Engineering assistant behavior.
     Code,
 }
 

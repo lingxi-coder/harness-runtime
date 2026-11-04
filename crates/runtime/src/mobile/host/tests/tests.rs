@@ -2,9 +2,15 @@ include!("../fast_mode_preference_tests.rs");
 include!("../permission_preference_tests.rs");
 include!("../model_preference_tests.rs");
 include!("../provider_region_tests.rs");
+#[path = "initial_profile_tests.rs"]
+mod initial_profile_tests;
+#[path = "session_owner_tests.rs"]
+mod session_owner_tests;
 include!("../reasoning_preference_tests.rs");
 #[path = "bash_precommit_wiring_tests.rs"]
 mod bash_precommit_wiring_tests;
+#[path = "cancel_admission_tests.rs"]
+mod cancel_admission_tests;
 #[path = "device_tools_tests.rs"]
 mod device_tools_tests;
 #[path = "prompt_suggestion_tests.rs"]
@@ -911,6 +917,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     observer
         .on_event(SubagentObservation::Completed {
             agent_id,
+            handback: None,
             content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""done""#)
                 .expect("completed observation fixture is JSON"),
             usage: lingxi_core::host::SubagentUsage::default(),
@@ -1260,17 +1267,29 @@ async fn lightweight_cron_store_crud_and_due_occurrence_need_no_engine() {
         Arc::new(PosixClock::new()),
     );
 
+    let automation = serde_json::json!({
+        "version": 2, "status": "active", "model": "anthropic/test",
+        "reasoning": {"type": "automatic"}, "runMode": "new_session",
+        "sessionMode": "code", "sessionScopeKey": "project.test"
+    })
+    .to_string();
     let created = store
-        .create("* * * * *".to_string(), "hello".to_string(), false)
+        .create_configured(
+            "* * * * *".to_string(),
+            "hello".to_string(),
+            false,
+            automation.clone(),
+        )
         .await
         .expect("one-shot creation");
     assert_eq!(1, store.list().await.len());
     let updated = store
-        .update(
+        .update_configured(
             created.id.clone(),
             "*/15 * * * *".to_string(),
             "updated".to_string(),
             true,
+            automation,
         )
         .await
         .expect("recurring update");
@@ -3140,9 +3159,10 @@ fn mobile_engine_exports_copyable_mcp_oauth_url_getters() {
 }
 
 #[test]
-fn mobile_mcp_reload_identical_config_is_read_only() {
+fn chat_mcp_listing_and_reload_keep_the_connected_server() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let cfg = test_config(tmp.path());
+    let mut cfg = test_config(tmp.path());
+    cfg.session_mode = session::jsonl::SessionMode::Chat;
     let settings_path = cfg.lingxi_home.join("settings.json");
     std::fs::create_dir_all(&cfg.lingxi_home).expect("create mobile home");
     std::fs::write(
@@ -3151,7 +3171,7 @@ fn mobile_mcp_reload_identical_config_is_read_only() {
     )
     .expect("write MCP settings");
     let cwd = cfg.cwd.clone();
-    let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
+    let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
     let desired = mobile_mcp_preflight(
         mcp::load_mcp_servers(&cwd.join(".mcp.json"), &settings_path, &cwd),
         handle.inner.oauth_supported,
@@ -3202,6 +3222,94 @@ fn mobile_mcp_reload_identical_config_is_read_only() {
             }
             other => panic!("unchanged MCP entry was reconciled: {other:?}"),
         }
+        handle
+            .submit(ClientCommand::RefreshListings {
+                which: vec![client::protocol::commands::ListingKindDto::Mcp],
+            })
+            .await
+            .unwrap();
+        assert!(
+            drained(&listener).await.iter().any(|event| matches!(event,
+                Ev::McpServers { servers } if servers.iter().any(|server| server.name == "remote")
+            )),
+            "Chat must expose the connected server"
+        );
+    });
+}
+
+#[test]
+fn chat_live_mcp_catalog_retires_removed_tools() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = test_config(tmp.path());
+    cfg.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+    handle.runtime().block_on(async {
+        let connection_id = lingxi_core::types::McpConnectionId::new();
+        let tool = lingxi_core::host::McpToolDto {
+            full_name: "mcp__remote__lookup".into(),
+            server_name: "remote".into(),
+            tool_name: "lookup".into(),
+            description: "Look up a value".into(),
+            input_schema: Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"type": "object"}),
+            )
+            .unwrap(),
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
+            search_hint: None,
+            always_load: None,
+            requires_user_interaction: false,
+        };
+        handle.inner.mcp_registry.connections.write().await.insert(
+            "remote".into(),
+            mcp::connection::McpConnectionState::Cached {
+                config: mobile_reload_test_config("http://127.0.0.1:1/mcp"),
+                connection_id,
+                capabilities: lingxi_core::host::ServerCapabilitiesDto::default(),
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                server_info: None,
+                tools: vec![tool],
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: Vec::new(),
+                cache_saved_at_ms: 0,
+                age_ms: 0,
+            },
+        );
+        let registered = tool_mcp::build_registered_mcp_tools(
+            &handle.inner.mcp_registry,
+            handle.inner.mcp_tool_context.clone(),
+        )
+        .await;
+        handle.inner.mcp_tool_registry.replace_mcp_tools(registered);
+        assert!(handle
+            .inner
+            .mcp_tool_registry
+            .find_by_name("mcp__remote__lookup")
+            .is_some());
+        handle
+            .inner
+            .mcp_registry
+            .remove_without_revoking_auth("remote")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while handle
+                .inner
+                .mcp_tool_registry
+                .find_by_name("mcp__remote__lookup")
+                .is_some()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the Chat MCP watcher removes retired tools");
     });
 }
 
@@ -3665,6 +3773,82 @@ fn submit_attach_turn_blocks_truncated_replay_history() {
                     && !snapshot.safe_to_resume
                     && snapshot.reason.as_deref() == Some("replay_history_truncated")
         ));
+    });
+}
+
+#[test]
+fn submit_attach_turn_keeps_live_owner_running_when_replay_history_is_truncated() {
+    use crate::mobile::test_support::new_engine_with_streaming;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let turn_id = 7878;
+        handle
+            .submit(ClientCommand::SendPrompt {
+                text: "keep running".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(turn_id),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let session_id = handle.active_session_id();
+        for _ in 0..2 {
+            handle
+                .durable_turns
+                .append_event(
+                    &session_id,
+                    turn_id,
+                    r#"{"type":"text_delta","text":"retained"}"#.into(),
+                )
+                .unwrap();
+        }
+        let before = handle.durable_turns.load(&session_id, turn_id).unwrap();
+        assert_eq!(before.state, Some(TurnRecoveryStateDto::Running));
+        handle
+            .durable_turns
+            .retain_events_from_for_test(&session_id, turn_id, before.last_sequence)
+            .unwrap();
+        let before = handle.durable_turns.load(&session_id, turn_id).unwrap();
+        handle
+            .submit(ClientCommand::AttachTurn {
+                turn_id,
+                after_sequence: Some(0),
+            })
+            .await
+            .unwrap();
+        let events = drained(&listener).await;
+        assert!(events.iter().any(|event| matches!(event,
+            Ev::TurnRecoveryState { snapshot }
+                if snapshot.turn_id == turn_id
+                    && snapshot.state == TurnRecoveryStateDto::Running
+                    && snapshot.reason.as_deref() == Some("replay_history_truncated")
+        )));
+        let after = handle.durable_turns.load(&session_id, turn_id).unwrap();
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.revision, before.revision);
+        assert!(!handle.active_turn_is_cancelled().await);
+        handle
+            .submit(ClientCommand::Cancel {
+                turn_id: Some(turn_id),
+            })
+            .await
+            .unwrap();
     });
 }
 
@@ -5192,6 +5376,7 @@ fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session(
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: Some("deepseek/deepseek-flash".into()),
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await;
         assert!(result.is_err(), "expected rejection, got {result:?}");
@@ -5206,6 +5391,7 @@ fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session(
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: Some("openai/gpt-5.6-sol".into()),
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("a routable model must be accepted");
@@ -6149,12 +6335,7 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
             .append_mobile_empty_session(&session_id, "cold Bash no-response", &first.session_cwd())
             .await
             .expect("anchor the session before restart");
-        first
-            .inner()
-            .session_writer
-            .append_session_mode(first.inner().session_mode.as_str())
-            .await
-            .expect("persist session mode");
+
         first
             .submit(ClientCommand::SendPrompt {
                 text: "printf cold-no-response".into(),
@@ -6211,10 +6392,7 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
     .expect("rebuild Mobile Shell host after restart");
     resumed.runtime().block_on(async {
         resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore completed session");
         resumed
@@ -6319,12 +6497,6 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             .append_mobile_empty_session(&session_id, "cold prompt replay", &first.session_cwd())
             .await
             .expect("anchor the session before restart");
-        first
-            .inner
-            .session_writer
-            .append_session_mode(first.inner.session_mode.as_str())
-            .await
-            .expect("persist the session mode");
 
         first
             .submit(client::protocol::commands::ClientCommand::SendPrompt {
@@ -6467,10 +6639,7 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
 
     resumed.runtime().block_on(async {
         resumed
-            .submit(client::protocol::commands::ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore the session containing the durable turn");
         resumed
@@ -6619,12 +6788,6 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
             )
             .await
             .expect("anchor the session transcript");
-        engine_for_work
-            .inner
-            .session_writer
-            .append_session_mode(engine_for_work.inner.session_mode.as_str())
-            .await
-            .expect("persist the session mode");
 
         engine_for_work
             .submit(client::protocol::commands::ClientCommand::SendPrompt {
@@ -6734,10 +6897,7 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
 
     resumed.runtime().block_on(async {
         resumed
-            .submit(client::protocol::commands::ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore the session containing the no-ID prompt");
         resumed
@@ -7644,12 +7804,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 .append_mobile_empty_session(&session_id, "skill cold replay", &first.session_cwd())
                 .await
                 .expect("anchor the session before restart");
-            first
-                .inner()
-                .session_writer
-                .append_session_mode(first.inner().session_mode.as_str())
-                .await
-                .expect("persist session mode");
+
 
             first
                 .submit(ClientCommand::RunSlashCommand {
@@ -8054,10 +8209,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
 
     resumed.runtime().block_on(async {
         resumed
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("restore the session containing the skill turn");
         let paused = resumed
@@ -8366,9 +8518,28 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 })
             })
             .collect::<Vec<_>>();
-        assert_eq!(body_rows.len(), 2);
-        assert_ne!(body_rows[0].id, body_rows[1].id);
-        assert_ne!(body_rows[1].id, body_message_id);
+        assert_eq!(
+            body_rows.len(),
+            1,
+            "reinvocation projects only the current skill body; original {body_message_id}; bounded rows:\n{}",
+            bounded_request_rows_diagnostic(&calls[1].messages)
+        );
+        let new_body = body_rows[0];
+        assert_ne!(new_body.id, body_message_id);
+        assert!(new_body.is_meta);
+        assert_eq!(new_body.turn_companion, Some(Some(true)));
+        assert_eq!(new_body.text_utf16.as_deref(), Some(source_body_units.as_slice()));
+        assert!(!second_user_rows.iter().any(|row| row.id == body_message_id));
+        // Skill reinvocation excludes only the retired body from model context,
+        // not from the durable transcript; both distinct sources survive.
+        for body_id in [body_message_id, new_body.id] {
+            let uuid = body_id.as_uuid().to_string();
+            assert_eq!(transcript_uuid_count(&resumed_transcript, &uuid), 1);
+            assert_eq!(
+                transcript_user_text_units(&resumed_transcript, &uuid).as_deref(),
+                Some(source_body_units.as_slice())
+            );
+        }
         let second_old_upe_row = second_user_rows
             .iter()
             .find(|row| row.id == upe_message_id)
@@ -8422,7 +8593,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             "a new same-text send appends a fresh UPE row instead of deduplicating by text"
         );
         assert_eq!(
-            transcript_uuid_count(&resumed_transcript, &body_rows[1].id.as_uuid().to_string()),
+            transcript_uuid_count(&resumed_transcript, &new_body.id.as_uuid().to_string()),
             1
         );
     });
@@ -8467,6 +8638,7 @@ fn submit_cancel_waits_for_cleanup_before_new_session() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("NewSession immediately after Cancel must not see an in-flight turn");
@@ -9881,13 +10053,14 @@ impl media_api::MediaService for SuccessfulHandoffMediaService {
 
 struct SuccessfulHandoffAttachment {
     expected_audio: Arc<dyn media_api::MediaAudioChannel>,
+    selected_account: StdMutex<Option<(String, String, String)>>,
     same_channel: std::sync::atomic::AtomicBool,
     open_calls: std::sync::atomic::AtomicUsize,
     opened: tokio::sync::Notify,
     _io_guards: StdMutex<
         Option<(
             tokio::sync::mpsc::Sender<orchestrator::RealtimeAgentInput>,
-            tokio::sync::mpsc::Receiver<llm_runtime::services::sdk::realtime::RealtimeEvent>,
+            tokio::sync::mpsc::Receiver<orchestrator::RealtimeAgentOutput>,
         )>,
     >,
 }
@@ -9896,6 +10069,7 @@ impl SuccessfulHandoffAttachment {
     fn new(expected_audio: Arc<dyn media_api::MediaAudioChannel>) -> Self {
         Self {
             expected_audio,
+            selected_account: StdMutex::new(None),
             same_channel: std::sync::atomic::AtomicBool::new(false),
             open_calls: std::sync::atomic::AtomicUsize::new(0),
             opened: tokio::sync::Notify::new(),
@@ -9909,12 +10083,23 @@ impl super::MediaConversationAttachment for SuccessfulHandoffAttachment {
     async fn open(
         &self,
         request: tool_api::MediaAgentHandoffRequest,
-        _: orchestrator::RealtimeAgentContext,
+        prepared: orchestrator::RealtimeAgentContext,
         audio: Arc<dyn media_api::MediaAudioChannel>,
     ) -> Result<super::RealtimeAgentSessionIo, String> {
         if request.session.0 .0 != "media-session-success" {
             return Err("unexpected media session reference".into());
         }
+        if prepared.account_scope.as_deref()
+            != Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
+        {
+            return Err("the initial media account must be unbound".into());
+        }
+        let (audio_profile_name, provider_profile, provider_account_scope) = self
+            .selected_account
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "fixture account was not selected".to_owned())?;
         self.same_channel.store(
             Arc::ptr_eq(&self.expected_audio, &audio),
             std::sync::atomic::Ordering::SeqCst,
@@ -9945,6 +10130,9 @@ impl super::MediaConversationAttachment for SuccessfulHandoffAttachment {
         let (output, output_rx) = tokio::sync::mpsc::channel(8);
         *self._io_guards.lock().unwrap() = Some((input_tx, output_rx));
         Ok(super::RealtimeAgentSessionIo {
+            audio_profile_name,
+            provider_profile,
+            provider_account_scope,
             control,
             events,
             inputs,
@@ -10004,9 +10192,10 @@ fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
     config.media_service = Some(service.clone());
     config.media_conversation_attachment = Some(attachment.clone());
     let listener = Arc::new(FakeListener::default());
+    let storage = Arc::new(lingxi_core::host::InMemorySecureStorage::new());
     let engine = new_engine_with_streaming(
         config,
-        Arc::new(HostFakePlatform::new(root.path().to_path_buf())),
+        Arc::new(HostFakePlatform::new(root.path().to_path_buf()).with_secure_storage(storage)),
         listener.clone(),
         Arc::new(RecordingPermissionSink::default()),
         Some(streaming.clone()),
@@ -10014,6 +10203,31 @@ fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
     .expect("build mobile engine with media host");
 
     engine.runtime().block_on(async {
+        let snapshot = engine
+            .provider_account_command(
+                serde_json::json!({
+                    "action":"add", "expectedRevision":0, "providerId":"openai",
+                    "displayName":"Handoff fixture", "executionBindingId":"openai",
+                    "authKind":"api_key"
+                })
+                .to_string(),
+                Some("handoff-fixture-key".into()),
+            )
+            .await
+            .expect("create a current handoff account");
+        let snapshot: lingxi_core::host::provider_accounts::AccountSnapshot =
+            serde_json::from_str(&snapshot).unwrap();
+        let account = snapshot.accounts.first().expect("created account");
+        *attachment.selected_account.lock().unwrap() = Some((
+            "openai".into(),
+            format!("account.{}", account.account_id),
+            serde_json::to_string(&llm_runtime::accounts::AccountResourceScope {
+                store_scope: account.credential_ref.store_scope.clone(),
+                account_id: account.account_id.clone(),
+                identity_generation: account.identity_generation,
+            })
+            .unwrap(),
+        ));
         engine
             .submit(ClientCommand::SendPrompt {
                 text: ClientTextDto::from("Start an audio conversation"),
@@ -10086,6 +10300,10 @@ fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
         .expect("the same active turn continues and ends after native realtime");
 
         let events = listener.received.lock().await;
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ClientEvent::TurnEnded { stop_reason: Some(reason), .. } if reason == "media_handoff_error"
+        )));
         assert_eq!(
             events
                 .iter()
@@ -10160,8 +10378,12 @@ async fn media_conversation_attachment_receives_the_existing_service_channel() {
     };
     let prepared = orchestrator::RealtimeAgentContext {
         session_id: "session-1".into(),
+        session_profile_name: "profile".into(),
+        audio_profile_name: "profile".into(),
         profile_name: Some("profile".into()),
-        account_scope: Some("profile:profile".into()),
+        account_scope: Some(lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into()),
+        conversation_mode: Default::default(),
+        conversation_profile_epoch: 0,
         attachment_id: None,
         instructions: String::new(),
         history: Vec::new(),
@@ -11008,6 +11230,7 @@ fn dynamic_loop_session_switch_cancels_previous_session_timer() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .unwrap();
@@ -11059,6 +11282,7 @@ fn mobile_session_switch_ends_only_the_previous_audio_owner() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("new session should be created");
@@ -11424,6 +11648,12 @@ fn seed_session_file(root: &std::path::Path) -> String {
     // we use a literal instead of minting one). Deterministic by design.
     let uuid = "11111111-2222-3333-4444-555555555555".to_string();
     let path = project_dir.join(format!("{uuid}.jsonl"));
+    let header = serde_json::json!({
+        "type": "fixed-session-mode",
+        "sessionId": uuid,
+        "sessionMode": "code",
+        "instructionEpoch": 0
+    });
     let line = serde_json::json!({
         "type": "user",
         "uuid": uuid,
@@ -11436,11 +11666,7 @@ fn seed_session_file(root: &std::path::Path) -> String {
         "userType": "external",
         "message": {"role": "user", "content": "hello from a prior session"}
     });
-    std::fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&line).unwrap()),
-    )
-    .expect("write session file");
+    std::fs::write(&path, format!("{header}\n{line}\n")).expect("write session file");
     uuid
 }
 
@@ -11461,7 +11687,10 @@ fn submit_list_sessions_emits_seeded_row() {
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::ListSessions { limit: None })
+            .submit(ClientCommand::ListSessions {
+                limit: None,
+                mode: None,
+            })
             .await
             .expect("submit(ListSessions) ok");
 
@@ -11471,19 +11700,16 @@ fn submit_list_sessions_emits_seeded_row() {
             _ => None,
         });
         let sessions = row.expect("a SessionList event must be emitted");
-        assert_eq!(sessions.len(), 1, "exactly one seeded session expected");
-        assert_eq!(
-            sessions[0].uuid, seeded_uuid,
-            "the listed row must be the seeded session"
-        );
-        assert_eq!(sessions[0].mode, SessionModeDto::Code);
+        let seeded = sessions
+            .iter()
+            .find(|row| row.uuid == seeded_uuid)
+            .expect("seeded row");
+        assert_eq!(seeded.mode, SessionModeDto::Code);
     });
 }
 
 /// SESSIONS/HISTORY: `submit(ListSessions)` on a connection with NO on-disk
-/// catalog (empty / missing project dir) still replies with a `SessionList`
-/// carrying an EMPTY vec — the loader's `EmptyDirectory` is "no sessions yet",
-/// not an error, and the client must always get a reply.
+/// catalog contains the newly created durable empty session and always replies.
 #[test]
 fn submit_list_sessions_empty_when_no_catalog() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -11491,7 +11717,10 @@ fn submit_list_sessions_empty_when_no_catalog() {
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::ListSessions { limit: Some(5) })
+            .submit(ClientCommand::ListSessions {
+                limit: Some(5),
+                mode: None,
+            })
             .await
             .expect("submit(ListSessions) ok");
 
@@ -11503,10 +11732,8 @@ fn submit_list_sessions_empty_when_no_catalog() {
                 _ => None,
             })
             .expect("a SessionList event must be emitted even with no catalog");
-        assert!(
-            sessions.is_empty(),
-            "no on-disk catalog must yield an empty SessionList, got {sessions:?}"
-        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].uuid, handle.active_session_id());
     });
 }
 
@@ -11529,6 +11756,7 @@ fn submit_new_session_emits_session_started() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("submit(NewSession) ok");
@@ -11538,7 +11766,7 @@ fn submit_new_session_emits_session_started() {
         assert_ne!(before, after, "NewSession must mint a fresh session id");
 
         let events = drained(&listener).await;
-        let started = events.iter().find_map(|e| match e {
+        let started = events.iter().rev().find_map(|e| match e {
             Ev::SessionStarted { session_id, mode } => Some((session_id.clone(), *mode)),
             _ => None,
         });
@@ -11568,13 +11796,16 @@ fn submit_new_session_emits_session_started() {
                 && record["permissionMode"] == expected_permission_mode
         }));
         assert!(records.iter().any(|record| {
-            record["type"] == "session-mode"
+            record["type"] == "fixed-session-mode"
                 && record["sessionId"] == after_uuid
                 && record["sessionMode"] == "code"
         }));
 
         handle
-            .submit(ClientCommand::ListSessions { limit: None })
+            .submit(ClientCommand::ListSessions {
+                limit: None,
+                mode: None,
+            })
             .await
             .expect("list anchored empty session");
         let events = drained(&listener).await;
@@ -11602,6 +11833,7 @@ fn submit_resume_session_restores_anchored_empty_session_with_same_uuid() {
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .expect("create anchored empty session");
@@ -11614,10 +11846,7 @@ fn submit_resume_session_restores_anchored_empty_session_with_same_uuid() {
             .to_string();
 
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: expected.clone(),
-                cwd: None,
-            })
+            .resume_seeded_test_session(expected.clone())
             .await
             .expect("anchored empty session resumes");
 
@@ -11664,10 +11893,7 @@ fn submit_resume_session_restores_its_persisted_permission_mode() {
         use lingxi_core::host::OrchestratorHandle;
 
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
+            .resume_seeded_test_session(session_id.clone())
             .await
             .expect("resume persisted session");
         let orchestrator: Arc<dyn OrchestratorHandle> = handle.inner().orchestrator.clone();
@@ -11679,91 +11905,126 @@ fn submit_resume_session_restores_its_persisted_permission_mode() {
 }
 
 #[test]
-fn submit_resume_session_rejects_a_session_from_another_mode() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (session_id, _) = seed_replay_valid_session(tmp.path());
-    let cfg = test_config(tmp.path());
-    let path =
-        session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), &session_id);
-    let mut transcript = std::fs::read_to_string(&path).expect("read seeded transcript");
-    transcript.push_str(&format!(
-        "{}\n",
-        serde_json::json!({
-            "type": "session-mode",
-            "sessionMode": "chat",
-            "sessionId": session_id,
-        })
-    ));
-    std::fs::write(&path, transcript).expect("append session mode");
-
-    let code_cfg = test_config(tmp.path());
-    let (handle, listener) = build_submit_handle_with_config(code_cfg, tmp.path());
+fn mobile_initialized_long_session_does_not_reread_identity_on_commands() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(root.path());
     handle.runtime().block_on(async {
-        let active_before = handle.inner().orchestrator.current_session_id().await;
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
-            .await;
-        assert!(
-            matches!(result, Err(ClientError::Rejected { ref message })
-                    if message.contains("belongs to chat mode")
-                        && message.contains("runs code mode")),
-            "{result:?}"
-        );
-        let events = drained(&listener).await;
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ev::SessionResumed { .. })),
-            "a rejected cross-mode resume must not emit SessionResumed"
-        );
-        assert_eq!(
-            handle.inner().orchestrator.current_session_id().await,
-            active_before,
-            "mode validation must happen before mutating the active session"
-        );
+        handle.ensure_mobile_session_anchor().await.unwrap();
+        let id = handle.inner().orchestrator.current_session_id().await;
+        let path = handle.inner().session_writer.active_path();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let row = format!("{}\n", serde_json::json!({"type":"custom-title", "sessionId":id.as_uuid(), "customTitle":"x".repeat(512)}));
+        for _ in 0..5000 { file.write_all(row.as_bytes()).unwrap(); }
+        drop(file);
+        // A missing sidecar is imported exactly once; later commands check its
+        // type and identity without reading the ever-growing log again.
+        let sidecar = path.with_file_name(format!("{}{}", path.file_name().unwrap().to_string_lossy(), branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX));
+        if let Err(error) = std::fs::remove_file(&sidecar) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        }
+        let before = crate::session_agent_transcript::identity_snapshot_read_count(&path);
+        handle.ensure_mobile_session_anchor().await.unwrap();
+        let imported = crate::session_agent_transcript::identity_snapshot_read_count(&path);
+        assert_eq!(imported, before + 1);
+        for _ in 0..5 {
+            handle.ensure_mobile_session_anchor().await.unwrap();
+            handle.ensure_mobile_session_anchor().await.unwrap();
+        }
+        assert_eq!(crate::session_agent_transcript::identity_snapshot_read_count(&path), imported);
+        #[cfg(unix)]
+        {
+            let real = sidecar.with_extension("saved");
+            std::fs::rename(&sidecar, &real).unwrap();
+            std::os::unix::fs::symlink(&real, &sidecar).unwrap();
+            assert!(handle.ensure_mobile_session_anchor().await.is_err());
+            std::fs::remove_file(&sidecar).unwrap();
+            std::fs::rename(&real, &sidecar).unwrap();
+            handle.ensure_mobile_session_anchor().await.unwrap();
+        }
+        handle.submit(ClientCommand::NewSession { cwd: None, model: None, mode: client::protocol::listings::SessionModeDto::Code, }).await.unwrap();
+        let next = handle.inner().session_writer.active_path();
+        assert_ne!(next, path);
+        handle.ensure_mobile_session_anchor().await.unwrap();
+        let next_reads = crate::session_agent_transcript::identity_snapshot_read_count(&next);
+        handle.ensure_mobile_session_anchor().await.unwrap();
+        assert_eq!(crate::session_agent_transcript::identity_snapshot_read_count(&next), next_reads);
     });
 }
 
 #[test]
-fn submit_resume_session_rejects_legacy_mode_less_session_from_chat_source() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (session_id, _) = seed_replay_valid_session(tmp.path());
-    let mut chat_cfg = test_config(tmp.path());
-    chat_cfg.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, listener) = build_submit_handle_with_config(chat_cfg, tmp.path());
-
+fn mobile_initial_and_new_sessions_keep_fixed_mode_headers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, _) = build_submit_handle_with_config(config, tmp.path());
     handle.runtime().block_on(async {
-        let active_before = handle.inner().orchestrator.current_session_id().await;
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
-                cwd: None,
-            })
-            .await;
-        assert!(
-            matches!(result, Err(ClientError::Rejected { ref message })
-                    if message.contains("belongs to code mode")
-                        && message.contains("runs chat mode")),
-            "{result:?}"
-        );
-        let events = drained(&listener).await;
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ev::SessionResumed { .. })),
-            "a rejected legacy code resume must not emit SessionResumed"
-        );
-        assert_eq!(
-            handle.inner().orchestrator.current_session_id().await,
-            active_before,
-            "legacy fallback validation must not disturb the active Chat session"
-        );
+        for create_new in [false, true] {
+            if create_new {
+                handle
+                    .submit(ClientCommand::NewSession {
+                        cwd: None,
+                        model: None,
+                        mode: client::protocol::listings::SessionModeDto::Chat,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let raw = std::fs::read_to_string(handle.inner().session_writer.active_path()).unwrap();
+            let mode = raw
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|row| row["type"] == "fixed-session-mode")
+                .unwrap();
+            assert_eq!(mode["sessionMode"], "chat");
+            assert_eq!(mode["instructionEpoch"], 0);
+        }
     });
 }
 
+#[test]
+fn anchored_session_with_deferred_tool_is_not_restored_as_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, _) = build_submit_handle_with_config(config, tmp.path());
+    let (source_id, path, source) = handle.runtime().block_on(async {
+        let source_id = handle.inner().orchestrator.current_session_id().await.as_uuid().to_string();
+        let path = handle.inner().session_writer.active_path();
+        let deferred = serde_json::json!({
+            "type":"attachment", "uuid":uuid::Uuid::new_v4(), "parentUuid":null,
+            "sessionId":source_id, "timestamp":"2026-10-29T00:00:00Z", "cwd":handle.session_cwd(),
+            "version":"test", "isSidechain":false,
+            "attachment":{"type":"hook_deferred_tool", "hookEvent":"PreToolUse", "hookName":"PreToolUse:Bash",
+                "toolUseID":"toolu_pending", "toolName":"Bash", "toolInput":{"command":"echo pending"},
+                "permissionMode":"default"}
+        });
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{deferred}").unwrap();
+        drop(file);
+        let source = std::fs::read(&path).unwrap();
+        (source_id, path, source)
+    });
+    drop(handle);
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    let (reopened, _) = build_submit_handle_with_config(config, tmp.path());
+    reopened.runtime().block_on(async {
+        let prior = reopened.inner().orchestrator.current_session_id().await;
+        assert!(matches!(
+            reopened.resume_seeded_test_session(source_id).await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert_eq!(
+            reopened.inner().orchestrator.current_session_id().await,
+            prior
+        );
+        assert_eq!(std::fs::read(path).unwrap(), source);
+    });
+}
+
+#[cfg(unix)]
 #[test]
 fn submit_fork_session_copies_context_into_target_mode_without_mutating_source() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -11771,17 +12032,21 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
     let cfg = test_config(tmp.path());
     let cwd = cfg.cwd.to_string_lossy().into_owned();
     let source_path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_session_id);
-    let source_before = std::fs::read_to_string(&source_path).expect("read source transcript");
     let (handle, listener) = build_submit_handle_with_config(cfg.clone(), tmp.path());
 
     handle.runtime().block_on(async {
         handle
+            .resume_seeded_test_session(source_session_id.clone())
+            .await
+            .unwrap();
+        let source_before = std::fs::read_to_string(&source_path).expect("read source transcript");
+        handle
             .submit(ClientCommand::ForkSession {
                 session_id: source_session_id.clone(),
-                target_mode: SessionModeDto::Chat,
+                target_mode: SessionModeDto::Code,
             })
             .await
-            .expect("fork session into Chat");
+            .expect("fork session in Code");
 
         let events = drained(&listener).await;
         let fork_session_id = events
@@ -11791,7 +12056,7 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
                     source_session_id: reported_source,
                     session_id,
                     mode,
-                } if reported_source == &source_session_id && *mode == SessionModeDto::Chat => {
+                } if reported_source == &source_session_id && *mode == SessionModeDto::Code => {
                     Some(session_id.clone())
                 }
                 _ => None,
@@ -11809,7 +12074,7 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
         let fork_raw = std::fs::read_to_string(&fork_path).expect("read fork transcript");
         assert!(fork_raw.contains("resume me from disk"));
         assert!(fork_raw.contains("resumed!"));
-        assert!(fork_raw.contains("\"sessionMode\":\"chat\""));
+        assert!(fork_raw.contains("\"sessionMode\":\"code\""));
 
         let rows = session::jsonl::list_recent_sessions(
             &cfg.lingxi_home,
@@ -11823,86 +12088,138 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
             .iter()
             .find(|row| row.uuid.to_string() == fork_session_id)
             .expect("fork row");
-        assert_eq!(fork_row.mode, session::jsonl::SessionMode::Chat);
+        assert_eq!(fork_row.mode, session::jsonl::SessionMode::Code);
         assert_eq!(fork_row.message_count, visible_message_count);
     });
 }
 
 #[test]
-fn chat_source_rejects_a_code_only_slash_command_before_dispatch() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let mut chat_cfg = test_config(tmp.path());
-    chat_cfg.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, listener) = build_submit_handle_with_config(chat_cfg, tmp.path());
+fn submit_fork_session_rejects_deferred_tools_for_current_and_other_source() {
+    for current_source in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (source_id, _) = seed_replay_valid_session(tmp.path());
+        let cfg = test_config(tmp.path());
+        let cwd = cfg.cwd.to_string_lossy().into_owned();
+        let path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_id);
+        let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+        handle.runtime().block_on(async {
+            if current_source {
+                handle.resume_seeded_test_session(source_id.clone()).await.unwrap();
+            }
+            let assistant = uuid::Uuid::new_v4();
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(file, "{}", serde_json::json!({
+                "type":"assistant", "uuid":assistant, "sessionId":source_id,
+                "parentUuid":"cccccccc-3333-4333-8333-cccccccccccc", "cwd":cwd,
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":"pending","name":"Bash","input":{"command":"true"}}]}
+            })).unwrap();
+            writeln!(file, "{}", serde_json::json!({
+                "type":"attachment", "uuid":uuid::Uuid::new_v4(), "sessionId":source_id,
+                "parentUuid":assistant, "cwd":cwd,
+                "attachment":{"type":"hook_deferred_tool","toolUseID":"pending","toolName":"Bash","toolInput":{"command":"true"}}
+            })).unwrap();
+            drop(file);
+            let before = std::fs::read(&path).unwrap();
+            let before_files = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+            let previous = handle.inner().orchestrator.conversation_mode().await;
+            let error = handle.submit(ClientCommand::ForkSession {
+                session_id: source_id.clone(), target_mode: SessionModeDto::Code,
+            }).await.unwrap_err();
+            assert!(matches!(error, ClientError::Rejected { message } if message.contains(if current_source { "Resume the original session first" } else { "select the source conversation first" })));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), before_files);
+            assert_eq!(handle.inner().orchestrator.conversation_mode().await, previous);
+            assert!(!drained(&listener).await.iter().any(|event| matches!(event, Ev::SessionForked { .. })));
+        });
+    }
+}
 
+#[test]
+fn submit_fork_session_rejects_unsettled_native_receipt_without_source_changes() {
+    use lingxi_core::host::{
+        DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,
+        ToolExecutionIdentity, ToolExecutionOutcome, ToolExecutionRecord, ToolExecutionStage,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (source_id, _) = seed_replay_valid_session(tmp.path());
+    let cfg = test_config(tmp.path());
+    let cwd = cfg.cwd.to_string_lossy().into_owned();
+    let path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_id);
+    let (handle, listener) = build_submit_handle_with_config(cfg.clone(), tmp.path());
     handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::RunSlashCommand {
-                raw: "/loop every 5 minutes inspect the workspace".into(),
-                images: Vec::new(),
-                turn_id: Some(42),
-            })
-            .await
-            .expect("Chat rejection is a handled command result");
-
-        let events = drained(&listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::SlashCommandResult {
-                turn_id: Some(42),
-                display,
-                is_error: true,
-            } if display.display().contains("unavailable in Chat mode")
-        )));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ev::TurnStarted { .. })),
-            "a hidden Code-only command must never reach turn dispatch"
-        );
+        handle.resume_seeded_test_session(source_id.clone()).await.unwrap();
+        let id = lingxi_core::types::SessionId::parse_prefixed(&source_id).unwrap();
+        let relative = std::path::PathBuf::from("session-state").join(id.as_uuid().to_string());
+        let journal = session::jsonl::DurableJournal::open_under(&cfg.lingxi_home, &relative).unwrap();
+        let output = DurableToolOutput { digest:"binding".into(), payload:serde_json::json!({}), media_refs:vec![] };
+        let mut execution = ToolExecutionRecord {
+            identity:ToolExecutionIdentity { session_id:id, provider_response_id:"response".into(), provider_call_id:"call".into(), member_index:0 },
+            tool_name:"computer".into(), input_digest:"input".into(), recovery_binding:output.clone(),
+            acknowledged_safety_checks:vec![], stage:ToolExecutionStage::Started, outcome:None, output:None,
+        };
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        execution.stage = ToolExecutionStage::Terminal;
+        execution.outcome = Some(ToolExecutionOutcome::Succeeded);
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        execution.stage = ToolExecutionStage::OutputPrepared;
+        execution.output = Some(output.clone());
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        execution.stage = ToolExecutionStage::OutputPublished;
+        journal.append_once(&execution.event_id(), &serde_json::json!({"ToolExecution": execution})).unwrap();
+        let receipt = NativeReceiptRecord {
+            response:None, session_id:id, receipt_id:"response/call".into(), execution_ids:vec![execution.execution_id()],
+            binding:NativeContinuationBinding { account:"account".into(), profile:"profile".into(), model:"model".into(), endpoint:"endpoint".into(), protocol:"responses".into() },
+            stage:NativeReceiptStage::Prepared, submission_attempt:0, receipt:output, provider_response_id:None,
+        };
+        journal.append_once(&receipt.event_id(), &serde_json::json!({"NativeReceipt": receipt})).unwrap();
+        journal.write_snapshot(5, &serde_json::json!({"sentinel":"unchanged"})).unwrap();
+        let wal = cfg.lingxi_home.join(&relative).join(session::jsonl::JOURNAL_FILE_NAME);
+        let snapshot = cfg.lingxi_home.join(&relative).join(session::jsonl::SNAPSHOT_FILE_NAME);
+        let wal_before = std::fs::read(&wal).unwrap();
+        let snapshot_before = std::fs::read(&snapshot).unwrap();
+        drop(journal);
+        let source_before = std::fs::read(&path).unwrap();
+        let before_files = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        let error = handle.submit(ClientCommand::ForkSession {
+            session_id:source_id.clone(), target_mode:SessionModeDto::Code,
+        }).await.unwrap_err();
+        assert!(matches!(error, ClientError::Rejected { message } if message.contains("unsettled computer receipt")));
+        assert_eq!(std::fs::read(&path).unwrap(), source_before);
+        assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), before_files);
+        assert!(!drained(&listener).await.iter().any(|event| matches!(event, Ev::SessionForked { .. })));
     });
 }
 
 #[test]
-fn resume_empty_session_bootstraps_legacy_project_index_uuid() {
+fn chat_and_code_expose_the_same_standard_slash_catalog() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-    let expected = "dddddddd-4444-4444-8444-dddddddddddd";
-
-    handle.runtime().block_on(async {
-        use lingxi_core::host::OrchestratorHandle;
-
-        handle
-            .resume_empty_session(expected.into(), "旧空会话".into())
-            .await
-            .expect("legacy indexed empty session resumes");
-
-        assert_eq!(
-            handle
-                .inner()
-                .orchestrator
-                .current_session_id()
-                .await
-                .as_uuid()
-                .to_string(),
-            expected,
-        );
-        let path =
-            session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd(), expected);
-        let raw = std::fs::read_to_string(path).expect("migration anchor exists");
-        assert!(raw.contains("\"mobileEmptySession\":1"));
-        assert!(raw.contains("旧空会话"));
-
-        let events = drained(&listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::SessionResumed {
-                session_id,
-                mode,
-                messages,
-            } if session_id == expected && mode == &SessionModeDto::Code && messages.is_empty()
-        )));
-    });
+    let commands = tmp.path().join(".lingxi").join("commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("research.md"),
+        "---\ndescription: Research\n---\nResearch $ARGUMENTS\n",
+    )
+    .unwrap();
+    let mut chat = test_config(tmp.path());
+    chat.session_mode = session::jsonl::SessionMode::Chat;
+    let (chat_handle, _) = build_submit_handle_with_config(chat, tmp.path());
+    let (code_handle, _) = build_submit_handle(tmp.path());
+    let before = chat_handle
+        .runtime()
+        .block_on(chat_handle.slash_command_catalog_snapshot());
+    let after = code_handle
+        .runtime()
+        .block_on(code_handle.slash_command_catalog_snapshot());
+    assert!(before
+        .iter()
+        .any(|command| command.name.display() == "research"));
+    assert_eq!(
+        before.iter().map(|c| c.name.display()).collect::<Vec<_>>(),
+        after.iter().map(|c| c.name.display()).collect::<Vec<_>>()
+    );
 }
 
 /// Seed a REPLAY-VALID session JSONL under
@@ -11927,6 +12244,12 @@ fn seed_replay_valid_session(root: &std::path::Path) -> (String, usize) {
     let asst_uuid = "cccccccc-3333-4333-8333-cccccccccccc".to_string();
     let path = project_dir.join(format!("{file_uuid}.jsonl"));
 
+    let header = serde_json::json!({
+        "type": "fixed-session-mode",
+        "sessionId": file_uuid,
+        "sessionMode": "code",
+        "instructionEpoch": 0
+    });
     let user_line = serde_json::json!({
         "type": "user",
         "uuid": user_uuid,
@@ -11951,7 +12274,7 @@ fn seed_replay_valid_session(root: &std::path::Path) -> (String, usize) {
         "message": {"role": "assistant", "content": [{"type": "text", "text": "resumed!"}]}
     });
     let body = format!(
-        "{}\n{}\n",
+        "{header}\n{}\n{}\n",
         serde_json::to_string(&user_line).unwrap(),
         serde_json::to_string(&asst_line).unwrap()
     );
@@ -11974,12 +12297,7 @@ fn submit_resume_session_rehydrates_and_emits() {
     handle.runtime().block_on(async {
         use lingxi_core::host::OrchestratorHandle;
 
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: file_uuid.clone(),
-                cwd: None,
-            })
-            .await;
+        let result = handle.resume_seeded_test_session(file_uuid.clone()).await;
         assert!(
             result.is_ok(),
             "ResumeSession against a replay-valid session must succeed, got {result:?}"
@@ -12041,10 +12359,7 @@ fn submit_resume_session_accepts_legacy_display_prefix() {
 
     handle.runtime().block_on(async {
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: format!("sess:{file_uuid}"),
-                cwd: None,
-            })
+            .resume_seeded_test_session(format!("sess:{file_uuid}"))
             .await
             .expect("legacy prefixed session id must resume");
 
@@ -12075,11 +12390,7 @@ fn submit_resume_session_missing_is_rejected() {
 
     handle.runtime().block_on(async {
         let result = handle
-            .submit(ClientCommand::ResumeSession {
-                // A well-formed uuid that names no on-disk session.
-                session_id: "dddddddd-4444-4444-8444-dddddddddddd".into(),
-                cwd: None,
-            })
+            .resume_seeded_test_session("dddddddd-4444-4444-8444-dddddddddddd".into())
             .await;
         assert!(
             matches!(result, Err(ClientError::Rejected { .. })),
@@ -12095,6 +12406,31 @@ fn submit_resume_session_missing_is_rejected() {
     });
 }
 
+#[test]
+fn uuid_only_mobile_resume_command_rejects_even_when_source_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session_id, _) = seed_replay_valid_session(tmp.path());
+    let (handle, listener) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let before = handle.inner.orchestrator.current_session_id().await;
+        assert!(matches!(
+            handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id,
+                    cwd: None,
+                    expected_mode: SessionModeDto::Code,
+                })
+                .await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert_eq!(handle.inner.orchestrator.current_session_id().await, before);
+        assert!(!drained(&listener)
+            .await
+            .iter()
+            .any(|event| matches!(event, Ev::SessionResumed { .. })));
+    });
+}
+
 /// SESSIONS/HISTORY (live ResumeSession): a MALFORMED session id (not a uuid)
 /// is honestly REJECTED — we parse the id as a `Uuid` first and reject a
 /// non-uuid rather than fake a confirmation.
@@ -12104,12 +12440,7 @@ fn submit_resume_session_malformed_id_is_rejected() {
     let (handle, listener) = build_submit_handle(tmp.path());
 
     handle.runtime().block_on(async {
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: "not-a-uuid".into(),
-                cwd: None,
-            })
-            .await;
+        let result = handle.resume_seeded_test_session("not-a-uuid".into()).await;
         assert!(
             matches!(result, Err(ClientError::Rejected { .. })),
             "a malformed session id must be Rejected, got {result:?}"
@@ -12150,12 +12481,7 @@ fn submit_resume_session_mid_turn_is_rejected() {
             "the freshly-armed turn token must not be cancelled yet"
         );
 
-        let result = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: file_uuid,
-                cwd: None,
-            })
-            .await;
+        let result = handle.resume_seeded_test_session(file_uuid).await;
         assert!(
             matches!(result, Err(ClientError::Rejected { .. })),
             "resume must be Rejected while a turn is in flight, got {result:?}"
@@ -12431,7 +12757,8 @@ fn new_session_accepts_another_existing_directory_and_rejects_missing_paths() {
         assert!(handle
             .submit(ClientCommand::NewSession {
                 cwd: Some(tmp.path().join("missing").display().to_string()),
-                model: None
+                model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .is_err());
@@ -12440,6 +12767,7 @@ fn new_session_accepts_another_existing_directory_and_rejects_missing_paths() {
             .submit(ClientCommand::NewSession {
                 cwd: Some(other.display().to_string()),
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .unwrap();
@@ -12615,18 +12943,14 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
             )
             .await
             .unwrap();
-        handle
-            .inner
-            .session_writer
-            .append_session_mode(handle.inner.session_mode.as_str())
-            .await
-            .unwrap();
+
         let original_scope = handle.inner.task_registry.handback_scope().await.unwrap();
 
         handle
             .submit(ClientCommand::NewSession {
                 cwd: None,
                 model: None,
+                mode: client::protocol::listings::SessionModeDto::Code,
             })
             .await
             .unwrap();
@@ -12647,10 +12971,7 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
         );
 
         handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: original.as_uuid().to_string(),
-                cwd: None,
-            })
+            .resume_seeded_test_session(original.as_uuid().to_string())
             .await
             .unwrap();
         let resumed_scope = handle.inner.task_registry.handback_scope().await.unwrap();

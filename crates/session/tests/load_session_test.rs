@@ -22,6 +22,14 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+fn fixed_source(id: Uuid, body: impl AsRef<str>) -> String {
+    format!(
+        "{}\n{}",
+        json!({"type":"fixed-session-mode", "sessionId":id, "sessionMode":"code", "instructionEpoch":0}),
+        body.as_ref()
+    )
+}
+
 fn source_json_view(source: &Utf16JsonProjection) -> Value {
     let json = source.to_json_string().expect("fixture source is JSON");
     serde_json::from_str(&json).expect("fixture source parses as JSON")
@@ -91,7 +99,7 @@ async fn loads_valid_two_message_session() {
         &sid.to_string(),
         "2026-05-25T12:00:01.000Z",
     ));
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid, body))
         .await
         .unwrap();
 
@@ -142,7 +150,7 @@ async fn dangling_parent_link_rejoins_nearest_preceding_row_at_inclusive_5000ms_
         &sid.to_string(),
         "2026-05-25T12:00:05.000Z", // exactly 5000 ms after m1; newest leaf
     ));
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid, body))
         .await
         .unwrap();
 
@@ -175,7 +183,7 @@ async fn first_message_with_parent_uuid_no_longer_errors() {
         &sid.to_string(),
         "2026-05-25T12:00:00.000Z",
     );
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid, body))
         .await
         .unwrap();
 
@@ -217,7 +225,7 @@ async fn differing_session_ids_no_longer_error() {
         &sid.to_string(),
         "2026-05-25T12:00:01.000Z",
     ));
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid, body))
         .await
         .unwrap();
 
@@ -243,9 +251,12 @@ async fn real_transcript_returns_only_newest_main_thread() {
     // Fixture is written with this exact session uuid as its filename stem.
     let sid: Uuid = "11111111-1111-4111-8111-111111111111".parse().unwrap();
     let fixture = include_str!("fixtures/real_transcript_branched.jsonl");
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixture)
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        fixed_source(sid, fixture),
+    )
+    .await
+    .unwrap();
 
     let messages = load_session(&lingxi_home, &cwd, sid, fs).await.expect("ok");
 
@@ -305,9 +316,12 @@ async fn forked_session_loads_and_uses_leaf_session_id() {
         &file_sid.to_string(),
         "2026-05-25T12:00:09.000Z",
     ));
-    tokio::fs::write(subdir.join(format!("{file_sid}.jsonl")), body)
-        .await
-        .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{file_sid}.jsonl")),
+        fixed_source(file_sid, body),
+    )
+    .await
+    .unwrap();
 
     let messages = load_session(&lingxi_home, &cwd, file_sid, fs)
         .await
@@ -479,7 +493,7 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
     ));
 
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
         .await
         .unwrap();
 
@@ -552,7 +566,7 @@ async fn no_parallel_calls_chain_is_unchanged_by_recovery() {
     ));
 
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
         .await
         .unwrap();
 
@@ -571,7 +585,7 @@ async fn loads_single_user_message() {
     let sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
     let body = json_line(&m1.to_string(), None, &sid.to_string());
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid, body))
         .await
         .unwrap();
 
@@ -680,7 +694,7 @@ async fn chain_stops_at_compact_boundary_parent_null() {
         "2026-07-13T10:00:04.000Z",
     ));
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
         .await
         .unwrap();
 
@@ -764,7 +778,7 @@ async fn compact_boundary_preserved_tail_resplices_after_summary() {
         "2026-07-13T10:00:06.000Z",
     ));
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
         .await
         .unwrap();
 
@@ -890,7 +904,7 @@ async fn preserved_tail_assistant_blocks_resolved_by_inner_message_id() {
             })
             .collect();
         let sid_uuid = Uuid::parse_str(&sid).unwrap();
-        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(sid_uuid, body))
             .await
             .unwrap();
 
@@ -971,7 +985,7 @@ async fn preserved_segment_resume_usage_and_boundary_validation() {
                 format!("{row}\n")
             })
             .collect();
-        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(Uuid::parse_str(&sid).unwrap(), body))
             .await
             .unwrap();
         let messages = load_session(&home, &cwd, Uuid::parse_str(&sid).unwrap(), fs)
@@ -1067,7 +1081,7 @@ async fn preserved_segment_keeps_parallel_results_and_split_blocks_only_from_lat
                 format!("{row}\n")
             })
             .collect();
-        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixed_source(Uuid::parse_str(&sid).unwrap(), body))
             .await
             .unwrap();
         let messages = load_session(&home, &cwd, Uuid::parse_str(&sid).unwrap(), fs)

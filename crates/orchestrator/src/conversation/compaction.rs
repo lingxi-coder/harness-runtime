@@ -532,6 +532,30 @@ pub(crate) struct SessionCompactCoreOutput {
     pub(crate) api_duration: std::time::Duration,
 }
 
+struct ExactCompactPreparedState {
+    reads_before: tool_api::read_file_state::ReadFileStateLru,
+    reads_after: tool_api::read_file_state::ReadFileStateLru,
+    skills: Vec<compaction::post_compact::StagedSkillWriteBack>,
+}
+
+impl ExactCompactPreparedState {
+    fn commit(&self, orch: &ConversationOrchestrator) {
+        orch.prompt_runtime
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .apply_compaction_transition(&self.reads_before, &self.reads_after);
+        for write in &self.skills {
+            compaction::invoked_skills::write_back_if_unchanged(
+                &write.key,
+                write.activation_id,
+                &write.original,
+                &write.replacement,
+            );
+        }
+    }
+}
+
 fn apply_session_compact_result(
     result: &mut compaction::IterationCompactionResult,
     event_result: &SessionCompactEventResult,
@@ -1623,16 +1647,20 @@ impl ConversationOrchestrator {
             ));
         };
 
-        let _turn_guard = tokio::select! {
+        let turn_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => {
                 return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
-            guard = self.turn_gate.lock() => guard,
+            guard = self.turn_gate.clone().lock_owned() => Arc::new(guard),
         };
 
+        self.admit_conversation_profile(&turn_guard).await?;
+        self.refresh_effective_skill_projection()
+            .await
+            .map_err(|error| lingxi_core::host::HandleError::ActionFailed(error.to_string()))?;
         let (history_before, model) = {
             let session = self.session.lock().await;
             (session.model_context_history(), session.model.clone())
@@ -1892,18 +1920,22 @@ impl ConversationOrchestrator {
         // background Fusion publication and session switches. Cancellation may
         // abandon the queue, never a partially persisted commit. Automatic
         // compaction already runs under its caller's turn gate.
-        let _turn_guard = tokio::select! {
+        let turn_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => {
                 return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
-            guard = self.turn_gate.lock() => guard,
+            guard = self.turn_gate.clone().lock_owned() => Arc::new(guard),
         };
 
         // Snapshot history (clone — we don't hold the lock across the
         // network call inside `process_iteration`).
+        self.admit_conversation_profile(&turn_guard).await?;
+        self.refresh_effective_skill_projection()
+            .await
+            .map_err(|error| lingxi_core::host::HandleError::ActionFailed(error.to_string()))?;
         let (history_before, model) = {
             let s = self.session.lock().await;
             (s.model_context_history(), s.model.clone())
@@ -2188,13 +2220,29 @@ impl ConversationOrchestrator {
         &self,
         boundary_context: &[lingxi_core::types::ConversationMessage],
     ) -> Vec<lingxi_core::types::ConversationMessage> {
+        self.restore_post_compact_attachments_with_state(
+            boundary_context,
+            &self.prompt_runtime.read_state_map,
+            false,
+        )
+        .await
+        .0
+    }
+
+    async fn restore_post_compact_attachments_with_state(
+        &self,
+        boundary_context: &[lingxi_core::types::ConversationMessage],
+        read_state_map: &tool_api::read_file_state::ReadFileStateMap,
+        stage_skills: bool,
+    ) -> (
+        Vec<lingxi_core::types::ConversationMessage>,
+        Vec<compaction::post_compact::StagedSkillWriteBack>,
+    ) {
         // Native g_n snapshots every cache entry, including nested-memory
         // seeds, before readFileState.clear(). Keep the cache's MRU order so
         // Evo's stable timestamp sort preserves ties.
         let snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
-            let mut map = self
-                .prompt_runtime
-                .read_state_map
+            let mut map = read_state_map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let snapshot = map
@@ -2220,8 +2268,13 @@ impl ConversationOrchestrator {
                 self.config.plans_directory.as_deref(),
             ));
             out.extend(
-                self.restore_post_compact_files_arm(snapshot, &already_attached, &plan_file)
-                    .await,
+                self.restore_post_compact_files_arm(
+                    snapshot,
+                    &already_attached,
+                    &plan_file,
+                    read_state_map,
+                )
+                .await,
             );
         }
 
@@ -2238,8 +2291,17 @@ impl ConversationOrchestrator {
             compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None),
         );
         let already_attached_skills = self.post_compact_attached_skill_contents(boundary_context);
-        let restored_skills =
-            compaction::restore_post_compact_skills(skill_candidates, &already_attached_skills);
+        let (restored_skills, staged_skills) = if stage_skills {
+            compaction::post_compact::stage_post_compact_skills(
+                skill_candidates,
+                &already_attached_skills,
+            )
+        } else {
+            (
+                compaction::restore_post_compact_skills(skill_candidates, &already_attached_skills),
+                Vec::new(),
+            )
+        };
         if let Some(rendered) = compaction::render_invoked_skills_attachment(&restored_skills) {
             let message_id = lingxi_core::types::MessageId::new();
             let contents = restored_skills
@@ -2251,7 +2313,7 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(message_id, contents);
-            out.push(lingxi_core::types::ConversationMessage::user_meta_js_utf16(
+            let mut message = lingxi_core::types::ConversationMessage::user_meta_js_utf16(
                 message_id,
                 rendered
                     .string_at("")
@@ -2260,7 +2322,33 @@ impl ConversationOrchestrator {
                 rendered
                     .string_units("")
                     .expect("skill attachment renderer returns a root string"),
-            ));
+            );
+            if let lingxi_core::types::ConversationMessage::User { origin, .. } = &mut message {
+                let scope =
+                    compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+                let mut activation = compaction::invoked_skills::skill_activation_origin(
+                    compaction::invoked_skills::context_epoch(scope),
+                );
+                let sources = restored_skills
+                    .iter()
+                    .map(|skill| {
+                        compaction::invoked_skills::skill_source_metadata(
+                            &skill.name,
+                            &skill.path,
+                            scope,
+                        )
+                    })
+                    .collect();
+                activation
+                    .set_field(
+                        "skills",
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::array(sources)
+                            .expect("skill source metadata is an array"),
+                    )
+                    .expect("skill activation metadata is an object");
+                *origin = Some(activation);
+            }
+            out.push(message);
         }
 
         // 2.1.266 `_ts` (@4123349), assembled by `KOe` as
@@ -2271,7 +2359,7 @@ impl ConversationOrchestrator {
             out.push(message);
         }
 
-        out
+        (out, staged_skills)
     }
 
     /// `_ts(agentId, storageV5)` — the `plan_file_reference` attachment.
@@ -2456,6 +2544,7 @@ impl ConversationOrchestrator {
         snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)>,
         already_attached: &[String],
         plan_file: &std::path::Path,
+        read_state_map: &tool_api::read_file_state::ReadFileStateMap,
     ) -> Vec<lingxi_core::types::ConversationMessage> {
         let candidates: Vec<compaction::FileRestoreCandidate> = snapshot
             .into_iter()
@@ -2589,7 +2678,7 @@ impl ConversationOrchestrator {
                                 .map(tool_api::read_file_state::mtime_ms_floor)
                                 .unwrap_or(0);
                             tool_api::read_file_state::set_with_requested_path(
-                                &self.prompt_runtime.read_state_map,
+                                read_state_map,
                                 candidate.path.clone(),
                                 tool_api::read_file_state::ReadFileEntry {
                                     content: content.clone(),
@@ -2766,7 +2855,7 @@ impl ConversationOrchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn apply_post_compact_placed(
         &self,
-        result: compaction::IterationCompactionResult,
+        mut result: compaction::IterationCompactionResult,
         trigger: compaction::CompactTrigger,
         pre_tokens_estimate: u64,
         messages_before: u32,
@@ -2792,21 +2881,40 @@ impl ConversationOrchestrator {
         // full-replacement path (short conversation / snip-micro-only /
         // under-threshold), keeping the post-compact history byte-identical to
         // before this finding.
-        let preserved_tail = match crate::native_computer::preserve_pending_compaction_tail(
-            self,
-            &result.messages_to_preserve,
-        )
-        .await
+        let (preserved_tail, native_exact_preserved) =
+            match crate::native_computer::preserve_pending_compaction_tail(
+                self,
+                &result.messages_to_preserve,
+            )
+            .await
+            {
+                Ok(tail) => tail,
+                Err(error) => {
+                    tracing::warn!(%error, "compaction cannot preserve an unfinished native round");
+                    self.output
+                        .emit_compaction_finished(Some(&error.to_string()))
+                        .await;
+                    return None;
+                }
+            };
+        // The exact native re-splice is defined for summaries preceding the
+        // kept rows. Refuse a shape with no durable anchor before committing.
+        if native_exact_preserved
+            && (!matches!(placement, SummaryPlacement::BeforeKept) || result.messages.is_empty())
         {
-            Ok(tail) => tail,
-            Err(error) => {
-                tracing::warn!(%error, "compaction cannot preserve an unfinished native round");
-                self.output
-                    .emit_compaction_finished(Some(&error.to_string()))
-                    .await;
-                return None;
-            }
-        };
+            let reason =
+                "compaction cannot preserve native abandonment without a preceding summary";
+            tracing::warn!("{reason}");
+            self.output.emit_compaction_finished(Some(reason)).await;
+            return None;
+        }
+        let native_exact_tail = native_exact_preserved
+            .then(|| {
+                preserved_tail
+                    .last()
+                    .map(|row| row.id().as_uuid().to_string())
+            })
+            .flatten();
         let kept_context_types = self
             .context_attachment_history(&preserved_tail)
             .into_iter()
@@ -2896,6 +3004,9 @@ impl ConversationOrchestrator {
             boundary_tail,
             anchor_uuid.as_ref(),
         );
+        if native_exact_preserved {
+            metadata.native_exact_preserved = Some(true);
+        }
 
         // This is the commit boundary for the post-compact transition. Every
         // phase below mutates live auxiliary state (read-state, invoked-skill
@@ -2932,9 +3043,36 @@ impl ConversationOrchestrator {
         // appended AFTER the summary, in the `messagesToKeep`/`attachments`
         // position of `buildPostCompactMessages` order. Internal vision
         // sidecars are inserted between the kept tail and these attachments.
-        let restored_attachments = self
-            .restore_post_compact_attachments_against(&preserved_tail)
-            .await;
+        let (restored_attachments, exact_prepared) = if native_exact_preserved {
+            let reads_before = self
+                .prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let staged_reads = std::sync::Arc::new(std::sync::Mutex::new(reads_before.clone()));
+            let (attachments, skills) = self
+                .restore_post_compact_attachments_with_state(&preserved_tail, &staged_reads, true)
+                .await;
+            let reads_after = staged_reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            (
+                attachments,
+                Some(ExactCompactPreparedState {
+                    reads_before,
+                    reads_after,
+                    skills,
+                }),
+            )
+        } else {
+            (
+                self.restore_post_compact_attachments_against(&preserved_tail)
+                    .await,
+                None,
+            )
+        };
 
         // Claude Code 2.1.212 `gio(...)` builds the post-compact attachment
         // set before `executePostCompactHooks`: reload instruction files with
@@ -3019,7 +3157,7 @@ impl ConversationOrchestrator {
             .as_ref()
             .and_then(|preserved| preserved.anchor_uuid.as_ref())
             .is_none_or(|anchor| Some(anchor) == summary_last_uuid.as_ref());
-        let retained_context_announcements = if tail_preserved
+        let mut retained_context_announcements = if tail_preserved
             && matches!(trigger, compaction::CompactTrigger::Auto)
             && matches!(placement, SummaryPlacement::BeforeKept)
             && anchor_matches
@@ -3108,10 +3246,87 @@ impl ConversationOrchestrator {
             let metadata_updated = marker.set_compact_metadata(metadata.clone());
             debug_assert!(metadata_updated);
         }
+        let boundary_id = marker.id();
         marker = self
             .mod_session_append_row(&marker, None, false, None)
             .await;
         history_after[0] = marker.clone();
+        if native_exact_preserved {
+            if marker.id() != boundary_id
+                || !matches!(&marker, ConversationMessage::System { compact_metadata: Some(saved), .. } if saved == &metadata)
+            {
+                let reason = "compaction hook changed the native recovery boundary";
+                self.output.emit_compaction_finished(Some(reason)).await;
+                return None;
+            }
+            let mut parent = marker.id();
+            for (index, (original, _)) in retained_context_announcements.iter_mut().enumerate() {
+                let accepted = self
+                    .mod_session_append_row(original, None, false, None)
+                    .await;
+                if let Err(error) = crate::native_computer::stage_exact_compaction_row(
+                    self,
+                    original,
+                    &accepted,
+                    marker.id(),
+                    parent,
+                    false,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "native compaction prelude could not be persisted");
+                    self.output
+                        .emit_compaction_finished(Some(&error.to_string()))
+                        .await;
+                    return None;
+                }
+                parent = accepted.id();
+                history_after[1 + index] = accepted.clone();
+                *original = accepted;
+            }
+            let offset = 1 + retained_context_announcements.len();
+            for (index, original) in result.messages.iter_mut().enumerate() {
+                let accepted = self
+                    .mod_session_append_row(original, None, false, None)
+                    .await;
+                if let Err(error) = crate::native_computer::stage_exact_compaction_row(
+                    self,
+                    original,
+                    &accepted,
+                    marker.id(),
+                    parent,
+                    true,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "native compaction summary could not be persisted");
+                    self.output
+                        .emit_compaction_finished(Some(&error.to_string()))
+                        .await;
+                    return None;
+                }
+                parent = accepted.id();
+                history_after[offset + index] = accepted.clone();
+                *original = accepted;
+            }
+            if !self
+                .persist_compact_boundary_to_jsonl(&marker, &metadata)
+                .await
+            {
+                self.output
+                    .emit_compaction_finished(Some(
+                        "native compaction boundary could not be persisted",
+                    ))
+                    .await;
+                return None;
+            }
+            if let Some(tail_last) = native_exact_tail.as_ref() {
+                *self.transcript.last_jsonl_uuid.lock().await = Some(tail_last.clone());
+            }
+            if let Some(prepared) = &exact_prepared {
+                prepared.commit(self);
+            }
+        }
         // Swap model-visible history under the same lock while retaining
         // transcript-only completion envelopes. They were excluded from the
         // compactor input and remain excluded after the transition.
@@ -3166,15 +3381,17 @@ impl ConversationOrchestrator {
         // 4. Preserved vision sidecars, then restored file attachments, chained
         //    after the tail (the `attachments` slot of
         //    `buildPostCompactMessages`).
-        self.persist_compact_boundary_to_jsonl(&marker, &metadata)
-            .await;
-        for (message, _) in &retained_context_announcements {
-            self.persist_message_to_jsonl(message).await;
+        if !native_exact_preserved {
+            self.persist_compact_boundary_to_jsonl(&marker, &metadata)
+                .await;
+            for (message, _) in &retained_context_announcements {
+                self.persist_message_to_jsonl(message).await;
+            }
+            for m in &result.messages {
+                self.persist_compact_summary_to_jsonl(m).await;
+            }
         }
-        for m in &result.messages {
-            self.persist_compact_summary_to_jsonl(m).await;
-        }
-        if tail_preserved {
+        if tail_preserved && !native_exact_preserved {
             if let Some(tail_last) = pre_boundary_last_uuid {
                 *self.transcript.last_jsonl_uuid.lock().await = Some(tail_last);
             }
@@ -4069,7 +4286,7 @@ impl ConversationOrchestrator {
         &self,
         marker: &ConversationMessage,
         metadata: &compaction::CompactBoundaryMetadata,
-    ) {
+    ) -> bool {
         // `compactMetadata` wire value: CompactBoundaryMetadata serializes
         // claude's camelCase keys; `logicalParentUuid` is a TOP-LEVEL line
         // field (`x9r` spreads it as a message-level sibling), never a
@@ -4090,7 +4307,7 @@ impl ConversationOrchestrator {
             .remove_field("logicalParentUuid")
             .expect("compact metadata is an object");
         self.persist_compact_boundary_jsonl_value(marker, compact_metadata)
-            .await;
+            .await
     }
 
     /// Shared compact-boundary JSONL writer for locally generated and SDK
@@ -4100,10 +4317,14 @@ impl ConversationOrchestrator {
         &self,
         marker: &ConversationMessage,
         mut compact_metadata: CompactSource,
-    ) {
+    ) -> bool {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
-            return;
+            return false;
         };
+        let exact_native = compact_metadata
+            .at_pointer("/nativeExactPreserved")
+            .and_then(|value| value.as_bool())
+            == Some(true);
         let session_id_str = self.session.lock().await.session_id.as_uuid().to_string();
         let explicit_parent = match marker {
             ConversationMessage::System {
@@ -4163,14 +4384,30 @@ impl ConversationOrchestrator {
             turn_origin_projection: None,
         };
         let uuid_for_chain = jmsg.uuid.clone();
-        match writer.append(&jmsg).await {
+        let append = if exact_native {
+            match writer.append_native_message_once(&jmsg).await {
+                Ok((_, true)) => Ok(()),
+                Ok((_, false)) => {
+                    Err("native compact boundary is not the transcript tip".to_string())
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        } else {
+            writer
+                .append(&jmsg)
+                .await
+                .map_err(|error| error.to_string())
+        };
+        match append {
             Ok(()) => {
                 *self.transcript.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
                 telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+                true
             }
             Err(e) => {
                 self.record_transcript_append_failure(&session_id_str, "compact_boundary", &e)
                     .await;
+                false
             }
         }
     }

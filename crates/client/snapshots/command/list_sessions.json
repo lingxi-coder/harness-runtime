@@ -1,4 +1,5 @@
 {
   "type": "list_sessions",
-  "limit": 20
+  "limit": 20,
+  "mode": "chat"
 }

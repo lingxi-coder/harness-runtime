@@ -826,6 +826,22 @@ mod tests {
         writer.append(&row).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn replay_source_check_uses_private_chat_writer_binding() {
+        let (_root, path, fs) = fixture();
+        let session =
+            SessionId::parse_prefixed(path.file_stem().unwrap().to_str().unwrap()).unwrap();
+        let writer = JsonlWriter::open_persistent_chat(path.clone(), fs, None)
+            .await
+            .unwrap();
+        append_user(&writer, "accepted").await;
+        writer.verify_active_replay_source(session).await.unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::rename(&path, path.with_extension("saved")).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        assert!(writer.verify_active_replay_source(session).await.is_err());
+    }
+
     fn context_row(captured: &CapturedChatTranscript) -> JsonlMessage {
         serde_json::from_value(json!({
             "type":"attachment", "uuid":uuid::Uuid::new_v4(),

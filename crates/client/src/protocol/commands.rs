@@ -37,7 +37,7 @@ use crate::protocol::audio::{
 };
 use crate::protocol::computer_access::ComputerAccessResponseDto;
 use crate::protocol::controls::ReasoningSelectionDto;
-use crate::protocol::listings::TaskStatusDto;
+use crate::protocol::listings::{SessionModeDto, TaskStatusDto};
 use crate::protocol::media::{
     MediaConnectionResponseDto, MediaControlResponseDto, MediaDeviceResponseDto,
     MediaServiceRequestDto, MediaSessionModeDto,
@@ -448,6 +448,8 @@ define_client_command! {
         // Optional exact starting model-selection source. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ClientTextDto>,
+        // The new session owns this mode for its entire lifetime.
+        mode: SessionModeDto,
     },
 
     // Resume a prior session on this connection. **The ONE allowed
@@ -460,6 +462,8 @@ define_client_command! {
         // Optional working directory override. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        // Reject a transcript belonging to another session space.
+        expected_mode: SessionModeDto,
     },
 
     // Request the resumable-session catalog. Replied with a
@@ -468,6 +472,9 @@ define_client_command! {
         // Optional cap on the number of rows. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
+        // Filter the complete catalog before applying the limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SessionModeDto>,
     },
 
     // Force a context compaction now. Reports via
@@ -741,6 +748,10 @@ define_client_command! {
     CronRunStarted {
         run_id: String,
         session_id: String,
+        transcript_path: String,
+        session_mode: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_scope_key: Option<String>,
     },
     ScheduledRunTurn {
         run_id: String,
@@ -885,11 +896,25 @@ define_client_command! {
     UpdateMediaSessionModes {
         modes: Vec<MediaSessionModeDto>,
     },
-
     // App lifecycle or user refresh for the shared official provider directory.
     RefreshProviderCatalog {
         // startup, foreground, background, timer, network_restored, settings, manual.
         trigger: String,
+    },
+    // Inspect host-side context metadata without a model call or prompt bodies.
+    GetContextManifest,
+    // Prepare a read-only summary for a new session in the target space.
+    PrepareSessionHandoff {
+        request_id: String,
+        target_mode: SessionModeDto,
+    },
+    // Cancel a pending handoff preparation.
+    CancelSessionHandoff {
+        request_id: String,
+    },
+    // Explicitly retry a failed summary at its retained original cutoff.
+    RetrySessionHandoff {
+        request_id: String,
     },
     /// Host-private restoration of one checkpoint; never executes a prompt.
     SideChatRestore { side_id: String, checkpoint_json: String, events_json: Vec<String> },
@@ -899,6 +924,20 @@ define_client_command! {
 impl From<ClientCommandWire> for ClientCommand {
     fn from(value: ClientCommandWire) -> Self {
         match value {
+            ClientCommandWire::GetContextManifest => Self::GetContextManifest,
+            ClientCommandWire::PrepareSessionHandoff {
+                request_id,
+                target_mode,
+            } => Self::PrepareSessionHandoff {
+                request_id,
+                target_mode,
+            },
+            ClientCommandWire::CancelSessionHandoff { request_id } => {
+                Self::CancelSessionHandoff { request_id }
+            }
+            ClientCommandWire::RetrySessionHandoff { request_id } => {
+                Self::RetrySessionHandoff { request_id }
+            }
             ClientCommandWire::SideChatRestore {
                 side_id,
                 checkpoint_json,
@@ -1012,11 +1051,19 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::LoadSessionAgentTranscript { agent_id } => {
                 Self::LoadSessionAgentTranscript { agent_id }
             }
-            ClientCommandWire::NewSession { cwd, model } => Self::NewSession { cwd, model },
-            ClientCommandWire::ResumeSession { session_id, cwd } => {
-                Self::ResumeSession { session_id, cwd }
+            ClientCommandWire::NewSession { cwd, model, mode } => {
+                Self::NewSession { cwd, model, mode }
             }
-            ClientCommandWire::ListSessions { limit } => Self::ListSessions { limit },
+            ClientCommandWire::ResumeSession {
+                session_id,
+                cwd,
+                expected_mode,
+            } => Self::ResumeSession {
+                session_id,
+                cwd,
+                expected_mode,
+            },
+            ClientCommandWire::ListSessions { limit, mode } => Self::ListSessions { limit, mode },
             ClientCommandWire::ForceCompact => Self::ForceCompact,
             ClientCommandWire::ClearSession => Self::ClearSession,
             ClientCommandWire::TaskList {
@@ -1113,9 +1160,19 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::TaskMessage { task_id, message } => {
                 Self::TaskMessage { task_id, message }
             }
-            ClientCommandWire::CronRunStarted { run_id, session_id } => {
-                Self::CronRunStarted { run_id, session_id }
-            }
+            ClientCommandWire::CronRunStarted {
+                run_id,
+                session_id,
+                transcript_path,
+                session_mode,
+                session_scope_key,
+            } => Self::CronRunStarted {
+                run_id,
+                session_id,
+                transcript_path,
+                session_mode,
+                session_scope_key,
+            },
             ClientCommandWire::ScheduledRunTurn {
                 run_id,
                 prompt,
@@ -1361,6 +1418,7 @@ impl<'de> Deserialize<'de> for ClientCommand {
             "clear_session" => Ok(Self::ClearSession),
             "request_exit" => Ok(Self::RequestExit),
             "get_conversation_controls" => Ok(Self::GetConversationControls),
+            "get_context_manifest" => Ok(Self::GetContextManifest),
             // These prompt fields are Source text. Decode their raw member
             // tokens directly so serde's internally-tagged Content buffer
             // cannot normalize isolated UTF-16 surrogates first.
@@ -1565,9 +1623,25 @@ pub struct CronAutomationDto {
     pub reasoning: ReasoningSelectionDto,
     pub run_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_scope_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_scope_key: Option<String>,
     pub notification_policy: String,
     #[serde(default)]
     pub runs: Vec<CronRunDto>,
@@ -1594,6 +1668,12 @@ pub struct CronRunDto {
     pub model: String,
     pub reasoning: ReasoningSelectionDto,
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope_key: Option<String>,
     pub summary: Option<String>,
     pub error: Option<String>,
 }

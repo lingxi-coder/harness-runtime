@@ -1666,9 +1666,10 @@ async fn unsupported_startup_prewarm_skips_prompt_and_tool_preparation() {
     tokio::time::timeout(Duration::from_secs(5), api.checked.notified())
         .await
         .expect("prewarm must check the selected route");
-    orch.shutdown_startup_responses_websocket_prewarm()
+    assert!(orch
+        .shutdown_startup_responses_websocket_prewarm()
         .await
-        .unwrap();
+        .is_empty());
     assert_eq!(
         *api.route.lock().unwrap(),
         Some((
@@ -2065,9 +2066,10 @@ async fn host_shutdown_joins_blocked_startup_prewarm_and_rejects_late_registrati
     orch.spawn_startup_responses_websocket_prewarm();
     api.wait_started().await;
     orch.close_background_producer_admission();
-    orch.shutdown_startup_responses_websocket_prewarm()
+    assert!(orch
+        .shutdown_startup_responses_websocket_prewarm()
         .await
-        .unwrap();
+        .is_empty());
     assert!(
         !api.active.load(Ordering::SeqCst),
         "shutdown must join the work future's drop"
@@ -2078,9 +2080,10 @@ async fn host_shutdown_joins_blocked_startup_prewarm_and_rejects_late_registrati
         .lifecycle_runtime
         .startup_responses_websocket_prewarm
         .is_running());
-    orch.shutdown_startup_responses_websocket_prewarm()
+    assert!(orch
+        .shutdown_startup_responses_websocket_prewarm()
         .await
-        .unwrap();
+        .is_empty());
     drop(orch);
     assert!(
         weak.upgrade().is_none(),

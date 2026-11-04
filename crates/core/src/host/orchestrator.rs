@@ -680,6 +680,9 @@ impl GoalStatusAttachment {
 pub struct DeferredToolReplay {
     /// Original tool-use id from the persisted hook attachment.
     pub tool_use_id: String,
+    /// Original assistant row, only when also present in the retained source.
+    #[serde(default)]
+    pub assistant_message_id: Option<MessageId>,
     /// Tool registry name to dispatch after resume.
     pub tool_name: String,
     /// Hook-updated tool input to replay.
@@ -789,6 +792,32 @@ impl PartialEq for MainLoopAssistantUsageSnapshot {
 
 impl Eq for MainLoopAssistantUsageSnapshot {}
 
+/// Host-owned capability kept alive until an admitted resume finishes. This is
+/// process-local state, never a transcript or client-protocol value.
+#[derive(Clone)]
+pub struct ResumeLifetimeGuard(std::sync::Arc<dyn Send + Sync>);
+
+impl ResumeLifetimeGuard {
+    /// Retain an arbitrary host reservation through the owned resume task.
+    pub fn new<T: Send + Sync + 'static>(guard: T) -> Self {
+        Self(std::sync::Arc::new(guard))
+    }
+}
+
+impl std::fmt::Debug for ResumeLifetimeGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResumeLifetimeGuard(..)")
+    }
+}
+
+impl PartialEq for ResumeLifetimeGuard {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ResumeLifetimeGuard {}
+
 /// Transcript-adjacent runtime state needed by an in-place session resume.
 ///
 /// This leaf-friendly mirror deliberately uses primitive fields instead of
@@ -796,11 +825,27 @@ impl Eq for MainLoopAssistantUsageSnapshot {}
 /// it, bridge/mobile hot-resume adopted the messages but silently reset compact
 /// bookkeeping and lost transcript-visibility flags already reconstructed by
 /// the JSONL loader.
+/// The opened transcript identity and bytes captured by a host before a
+/// resume. The writer must keep this same authority through publication and
+/// subsequent appends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedResumeSource {
+    pub root: std::path::PathBuf,
+    pub relative: std::path::PathBuf,
+    pub root_identity: crate::host::rooted_fs::RootIdentity,
+    pub file_identity: crate::host::rooted_fs::RootIdentity,
+    pub expected_content: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeRuntimeSnapshot {
+    /// Host reservation that must outlive detached resume work.
+    pub lifetime_guard: Option<ResumeLifetimeGuard>,
     /// Exact transcript selected by the loader. A cross-worktree resume keeps
     /// appending here even when the stored working directory no longer exists.
     pub transcript_path: Option<std::path::PathBuf>,
+    /// File identity and contents captured from this exact selected source.
+    pub transcript_source: Option<PinnedResumeSource>,
     /// Existing transcript workspace to adopt while mounting this session.
     /// `None` keeps the caller's current working directory.
     pub working_directory: Option<std::path::PathBuf>,
@@ -896,6 +941,9 @@ pub struct ResumeRuntimeSnapshot {
     /// Resume consumers must adopt it as-is and never create one while
     /// replaying a session.
     pub prompt_snapshot: Option<PromptSnapshot>,
+    /// Admitted profile epoch of the captured prompt state. This is runtime
+    /// resume metadata, not a persisted or client-facing wire field.
+    pub prompt_snapshot_epoch: Option<u64>,
     /// Routing hint from the latest raw prompt-snapshot attachment. This is
     /// independent of the last valid static-prefix snapshot: an invalid latest
     /// attachment cannot resurrect an older inline context hint.
@@ -2682,6 +2730,21 @@ pub struct PromptSuggestionResult {
 /// `ConversationOrchestrator` does NOT yet implement it.
 #[async_trait]
 pub trait OrchestratorHandle: Send + Sync {
+    /// Read the session's fixed profile without a model call.
+    async fn conversation_mode(&self) -> super::session_context::SessionModeSnapshot {
+        super::session_context::SessionModeSnapshot {
+            session_id: self.current_session_id().await.as_uuid().to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Inspect the last model projection without exposing prompt bodies.
+    async fn context_manifest(&self) -> super::session_context::ContextManifest {
+        super::session_context::ContextManifest {
+            session: self.conversation_mode().await,
+            ..Default::default()
+        }
+    }
     /// Account for a real composer submission before slash-command dispatch.
     async fn record_prompt_suggestion_submission(&self, _text: &str) -> Result<(), HandleError> {
         Ok(())
@@ -4173,7 +4236,11 @@ pub enum ResponseTimingEvent {
 #[async_trait]
 pub trait OutputStream: Send + Sync {
     /// Observe selected accounts and sanitized aggregate routing failures.
-    async fn emit_provider_account_routing(&self, _event: &crate::host::provider_accounts::ProviderAccountRoutingEvent) {}
+    async fn emit_provider_account_routing(
+        &self,
+        _event: &crate::host::provider_accounts::ProviderAccountRoutingEvent,
+    ) {
+    }
     /// Whether this sink observes raw model-output progress for trusted host UI.
     /// This observation is separate from published messages and token accounting.
     fn wants_model_output_progress(&self) -> bool {

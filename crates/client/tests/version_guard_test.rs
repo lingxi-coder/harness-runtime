@@ -271,6 +271,59 @@ fn current_contract_index() -> ContractIndex {
         ix.insert(path.to_string(), ty.to_string());
     };
 
+    put("ClientCommand::GetContextManifest", "get_context_manifest");
+    put(
+        "ClientCommand::PrepareSessionHandoff",
+        "prepare_session_handoff",
+    );
+    put("ClientCommand::PrepareSessionHandoff.request_id", "String");
+    put(
+        "ClientCommand::PrepareSessionHandoff.target_mode",
+        "SessionModeDto",
+    );
+    put(
+        "ClientCommand::CancelSessionHandoff",
+        "cancel_session_handoff",
+    );
+    put("ClientCommand::CancelSessionHandoff.request_id", "String");
+    put(
+        "ClientCommand::RetrySessionHandoff",
+        "retry_session_handoff",
+    );
+    put("ClientCommand::RetrySessionHandoff.request_id", "String");
+    put(
+        "ClientEvent::SessionHandoffPrepared",
+        "session_handoff_prepared",
+    );
+    put("ClientEvent::SessionHandoffPrepared.request_id", "String");
+    put(
+        "ClientEvent::SessionHandoffPrepared.source_session_id",
+        "String",
+    );
+    put(
+        "ClientEvent::SessionHandoffPrepared.source_mode",
+        "SessionModeDto",
+    );
+    put(
+        "ClientEvent::SessionHandoffPrepared.target_mode",
+        "SessionModeDto",
+    );
+    put("ClientEvent::SessionHandoffPrepared.cutoff", "String");
+    put(
+        "ClientEvent::SessionHandoffPrepared.summary",
+        "ClientTextDto",
+    );
+    put(
+        "ClientEvent::SessionHandoffFailed",
+        "session_handoff_failed",
+    );
+    put("ClientEvent::SessionHandoffFailed.request_id", "String");
+    put("ClientEvent::SessionHandoffFailed.message", "String");
+    put("ClientEvent::ContextManifest", "context_manifest");
+    put("ClientEvent::ContextManifest.manifest_json", "String");
+    put("SessionModeDto::Chat", "chat");
+    put("SessionModeDto::Code", "code");
+
     put("ClientCommand::ProviderAccounts", "provider_accounts");
     put("ClientCommand::ProviderAccounts.operation_id", "u64");
     put("ClientCommand::ProviderAccounts.action", "String");
@@ -313,6 +366,7 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::ProviderAccountRefreshRequested.credential_revision",
         "u64",
     );
+
     put("ClientCommand::SkillAdmin", "skill_admin");
     put("ClientCommand::SkillAdmin.command", "SkillAdminCommandDto");
     put("ClientCommand::FusionAdmin", "fusion_admin");
@@ -1081,13 +1135,19 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::NewSession", "new_session");
     put("ClientCommand::NewSession.cwd", "Option<String>");
     put("ClientCommand::NewSession.model", "Option<ClientTextDto>");
+    put("ClientCommand::NewSession.mode", "SessionModeDto");
 
     put("ClientCommand::ResumeSession", "resume_session");
     put("ClientCommand::ResumeSession.session_id", "String");
     put("ClientCommand::ResumeSession.cwd", "Option<String>");
+    put(
+        "ClientCommand::ResumeSession.expected_mode",
+        "SessionModeDto",
+    );
 
     put("ClientCommand::ListSessions", "list_sessions");
     put("ClientCommand::ListSessions.limit", "Option<u32>");
+    put("ClientCommand::ListSessions.mode", "Option<SessionModeDto>");
 
     put("ClientCommand::ForceCompact", "force_compact");
     put("ClientCommand::ClearSession", "clear_session");
@@ -3080,7 +3140,7 @@ fn contract_index_covers_every_dto() {
         AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
         DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
         ModelContextBudgetDto, ProviderDirectoryDefinitionDto, ProviderModelCatalogEntryDto,
-        SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionRowDto, SkillDto,
+        SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto,
         SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client::protocol::media::*;
@@ -3099,6 +3159,7 @@ fn contract_index_covers_every_dto() {
     // Touch every type so removing a type breaks this compile. The values are
     // intentionally minimal; this is a coverage anchor, not a round-trip test.
     let _text = ClientTextDto::default();
+    let _session_modes = [SessionModeDto::Chat, SessionModeDto::Code];
     let _context_budget = ModelContextBudgetDto {
         policy: String::new(),
         effective_input_budget: None,
@@ -3123,6 +3184,21 @@ fn contract_index_covers_every_dto() {
         connection_id: None,
     };
     let _ev: Vec<ClientEvent> = vec![
+        ClientEvent::SessionHandoffPrepared {
+            request_id: "1".into(),
+            source_session_id: "s".into(),
+            source_mode: SessionModeDto::Code,
+            target_mode: SessionModeDto::Chat,
+            cutoff: "cutoff".into(),
+            summary: ClientTextDto::from_utf8("summary"),
+        },
+        ClientEvent::SessionHandoffFailed {
+            request_id: "1".into(),
+            message: "error".into(),
+        },
+        ClientEvent::ContextManifest {
+            manifest_json: String::new(),
+        },
         ClientEvent::WorkspaceChanged {
             state: client::protocol::listings::WorkspaceStateDto {
                 session_id: String::new(),
@@ -3526,6 +3602,17 @@ fn contract_index_covers_every_dto() {
     };
     let _skill_admin = skill_admin_command.clone();
     let _cmd: Vec<ClientCommand> = vec![
+        ClientCommand::PrepareSessionHandoff {
+            request_id: "1".into(),
+            target_mode: SessionModeDto::Chat,
+        },
+        ClientCommand::CancelSessionHandoff {
+            request_id: "1".into(),
+        },
+        ClientCommand::RetrySessionHandoff {
+            request_id: "1".into(),
+        },
+        ClientCommand::GetContextManifest,
         ClientCommand::ProviderAccounts {
             operation_id: 0,
             action: String::new(),

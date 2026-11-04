@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use super::MobileEngineError;
+use super::{MobileEngineError, SessionModeDto};
 use branding::{BrandRuntimeProfile, LINGXI_RUNTIME_PROFILE};
 
 /// Native backing paths of the Linux account. Native clients store logical
@@ -17,8 +17,10 @@ pub struct MobileUserDirectories {
     pub config_guest_path: String,
     pub projects: String,
     pub projects_guest_path: String,
-    pub default_cwd: String,
-    pub default_guest_cwd: String,
+    pub chat_cwd: String,
+    pub chat_guest_cwd: String,
+    pub code_cwd: String,
+    pub code_guest_cwd: String,
     pub scheduled_cwd: String,
     pub scheduled_guest_cwd: String,
     pub apps: String,
@@ -58,12 +60,12 @@ fn mobile_user_directories_for_profile(
     let guest_home = profile.guest_home();
     let config = home.join(profile.config_dir_name);
     let config_guest_path = profile.config_guest_path();
-    let cwd = home.join(profile.brand_id);
-    let guest_cwd = profile.workspace_root_guest_path();
-    let projects = cwd.join("projects");
+    let chat_cwd = config.join("chat");
+    let code_cwd = config.join("code");
+    let projects = config.join("projects");
     let projects_guest_path = profile.projects_guest_path();
-    let scheduled = cwd.join("scheduled");
-    let scheduled_guest_path = guest_cwd.join("scheduled");
+    let scheduled = config.join("scheduled");
+    let scheduled_guest_path = profile.workspace_container_guest_path().join("scheduled");
     let apps = config.join(".apps");
     let apps_guest_path = profile.apps_guest_path();
     Ok(MobileUserDirectories {
@@ -76,8 +78,16 @@ fn mobile_user_directories_for_profile(
         config_guest_path: config_guest_path.to_string_lossy().into_owned(),
         projects: projects.to_string_lossy().into_owned(),
         projects_guest_path: projects_guest_path.to_string_lossy().into_owned(),
-        default_cwd: cwd.to_string_lossy().into_owned(),
-        default_guest_cwd: guest_cwd.to_string_lossy().into_owned(),
+        chat_cwd: chat_cwd.to_string_lossy().into_owned(),
+        chat_guest_cwd: profile
+            .chat_workspace_guest_path()
+            .to_string_lossy()
+            .into_owned(),
+        code_cwd: code_cwd.to_string_lossy().into_owned(),
+        code_guest_cwd: profile
+            .code_workspace_guest_path()
+            .to_string_lossy()
+            .into_owned(),
         scheduled_cwd: scheduled.to_string_lossy().into_owned(),
         scheduled_guest_cwd: scheduled_guest_path.to_string_lossy().into_owned(),
         apps: apps.to_string_lossy().into_owned(),
@@ -122,7 +132,8 @@ impl MobileUserDirectories {
         for path in [
             &self.config_home,
             &self.projects,
-            &self.default_cwd,
+            &self.chat_cwd,
+            &self.code_cwd,
             &self.scheduled_cwd,
             &self.apps,
         ] {
@@ -134,17 +145,33 @@ impl MobileUserDirectories {
         Ok(())
     }
 
-    /// Validate a host or logical guest cwd and return both coordinates. A
-    /// canonical containment check rejects symlink escapes from the account.
+    /// Resolve a conversation cwd, choosing its fixed mode's Global default only
+    /// when no explicit project, resumed, or scheduled cwd was supplied.
     pub fn resolve_cwd(
         &self,
         requested: Option<&str>,
+        mode: SessionModeDto,
     ) -> Result<(PathBuf, PathBuf), MobileEngineError> {
-        let requested = Path::new(
-            requested
-                .filter(|path| !path.is_empty())
-                .unwrap_or(&self.default_cwd),
-        );
+        let default = match mode {
+            SessionModeDto::Chat => &self.chat_cwd,
+            SessionModeDto::Code => &self.code_cwd,
+        };
+        self.resolve_explicit_cwd(requested.unwrap_or(default))
+    }
+
+    /// Resolve an explicitly chosen host or guest cwd without inventing a
+    /// conversation mode, for example for a scheduled controller. A canonical
+    /// containment check rejects symlink escapes from the account.
+    pub fn resolve_explicit_cwd(
+        &self,
+        requested: &str,
+    ) -> Result<(PathBuf, PathBuf), MobileEngineError> {
+        if requested.is_empty() {
+            return Err(MobileEngineError::Internal(
+                "workspace path must not be empty".into(),
+            ));
+        }
+        let requested = Path::new(requested);
         let requested = if let Ok(relative) = requested.strip_prefix(&self.guest_home) {
             Path::new(&self.home).join(relative)
         } else {
@@ -201,6 +228,14 @@ mod tests {
         let dirs =
             mobile_user_directories(root.path().join("runtime").display().to_string()).unwrap();
         let profile = LINGXI_RUNTIME_PROFILE;
+        assert_eq!(
+            Path::new(&dirs.chat_cwd),
+            Path::new(&dirs.config_home).join("chat")
+        );
+        assert_eq!(
+            Path::new(&dirs.code_cwd),
+            Path::new(&dirs.config_home).join("code")
+        );
         assert_eq!(dirs.brand_id, profile.brand_id);
         assert_eq!(dirs.linux_user, profile.linux_user);
         assert_eq!(dirs.config_dir_name, profile.config_dir_name);
@@ -210,8 +245,12 @@ mod tests {
             profile.config_guest_path().display().to_string()
         );
         assert_eq!(
-            dirs.default_guest_cwd,
-            profile.workspace_root_guest_path().display().to_string()
+            dirs.chat_guest_cwd,
+            profile.chat_workspace_guest_path().display().to_string()
+        );
+        assert_eq!(
+            dirs.code_guest_cwd,
+            profile.code_workspace_guest_path().display().to_string()
         );
         assert_eq!(
             dirs.projects_guest_path,
@@ -223,16 +262,48 @@ mod tests {
         );
         assert!(!Path::new(&dirs.home).exists(), "path lookup is read-only");
         dirs.prepare().unwrap();
+        assert_eq!(
+            dirs.resolve_cwd(None, SessionModeDto::Chat).unwrap(),
+            (
+                std::fs::canonicalize(&dirs.chat_cwd).unwrap(),
+                PathBuf::from(&dirs.chat_guest_cwd)
+            )
+        );
+        assert_eq!(
+            dirs.resolve_cwd(None, SessionModeDto::Code).unwrap(),
+            (
+                std::fs::canonicalize(&dirs.code_cwd).unwrap(),
+                PathBuf::from(&dirs.code_guest_cwd)
+            )
+        );
+        assert_eq!(
+            dirs.resolve_explicit_cwd(&dirs.config_home).unwrap().1,
+            PathBuf::from(&dirs.config_guest_path)
+        );
+        assert_eq!(
+            dirs.resolve_explicit_cwd(&dirs.scheduled_cwd).unwrap().1,
+            PathBuf::from(&dirs.scheduled_guest_cwd)
+        );
         let source = Path::new(&dirs.projects).join("a/workspace");
         std::fs::create_dir_all(&source).unwrap();
-        let (host, guest) = dirs.resolve_cwd(source.to_str()).unwrap();
+        let (host, guest) = dirs
+            .resolve_cwd(source.to_str(), SessionModeDto::Chat)
+            .unwrap();
         assert_eq!(
             guest,
             Path::new(&dirs.projects_guest_path).join("a/workspace")
         );
-        assert_eq!(dirs.resolve_cwd(guest.to_str()).unwrap().0, host);
+        assert_eq!(
+            dirs.resolve_cwd(guest.to_str(), SessionModeDto::Code)
+                .unwrap()
+                .0,
+            host
+        );
         assert!(Path::new(&dirs.config_home).starts_with(&dirs.home));
-        assert!(dirs.resolve_cwd(root.path().to_str()).is_err());
+        assert!(dirs
+            .resolve_cwd(root.path().to_str(), SessionModeDto::Chat)
+            .is_err());
+        assert!(dirs.resolve_cwd(Some(""), SessionModeDto::Code).is_err());
     }
 
     #[test]
@@ -261,8 +332,12 @@ mod tests {
                 .to_string()
         );
         assert_eq!(dirs.config_guest_path, "/home/atlas_guest/.atlas");
-        assert_eq!(dirs.default_guest_cwd, "/home/atlas_guest/atlas");
-        assert_eq!(dirs.projects_guest_path, "/home/atlas_guest/atlas/projects");
+        assert_eq!(dirs.chat_guest_cwd, "/home/atlas_guest/.atlas/chat");
+        assert_eq!(dirs.code_guest_cwd, "/home/atlas_guest/.atlas/code");
+        assert_eq!(
+            dirs.projects_guest_path,
+            "/home/atlas_guest/.atlas/projects"
+        );
         assert_eq!(dirs.apps_guest_path, "/home/atlas_guest/.atlas/.apps");
 
         dirs.prepare().unwrap();
@@ -312,6 +387,8 @@ mod tests {
         dirs.prepare().unwrap();
         let link = Path::new(&dirs.projects).join("escape");
         std::os::unix::fs::symlink(root.path(), &link).unwrap();
-        assert!(dirs.resolve_cwd(link.to_str()).is_err());
+        assert!(dirs
+            .resolve_cwd(link.to_str(), SessionModeDto::Chat)
+            .is_err());
     }
 }

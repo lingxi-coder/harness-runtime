@@ -811,7 +811,7 @@ impl ConversationOrchestrator {
         // so side queries assembled with an empty toolset take the same
         // normalization branch as the main loop.
         if !self.side_chat {
-            lingxi_core::host::session_flags::set_tool_search_enabled(
+            self.api.set_tool_search_enabled(
                 self.tools.deferral().mode().is_enabled()
                     && tool_search_supported_for_request(
                         self.api.as_ref(),

@@ -156,10 +156,35 @@ fn session_agent_message_from_projection(
 }
 
 /// Read or explicitly import identity facts through the session's existing writer.
+#[cfg(test)]
+static IDENTITY_SNAPSHOT_READS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn identity_snapshot_read_count(path: &std::path::Path) -> usize {
+    IDENTITY_SNAPSHOT_READS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(path)
+        .copied()
+        .unwrap_or(0)
+}
+
 pub async fn session_identity_snapshot_for_path(
     writer: &session::jsonl::JsonlWriter,
     transcript_path: &std::path::Path,
 ) -> Result<session::jsonl::SessionMessageIdentitySnapshot, String> {
+    #[cfg(test)]
+    {
+        *IDENTITY_SNAPSHOT_READS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .entry(transcript_path.to_path_buf())
+            .or_default() += 1;
+    }
     match tokio::fs::symlink_metadata(transcript_path).await {
         Ok(metadata) if !metadata.file_type().is_file() => Err(format!(
             "transcript is not a regular file: {}",

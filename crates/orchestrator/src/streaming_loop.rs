@@ -680,9 +680,9 @@ async fn finish_pending_server_stitch(
     current_row_by_api_index: &mut HashMap<u32, MessageId>,
     pending: &mut Option<PendingServerStitch>,
     pump: &mut Option<ExecutorPump<'_, '_>>,
-) {
+) -> Result<(), OrchestratorError> {
     let Some(stitch) = pending.take() else {
-        return;
+        return Ok(());
     };
     let candidate_position = turn.assistant_rows.iter().position(|row| {
         row.stream_order >= stitch.after_row_order
@@ -696,7 +696,7 @@ async fn finish_pending_server_stitch(
     let Some(candidate_position) = candidate_position else {
         // A blank/error response leaves J pending for a later completed row.
         *pending = Some(stitch);
-        return;
+        return Ok(());
     };
 
     let candidate_id = turn.assistant_rows[candidate_position].row_id;
@@ -780,7 +780,7 @@ async fn finish_pending_server_stitch(
     if let Some(p) = pump.as_mut() {
         p.executor
             .remove_assistant_stream_rows(&retained_links)
-            .await;
+            .await?;
     }
     turn.assistant_rows
         .retain(|row| !retained_ids.contains(&row.row_id));
@@ -794,6 +794,7 @@ async fn finish_pending_server_stitch(
     }
     turn.assistant_row_identity = Some(candidate_id);
     turn.replacement_message_id = Some(candidate_id);
+    Ok(())
 }
 
 /// Merge host presentation snapshots while keeping complete SDK measurements
@@ -1510,7 +1511,35 @@ async fn pump_stream_inner(
     // Do not abort on incomplete JSON until the terminal reason is available.
     let mut pending_tool_json_error = None;
 
+    macro_rules! stop_on_transcript_error {
+        ($result:expr) => {
+            if let Err(error) = $result {
+                return Err(build_failure(
+                    turn,
+                    &acc,
+                    &message_start_usage,
+                    error,
+                    real_content_started,
+                    partial_close,
+                    any_event,
+                ));
+            }
+        };
+    }
+    macro_rules! check_transcript_owner {
+        () => {
+            if let Some(p) = pump.as_ref() {
+                let result = p
+                    .executor
+                    .orchestrator()
+                    .ensure_transcript_rewrite_resolved();
+                stop_on_transcript_error!(result);
+            }
+        };
+    }
+
     loop {
+        check_transcript_owner!();
         // Owned dispatches continue independently while the provider waits.
         // Completion advances the scheduler immediately; results become
         // query-visible only at the post-event Tn poll below.
@@ -1523,7 +1552,7 @@ async fn pump_stream_inner(
                     // Dropping the stream ends the request; only completed
                     // blocks are kept, and the caller's abort checkpoint ends
                     // the turn.
-                    finish_pending_server_stitch(
+                    stop_on_transcript_error!(finish_pending_server_stitch(
                         &mut turn,
                         output,
                         &mut assistant_block_indices,
@@ -1532,7 +1561,7 @@ async fn pump_stream_inner(
                         &mut pending_server_stitch,
                         &mut pump,
                     )
-                    .await;
+                    .await);
                     partial_close.close(output.as_ref()).await;
                     poll_ready_stream_tool_results(&mut pump).await;
                     return Ok((turn, futures::stream::empty().boxed()));
@@ -1561,16 +1590,18 @@ async fn pump_stream_inner(
                         .as_ref()
                         .is_some_and(|p| p.user_cancel.is_some_and(CancellationToken::is_cancelled))
                 {
-                    finish_pending_server_stitch(
-                        &mut turn,
-                        output,
-                        &mut assistant_block_indices,
-                        &mut assistant_block_row_ids,
-                        &mut current_row_by_api_index,
-                        &mut pending_server_stitch,
-                        &mut pump,
-                    )
-                    .await;
+                    stop_on_transcript_error!(
+                        finish_pending_server_stitch(
+                            &mut turn,
+                            output,
+                            &mut assistant_block_indices,
+                            &mut assistant_block_row_ids,
+                            &mut current_row_by_api_index,
+                            &mut pending_server_stitch,
+                            &mut pump,
+                        )
+                        .await
+                    );
                     partial_close.close(output.as_ref()).await;
                     return Ok((turn, stream));
                 }
@@ -1748,9 +1779,11 @@ async fn pump_stream_inner(
                         let discarded_links =
                             persisted_links_for_row_ids(&turn, &discarded_row_ids);
                         if let Some(p) = pump.as_mut() {
-                            p.executor
-                                .remove_assistant_stream_rows(&discarded_links)
-                                .await;
+                            stop_on_transcript_error!(
+                                p.executor
+                                    .remove_assistant_stream_rows(&discarded_links)
+                                    .await
+                            );
                         }
 
                         let retained_row_ids =
@@ -1870,9 +1903,11 @@ async fn pump_stream_inner(
                             .as_deref_mut()
                             .map(StreamToolSettlement::discard_tool_completion_rows)
                             .unwrap_or_default();
-                        p.executor
-                            .remove_assistant_stream_rows(&declined_links)
-                            .await;
+                        stop_on_transcript_error!(
+                            p.executor
+                                .remove_assistant_stream_rows(&declined_links)
+                                .await
+                        );
                         Some(tombstones)
                     } else {
                         None
@@ -2113,16 +2148,18 @@ async fn pump_stream_inner(
                             .is_some_and(|text| !text.trim().is_empty())
                     })
                 }) {
-                    finish_pending_server_stitch(
-                        &mut turn,
-                        output,
-                        &mut assistant_block_indices,
-                        &mut assistant_block_row_ids,
-                        &mut current_row_by_api_index,
-                        &mut pending_server_stitch,
-                        &mut pump,
-                    )
-                    .await;
+                    stop_on_transcript_error!(
+                        finish_pending_server_stitch(
+                            &mut turn,
+                            output,
+                            &mut assistant_block_indices,
+                            &mut assistant_block_row_ids,
+                            &mut current_row_by_api_index,
+                            &mut pending_server_stitch,
+                            &mut pump,
+                        )
+                        .await
+                    );
                     if pending_server_stitch.is_none()
                         && !pump.as_ref().is_some_and(|p| p.suppress_live_text)
                     {
@@ -2220,6 +2257,7 @@ async fn pump_stream_inner(
                         .emit_assistant_block_identity(block_key, &row_id)
                         .await;
                 }
+                check_transcript_owner!();
                 // Register the completed source row at content_block_stop.
                 // Known tools are eagerly dispatched by the owned scheduler;
                 // query-visible results still wait for the event-boundary Tn.
@@ -2323,6 +2361,7 @@ async fn pump_stream_inner(
                     persist_unlinked_rows,
                 )
                 .await;
+                check_transcript_owner!();
             }
             RouterAction::RecordUsage {
                 output_tokens,
@@ -2355,6 +2394,7 @@ async fn pump_stream_inner(
                     false,
                 )
                 .await;
+                check_transcript_owner!();
             }
             RouterAction::EndOfStream => {
                 if !matches!(
@@ -2374,16 +2414,18 @@ async fn pump_stream_inner(
                         ));
                     }
                 }
-                finish_pending_server_stitch(
-                    &mut turn,
-                    output,
-                    &mut assistant_block_indices,
-                    &mut assistant_block_row_ids,
-                    &mut current_row_by_api_index,
-                    &mut pending_server_stitch,
-                    &mut pump,
-                )
-                .await;
+                stop_on_transcript_error!(
+                    finish_pending_server_stitch(
+                        &mut turn,
+                        output,
+                        &mut assistant_block_indices,
+                        &mut assistant_block_row_ids,
+                        &mut current_row_by_api_index,
+                        &mut pending_server_stitch,
+                        &mut pump,
+                    )
+                    .await
+                );
                 poll_ready_stream_tool_results(&mut pump).await;
                 return Ok((turn, stream));
             }
@@ -2402,16 +2444,18 @@ async fn pump_stream_inner(
             .as_ref()
             .is_some_and(|p| p.user_cancel.is_some_and(CancellationToken::is_cancelled))
     {
-        finish_pending_server_stitch(
-            &mut turn,
-            output,
-            &mut assistant_block_indices,
-            &mut assistant_block_row_ids,
-            &mut current_row_by_api_index,
-            &mut pending_server_stitch,
-            &mut pump,
-        )
-        .await;
+        stop_on_transcript_error!(
+            finish_pending_server_stitch(
+                &mut turn,
+                output,
+                &mut assistant_block_indices,
+                &mut assistant_block_row_ids,
+                &mut current_row_by_api_index,
+                &mut pending_server_stitch,
+                &mut pump,
+            )
+            .await
+        );
         partial_close.close(output.as_ref()).await;
         return Ok((turn, stream));
     }

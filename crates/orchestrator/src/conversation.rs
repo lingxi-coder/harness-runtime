@@ -75,6 +75,9 @@ impl HookPromptRequest {
 /// Minimal current contract the orchestrator needs from the API client.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
+    /// Session-owned tool-reference normalization used by main and side queries.
+    fn set_tool_search_enabled(&self, _enabled: bool) {}
+
     /// Exact native route identity. Unavailable route metadata admits no Fast mode.
     fn is_first_party_route(&self, _model: &str, _profile: Option<&str>) -> bool {
         false
@@ -996,6 +999,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         // upstream and never reach `surface_model_error` — dead arms kept for
         // totality.
         OrchestratorError::Internal(_)
+        | OrchestratorError::TranscriptRewriteUncertain(_)
         | OrchestratorError::Settings(_)
         | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::StreamingProtocol(_)
@@ -1007,7 +1011,8 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         | OrchestratorError::RateLimitRejected { .. }
         | OrchestratorError::MaxTurnsReached { .. }
         | OrchestratorError::MaxStructuredOutputRetries { .. }
-        | OrchestratorError::MaxBudgetReached { .. } => (Some("unknown"), None),
+        | OrchestratorError::MaxBudgetReached { .. }
+        | OrchestratorError::ContextState(_) => (Some("unknown"), None),
     };
     ApiErrorEnvelope {
         error,
@@ -1683,6 +1688,8 @@ pub struct ConversationOrchestrator {
     pub(crate) persistent_app_chat: bool,
     pub(crate) side_chat_model_refs: Option<Vec<String>>,
     pub(crate) config: OrchestratorConfig,
+    pub(crate) conversation_context: Mutex<context_state_impl::ConversationContextRuntime>,
+    pub(crate) conversation_transition: Mutex<()>,
     pub(crate) native_sandbox_host_facts_provider:
         Option<Arc<dyn Fn() -> NativeSandboxHostFacts + Send + Sync>>,
     pub(crate) native_policy_host_facts_provider:
@@ -2069,7 +2076,7 @@ mod drivers_impl;
 pub use drivers_impl::{
     realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, PendingPromptIdentity, QueuedPromptInput, RealtimeAgentContext,
-    RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentSessionIo,
+    RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentOutput, RealtimeAgentSessionIo, RealtimeCompletionBoundary,
     ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 #[path = "conversation/context_announcements.rs"]
@@ -2101,6 +2108,8 @@ mod prompt_suggestion;
 #[path = "conversation/prompt_suggestion_background.rs"]
 mod prompt_suggestion_background;
 pub(crate) use context_announcements_impl::PreparedContextAnnouncements;
+#[path = "conversation/context_state.rs"]
+mod context_state_impl;
 #[path = "conversation/prompt_cache.rs"]
 mod prompt_cache_impl;
 #[path = "conversation/prompt.rs"]
@@ -2109,6 +2118,8 @@ mod prompt_impl;
 mod prompt_ingress_environment;
 #[path = "conversation/reminders.rs"]
 mod reminders_impl;
+#[path = "conversation/skill_projection.rs"]
+mod skill_projection_impl;
 #[path = "conversation/tooling.rs"]
 mod tooling_impl;
 #[path = "conversation/transcript.rs"]

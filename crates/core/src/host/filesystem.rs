@@ -201,6 +201,18 @@ pub trait FileSystem: Send + Sync {
         ))
     }
 
+    /// Read a bounded regular single-link file through a no-follow handle,
+    /// rejecting FIFOs and a changed root or leaf before returning.
+    async fn read_file_rooted_single_link_checked(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+    ) -> Result<crate::host::rooted_fs::CheckedFileSnapshot, FsError> {
+        Err(FsError::Io(
+            "checked rooted file reads are unsupported".into(),
+        ))
+    }
+
     /// Append and sync the allocated file and its containing directory before
     /// a recipient acknowledges consumption of a durable journal entry.
     async fn append_file_rooted_durable(
@@ -210,6 +222,22 @@ pub trait FileSystem: Send + Sync {
         _content: &str,
     ) -> Result<(), FsError> {
         Err(FsError::Io("durable rooted appends are unsupported".into()))
+    }
+
+    /// Compare an existing rooted file's entire contents and durably append
+    /// or sync it through the same single-link handle. A snapshot recording
+    /// absence requires the same root and an exclusive creation of the leaf.
+    /// Implementations must reject any changed root, leaf, or contents.
+    async fn append_or_sync_file_rooted_durable_checked(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+        _expected: &crate::host::rooted_fs::CheckedFileSnapshot,
+        _append: Option<&str>,
+    ) -> Result<(), FsError> {
+        Err(FsError::Io(
+            "checked durable rooted appends are unsupported".into(),
+        ))
     }
 
     /// Sync an existing regular file without following symlinks below root.
@@ -241,6 +269,22 @@ pub trait FileSystem: Send + Sync {
         &self,
         _root: &Path,
     ) -> Result<Option<crate::host::rooted_fs::RootIdentity>, FsError> {
+        Ok(None)
+    }
+
+    /// Create or capture a direct scheduler-state directory below the pinned
+    /// scope without changing an existing directory's permissions.
+    async fn ensure_directory_rooted_identity_pinned(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+        expected: Option<&crate::host::rooted_fs::RootIdentity>,
+    ) -> Result<Option<crate::host::rooted_fs::RootIdentity>, FsError> {
+        if expected.is_some() {
+            return Err(FsError::Io(
+                "pinned directory capture is unsupported".into(),
+            ));
+        }
         Ok(None)
     }
 
@@ -383,6 +427,21 @@ pub trait FileSystem: Send + Sync {
         self.write_file(&path.to_string_lossy(), content).await
     }
 
+    /// Atomically write below the same root identity that was locked.
+    /// Virtual filesystems may use None; native filesystems must override this.
+    async fn write_file_rooted_atomic_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&crate::host::rooted_fs::RootIdentity>,
+    ) -> Result<(), FsError> {
+        if expected.is_some() {
+            return Err(FsError::Io("pinned atomic writes are unsupported".into()));
+        }
+        self.write_file_rooted_atomic(root, relative, content).await
+    }
+
     /// Lock a file addressed relative to a trusted `root`. Hardened platform
     /// implementations create missing private parents and open every component
     /// without following symlinks.
@@ -393,6 +452,19 @@ pub trait FileSystem: Send + Sync {
     ) -> Result<Box<dyn FlockGuard>, FsError> {
         let path = crate::host::rooted_fs::checked_join(root, relative)?;
         self.flock_exclusive(&path.to_string_lossy()).await
+    }
+
+    /// Lock below an already captured root identity.
+    async fn flock_exclusive_rooted_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&crate::host::rooted_fs::RootIdentity>,
+    ) -> Result<Box<dyn FlockGuard>, FsError> {
+        if expected.is_some() {
+            return Err(FsError::Io("pinned rooted locks are unsupported".into()));
+        }
+        self.flock_exclusive_rooted(root, relative).await
     }
 
     /// Delete a file addressed relative to a trusted root without following

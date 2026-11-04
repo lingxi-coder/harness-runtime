@@ -133,6 +133,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     let request_dispatch_observer = orch.turn_request_dispatch_observer();
     macro_rules! side_request {
         ($request:expr) => {{
+            orch.ensure_transcript_rewrite_resolved()?;
             if let Some(cancel) = side_cancel.filter(|_| orch.side_chat) {
                 tokio::select! {
                     biased;

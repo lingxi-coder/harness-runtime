@@ -285,7 +285,7 @@ pub(crate) fn prompt_section_slots(
 }
 
 impl PromptSection {
-    fn new(id: &str, text: String, scope: PromptSectionScope) -> Self {
+    pub(crate) fn new(id: &str, text: String, scope: PromptSectionScope) -> Self {
         Self {
             id: id.to_string(),
             text,
@@ -419,9 +419,22 @@ pub(crate) fn named_prompt_sections_with_style(
     ctx: &SystemPromptContext,
     output_style: Option<ActiveOutputStyle<'_>>,
 ) -> Vec<PromptSection> {
+    named_prompt_sections_for_mode(
+        ctx,
+        output_style,
+        lingxi_core::host::session_context::ConversationMode::Code,
+    )
+}
+
+pub(crate) fn named_prompt_sections_for_mode(
+    ctx: &SystemPromptContext,
+    output_style: Option<ActiveOutputStyle<'_>>,
+    mode: lingxi_core::host::session_context::ConversationMode,
+) -> Vec<PromptSection> {
+    use lingxi_core::host::session_context::ConversationMode;
     let mut sections = vec![PromptSection::new(
         "header",
-        HEADER.to_string(),
+        profile_header(mode).to_owned(),
         PromptSectionScope::Shared,
     )];
 
@@ -445,17 +458,21 @@ pub(crate) fn named_prompt_sections_with_style(
         /* is_coordinator */ false,
         /* is_non_interactive */ !ctx.is_interactive,
     );
-    sections.extend(body_sections::named_sections(
-        output_style.is_some(),
-        keep_coding,
-        &ctx.tool_names,
-        /* is_interactive = */ ctx.is_interactive,
-        /* has_agent_tool = */ has_agent,
-        /* fork_mode_enabled = */ fork_mode,
-        /* model = */ &ctx.model,
-        /* skills_available = */ ctx.skills_available,
-        /* exclude_dynamic_sections = */ ctx.exclude_dynamic_sections,
-    ));
+    if mode == ConversationMode::Chat {
+        sections.extend(body_sections::named_chat_sections(&ctx.tool_names));
+    } else {
+        sections.extend(body_sections::named_sections(
+            output_style.is_some(),
+            keep_coding,
+            &ctx.tool_names,
+            /* is_interactive = */ ctx.is_interactive,
+            /* has_agent_tool = */ has_agent,
+            /* fork_mode_enabled = */ fork_mode,
+            /* model = */ &ctx.model,
+            /* skills_available = */ ctx.skills_available,
+            /* exclude_dynamic_sections = */ ctx.exclude_dynamic_sections,
+        ));
+    }
 
     // R-P1c/R-P1d: the LINGXI.md memory block is NO LONGER spliced into the
     // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
@@ -533,13 +550,24 @@ pub(crate) fn named_prompt_sections_with_style(
     // Model-specific 2.1.220 tail: act-don't-rederive for every profile,
     // Opus-5 delivery/correction restrictions, or Fable/Mythos autonomous
     // mitigation. These are after context management in the oracle.
-    sections.extend(body_sections::post_context_named_sections(
-        &ctx.model,
-        output_style.is_some(),
-    ));
+    if mode == ConversationMode::Code {
+        sections.extend(body_sections::post_context_named_sections(
+            &ctx.model,
+            output_style.is_some(),
+        ));
+    }
 
     // R-P1b: NO `Notes:` FOOTER on the MAIN prompt.
     sections
+}
+
+pub(crate) fn profile_header(
+    mode: lingxi_core::host::session_context::ConversationMode,
+) -> &'static str {
+    match mode {
+        lingxi_core::host::session_context::ConversationMode::Code => HEADER,
+        lingxi_core::host::session_context::ConversationMode::Chat => "You are LingXi, a capable assistant for research, writing, learning and getting work done.",
+    }
 }
 
 /// Format the active output-style section, byte-for-byte as TS

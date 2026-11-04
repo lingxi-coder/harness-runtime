@@ -805,7 +805,22 @@ fn configure_boxed_orchestrator(
 async fn bootstrap_main_transcript_identity_if_nonempty(
     writer: &session::jsonl::JsonlWriter,
     transcript_path: &std::path::Path,
+    authority: Option<&session::jsonl::writer::TranscriptFileAuthority>,
+    expected_content: Option<&str>,
 ) -> Result<bool, String> {
+    if let Some(authority) = authority {
+        let expected_content =
+            expected_content.ok_or("captured transcript content is unavailable")?;
+        writer
+            .bootstrap_session_message_identity_snapshot_with_source_authority(
+                transcript_path,
+                authority,
+                expected_content.as_bytes(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
     let metadata = match tokio::fs::symlink_metadata(transcript_path).await {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
         Ok(_) => {
@@ -832,6 +847,28 @@ async fn bootstrap_main_transcript_identity_if_nonempty(
     Ok(true)
 }
 
+/// Publish an owned draft only after its fixed header and writer lease exist.
+pub(super) async fn ensure_durable_draft_anchor(
+    writer: &Arc<session::jsonl::JsonlWriter>,
+    transcript_path: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    mode: lingxi_core::host::session_context::ConversationMode,
+    title: &str,
+) -> Result<bool, String> {
+    let session = lingxi_core::types::SessionId::parse_prefixed(session_id)
+        .ok_or("invalid draft session UUID")?;
+    if writer.active_path().as_path() != transcript_path
+        || writer.session_target_path(session).as_deref() != Some(transcript_path)
+    {
+        return Err("draft session writer changed target".into());
+    }
+    writer
+        .ensure_draft_anchor(session, mode, cwd, title)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod main_transcript_identity_bootstrap_tests {
     use super::*;
@@ -850,17 +887,23 @@ mod main_transcript_identity_bootstrap_tests {
             branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX
         ));
 
-        assert!(
-            !bootstrap_main_transcript_identity_if_nonempty(&writer, &transcript_path)
-                .await
-                .unwrap()
-        );
+        assert!(!bootstrap_main_transcript_identity_if_nonempty(
+            &writer,
+            &transcript_path,
+            None,
+            None
+        )
+        .await
+        .unwrap());
         std::fs::write(&transcript_path, "").unwrap();
-        assert!(
-            !bootstrap_main_transcript_identity_if_nonempty(&writer, &transcript_path)
-                .await
-                .unwrap()
-        );
+        assert!(!bootstrap_main_transcript_identity_if_nonempty(
+            &writer,
+            &transcript_path,
+            None,
+            None
+        )
+        .await
+        .unwrap());
         assert!(!sidecar_path.exists());
 
         let native = concat!(
@@ -868,11 +911,14 @@ mod main_transcript_identity_bootstrap_tests {
             "{\"type\":\"assistant\",\"uuid\":\"native-assistant\",\"parentUuid\":\"native-user\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:01.000Z\",\"cwd\":\"/workspace\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
         );
         std::fs::write(&transcript_path, native).unwrap();
-        assert!(
-            bootstrap_main_transcript_identity_if_nonempty(&writer, &transcript_path)
-                .await
-                .unwrap()
-        );
+        assert!(bootstrap_main_transcript_identity_if_nonempty(
+            &writer,
+            &transcript_path,
+            None,
+            None
+        )
+        .await
+        .unwrap());
         assert_eq!(std::fs::read_to_string(&transcript_path).unwrap(), native);
         let identities = writer
             .read_session_message_identity_snapshot(&transcript_path)
@@ -908,22 +954,124 @@ pub async fn build_with_credential_stack(
 
     super::team_invocation::enforce_team_config(&mut cfg)?;
     super::app_invocation::enforce_app_config(&mut cfg)?;
+    // Resolve and validate fixed ownership before opening a writer or running
+    // any startup effects. A restored session never adopts a UI selection.
+    let initial_conversation_mode = cfg.initial_conversation_mode.take();
+    // This admission option belongs only to this construction, not to the
+    // cloned scheduler/settings configurations derived below.
+    let durable_draft_title = std::mem::take(&mut cfg.durable_draft_title);
+    let durable_draft_anchor = durable_draft_title.is_some();
+    if let Some(title) = durable_draft_title.as_deref() {
+        if title.trim().is_empty() || title.contains('\0') {
+            return Err(BuildError::Orchestrator(
+                "draft title must not be empty".into(),
+            ));
+        }
+        let id = cfg
+            .session_id_override
+            .as_deref()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        if !cfg.restore_draft
+            || !cfg.session_persistence
+            || cfg.defer_session_start
+            || initial_conversation_mode.is_none()
+            || id.is_none()
+            || !cfg.cwd.is_absolute()
+            || cfg.cwd.to_str().is_none()
+            || !cfg.lingxi_home.is_absolute()
+            || cfg.session_resume_target_snapshot.is_some()
+            || cfg.app_invocation.is_some()
+            || cfg.team_invocation.is_some()
+        {
+            return Err(BuildError::Orchestrator(
+                "draft anchor requires an explicit persistent owner".into(),
+            ));
+        }
+        if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
+            if uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != id {
+                return Err(BuildError::Orchestrator(
+                    "draft resume has a different session UUID".into(),
+                ));
+            }
+        }
+        if let Some(lease) = cfg.session_writer_lease.as_ref() {
+            if lease.canonical_session_id().map(|value| value.as_uuid()) != id {
+                return Err(BuildError::Orchestrator(
+                    "draft writer lease has a different session UUID".into(),
+                ));
+            }
+        }
+    }
+    let captured_mode = cfg
+        .session_resume_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            session::JsonlWriter::fixed_session_mode_from_source(
+                &snapshot.content,
+                &snapshot.source_session_id,
+            )
+            .map_err(|error| {
+                BuildError::Orchestrator(format!("invalid resumed session mode: {error}"))
+            })
+        })
+        .transpose()?;
+    if let (Some(expected), Some(actual)) = (initial_conversation_mode, captured_mode) {
+        if expected != actual {
+            return Err(BuildError::Orchestrator(format!(
+                "session mode mismatch: expected {}, found {}",
+                expected.as_str(),
+                actual.as_str()
+            )));
+        }
+    }
+    let construction_mode = captured_mode
+        .or(initial_conversation_mode)
+        .unwrap_or_default();
     let app_chat_mount = super::app_invocation::chat::open(
         &cfg,
         Arc::new(DesktopFileSystem::new(cfg.cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
     )
     .await?;
     let is_app_chat = app_chat_mount.is_some();
+    if durable_draft_anchor && is_app_chat {
+        return Err(BuildError::Orchestrator(
+            "draft anchor requires an ordinary session".into(),
+        ));
+    }
+    // App-owned Chat has a separate transcript and lifecycle. Its captured
+    // profile, not the ordinary conversation's selected space, is authoritative.
+    let construction_mode = if let Some(source) = app_chat_mount
+        .as_ref()
+        .and_then(|chat| chat.source.as_ref())
+    {
+        session::JsonlWriter::fixed_session_mode_from_source(
+            source.source(),
+            &source.session_id().to_string(),
+        )
+        .map_err(BuildError::Orchestrator)?
+    } else if is_app_chat {
+        lingxi_core::host::session_context::ConversationMode::Chat
+    } else {
+        construction_mode
+    };
     let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
         .with_tool_aliases(cfg.tool_aliases.clone())
         .map_err(BuildError::InvalidToolAliases)?;
     // Validate once at the boundary; every desktop-answered gate below (main,
     // side chat) and the native cron seed (a clone of `cfg`) use this value.
     let permission_timeout = cfg.resolved_permission_timeout()?;
+    // This choice belongs only to this construction; no settings, cron,
+    // workflow or other cloned child configuration may inherit it.
+    let target_resume_snapshot = cfg.session_resume_target_snapshot.take();
+    let construction_transcript_authority = cfg.session_transcript_authority.take();
+    // The foreground launch owner is construction-only. A short-lived cron
+    // or other child must never rebind its registry or close its admission.
+    let bg_session_forker = cfg.bg_session_forker.take();
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
         let mut seed = cfg.clone();
         seed.session_writer_lease = None;
         seed.session_transcript_path = None;
+        seed.session_transcript_authority = None;
         seed.session_resume_snapshot = None;
         seed.session_resume_cost = None;
         (seed, permission_sink.clone())
@@ -1170,7 +1318,6 @@ pub async fn build_with_credential_stack(
     // live under `<lingxi_home>/file-history/<session>/`.
     let file_history = std::sync::Arc::new(session::FileHistory::new(
         cfg.lingxi_home.clone(),
-        cwd.clone(),
         main_session_uuid.clone(),
     ));
     let main_transcript_path = cfg.session_transcript_path.clone().unwrap_or_else(|| {
@@ -1180,6 +1327,34 @@ pub async fn build_with_credential_stack(
             &main_session_uuid,
         )
     });
+    let captured_target_content = cfg.session_resume_snapshot.as_ref().and_then(|snapshot| {
+        if snapshot.source_session_id == main_session_uuid {
+            Some(snapshot.content.clone())
+        } else {
+            target_resume_snapshot.clone()
+        }
+    });
+    if cfg.session_persistence
+        && !is_app_chat
+        && captured_target_content.is_some()
+        && construction_transcript_authority.is_none()
+    {
+        return Err(BuildError::Orchestrator(
+            "persistent resume requires captured transcript authority".into(),
+        ));
+    }
+    if durable_draft_anchor
+        && main_transcript_path
+            != session::jsonl::session_path(
+                &cfg.lingxi_home,
+                cfg.cwd.to_str().expect("validated draft cwd"),
+                &main_session_uuid,
+            )
+    {
+        return Err(BuildError::Orchestrator(
+            "draft transcript does not match its workspace owner".into(),
+        ));
+    }
     // Create the one ordinary transcript writer before durable session setup.
     // Production later decorates this same writer with the coordinator's
     // durable transaction; legacy/no-persistence hosts keep compatibility.
@@ -1200,12 +1375,18 @@ pub async fn build_with_credential_stack(
         // A fork has a different backup-directory owner. Do not attach source
         // checkpoint names to that empty directory without a backup transfer.
         if snapshot.source_session_id == main_session_uuid {
-            file_history.restore_from_records(session::file_history::parse_snapshot_records(
-                &snapshot.content,
-            ));
+            let records = session::file_history::parse_snapshot_records(&snapshot.content)
+                .map_err(BuildError::DurableSession)?;
+            file_history
+                .restore_from_records(records)
+                .map_err(BuildError::DurableSession)?;
         }
     } else if let Ok(content) = std::fs::read_to_string(&main_transcript_path) {
-        file_history.restore_from_records(session::file_history::parse_snapshot_records(&content));
+        let records = session::file_history::parse_snapshot_records(&content)
+            .map_err(BuildError::DurableSession)?;
+        file_history
+            .restore_from_records(records)
+            .map_err(BuildError::DurableSession)?;
     }
     let main_subagents_dir = main_transcript_path.with_extension("").join("subagents");
 
@@ -1873,10 +2054,11 @@ pub async fn build_with_credential_stack(
                 .with_durable_lock(durable_writer),
         );
         writer
-            .activate_session_target(
+            .activate_session_target_with_authority(
                 main_session_id,
                 main_transcript_path.clone(),
                 cfg.cwd.clone(),
+                construction_transcript_authority.clone(),
             )
             .map_err(|error| BuildError::DurableSession(error.to_string()))?;
         writer
@@ -1889,8 +2071,13 @@ pub async fn build_with_credential_stack(
                 &snapshot.content,
                 &snapshot.source_session_id,
             )
+        } else if let Some(target_snapshot) = target_resume_snapshot.as_ref() {
+            session::JsonlWriter::capture_session_metadata_source(
+                target_snapshot,
+                &main_session_uuid,
+            )
         } else {
-            // A fork has its own workspace and metadata identity.
+            // A lazy fork has its own workspace and metadata identity.
             Vec::new()
         };
         main_jsonl_writer.install_session_metadata_source(&main_session_uuid, &rows);
@@ -1899,6 +2086,8 @@ pub async fn build_with_credential_stack(
         bootstrap_main_transcript_identity_if_nonempty(
             main_jsonl_writer.as_ref(),
             &main_transcript_path,
+            construction_transcript_authority.as_ref(),
+            captured_target_content.as_deref(),
         )
         .await
         .map_err(|error| {
@@ -2338,8 +2527,11 @@ pub async fn build_with_credential_stack(
     } else {
         mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd)
     };
-    if cfg.local_apps && !cfg.strict_mcp_config && !cfg.customization_gates.disables_mcp_discovery()
-        && cfg.app_invocation.is_none() && cfg.team_invocation.is_none()
+    if cfg.local_apps
+        && !cfg.strict_mcp_config
+        && !cfg.customization_gates.disables_mcp_discovery()
+        && cfg.app_invocation.is_none()
+        && cfg.team_invocation.is_none()
     {
         mcp::local_apps::append(&mut mcp_configs, &cfg.lingxi_home);
     }
@@ -5872,6 +6064,7 @@ pub async fn build_with_credential_stack(
     // restoration. Same shared-`Arc` file target, so the record lands in the SAME
     // `<uuid>.jsonl` the orchestrator appends messages to.
     let main_agent_setting_writer = main_jsonl_writer.clone();
+    let draft_anchor_writer = durable_draft_anchor.then(|| main_jsonl_writer.clone());
     let goal_hooks_restricted = if cfg.restricted {
         effective_settings
             .settings
@@ -5929,6 +6122,7 @@ pub async fn build_with_credential_stack(
         memory,
         cwd.clone(),
     )
+    .with_conversation_mode(construction_mode)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
     .with_native_model_settings_snapshot(crate::native_model_settings::snapshot(Some(
         &effective_settings,
@@ -6220,7 +6414,7 @@ pub async fn build_with_credential_stack(
     // the live conversation into a new background session. `None` (default /
     // non-CLI hosts) leaves that `/fork` variant failing with a clear
     // `ActionFailed`, byte-identical to before this seam existed.
-    let orch_builder = match cfg.bg_session_forker.clone() {
+    let orch_builder = match bg_session_forker {
         Some(forker) => {
             forker.set_task_registry(task_registry.clone());
             orch_builder.with_bg_session_forker(forker)
@@ -6357,6 +6551,32 @@ pub async fn build_with_credential_stack(
         model_provenance,
     ))
     .await?;
+    // Deferred headless mounts initialize only after installing their captured
+    // history. App Chat uses its own transcript identity and lifecycle.
+    if !cfg.defer_session_start && !is_app_chat {
+        orch.initialize_conversation_mode()
+            .await
+            .map_err(|error| BuildError::Orchestrator(error.to_string()))?;
+    }
+    if let Some(writer) = draft_anchor_writer {
+        if session_cwd.cwd() != cwd {
+            return Err(BuildError::Orchestrator(
+                "draft session cwd changed before anchor creation".into(),
+            ));
+        }
+        ensure_durable_draft_anchor(
+            &writer,
+            &main_transcript_path,
+            &cwd,
+            &main_session_uuid,
+            construction_mode,
+            durable_draft_title
+                .as_deref()
+                .expect("draft title validated"),
+        )
+        .await
+        .map_err(|error| BuildError::Orchestrator(format!("draft session anchor: {error}")))?;
+    }
     orch.enable_goal_retries();
     orch.attach_owned_session_switches();
     orch.set_main_report_waker(Arc::new(
@@ -6638,7 +6858,9 @@ pub async fn build_with_credential_stack(
             "Bash",
         );
     }
-    if cfg.local_apps {
+    if cfg.local_apps
+        && construction_mode == lingxi_core::host::session_context::ConversationMode::Code
+    {
         crate::local_apps::register_skill(
             &mut reg,
             &[local_app::TOOL_NAME.to_string(), "Bash".to_string()],

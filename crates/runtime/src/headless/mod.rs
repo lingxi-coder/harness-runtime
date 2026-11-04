@@ -539,7 +539,13 @@ async fn run_owned(
     if options.permission_prompts_none {
         config.desktop.injected_permission_gate = None;
     }
-    let prepared = match session::prepare(&mut config.desktop, &config.session_start).await {
+    let prepared = match session::prepare(
+        &mut config.desktop,
+        &config.session_start,
+        options.rewind_files.is_some(),
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(error) => {
             let _ = io.stderr.write_line(&format!("lingxi-cli: {error}")).await;

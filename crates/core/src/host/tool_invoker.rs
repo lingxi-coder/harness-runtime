@@ -634,6 +634,12 @@ pub struct ToolInvocationResult {
 /// `ToolRegistry`) and in test fixtures (recording mock).
 #[async_trait]
 pub trait ToolInvoker: Send + Sync + Any {
+    /// Host-owned durable-origin acknowledgement state for child transcript
+    /// writers. This is opaque to core and never comes from tool input.
+    fn durable_origin_state(&self) -> Option<ToolInvocationContextState> {
+        None
+    }
+
     /// Release this Agent's computer inputs after its loop has settled.
     async fn cleanup_computer_inputs(
         &self,

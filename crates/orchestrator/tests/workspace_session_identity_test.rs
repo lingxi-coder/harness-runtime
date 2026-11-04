@@ -52,7 +52,8 @@ async fn fixture(
 fn write_source(path: &Path, cwd: &Path, id: SessionId) -> String {
     let uuid = uuid::Uuid::new_v4();
     let content = format!(
-        "{}\n",
+        "{}\n{}\n",
+        serde_json::json!({"type":"fixed-session-mode", "sessionId":id.as_uuid(), "sessionMode":"code", "instructionEpoch":0}),
         serde_json::json!({
             "type":"user", "uuid":uuid, "parentUuid":null, "cwd":cwd,
             "sessionId":id.as_uuid(), "timestamp":"2026-10-21T12:00:00.000Z",
@@ -281,7 +282,7 @@ async fn warm_resume_missing_workspace_keeps_current_cwd_and_source_transcript()
 }
 
 #[tokio::test]
-async fn change_working_directory_moves_complete_jsonl_and_sidecars_before_publishing_cwd() {
+async fn change_working_directory_preserves_exact_jsonl_and_sidecars_before_publishing_cwd() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let boot = root.path().join("boot");
@@ -299,28 +300,21 @@ async fn change_working_directory_moves_complete_jsonl_and_sidecars_before_publi
         .await
         .unwrap();
     let moved = transcript(&home, &target, id);
-    assert_eq!(writer.active_path(), moved);
-    assert!(!old.exists());
-    assert!(std::fs::read_to_string(&moved)
+    assert_eq!(writer.active_path(), old);
+    assert!(!moved.exists());
+    assert!(std::fs::read_to_string(&old)
         .unwrap()
         .starts_with(&original));
-    let routed = session::jsonl::route_lines(&std::fs::read_to_string(&moved).unwrap());
+    let routed = session::jsonl::route_lines(&std::fs::read_to_string(&old).unwrap());
     assert_eq!(
         routed.relocated_cwds[&id.as_uuid().to_string()],
         target.to_string_lossy()
     );
     assert_eq!(
-        std::fs::read_to_string(
-            moved
-                .parent()
-                .unwrap()
-                .join(id.as_uuid().to_string())
-                .join("nested/output")
-        )
-        .unwrap(),
+        std::fs::read_to_string(old_sidecar.join("nested/output")).unwrap(),
         "complete-artifact"
     );
-    assert!(!old_sidecar.exists());
+    assert!(old_sidecar.exists());
     assert_eq!(
         cwd.snapshot(),
         (target.clone(), vec![target.clone(), additional])
@@ -330,7 +324,7 @@ async fn change_working_directory_moves_complete_jsonl_and_sidecars_before_publi
 }
 
 #[tokio::test]
-async fn failed_transcript_move_rolls_back_sidecars_and_does_not_publish_cwd() {
+async fn invalid_transcript_source_keeps_sidecars_and_does_not_publish_cwd() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let boot = root.path().join("boot");
@@ -339,7 +333,7 @@ async fn failed_transcript_move_rolls_back_sidecars_and_does_not_publish_cwd() {
     let id = SessionId::new();
     let (orch, writer, cwd, _) = fixture(&home, &boot, id).await;
     let old = transcript(&home, &boot, id);
-    std::fs::create_dir_all(&old).unwrap(); // Invalid transcript source forces writer rollback.
+    std::fs::create_dir_all(&old).unwrap(); // A directory cannot be a transcript source.
     let new = transcript(&home, &target, id);
     let old_sidecar = old.parent().unwrap().join(id.as_uuid().to_string());
     let new_sidecar = new.parent().unwrap().join(id.as_uuid().to_string());
@@ -404,15 +398,24 @@ async fn warm_resume_replaces_shared_worktree_state_and_preserves_explicit_dirs(
     );
     assert_eq!(cwd.cwd(), worktree);
     assert!(cwd.trusted_dirs().contains(&extra));
+    let plain_id = SessionId::new();
+    write_source(&transcript(&home, &boot, plain_id), &boot, plain_id);
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(boot.clone()));
+    let plain = orchestrator::resume::replay_session_state(
+        &home,
+        &boot.to_string_lossy(),
+        plain_id.as_uuid(),
+        fs,
+    )
+    .await
+    .unwrap();
+    let runtime = plain.handle_runtime_snapshot();
     orch.resume_session(
-        SessionId::new(),
-        Vec::new(),
+        plain_id,
+        plain.state.history,
+        plain.last_message_uuid.map(|id| id.to_string()),
         None,
-        None,
-        lingxi_core::host::ResumeRuntimeSnapshot {
-            working_directory: Some(boot.clone()),
-            ..Default::default()
-        },
+        runtime,
     )
     .await
     .unwrap();
@@ -442,7 +445,14 @@ async fn warm_resume_after_cd_cannot_reappend_the_previous_sessions_metadata() {
         .await
         .unwrap();
     writer.append_permission_mode("plan").await.unwrap();
-    writer.append_session_mode("A mode").await.unwrap();
+    writer
+        .initialize_fixed_session_mode(
+            &id_a.as_uuid().to_string(),
+            lingxi_core::host::session_context::ConversationMode::Code,
+            0,
+        )
+        .await
+        .unwrap();
     orch.change_working_directory(moved.clone(), vec![moved.clone()])
         .await
         .unwrap();
@@ -470,7 +480,6 @@ async fn warm_resume_after_cd_cannot_reappend_the_previous_sessions_metadata() {
     let tail = session::jsonl::read_tail(&path_b);
     assert!(tail.contains("B preserved title"));
     assert!(!tail.contains("A title"));
-    assert!(!tail.contains("A mode"));
     assert!(!tail.contains(r#""permissionMode":"plan""#));
     assert!(!tail.contains(&moved.to_string_lossy().to_string()));
 }

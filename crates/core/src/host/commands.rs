@@ -7,7 +7,17 @@
 
 use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
+use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
+
+/// Trusted identity of a directory Skill supplied by the command producer.
+/// The name remains an exact JavaScript string, including isolated UTF-16 units.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SlashSkillIdentity {
+    #[serde(with = "crate::types::utf16_json::raw_json_serde")]
+    pub name: Utf16JsonProjection,
+    pub path: PathBuf,
+}
 
 /// Result of [`SlashCommandDispatcher::dispatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +39,8 @@ pub enum SlashDispatchResult {
         /// The exact source projection of the expanded prompt to submit as the user turn.
         prompt: Utf16JsonProjection,
     },
-    /// A directory Skill whose Native ingress is a command row followed by
-    /// an expanded body companion and ordered hook-produced history rows.
+    /// A Native prompt expansion with a command row, body companion and
+    /// ordered hook-produced history rows. Only `skill: Some` is a Skill.
     RunSkillAsTurn {
         /// Exact `<command-message>` / `<command-name>` command header.
         command: Utf16JsonProjection,
@@ -38,6 +48,8 @@ pub enum SlashDispatchResult {
         body: Utf16JsonProjection,
         /// Ordered Native history rows emitted by UserPromptExpansion hooks.
         hook_messages: Vec<Utf16JsonProjection>,
+        /// Directory Skill identity, or `None` for ordinary prompt expansions.
+        skill: Option<SlashSkillIdentity>,
     },
     /// A command handler failed before producing a user-visible result.
     Failed {

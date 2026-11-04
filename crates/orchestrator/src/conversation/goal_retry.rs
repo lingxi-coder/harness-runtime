@@ -3,24 +3,19 @@ use super::{Arc, CancellationToken, ConversationOrchestrator, Duration};
 use crate::prompt::goal_interruption::{self, GoalInterruption};
 use std::time::SystemTime;
 
+type GoalIdentity = (
+    SystemTime,
+    lingxi_core::types::utf16_json::Utf16JsonProjection,
+);
+
 #[derive(Default)]
 pub(crate) struct GoalRetryState {
-    goal: Option<(
-        SystemTime,
-        lingxi_core::types::utf16_json::Utf16JsonProjection,
-    )>,
+    goal: Option<GoalIdentity>,
     retries: u32,
     announced: Option<&'static str>,
     pending: Option<CancellationToken>,
     queued_id: Option<String>,
-    checkin: Option<(
-        String,
-        CancellationToken,
-        (
-            SystemTime,
-            lingxi_core::types::utf16_json::Utf16JsonProjection,
-        ),
-    )>,
+    checkin: Option<(String, CancellationToken, GoalIdentity)>,
 }
 impl Drop for GoalRetryState {
     fn drop(&mut self) {
@@ -28,6 +23,20 @@ impl Drop for GoalRetryState {
     }
 }
 impl GoalRetryState {
+    fn retry_is_valid(&self, id: &str, current: Option<&GoalIdentity>) -> bool {
+        if let Some((_, token, goal)) = self.checkin.as_ref().filter(|(queued, _, _)| queued == id)
+        {
+            return !token.is_cancelled() && current == Some(goal);
+        }
+        current.is_some()
+            && current == self.goal.as_ref()
+            && self.queued_id.as_deref() == Some(id)
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|token| !token.is_cancelled())
+    }
+
     fn cancel_pending(&mut self) {
         if let Some(token) = self.pending.take() {
             token.cancel();
@@ -198,14 +207,66 @@ impl ConversationOrchestrator {
         true
     }
 
+    fn goal_retry_enabled(&self, id: &str) -> bool {
+        self.prompt_is_interactive()
+            && (id.starts_with("goal-retry-checkin-")
+                || telemetry::flag_bool("tengu_pewter_avocet", true))
+            && crate::prompt::goal_checkin::checkin_interval_ms() != 0
+    }
+
+    /// Inspect a retry without consuming it before profile persistence.
+    pub(crate) async fn goal_retry_is_valid(&self, id: &str) -> bool {
+        if !self.goal_retry_enabled(id) {
+            return false;
+        }
+        let session = self.session.lock().await;
+        let current = session
+            .active_goal
+            .as_ref()
+            .map(|goal| (goal.set_at, goal.condition.clone()));
+        let state = self
+            .lifecycle_runtime
+            .goal_retry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retry_is_valid(id, current.as_ref())
+    }
+
+    /// A discarded stale check-in must not block future check-ins. Recheck
+    /// under the state lock and report an entry that has become valid again.
+    pub(crate) async fn recheck_goal_retry_or_discard_stale(&self, id: &str) -> bool {
+        let session = self.session.lock().await;
+        let current = session
+            .active_goal
+            .as_ref()
+            .map(|goal| (goal.set_at, goal.condition.clone()));
+        let mut state = self
+            .lifecycle_runtime
+            .goal_retry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let enabled = self.goal_retry_enabled(id);
+        if enabled && state.retry_is_valid(id, current.as_ref()) {
+            return true;
+        }
+        if state
+            .checkin
+            .as_ref()
+            .is_some_and(|(queued, _, _)| queued == id)
+        {
+            let (_, token, _) = state.checkin.take().expect("checked checkin");
+            token.cancel();
+        } else if !enabled && state.queued_id.as_deref() == Some(id) {
+            state.queued_id = None;
+            state.cancel_pending();
+        }
+        false
+    }
+
     /// Drop invalidated queued retries at the actual turn gate, including races
     /// where the host already dequeued one before a human message or goal clear.
     pub(crate) async fn admit_goal_retry(&self, id: &str) -> bool {
-        if !self.prompt_is_interactive()
-            || (!id.starts_with("goal-retry-checkin-")
-                && !telemetry::flag_bool("tengu_pewter_avocet", true))
-            || crate::prompt::goal_checkin::checkin_interval_ms() == 0
-        {
+        if !self.goal_retry_enabled(id) {
             self.reset_goal_interruption();
             return false;
         }
@@ -224,19 +285,12 @@ impl ConversationOrchestrator {
             .as_ref()
             .is_some_and(|(queued, _, _)| queued == id)
         {
-            let (_, token, goal) = state.checkin.take().expect("checked checkin");
-            let valid = !token.is_cancelled() && current.as_ref() == Some(&goal);
+            let valid = state.retry_is_valid(id, current.as_ref());
+            let (_, token, _) = state.checkin.take().expect("checked checkin");
             token.cancel();
             return valid;
         }
-        if current != state.goal
-            || current.is_none()
-            || state.queued_id.as_deref() != Some(id)
-            || state
-                .pending
-                .as_ref()
-                .is_none_or(CancellationToken::is_cancelled)
-        {
+        if !state.retry_is_valid(id, current.as_ref()) {
             return false;
         }
         state.queued_id = None;
@@ -348,6 +402,10 @@ mod tests {
     fn fixture_config(
         interactive: bool,
         wire: bool,
+        writer: Option<(
+            lingxi_core::types::SessionId,
+            Arc<session::jsonl::JsonlWriter>,
+        )>,
     ) -> (
         Arc<ConversationOrchestrator>,
         Arc<MockStreamingApiClient>,
@@ -361,21 +419,26 @@ mod tests {
             message_delta_stop("end_turn"),
             message_stop(),
         ]]));
-        let orch =
-            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
-                crate::OrchestratorConfig {
-                    interactive_session: interactive,
-                    ..Default::default()
-                },
-                Arc::new(MockApiClient::new(vec![])),
-                api.clone(),
-                Arc::new(tool_api::ToolRegistry::new()),
-                noop_hook_executor(),
-                Arc::new(NoOpPermissionGate),
-                Arc::new(MockOutputStream::new()),
-                Arc::new(StaticMemoryProvider::empty()),
-                std::env::temp_dir(),
-            ));
+        let orch = ConversationOrchestrator::new_with_streaming(
+            crate::OrchestratorConfig {
+                interactive_session: interactive,
+                ..Default::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            api.clone(),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let orch = if let Some((id, writer)) = writer {
+            orch.with_session_id(id).with_jsonl_writer(writer)
+        } else {
+            orch
+        };
+        let orch = ConversationOrchestrator::into_shared(orch);
         orch.enable_goal_retries();
         let queue = Arc::new(Queue::default());
         if wire {
@@ -389,14 +452,14 @@ mod tests {
         Arc<MockStreamingApiClient>,
         Arc<Queue>,
     ) {
-        fixture_config(true, true)
+        fixture_config(true, true, None)
     }
 
     #[tokio::test]
     async fn retries_require_interactive_host_delivery() {
         use lingxi_core::host::OrchestratorHandle;
         for (interactive, wire) in [(false, true), (true, false)] {
-            let (orch, _, queue) = fixture_config(interactive, wire);
+            let (orch, _, queue) = fixture_config(interactive, wire, None);
             orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
                 "finish",
             ))
@@ -573,5 +636,210 @@ mod tests {
         let (new_id, _, _) = queue.0.lock().unwrap().pop().unwrap();
         assert!(!orch.admit_goal_retry(&old_id).await);
         assert!(orch.admit_goal_retry(&new_id).await);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn invalid_only_retry_preserves_pending_profile_and_skill_epoch() {
+        use lingxi_core::host::session_context::ConversationMode;
+        use lingxi_core::host::OrchestratorHandle;
+        use lingxi_core::types::{ConversationMessage, MessageId};
+
+        let _registry_guard = compaction::invoked_skills::TEST_LOCK.lock().unwrap();
+        let (orch, api, queue) = fixture();
+        orch.set_active_goal(&source_text("finish")).await;
+        let goal = orch.session.lock().await.active_goal.clone().unwrap();
+        assert!(orch.queue_goal_checkin("continue".into(), &goal).await);
+        let (valid_id, body, token) = queue.0.lock().unwrap().pop().unwrap();
+
+        let session_id = orch.current_session_id().await.to_string();
+        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+        let skill_id = MessageId::new();
+        let skill = ConversationMessage::user_meta(skill_id, "old skill guidance".into())
+            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
+        orch.session.lock().await.history.push(skill);
+        compaction::invoked_skills::register_scoped_for_message(
+            &source_text("keep"),
+            std::path::Path::new("/skills/keep"),
+            &source_text("old skill guidance"),
+            scope,
+            skill_id,
+        );
+        assert!(orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
+
+        let outcome = orch
+            .run_queued_prompt_batch(
+                vec![crate::QueuedPromptInput {
+                    goal_retry_id: Some("goal-retry-checkin-stale".into()),
+                    text: "stale".into(),
+                    is_meta: true,
+                    ..Default::default()
+                }],
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, crate::conversation::TurnOutcome::EndTurn));
+        let state = orch.conversation_mode().await;
+        assert_eq!(state.mode, ConversationMode::Code);
+        assert_eq!(orch.profile_epoch().await, 0);
+        assert_eq!(compaction::invoked_skills::context_epoch(scope), 0);
+        assert_eq!(compaction::invoked_skills::filter_for_scope(scope).len(), 1);
+        assert!(orch
+            .session
+            .lock()
+            .await
+            .model_context_history()
+            .iter()
+            .any(|row| row.id() == skill_id));
+        assert!(api.captured_calls().await.is_empty());
+        assert!(!token.is_cancelled());
+        assert!(orch.goal_retry_is_valid(&valid_id).await);
+        assert!(orch.recheck_goal_retry_or_discard_stale(&valid_id).await);
+        assert!(!token.is_cancelled());
+
+        orch.run_queued_prompt_batch(
+            vec![crate::QueuedPromptInput {
+                goal_retry_id: Some(valid_id),
+                text: body,
+                is_meta: true,
+                ..Default::default()
+            }],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(api.captured_calls().await.len(), 1);
+        assert!(token.is_cancelled());
+        assert_eq!(
+            (
+                orch.conversation_mode().await.mode,
+                orch.profile_epoch().await
+            ),
+            (ConversationMode::Code, 0)
+        );
+        assert_eq!(compaction::invoked_skills::filter_for_scope(scope).len(), 1);
+        compaction::invoked_skills::clear_session(&session_id);
+    }
+
+    #[tokio::test]
+    async fn goal_retry_invalidated_during_storage_wait_does_not_admit_profile() {
+        use lingxi_core::host::session_context::ConversationMode;
+        use lingxi_core::host::OrchestratorHandle;
+
+        let (orch, api, queue) = fixture();
+        orch.set_active_goal(&source_text("finish")).await;
+        let goal = orch.session.lock().await.active_goal.clone().unwrap();
+        assert!(orch.queue_goal_checkin("continue".into(), &goal).await);
+        let (id, body, token) = queue.0.lock().unwrap().pop().unwrap();
+        assert!(orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
+
+        let storage = orch.transcript.storage_pauses.lock().await;
+        let mut retry = orch.run_queued_prompt_batch(
+            vec![crate::QueuedPromptInput {
+                goal_retry_id: Some(id),
+                text: body,
+                is_meta: true,
+                ..Default::default()
+            }],
+            CancellationToken::new(),
+        );
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+        assert!(orch.turn_gate.try_lock().is_err());
+        token.cancel();
+        drop(storage);
+        assert!(matches!(
+            retry.await.unwrap(),
+            crate::conversation::TurnOutcome::EndTurn
+        ));
+        let state = orch.conversation_mode().await;
+        assert_eq!(state.mode, ConversationMode::Code);
+        assert_eq!(orch.profile_epoch().await, 0);
+        assert!(api.captured_calls().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn valid_goal_retry_survives_failed_profile_persistence() {
+        use lingxi_core::host::session_context::ConversationMode;
+        use lingxi_core::host::OrchestratorHandle;
+
+        let root = tempfile::tempdir().unwrap();
+        let id = lingxi_core::types::SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(root.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::JsonlWriter::new(path.clone(), fs));
+        let (orch, api, queue) = fixture_config(true, true, Some((id, writer)));
+        orch.set_active_goal(&source_text("finish")).await;
+        let goal = orch.session.lock().await.active_goal.clone().unwrap();
+        assert!(orch.queue_goal_checkin("continue".into(), &goal).await);
+        let (retry_id, body, token) = queue.0.lock().unwrap().pop().unwrap();
+        assert!(orch
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .is_err());
+
+        let backup = path.with_extension("backup");
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let retry = || {
+            vec![crate::QueuedPromptInput {
+                goal_retry_id: Some(retry_id.clone()),
+                text: body.clone(),
+                is_meta: true,
+                ..Default::default()
+            }]
+        };
+        assert!(orch.initialize_conversation_mode().await.is_err());
+        assert!(!token.is_cancelled());
+        assert!(orch.goal_retry_is_valid(&retry_id).await);
+        assert!(api.captured_calls().await.is_empty());
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&backup, &path).unwrap();
+        orch.initialize_conversation_mode().await.unwrap();
+        orch.run_queued_prompt_batch(retry(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(token.is_cancelled());
+        assert_eq!(api.captured_calls().await.len(), 1);
+        assert_eq!(
+            (
+                orch.conversation_mode().await.mode,
+                orch.profile_epoch().await
+            ),
+            (ConversationMode::Code, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn discarded_cancelled_checkin_does_not_block_a_later_checkin() {
+        use lingxi_core::host::OrchestratorHandle;
+        let (orch, api, queue) = fixture();
+        orch.set_active_goal(&source_text("finish")).await;
+        let goal = orch.session.lock().await.active_goal.clone().unwrap();
+        assert!(orch.queue_goal_checkin("continue".into(), &goal).await);
+        let (id, body, token) = queue.0.lock().unwrap().pop().unwrap();
+        token.cancel();
+        orch.run_queued_prompt_batch(
+            vec![crate::QueuedPromptInput {
+                goal_retry_id: Some(id),
+                text: body,
+                is_meta: true,
+                ..Default::default()
+            }],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(api.captured_calls().await.is_empty());
+        assert!(orch.queue_goal_checkin("next".into(), &goal).await);
     }
 }

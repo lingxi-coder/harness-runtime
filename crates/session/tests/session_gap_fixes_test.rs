@@ -64,7 +64,8 @@ fn write_session_with_extras(
             obj.insert(k.clone(), v.clone());
         }
     }
-    let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+    let header = serde_json::json!({"type":"fixed-session-mode", "sessionId":uuid, "sessionMode":"code", "instructionEpoch":0});
+    let bytes = format!("{header}\n{}\n", serde_json::to_string(&line).unwrap());
     let path = dir.join(format!("{uuid}.jsonl"));
     std::fs::write(&path, bytes).unwrap();
     filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
@@ -263,7 +264,7 @@ async fn loop_session_is_filtered_from_resume_picker() {
     let loop_path = dir.join(format!("{loop_uuid}.jsonl"));
     std::fs::write(
         &loop_path,
-        format!("{}\n", serde_json::to_string(&loop_line).unwrap()),
+        format!("{}\n{}\n", serde_json::json!({"type":"fixed-session-mode", "sessionId":loop_uuid, "sessionMode":"code", "instructionEpoch":0}), serde_json::to_string(&loop_line).unwrap()),
     )
     .unwrap();
     filetime::set_file_mtime(
@@ -304,7 +305,7 @@ async fn session_with_loop_text_in_non_content_context_is_not_filtered() {
     let path = dir.join(format!("{keep_uuid}.jsonl"));
     std::fs::write(
         &path,
-        format!("{}\n", serde_json::to_string(&line).unwrap()),
+        format!("{}\n{}\n", serde_json::json!({"type":"fixed-session-mode", "sessionId":keep_uuid, "sessionMode":"code", "instructionEpoch":0}), serde_json::to_string(&line).unwrap()),
     )
     .unwrap();
     filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(base)).unwrap();

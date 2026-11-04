@@ -26,10 +26,11 @@ mod streaming;
 pub use realtime::{
     realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
     MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits, RealtimeAgentSessionIo, ScheduledMediaChild, ScheduledMediaChildRoute,
-    ScheduledMediaParentCheck,
+    RealtimeAgentLimits, RealtimeAgentOutput, RealtimeAgentSessionIo, RealtimeCompletionBoundary,
+    ScheduledMediaChild, ScheduledMediaChildRoute, ScheduledMediaParentCheck,
 };
 
+use super::context_state_impl::ProfileTurnGuard;
 use super::hooks_impl::ModPromptScreen;
 use super::*;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
@@ -50,6 +51,8 @@ pub struct QueuedPromptInput {
     pub is_meta: bool,
     /// Native `turnCompanion:true` marker for a paired meta message.
     pub turn_companion: bool,
+    /// Trusted producer identity, present only for a directory Skill body.
+    pub skill_identity: Option<lingxi_core::host::SlashSkillIdentity>,
     /// Ordered Native history rows to append after this input's message. Skill
     /// dispatch puts its UserPromptExpansion rows on the body companion only.
     pub trailing_history_rows: Vec<Utf16JsonProjection>,
@@ -96,6 +99,7 @@ impl Default for QueuedPromptInput {
             images: Vec::new(),
             is_meta: false,
             turn_companion: false,
+            skill_identity: None,
             trailing_history_rows: Vec::new(),
             mod_origin: None,
             message_origin: None,
@@ -134,13 +138,15 @@ pub struct PendingPromptIdentity {
     pub trailing_history_row_ids: Vec<MessageId>,
 }
 
-/// Build the exact queued input pair for an inline directory Skill. Hook rows
-/// stay source projections and remain ordered after the expanded body.
+/// Build the exact queued input pair for a Native prompt expansion. Hook rows
+/// stay source projections and remain ordered after the expanded body. Only a
+/// producer-supplied Skill identity marks the body as a Skill activation.
 #[must_use]
 pub fn skill_prompt_inputs(
     command: Utf16JsonProjection,
     body: Utf16JsonProjection,
     hook_messages: Vec<Utf16JsonProjection>,
+    skill: Option<lingxi_core::host::SlashSkillIdentity>,
 ) -> Vec<QueuedPromptInput> {
     vec![
         QueuedPromptInput {
@@ -151,6 +157,7 @@ pub fn skill_prompt_inputs(
             text: body,
             is_meta: true,
             turn_companion: true,
+            skill_identity: skill,
             trailing_history_rows: hook_messages,
             ..Default::default()
         },
@@ -422,6 +429,61 @@ fn token_aborted(token: &Option<CancellationToken>) -> bool {
 }
 
 impl ConversationOrchestrator {
+    /// Publish only the accepted, successfully persisted Skill body as the
+    /// current activation. The same exact body and UUID are used for live
+    /// compaction and for passive reconstruction after restart.
+    pub(super) async fn admit_skill_prompt_message(
+        &self,
+        input: &QueuedPromptInput,
+        message: &ConversationMessage,
+    ) -> Result<(), OrchestratorError> {
+        let skill = input
+            .skill_identity
+            .as_ref()
+            .expect("Skill companion identity");
+        let accepted = if let Some(identity) = &input.pending_prompt_identity {
+            let accepted = self
+                .persist_pending_prompt_queued_message_once(message, input, &identity.prompt_id)
+                .await?;
+            self.append_pending_prompt_message_to_history_once(&accepted)
+                .await?;
+            accepted
+        } else {
+            let accepted = self.persist_admitted_skill_prompt(message, input).await?;
+            self.session.lock().await.history.push(accepted.clone());
+            accepted
+        };
+        // The cold transcript reconstruction concatenates all text blocks in
+        // source order without inventing separators. Match it here, including
+        // exact UTF-16 units from a multi-block session.append rewrite.
+        let units = match &accepted {
+            ConversationMessage::User { content, .. } => content
+                .iter()
+                .flat_map(|block| match block {
+                    ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
+                    ContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } => utf16_code_units.clone(),
+                    _ => Vec::new(),
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let body = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("accepted Skill text retains exact UTF-16");
+        let session_id = self.session.lock().await.session_id.to_string();
+        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+        compaction::invoked_skills::register_activation_with_message(
+            &skill.name,
+            &skill.path,
+            &body,
+            None,
+            scope,
+            accepted.id(),
+        );
+        Ok(())
+    }
+
     /// Read the active turn's [`crate::prompt::mid_turn_input::CancelReason`] from
     /// the wired flag, defaulting to `UserInterrupt` when no flag is wired (so an
     /// un-wired turn always takes the user-interrupt branch — today's behavior).
@@ -973,7 +1035,7 @@ impl ConversationOrchestrator {
         llm_runtime::catalog_task::scope(async {
             let prompt = prompt.into();
             self.cancel_idle_compaction();
-            let _turn_guard = self.turn_gate.lock().await;
+            let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
             self.begin_turn_metrics();
             let _activity_guard = self.main_loop_activity(true);
             tracing::info!(
@@ -987,7 +1049,9 @@ impl ConversationOrchestrator {
                     telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
                         self.scope_api_session(
                             !self.prompt_is_interactive(),
-                            crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt)),
+                            crate::turn_loop::boxed_turn_future(|| {
+                                self.try_run_turn(&prompt, &turn_guard)
+                            }),
                         )
                         .await
                     }),
@@ -996,6 +1060,8 @@ impl ConversationOrchestrator {
             .await;
             let cleanup = crate::native_computer::cleanup(self).await;
             let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
             self.fire_mod_turn_complete(false, result.is_err()).await;
             self.complete_turn_metrics(result.as_ref().ok());
             self.emit_terminal_rate_limit_if_changed(&result).await;
@@ -1027,8 +1093,10 @@ impl ConversationOrchestrator {
     async fn try_run_turn(
         &self,
         prompt: &Utf16JsonProjection,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         self.recover_session_storage().await?;
+        self.admit_conversation_profile(turn_guard).await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt for THIS turn.
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else
@@ -1205,7 +1273,7 @@ impl ConversationOrchestrator {
                 .is_some()
                 .then_some(ambient_origin);
             self.cancel_idle_compaction();
-            let _turn_guard = self.turn_gate.lock().await;
+            let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
             let _activity_guard = self.main_loop_activity(true);
             tracing::info!(
                 event = orch_events::TURN_STREAMING_STARTED,
@@ -1233,11 +1301,14 @@ impl ConversationOrchestrator {
                             }]),
                             None,
                             None,
+                            &turn_guard,
                         )),
                     )
                     .await
                 })
                 .await;
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
             self.emit_terminal_rate_limit_if_changed(&result).await;
             let result = result.map_err(|e| self.enrich_api_error(e));
             match &result {
@@ -1276,12 +1347,12 @@ impl ConversationOrchestrator {
         let turn_guard = if let Some(cancel) = generation_cancel.as_ref() {
             self.lock_turn_unless_cancelled(cancel).await
         } else {
-            Some(self.turn_gate.lock().await)
+            Some(Arc::new(self.turn_gate.clone().lock_owned().await))
         };
-        let Some(_turn_guard) = turn_guard else {
+        let Some(turn_guard) = turn_guard else {
             return Ok(TurnOutcome::Cancelled);
         };
-        self.run_meta_rewake_under_gate_with_cancel(generation_cancel)
+        self.run_meta_rewake_under_gate_with_cancel(generation_cancel, &turn_guard)
             .await
     }
 
@@ -1293,7 +1364,7 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.cancel_idle_compaction();
-        let _turn_guard = self.turn_gate.lock().await;
+        let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
         // The caller may have observed a pending task notification before a
         // different owner consumed it. Keep that no-work recheck from exposing
         // the preceding query's yielded-user count to headless publication.
@@ -1309,7 +1380,7 @@ impl ConversationOrchestrator {
                 TurnOutcome::EndTurn
             });
         }
-        self.run_meta_rewake_under_gate_with_cancel(Some(cancel))
+        self.run_meta_rewake_under_gate_with_cancel(Some(cancel), &turn_guard)
             .await
     }
 
@@ -1321,7 +1392,7 @@ impl ConversationOrchestrator {
         scope: lingxi_core::host::handback::HandbackSessionScope,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
             return Ok(TurnOutcome::Cancelled);
         };
         if !self.has_pending_main_reports(scope).await {
@@ -1329,7 +1400,7 @@ impl ConversationOrchestrator {
             // the report. No turn was opened, so it has no UI lifecycle to end.
             return Ok(TurnOutcome::EndTurn);
         }
-        self.run_meta_rewake_under_gate_with_cancel(Some(cancel))
+        self.run_meta_rewake_under_gate_with_cancel(Some(cancel), &turn_guard)
             .await
     }
 
@@ -1349,6 +1420,7 @@ impl ConversationOrchestrator {
     async fn run_meta_rewake_under_gate_with_cancel(
         &self,
         cancel: Option<CancellationToken>,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<TurnOutcome, OrchestratorError> {
         // A gate-admitted notification/report wake is a new query. Internal
         // transient rewakes inside its driver continue sharing these metrics.
@@ -1359,7 +1431,15 @@ impl ConversationOrchestrator {
         let result = self
             .scope_api_session(
                 !self.prompt_is_interactive(),
-                Box::pin(self.try_run_turn_streaming("", Vec::new(), cancel, None, true, false)),
+                Box::pin(self.try_run_turn_streaming(
+                    "",
+                    Vec::new(),
+                    cancel,
+                    None,
+                    true,
+                    false,
+                    turn_guard,
+                )),
             )
             .await;
         // The outer boundary emits the MaxTurns/error terminal after the inner
@@ -1732,16 +1812,26 @@ impl ConversationOrchestrator {
                     parent_uuid,
                     persist,
                     timestamp,
-                    ..
+                    tool_completion_id,
                 } => {
                     if *persist {
-                        self.persist_preappended_stream_row(
-                            stored,
-                            parent_uuid.clone(),
-                            timestamp,
-                            settlement.publication_guard.clone(),
-                        )
-                        .await;
+                        let accepted = self
+                            .persist_preappended_stream_row(
+                                stored,
+                                parent_uuid.clone(),
+                                timestamp,
+                                settlement.publication_guard.clone(),
+                                tool_completion_id.clone(),
+                            )
+                            .await;
+                        if !accepted
+                            && compaction::invoked_skills::is_individual_skill_activation(stored)
+                        {
+                            let rejected_id = stored.id();
+                            settlement
+                                .query_rows
+                                .retain(|(row, _)| row.id() != rejected_id);
+                        }
                     }
                 }
                 crate::streaming_loop::StreamEventJournalEntry::FlushHookAttachments(id) => {
@@ -1764,6 +1854,19 @@ impl ConversationOrchestrator {
         let append_guard = publication_guard.clone();
         let append = async {
             let mut session = self.session.lock().await;
+            // Skill rows were durably accepted and activated under their
+            // publication lease. Put them back in JE order after K without
+            // publishing a second copy.
+            let skill_ids = rows
+                .iter()
+                .filter_map(|(message, _)| {
+                    compaction::invoked_skills::is_individual_skill_activation(message)
+                        .then_some(message.id())
+                })
+                .collect::<std::collections::HashSet<_>>();
+            session
+                .history
+                .retain(|message| !skill_ids.contains(&message.id()));
             for (message, source_tool_use_id) in rows {
                 if let Some(tool_use_id) = source_tool_use_id {
                     session
@@ -2813,7 +2916,7 @@ impl ConversationOrchestrator {
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                        .await;
+                        .await?;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue(
@@ -2873,7 +2976,7 @@ impl ConversationOrchestrator {
                     return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
                 }
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                    .await;
+                    .await?;
                 self.inject_meta_user_message(MALFORMED_TOOL_USE_RETRY_NUDGE)
                     .await;
                 // TS resets the recovery counters on the retry transition so
@@ -2993,7 +3096,7 @@ impl ConversationOrchestrator {
                                 .successful_assistant_messages
                                 .saturating_sub(u32::from(!has_api_error));
                             self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                                .await;
+                                .await?;
                             return Ok(StreamingIterationDisposition::Continue(
                                 crate::turn_loop::NativeQueryTransition::InPlaceRetry,
                             ));
@@ -3057,7 +3160,7 @@ impl ConversationOrchestrator {
                     && !prior_structured_output =>
             {
                 self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                    .await;
+                    .await?;
                 self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                 loop_state.thinking_only_nudged = true;
                 Ok(StreamingIterationDisposition::Continue(
@@ -3122,7 +3225,7 @@ impl ConversationOrchestrator {
                     && !prior_structured_output
                 {
                     self.discard_retry_attempt(assistant_id, &persisted_retry_row_ids)
-                        .await;
+                        .await?;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue(
@@ -3146,6 +3249,7 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         transient_rewake: bool,
         in_human_turn: bool,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         self.try_run_turn_streaming_inputs(
             prompt,
@@ -3157,8 +3261,33 @@ impl ConversationOrchestrator {
             None,
             None,
             None,
+            turn_guard,
         )
         .await
+    }
+
+    async fn recover_streaming_query_storage(
+        &self,
+        in_human_turn: bool,
+    ) -> Result<(), OrchestratorError> {
+        if in_human_turn {
+            self.recover_session_storage().await?;
+        } else {
+            self.check_storage_pause().await?;
+        }
+        Ok(())
+    }
+
+    async fn admit_streaming_query(
+        &self,
+        in_human_turn: bool,
+        turn_guard: &ProfileTurnGuard,
+    ) -> Result<(), OrchestratorError> {
+        self.recover_streaming_query_storage(in_human_turn).await?;
+        // The turn gate remains held through the profile transaction and the
+        // whole query, so later selections can only affect the next query.
+        self.admit_conversation_profile(turn_guard).await?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3173,73 +3302,101 @@ impl ConversationOrchestrator {
         queued_inputs: Option<Vec<QueuedPromptInput>>,
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        if in_human_turn {
-            self.recover_session_storage().await?;
-        } else {
-            self.check_storage_pause().await?;
-        }
-        // Each call admits one fresh query, including a metadata re-wake. The
-        // StreamingTurnDriver retains these IDs through internal retries and
-        // tool continuations without re-entering this wrapper.
-        self.prompt_runtime.begin_native_query();
-        let suggestion_origin = queued_inputs
-            .as_ref()
-            .and_then(|inputs| inputs.iter().rev().find(|input| !input.is_meta))
-            .and_then(|input| input.mod_origin.as_ref())
-            .and_then(|origin| origin.get("kind"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|kind| !matches!(*kind, "user" | "human"))
-            .map(str::to_owned)
-            .or_else(|| (!in_human_turn).then(|| "task_notification".into()));
-        self.begin_prompt_suggestion_turn(prompt, in_human_turn, suggestion_origin)
-            .await;
-        if !transient_rewake {
-            self.begin_turn_metrics();
-        }
-        let completion_cancel = user_cancel.clone();
-        let result = crate::request_context::scope_if_missing(
-            self,
-            crate::server_fallback::scope_query_and_flush(
-                self,
-                Box::pin(
-                    StreamingTurnDriver {
-                        orch: self,
-                        prompt,
-                        images,
-                        user_cancel,
-                        message_id,
-                        transient_rewake,
-                        in_human_turn,
-                        queued_inputs,
-                        row_token,
-                        projected_content,
-                    }
-                    .run(),
-                ),
-            ),
+        self.admit_streaming_query(in_human_turn, turn_guard)
+            .await?;
+        self.run_admitted_streaming_query(
+            prompt,
+            images,
+            user_cancel,
+            message_id,
+            transient_rewake,
+            in_human_turn,
+            queued_inputs,
+            row_token,
+            projected_content,
         )
-        .await;
-        let cleanup = crate::native_computer::cleanup(self).await;
-        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
-        self.fire_mod_turn_complete(
-            completion_cancel
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_admitted_streaming_query(
+        &self,
+        prompt: &str,
+        images: Vec<lingxi_core::types::ImageSource>,
+        user_cancel: Option<CancellationToken>,
+        message_id: Option<MessageId>,
+        transient_rewake: bool,
+        in_human_turn: bool,
+        queued_inputs: Option<Vec<QueuedPromptInput>>,
+        row_token: Option<String>,
+        projected_content: Option<ProjectedUserContent>,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
+        llm_runtime::catalog_task::scope(async {
+            // Internal retries and tool continuations stay in this admitted query.
+            self.prompt_runtime.begin_native_query();
+            let suggestion_origin = queued_inputs
                 .as_ref()
-                .is_some_and(CancellationToken::is_cancelled),
-            result.is_err(),
-        )
-        .await;
-        if !transient_rewake {
-            self.complete_turn_metrics(result.as_ref().ok());
-            if matches!(&result, Ok(ConversationOutcome::EndTurn { .. }))
-                && !completion_cancel
-                    .as_ref()
-                    .is_some_and(CancellationToken::is_cancelled)
-            {
-                self.spawn_prompt_suggestion().await;
+                .and_then(|inputs| inputs.iter().rev().find(|input| !input.is_meta))
+                .and_then(|input| input.mod_origin.as_ref())
+                .and_then(|origin| origin.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|kind| !matches!(*kind, "user" | "human"))
+                .map(str::to_owned)
+                .or_else(|| (!in_human_turn).then(|| "task_notification".into()));
+            self.begin_prompt_suggestion_turn(prompt, in_human_turn, suggestion_origin)
+                .await;
+            if !transient_rewake {
+                self.begin_turn_metrics();
             }
-        }
-        result
+            let completion_cancel = user_cancel.clone();
+            let result = crate::request_context::scope_if_missing(
+                self,
+                crate::server_fallback::scope_query_and_flush(
+                    self,
+                    Box::pin(
+                        StreamingTurnDriver {
+                            orch: self,
+                            prompt,
+                            images,
+                            user_cancel,
+                            message_id,
+                            transient_rewake,
+                            in_human_turn,
+                            queued_inputs,
+                            row_token,
+                            projected_content,
+                        }
+                        .run(),
+                    ),
+                ),
+            )
+            .await;
+            let cleanup = crate::native_computer::cleanup(self).await;
+            let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
+            self.fire_mod_turn_complete(
+                completion_cancel
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled),
+                result.is_err(),
+            )
+            .await;
+            if !transient_rewake {
+                self.complete_turn_metrics(result.as_ref().ok());
+                if matches!(&result, Ok(ConversationOutcome::EndTurn { .. }))
+                    && !completion_cancel
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                {
+                    self.spawn_prompt_suggestion().await;
+                }
+            }
+            result
+        })
+        .await
     }
 
     // Race cancellation only before execution starts. Dropping a running turn
@@ -3247,12 +3404,12 @@ impl ConversationOrchestrator {
     async fn lock_turn_unless_cancelled(
         &self,
         cancel: &CancellationToken,
-    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    ) -> Option<ProfileTurnGuard> {
         self.cancel_idle_compaction();
         tokio::select! {
             biased;
             () = cancel.cancelled() => None,
-            guard = self.turn_gate.lock() => Some(guard),
+            guard = self.turn_gate.clone().lock_owned() => Some(Arc::new(guard)),
         }
     }
 
@@ -3343,7 +3500,7 @@ impl ConversationOrchestrator {
         let future = {
             let prompt = prompt.into();
             Box::pin(async move {
-                let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
                     self.record_pre_admission_shutdown_interruption().await;
                     return Ok(TurnOutcome::Cancelled);
                 };
@@ -3369,6 +3526,7 @@ impl ConversationOrchestrator {
                                             message_id,
                                             cancel.clone(),
                                             None,
+                                            &turn_guard,
                                         )
                                     }),
                                 )
@@ -3380,6 +3538,9 @@ impl ConversationOrchestrator {
                 .await;
                 let cleanup = crate::native_computer::cleanup(self).await;
                 let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+                let result = result.and_then(|outcome| {
+                    self.ensure_transcript_rewrite_resolved().map(|()| outcome)
+                });
                 self.fire_mod_turn_complete(
                     cancel.is_cancelled()
                         || result
@@ -3405,62 +3566,68 @@ impl ConversationOrchestrator {
         mut inputs: Vec<QueuedPromptInput>,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        if inputs.is_empty() {
-            return Ok(TurnOutcome::EndTurn);
-        }
-        apply_current_native_user_source(&mut inputs);
-        if inputs.iter().any(|input| !input.is_meta) {
-            self.reset_goal_interruption();
-        }
-        let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-            return Ok(TurnOutcome::Cancelled);
-        };
-        let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
-        let prompt = inputs[primary].text.clone();
-        self.begin_turn_metrics();
-        let _activity_guard = self.main_loop_activity(true);
-        tracing::info!(
-            event = orch_events::CONVERSATION_STARTED,
-            prompt_len = prompt.string_at("").unwrap_or_default().len()
-        );
-        let result = crate::request_context::scope_if_missing(
-            self,
-            crate::server_fallback::scope_query_and_flush(
+        llm_runtime::catalog_task::scope(async {
+            if inputs.is_empty() {
+                return Ok(TurnOutcome::EndTurn);
+            }
+            apply_current_native_user_source(&mut inputs);
+            if inputs.iter().any(|input| !input.is_meta) {
+                self.reset_goal_interruption();
+            }
+            let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                return Ok(TurnOutcome::Cancelled);
+            };
+            let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
+            let prompt = inputs[primary].text.clone();
+            self.begin_turn_metrics();
+            let _activity_guard = self.main_loop_activity(true);
+            tracing::info!(
+                event = orch_events::CONVERSATION_STARTED,
+                prompt_len = prompt.string_at("").unwrap_or_default().len()
+            );
+            let result = crate::request_context::scope_if_missing(
                 self,
-                telemetry::otel::with_turn_span(
-                    "lingxi.orchestrator.turn.cancelable_batch",
-                    async {
-                        self.scope_api_session(
-                            !self.prompt_is_interactive(),
-                            crate::turn_loop::boxed_turn_future(|| {
-                                self.try_run_turn_cancelable(
-                                    &prompt,
-                                    Vec::new(),
-                                    None,
-                                    cancel.clone(),
-                                    Some(inputs),
-                                )
-                            }),
-                        )
-                        .await
-                    },
+                crate::server_fallback::scope_query_and_flush(
+                    self,
+                    telemetry::otel::with_turn_span(
+                        "lingxi.orchestrator.turn.cancelable_batch",
+                        async {
+                            self.scope_api_session(
+                                !self.prompt_is_interactive(),
+                                crate::turn_loop::boxed_turn_future(|| {
+                                    self.try_run_turn_cancelable(
+                                        &prompt,
+                                        Vec::new(),
+                                        None,
+                                        cancel.clone(),
+                                        Some(inputs),
+                                        &turn_guard,
+                                    )
+                                }),
+                            )
+                            .await
+                        },
+                    ),
                 ),
-            ),
-        )
-        .await;
-        let cleanup = crate::native_computer::cleanup(self).await;
-        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
-        self.fire_mod_turn_complete(
-            cancel.is_cancelled()
-                || result
-                    .as_ref()
-                    .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
-            result.is_err(),
-        )
-        .await;
-        self.emit_terminal_rate_limit_if_changed(&result).await;
-        self.complete_turn_metrics(None);
-        result.map_err(|error| self.enrich_api_error(error))
+            )
+            .await;
+            let cleanup = crate::native_computer::cleanup(self).await;
+            let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            let result = result
+                .and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
+            self.fire_mod_turn_complete(
+                cancel.is_cancelled()
+                    || result
+                        .as_ref()
+                        .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
+                result.is_err(),
+            )
+            .await;
+            self.emit_terminal_rate_limit_if_changed(&result).await;
+            self.complete_turn_metrics(None);
+            result.map_err(|error| self.enrich_api_error(error))
+        })
+        .await
     }
 
     /// Internal implementation of the REPL turn loop with cancellation.
@@ -3471,7 +3638,9 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         cancel: CancellationToken,
         queued_inputs: Option<Vec<QueuedPromptInput>>,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.admit_conversation_profile(turn_guard).await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt (same as non-cancelable path).
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else the
@@ -3489,6 +3658,7 @@ impl ConversationOrchestrator {
         // `RUe`'s cap closed ("idle check-ins paused until your next message").
         // Only the deferral's idle counter is reset; the stretch itself lives on.
         let (screened_text, _user_msg) = if let Some(inputs) = queued_inputs {
+            let requires_skill_header = inputs.iter().any(|input| input.skill_identity.is_some());
             let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
             let mut admitted = Vec::with_capacity(inputs.len());
             for (index, mut input) in inputs.into_iter().enumerate() {
@@ -3520,7 +3690,9 @@ impl ConversationOrchestrator {
                     ModPromptScreen::Drop(reason) => self.emit_mod_prompt_drop(&reason).await,
                 }
             }
-            if admitted.is_empty() {
+            if admitted.is_empty()
+                || (requires_skill_header && !admitted.iter().any(|(_, input, _)| !input.is_meta))
+            {
                 return Ok(TurnOutcome::EndTurn);
             }
             let primary = admitted
@@ -3556,6 +3728,8 @@ impl ConversationOrchestrator {
                     },
                 )
                 .await;
+                self.stamp_skill_prompt_activation(&input, &mut message)
+                    .await;
                 submissions.push((input, message, context));
             }
             if submissions.iter().any(|(input, _, _)| !input.is_meta) {
@@ -3566,8 +3740,12 @@ impl ConversationOrchestrator {
                     .clear_idle_checkins();
             }
             for (input, message, _) in &submissions {
-                self.session.lock().await.history.push(message.clone());
-                self.persist_queued_message_to_jsonl(message, input).await;
+                if input.skill_identity.is_some() {
+                    self.admit_skill_prompt_message(input, message).await?;
+                } else {
+                    self.session.lock().await.history.push(message.clone());
+                    self.persist_queued_message_to_jsonl(message, input).await;
+                }
             }
             // Keep request sidecars and hook-generated history after the whole
             // command/body pair, preserving their Native transcript position.
@@ -3888,6 +4066,7 @@ impl ConversationOrchestrator {
             None,
             None,
             Some(content),
+            None,
         )
         .await
     }
@@ -3945,10 +4124,10 @@ impl ConversationOrchestrator {
     }
 
     /// As [`Self::run_turn_streaming_with_cancel_image_sources`], notifying the
-    /// host once this request has acquired the orchestrator turn gate. Hosts
-    /// that move pending input into this call can use the callback as the
-    /// ownership boundary: cancellation before the gate leaves the input with
-    /// the caller; cancellation or errors after admission belong to this turn.
+    /// host once the turn gate, storage recovery and conversation profile
+    /// admission have succeeded. Hosts can use the callback as the input
+    /// ownership boundary: cancellation or failure before it leaves the
+    /// input with the caller; later outcomes belong to this turn.
     pub fn run_turn_streaming_with_cancel_image_sources_and_admission(
         &self,
         prompt: impl Into<Utf16JsonProjection>,
@@ -3963,6 +4142,28 @@ impl ConversationOrchestrator {
             None,
             true,
             None,
+            on_admitted,
+        )
+    }
+
+    /// Admit a TUI turn with its visible-row correlation token and notify the
+    /// host when recovery and profile admission have completed. Before the
+    /// callback the caller still owns its text and attachments.
+    pub fn run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
+        &self,
+        prompt: impl Into<Utf16JsonProjection>,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        row_token: String,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> futures::future::BoxFuture<'_, Result<TurnOutcome, OrchestratorError>> {
+        self.run_turn_streaming_with_origin_and_row_token_and_admission(
+            prompt,
+            images,
+            cancel,
+            None,
+            true,
+            Some(row_token),
             on_admitted,
         )
     }
@@ -4083,8 +4284,7 @@ impl ConversationOrchestrator {
                 let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
                     return Ok(TurnOutcome::Cancelled);
                 };
-                on_admitted();
-                self.run_turn_streaming_source_with_origin_locked(
+                self.run_turn_streaming_source_with_origin_locked_and_admission(
                     &turn_guard,
                     prompt,
                     images,
@@ -4092,6 +4292,7 @@ impl ConversationOrchestrator {
                     message_id,
                     in_human_turn,
                     row_token,
+                    Some(on_admitted),
                 )
                 .await
             })
@@ -4109,9 +4310,10 @@ impl ConversationOrchestrator {
         self.run_queued_prompt_batch_with_admission(inputs, cancel, Box::new(|| {}))
     }
 
-    /// Deliver a queued batch while reporting when it has acquired the
-    /// orchestrator turn gate. The callback runs exactly once after admission;
-    /// an empty batch or cancellation while waiting returns without calling it.
+    /// Deliver a queued batch and report when the turn gate, storage recovery
+    /// and conversation profile admission have succeeded. The callback runs
+    /// exactly once after admission; an empty batch, cancellation or failure
+    /// before admission returns without calling it.
     #[inline(never)]
     pub fn run_queued_prompt_batch_with_admission(
         &self,
@@ -4135,14 +4337,13 @@ impl ConversationOrchestrator {
                 // user cancels before this queued turn acquires the gate, finish
                 // appending the Native rows; the cancellation token still
                 // suppresses the model request.
-                self.turn_gate.lock().await
+                Arc::new(self.turn_gate.clone().lock_owned().await)
             } else {
                 let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
                     return Ok(TurnOutcome::Cancelled);
                 };
                 turn_guard
             };
-            on_admitted();
             let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
             let prompt = inputs[primary]
                 .text
@@ -4161,6 +4362,7 @@ impl ConversationOrchestrator {
                 Some(inputs),
                 None,
                 None,
+                Some(on_admitted),
             )
             .await
         })
@@ -4168,13 +4370,38 @@ impl ConversationOrchestrator {
 
     pub(super) async fn run_turn_streaming_source_with_origin_locked(
         &self,
-        turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        turn_guard: &ProfileTurnGuard,
         prompt: Utf16JsonProjection,
         images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
         message_id: Option<MessageId>,
         in_human_turn: bool,
         row_token: Option<String>,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_streaming_source_with_origin_locked_and_admission(
+            turn_guard,
+            prompt,
+            images,
+            cancel,
+            message_id,
+            in_human_turn,
+            row_token,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_streaming_source_with_origin_locked_and_admission(
+        &self,
+        turn_guard: &ProfileTurnGuard,
+        prompt: Utf16JsonProjection,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
+        in_human_turn: bool,
+        row_token: Option<String>,
+        on_admitted: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
         let display = prompt.string_at("").unwrap_or_default().to_owned();
         let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
@@ -4204,6 +4431,7 @@ impl ConversationOrchestrator {
             }]),
             row_token,
             None,
+            on_admitted,
         )
         .await
     }
@@ -4211,7 +4439,7 @@ impl ConversationOrchestrator {
     #[allow(clippy::too_many_arguments)]
     async fn run_turn_streaming_inputs_locked(
         &self,
-        _turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        turn_guard: &ProfileTurnGuard,
         prompt: &str,
         images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
@@ -4220,7 +4448,58 @@ impl ConversationOrchestrator {
         queued_inputs: Option<Vec<QueuedPromptInput>>,
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
+        on_admitted: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        let direct_bash = queued_inputs
+            .as_ref()
+            .is_some_and(|inputs| queued_inputs_are_direct_bash(inputs));
+        if cancel.is_cancelled() && !direct_bash {
+            return self.cancel_unstarted_streaming_query().await;
+        }
+        self.recover_streaming_query_storage(in_human_turn).await?;
+        if cancel.is_cancelled() && !direct_bash {
+            return self.cancel_unstarted_streaming_query().await;
+        }
+        // A goal-only batch can become stale while storage recovery waits.
+        // Check immediately before profile admission without consuming valid
+        // retries, so a failed profile append leaves them available for retry.
+        if let Some(inputs) = queued_inputs.as_ref().filter(|inputs| {
+            !inputs.is_empty() && inputs.iter().all(|input| input.goal_retry_id.is_some())
+        }) {
+            let mut valid = false;
+            for id in inputs
+                .iter()
+                .filter_map(|input| input.goal_retry_id.as_deref())
+            {
+                if self.goal_retry_is_valid(id).await {
+                    valid = true;
+                    break;
+                }
+            }
+            if !valid {
+                for id in inputs
+                    .iter()
+                    .filter_map(|input| input.goal_retry_id.as_deref())
+                {
+                    valid |= self.recheck_goal_retry_or_discard_stale(id).await;
+                }
+            }
+            if !valid {
+                self.emit_turn_terminal("end_turn", &self.snapshot_cost_real().await)
+                    .await;
+                return Ok(TurnOutcome::EndTurn);
+            }
+        }
+        self.admit_conversation_profile(turn_guard).await?;
+        // Recovery and durable profile publication can wait. If cancellation
+        // won during that work, ownership of ordinary input stays with the
+        // caller; direct Bash already has a durable side effect to settle.
+        if cancel.is_cancelled() && !direct_bash {
+            return self.cancel_unstarted_streaming_query().await;
+        }
+        if let Some(on_admitted) = on_admitted {
+            on_admitted();
+        }
         if in_human_turn {
             self.reset_goal_interruption();
         }
@@ -4279,14 +4558,7 @@ impl ConversationOrchestrator {
             prompt_len = prompt.len()
         );
         if cancel.is_cancelled() && !cancelled_direct_bash_no_query {
-            self.abort_startup_responses_websocket_prewarm();
-            if let Err(err) = self.api.close_responses_websocket_session().await {
-                tracing::warn!(
-                    error = %err,
-                    "failed to close responses websocket session after pre-cancelled streaming turn"
-                );
-            }
-            return Ok(TurnOutcome::Cancelled);
+            return self.cancel_unstarted_streaming_query().await;
         }
         // DEFERRED-3: GRANULAR user-ESC interrupt — do NOT race-drop the turn.
         // Previously this `select!`'d `try_run_turn_streaming` against
@@ -4309,7 +4581,7 @@ impl ConversationOrchestrator {
             async {
                 self.scope_api_session(
                     !self.prompt_is_interactive(),
-                    Box::pin(self.try_run_turn_streaming_inputs(
+                    Box::pin(self.run_admitted_streaming_query(
                         prompt,
                         images,
                         Some(cancel.clone()),
@@ -4325,6 +4597,7 @@ impl ConversationOrchestrator {
             },
         )
         .await;
+        let r = r.and_then(|outcome| self.ensure_transcript_rewrite_resolved().map(|()| outcome));
         if cancel.is_cancelled() {
             self.reset_goal_interruption();
         }
@@ -4371,6 +4644,17 @@ impl ConversationOrchestrator {
                 Err(self.enrich_api_error(e))
             }
         }
+    }
+
+    async fn cancel_unstarted_streaming_query(&self) -> Result<TurnOutcome, OrchestratorError> {
+        self.abort_startup_responses_websocket_prewarm();
+        if let Err(err) = self.api.close_responses_websocket_session().await {
+            tracing::warn!(
+                error = %err,
+                "failed to close responses websocket session after pre-cancelled streaming turn"
+            );
+        }
+        Ok(TurnOutcome::Cancelled)
     }
 
     /// Load + base64-encode each pasted image path into an [`ImageSource`].
@@ -5153,10 +5437,11 @@ mod current_prompt_upe_scope_tests {
         let waiting_admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let waiting_admissions_callback = waiting_admissions.clone();
         let mut waiting = Box::pin(
-            orch.run_turn_streaming_with_cancel_image_sources_and_admission(
+            orch.run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
                 source_string_projection("cancel before admission"),
                 Vec::new(),
                 cancel.clone(),
+                "waiting-row".into(),
                 Box::new(move || {
                     waiting_admissions_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }),
@@ -5186,10 +5471,11 @@ mod current_prompt_upe_scope_tests {
         let cancel_at_admission = CancellationToken::new();
         let cancel_at_admission_callback = cancel_at_admission.clone();
         let outcome = orch
-            .run_turn_streaming_with_cancel_image_sources_and_admission(
+            .run_turn_streaming_with_cancel_image_sources_and_row_token_and_admission(
                 source_string_projection("callback after admission"),
                 Vec::new(),
                 cancel_at_admission,
+                "admitted-row".into(),
                 Box::new(move || {
                     admitted_count_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     cancel_at_admission_callback.cancel();

@@ -16,4 +16,12 @@ pub trait FileHistorySink: Send + Sync {
     /// snapshot, if not already tracked. Best-effort — a no-op when no turn
     /// snapshot is open or checkpointing is unavailable.
     async fn track_edit(&self, file_path: &str);
+
+    /// Bind a previously missing parent to the directory that actually
+    /// performed a successful rooted write. A changed parent remains unbound.
+    async fn track_completed_write(
+        &self,
+        file_path: &str,
+        parent: super::rooted_fs::RootedWriteParent,
+    );
 }
