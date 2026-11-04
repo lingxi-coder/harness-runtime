@@ -253,9 +253,8 @@ mod tests {
         let configuration = render(root, &"configuration".into());
         let configuration_text = configuration.string_at("").unwrap();
         assert!(
-            configuration_text.contains(
-                "then `settings.local.json`, then `--settings`, then managed policy"
-            ),
+            configuration_text
+                .contains("then `settings.local.json`, then `--settings`, then managed policy"),
             "configuration topic missing the boot permission fold"
         );
         assert!(
