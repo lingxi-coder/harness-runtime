@@ -26,6 +26,62 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn track_cc_environment() {
+    let target = env::var("TARGET").unwrap();
+    let host = env::var("HOST").unwrap();
+    let target_underscored = target.replace(['-', '.'], "_");
+    let kind = if target == host { "HOST" } else { "TARGET" };
+
+    // cc 1.2.x checks these four spellings, in precedence order. Watch even
+    // unset variants so that adding a higher-priority override rebuilds the C.
+    for variable in ["CC", "CFLAGS", "AR", "ARFLAGS", "RANLIB", "RANLIBFLAGS"] {
+        println!("cargo:rerun-if-env-changed={variable}_{target}");
+        println!("cargo:rerun-if-env-changed={variable}_{target_underscored}");
+        println!("cargo:rerun-if-env-changed={kind}_{variable}");
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+
+    // cc's other tool-selection and flag controls, Apple SDK selection, and
+    // the environment inherited by the supported native toolchains.
+    for variable in [
+        "CC_FORCE_DISABLE",
+        "CC_KNOWN_WRAPPER_CUSTOM",
+        "CC_SHELL_ESCAPED_FLAGS",
+        "CRATE_CC_NO_DEFAULTS",
+        "CROSS_COMPILE",
+        "RUSTC_WRAPPER",
+        "RUSTC_LINKER",
+        "ZERO_AR_DATE",
+        "PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "WASI_SDK_PATH",
+        "WASI_SYSROOT",
+        "WASM_MUSL_SYSROOT",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "IPHONEOS_DEPLOYMENT_TARGET",
+        "TVOS_DEPLOYMENT_TARGET",
+        "WATCHOS_DEPLOYMENT_TARGET",
+        "XROS_DEPLOYMENT_TARGET",
+        "VSCMD_ARG_TGT_ARCH",
+        "VSCMD_ARG_VCVARS_SPECTRE",
+        "VCINSTALLDIR",
+        "VSINSTALLDIR",
+        "VSTEL_MSBuildProjectFullPath",
+        "VCToolsVersion",
+        "WindowsSdkDir",
+        "WindowsSDKVersion",
+        "ProgramFiles(x86)",
+        "ProgramFiles",
+        "INCLUDE",
+        "LIB",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+}
+
 fn copy_include_tree(source: &Path, target: &Path) {
     assert!(
         fs::symlink_metadata(source).unwrap().file_type().is_dir(),
@@ -87,12 +143,10 @@ const SRC_TLS: &[&str] = &[
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    // `cargo_metadata(false)` below intentionally suppresses cc-rs' automatic
-    // Cargo directives, including its environment invalidation hints. Keep the
-    // Apple deployment target explicit so rebuilding an iOS XCFramework after
-    // changing the minimum OS cannot silently reuse C objects stamped for the
-    // SDK's current (and potentially much newer) default deployment version.
-    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+    // `cargo_metadata(false)` suppresses all cc-rs Cargo directives, including
+    // environment invalidation. Restore the relevant hints without emitting
+    // cc-rs' conflicting native link directives.
+    track_cc_environment();
     // `third_party/mbedtls` lives next to `third_party/mbedtls-sys`.
     let src_root = manifest.parent().unwrap().join("mbedtls");
     let source_include = src_root.join("include");
