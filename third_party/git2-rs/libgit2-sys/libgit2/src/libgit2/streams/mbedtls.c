@@ -12,6 +12,7 @@
 #include <ctype.h>
 
 #include "runtime.h"
+#include "errors.h"
 #include "stream.h"
 #include "streams/socket.h"
 #include "git2/transport.h"
@@ -42,7 +43,7 @@
 #define GIT_SSL_DEFAULT_CIPHERS "TLS1-3-AES-128-GCM-SHA256:TLS1-3-AES-256-GCM-SHA384:TLS1-3-CHACHA20-POLY1305-SHA256:TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256:TLS-ECDHE-RSA-WITH-AES-128-GCM-SHA256:TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384:TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384:TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256:TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256:TLS-DHE-RSA-WITH-AES-128-GCM-SHA256:TLS-DHE-RSA-WITH-AES-256-GCM-SHA384:TLS-DHE-RSA-WITH-CHACHA20-POLY1305-SHA256:TLS-ECDHE-ECDSA-WITH-AES-128-CBC-SHA256:TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256:TLS-ECDHE-ECDSA-WITH-AES-128-CBC-SHA:TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA:TLS-ECDHE-ECDSA-WITH-AES-256-CBC-SHA384:TLS-ECDHE-RSA-WITH-AES-256-CBC-SHA384:TLS-ECDHE-ECDSA-WITH-AES-256-CBC-SHA:TLS-ECDHE-RSA-WITH-AES-256-CBC-SHA:TLS-DHE-RSA-WITH-AES-128-CBC-SHA256:TLS-DHE-RSA-WITH-AES-256-CBC-SHA256:TLS-RSA-WITH-AES-128-GCM-SHA256:TLS-RSA-WITH-AES-256-GCM-SHA384:TLS-RSA-WITH-AES-128-CBC-SHA256:TLS-RSA-WITH-AES-256-CBC-SHA256:TLS-RSA-WITH-AES-128-CBC-SHA:TLS-RSA-WITH-AES-256-CBC-SHA"
 #define GIT_SSL_DEFAULT_CIPHERS_COUNT 28
 
-static int ciphers_list[GIT_SSL_DEFAULT_CIPHERS_COUNT];
+static int ciphers_list[GIT_SSL_DEFAULT_CIPHERS_COUNT + 1];
 
 static bool initialized = false;
 static mbedtls_ssl_config mbedtls_config;
@@ -113,7 +114,7 @@ int git_mbedtls_stream_global_init(void)
 		int cipherid = mbedtls_ssl_get_ciphersuite_id(cipher_name);
 		if (cipherid == 0) continue;
 
-		if (ciphers_known >= ARRAY_SIZE(ciphers_list)) {
+		if (ciphers_known >= ARRAY_SIZE(ciphers_list) - 1) {
 			git_error_set(GIT_ERROR_SSL, "out of cipher list space");
 			goto cleanup;
 		}
@@ -121,6 +122,7 @@ int git_mbedtls_stream_global_init(void)
 		ciphers_list[ciphers_known++] = cipherid;
 	}
 	git__free(cipher_string);
+	ciphers_list[ciphers_known] = 0;
 
 	if (!ciphers_known) {
 		git_error_set(GIT_ERROR_SSL, "no cipher could be enabled");
@@ -245,7 +247,8 @@ static int mbedtls_connect(git_stream *stream)
 
 	st->connected = true;
 
-	mbedtls_ssl_set_hostname(st->ssl, st->host);
+	if ((ret = mbedtls_ssl_set_hostname(st->ssl, st->host)) != 0)
+		return ssl_set_error(st->ssl, ret);
 
 	mbedtls_ssl_set_bio(st->ssl, st->io, bio_write, bio_read, NULL);
 
@@ -326,14 +329,26 @@ static ssize_t mbedtls_stream_read(git_stream *stream, void *data, size_t len)
 static int mbedtls_stream_close(git_stream *stream)
 {
 	mbedtls_stream *st = (mbedtls_stream *) stream;
+	git_error *last_error = NULL;
 	int ret = 0;
 
-	if (st->connected && (ret = ssl_teardown(st->ssl)) != 0)
-		return -1;
+	if (st->connected && ssl_teardown(st->ssl) != 0)
+		ret = -1;
 
 	st->connected = false;
 
-	return st->owned ? git_stream_close(st->io) : 0;
+	if (st->owned) {
+		int close_ret;
+		if (ret)
+			git_error_save(&last_error);
+		close_ret = git_stream_close(st->io);
+		if (last_error)
+			git_error_restore(last_error);
+		if (!ret)
+			ret = close_ret;
+	}
+
+	return ret;
 }
 
 static void mbedtls_stream_free(git_stream *stream)
@@ -357,7 +372,7 @@ static int mbedtls_stream_wrap(
 	int owned)
 {
 	mbedtls_stream *st;
-	int error;
+	int error = -1;
 
 	st = git__calloc(1, sizeof(mbedtls_stream));
 	GIT_ERROR_CHECK_ALLOC(st);
@@ -366,7 +381,8 @@ static int mbedtls_stream_wrap(
 	st->owned = owned;
 
 	st->ssl = git__malloc(sizeof(mbedtls_ssl_context));
-	GIT_ERROR_CHECK_ALLOC(st->ssl);
+	if (!st->ssl)
+		goto out_err;
 	mbedtls_ssl_init(st->ssl);
 	if (mbedtls_ssl_setup(st->ssl, &mbedtls_config)) {
 		git_error_set(GIT_ERROR_SSL, "failed to create ssl object");
@@ -375,7 +391,8 @@ static int mbedtls_stream_wrap(
 	}
 
 	st->host = git__strdup(host);
-	GIT_ERROR_CHECK_ALLOC(st->host);
+	if (!st->host)
+		goto out_err;
 
 	st->parent.version = GIT_STREAM_VERSION;
 	st->parent.encrypted = 1;
@@ -392,9 +409,11 @@ static int mbedtls_stream_wrap(
 	return 0;
 
 out_err:
-	mbedtls_ssl_free(st->ssl);
-	git_stream_close(st->io);
-	git_stream_free(st->io);
+	/* The input stream remains the caller's responsibility until success. */
+	if (st->ssl)
+		mbedtls_ssl_free(st->ssl);
+	git__free(st->ssl);
+	git__free(st->host);
 	git__free(st);
 
 	return error;
@@ -414,6 +433,7 @@ int git_mbedtls_stream_new(
 	const char *port)
 {
 	git_stream *stream;
+	git_error *last_error = NULL;
 	int error;
 
 	GIT_ASSERT_ARG(out);
@@ -424,8 +444,14 @@ int git_mbedtls_stream_new(
 		return error;
 
 	if ((error = mbedtls_stream_wrap(out, stream, host, 1)) < 0) {
+		if (git_error_exists())
+			git_error_save(&last_error);
 		git_stream_close(stream);
 		git_stream_free(stream);
+		if (last_error)
+			git_error_restore(last_error);
+		else
+			git_error_clear();
 	}
 
 	return error;
