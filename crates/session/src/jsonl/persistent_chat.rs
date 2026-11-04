@@ -575,11 +575,16 @@ impl JsonlWriter {
             target_file
                 .sync_all()
                 .map_err(|error| unavailable(&error.to_string()))?;
-            message_identity::bootstrap_at(
+            // `target_bytes == bytes` already proved the sealed file matches
+            // this buffer, so identity bootstrap must not read it again.
+            let source = String::from_utf8(bytes)
+                .map_err(|_| unavailable("recovery transcript is not UTF-8"))?;
+            message_identity::bootstrap_from_source_at(
                 &Default::default(),
                 &target,
                 target_root,
                 &target_identity,
+                Some(source.as_str()),
             )?;
             rooted_fs::sync_parent_pinned(&chat_root, relative, Some(&root_identity))?;
             std::fs::File::open(&chat_root)
@@ -588,11 +593,9 @@ impl JsonlWriter {
             if rooted_fs::root_identity(&chat_root)? != root_identity {
                 return Err(unavailable("Chat changed while staging recovery"));
             }
-            if bytes.is_empty() {
+            if source.is_empty() {
                 return Ok(None);
             }
-            let source = String::from_utf8(bytes)
-                .map_err(|_| unavailable("recovery transcript is not UTF-8"))?;
             Ok(Some(CapturedChatTranscript {
                 path: target,
                 session_id,

@@ -616,9 +616,80 @@ fn canonical_metadata_session_id(session_id: &str) -> String {
 /// contains one. This protects the in-process metadata state from a title
 /// appended by another host (for example Electron's metadata-only rename)
 /// before a large transcript write crosses the backstop in one operation.
+///
+/// The scan walks backward in [`crate::jsonl::LITE_READ_BUF_SIZE`] windows and
+/// stops at the first matching record. A title just outside the tail does not
+/// pull the rest of the transcript into one string. A missing title still
+/// reaches the start of the file, which is the same answer as a full read.
 fn latest_custom_title(path: &Path, session_id: &str) -> Option<Option<Utf16JsonProjection>> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    latest_custom_title_from_source(&contents, session_id)
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    scan_latest_custom_title(&mut file, len, session_id)
+        .ok()
+        .flatten()
+}
+
+/// Newest matching custom-title in `file`, which is `len` bytes long.
+///
+/// `Ok(None)` means the transcript has no matching title. A window that is not
+/// valid UTF-8 falls back to one full `read_to_string`, so a file the old path
+/// rejected still errors instead of being scanned lossily.
+fn scan_latest_custom_title(
+    file: &mut (impl std::io::Read + std::io::Seek),
+    len: u64,
+    session_id: &str,
+) -> std::io::Result<Option<Option<Utf16JsonProjection>>> {
+    use std::io::SeekFrom;
+
+    if len == 0 {
+        return Ok(None);
+    }
+    if len <= crate::jsonl::LITE_READ_BUF_SIZE as u64 {
+        file.seek(SeekFrom::Start(0))?;
+        let mut source = String::new();
+        file.read_to_string(&mut source)?;
+        return Ok(latest_custom_title_from_source(&source, session_id));
+    }
+    let mut end = len;
+    // Bytes of a line that started before the newer window. Appended to the
+    // next older window so a record split by the window boundary is parsed whole.
+    let mut carry: Vec<u8> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(crate::jsonl::LITE_READ_BUF_SIZE as u64);
+        let read_len = usize::try_from(end - start)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        file.seek(SeekFrom::Start(start))?;
+        let mut buf = vec![0u8; read_len];
+        file.read_exact(&mut buf)?;
+        let head = if start > 0 {
+            match buf.iter().position(|byte| *byte == b'\n') {
+                Some(index) => {
+                    let head = buf[..index].to_vec();
+                    buf.drain(..=index);
+                    head
+                }
+                None => std::mem::replace(&mut buf, Vec::new()),
+            }
+        } else {
+            Vec::new()
+        };
+        buf.extend_from_slice(&carry);
+        let text = match String::from_utf8(buf) {
+            Ok(text) => text,
+            Err(_) => {
+                file.seek(SeekFrom::Start(0))?;
+                let mut source = String::new();
+                file.read_to_string(&mut source)?;
+                return Ok(latest_custom_title_from_source(&source, session_id));
+            }
+        };
+        if let Some(title) = latest_custom_title_from_source(&text, session_id) {
+            return Ok(Some(title));
+        }
+        carry = head;
+        end = start;
+    }
+    Ok(None)
 }
 
 fn latest_custom_title_from_source(
@@ -3782,13 +3853,12 @@ impl JsonlWriter {
                         .map_err(|error| FsError::Io(error.to_string()))?;
                     let tail = String::from_utf8_lossy(&bytes).into_owned();
                     if !skip_title_adopt && !tail.contains("\"type\":\"custom-title\"") {
-                        file.seek(SeekFrom::Start(0))
-                            .map_err(|error| FsError::Io(error.to_string()))?;
-                        let mut source = String::new();
-                        file.read_to_string(&mut source)
-                            .map_err(|error| FsError::Io(error.to_string()))?;
-                        if let Some(title) = latest_custom_title_from_source(&source, &session_id) {
-                            next_state.title = title;
+                        match scan_latest_custom_title(&mut file, length, &session_id) {
+                            Ok(Some(title)) => next_state.title = title,
+                            Ok(None) => {}
+                            Err(error) => {
+                                return Err(FsError::Io(error.to_string()).into());
+                            }
                         }
                     }
                     let plan = plan_re_append(

@@ -1398,6 +1398,25 @@ pub(crate) async fn final_model_result(
     Ok(())
 }
 
+/// True when `path` contains exactly `expected`, read in fixed-size chunks.
+async fn file_matches(path: &std::path::Path, expected: &[u8]) -> std::io::Result<bool> {
+    use tokio::io::AsyncReadExt as _;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut offset = 0usize;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf).await?;
+        if read == 0 {
+            return Ok(offset == expected.len());
+        }
+        let end = offset.saturating_add(read);
+        if end > expected.len() || buf[..read] != expected[offset..end] {
+            return Ok(false);
+        }
+        offset = end;
+    }
+}
+
 /// Store large final outputs in the existing tool-results media directory, then fsync.
 async fn store_payload(
     orch: &ConversationOrchestrator,
@@ -1430,8 +1449,11 @@ async fn store_payload(
     )
     .await
     .map_err(internal)?;
-    let existing = tokio::fs::read(&stored.filepath).await.map_err(internal)?;
-    if existing != body.as_bytes() {
+    // Compare in chunks so a 32 MiB result is not loaded a second time.
+    if !file_matches(&stored.filepath, body.as_bytes())
+        .await
+        .map_err(internal)?
+    {
         return Err(internal("native result media identity conflicts"));
     }
     tokio::fs::File::open(&stored.filepath)

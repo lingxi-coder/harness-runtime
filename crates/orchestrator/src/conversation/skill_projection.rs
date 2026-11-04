@@ -169,6 +169,25 @@ impl ConversationOrchestrator {
             .filter(|aggregate| aggregate.visible && !aggregate.stale)
             .flat_map(|aggregate| aggregate.names.iter().cloned())
             .collect::<HashSet<_>>();
+        let individuals = history
+            .iter()
+            .filter_map(|row| {
+                let ConversationMessage::User {
+                    id,
+                    origin: Some(origin),
+                    ..
+                } = row
+                else {
+                    return None;
+                };
+                if origin.string_at("/type") != Some("skill_activation") {
+                    return None;
+                }
+                origin
+                    .string_units("/skill_name")
+                    .map(|skill| (*id, skill))
+            })
+            .collect::<HashSet<_>>();
         for entry in metadata.iter().filter(|entry| entry.effective) {
             let Some(owner_id) = entry.message_id.filter(|id| visible_ids.contains(id)) else {
                 continue;
@@ -176,13 +195,7 @@ impl ConversationOrchestrator {
             let Some(name) = entry.skill_name.string_units("") else {
                 continue;
             };
-            let is_current_individual = history.iter().any(|row| {
-                matches!(row, ConversationMessage::User { id, origin: Some(origin), .. }
-                    if *id == owner_id
-                        && origin.string_at("/type") == Some("skill_activation")
-                        && origin.string_units("/skill_name").as_ref() == Some(&name))
-            });
-            if is_current_individual {
+            if individuals.contains(&(owner_id, name.clone())) {
                 covered.insert(name);
             }
         }

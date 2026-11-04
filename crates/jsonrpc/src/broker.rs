@@ -20,7 +20,10 @@ use bytes::{Bytes, BytesMut};
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Semaphore};
+
+/// Cap detached request tasks so one connection cannot spawn without bound.
+const MAX_INFLIGHT_REQUESTS: usize = 64;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -153,12 +156,17 @@ async fn typed_reader_loop<S>(
 where
     S: futures::Stream<Item = Message> + Send + Unpin + 'static,
 {
+    let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
     while let Some(frame) = inbound.next().await {
         match frame {
             Message::Request(req) => {
+                let Ok(permit) = inflight.clone().acquire_owned().await else {
+                    break;
+                };
                 let dispatcher_clone = dispatcher.clone();
                 let responder = responder_tx.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let resp = dispatcher_clone.dispatch(req).await;
                     let _ = responder.send(Message::Response(resp));
                 });
@@ -309,6 +317,7 @@ where
     C: Decoder<Item = Message, Error = crate::codec::CodecError> + Send + 'static,
 {
     let mut buf = BytesMut::new();
+    let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
     while let Some(chunk) = inbound_bytes.next().await {
         let chunk = chunk?;
         buf.extend_from_slice(&chunk);
@@ -324,10 +333,15 @@ where
             match frame {
                 Message::Request(req) => {
                     // Dispatch on a detached task so a slow handler does not
-                    // block subsequent inbound frames.
+                    // block subsequent inbound frames. The permit caps how
+                    // many of those tasks exist for this connection.
+                    let Ok(permit) = inflight.clone().acquire_owned().await else {
+                        break;
+                    };
                     let dispatcher_clone = dispatcher.clone();
                     let responder = responder_tx.clone();
                     tokio::spawn(async move {
+                        let _permit = permit;
                         let resp = dispatcher_clone.dispatch(req).await;
                         // If the writer is gone, drop silently — the
                         // connection is closing anyway.

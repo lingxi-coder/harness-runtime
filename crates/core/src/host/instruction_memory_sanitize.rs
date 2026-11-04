@@ -36,10 +36,13 @@ pub(crate) fn compile_native_tag_pattern(pattern: &str) -> Regex {
     let pattern = pattern
         .replace(r"\s", JS_SPACE_CLASS)
         .replace(r"\w", "A-Za-z0-9_");
+    // The pinned patterns recognize memory framing tags. An unlimited
+    // backtrack on a multi-megabyte AutoMem body can stall the host, so keep
+    // fancy-regex's default backtrack budget and a 1 MiB delegate.
     RegexBuilder::new(&pattern)
         .case_insensitive(true)
-        .delegate_size_limit(32 * 1024 * 1024)
-        .backtrack_limit(usize::MAX)
+        .delegate_size_limit(1024 * 1024)
+        .backtrack_limit(1_000_000)
         .build()
         .expect("pinned native tag recognizer")
 }

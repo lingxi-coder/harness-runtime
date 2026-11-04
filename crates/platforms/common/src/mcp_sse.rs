@@ -32,8 +32,12 @@ use lingxi_core::host::mcp::McpError;
 use lingxi_llm_client::transport::http_backend as reqwest;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
+
+/// Time allowed to receive response headers. The SSE body itself stays open.
+const MCP_SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Header name used by claude-code IDE plugins for the auth token.
 /// LITERAL — must match claude-code byte-for-byte.
@@ -229,12 +233,20 @@ where
 
     // ---- Open the SSE event-stream GET ----
     let get_headers = build_headers(auth_token, extra_headers, "text/event-stream")?;
-    let response = client
-        .get(url)
-        .headers(get_headers)
-        .send()
-        .await
-        .map_err(|e| SseConnectError::Transport(e.to_string()))?;
+    let response = match tokio::time::timeout(
+        MCP_SSE_HEADER_TIMEOUT,
+        client.get(url).headers(get_headers).send(),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(SseConnectError::Transport(error.to_string())),
+        Err(_) => {
+            return Err(SseConnectError::Transport(
+                "timed out waiting for SSE response headers".into(),
+            ))
+        }
+    };
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         && matches!(
@@ -371,17 +383,40 @@ where
                 };
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-            let response = post_client
-                .post(&post_url)
-                .headers(headers)
-                .json(&frame)
-                .send()
-                .await;
+            let response = tokio::time::timeout(
+                MCP_SSE_HEADER_TIMEOUT,
+                post_client
+                    .post(&post_url)
+                    .headers(headers)
+                    .json(&frame)
+                    .send(),
+            )
+            .await;
             match response {
-                Err(error) => {
-                    tracing::warn!(%error, "mcp sse: POST failed");
+                Err(_) => {
+                    tracing::warn!("mcp sse: POST timed out");
+                    if let Some(error) =
+                        transport_error_message(&frame, "MCP SSE POST timed out")
+                    {
+                        if inbound_tx.send(error).is_err() {
+                            break;
+                        }
+                    }
+                    // The writer is the only outbound path. Stop it so the host
+                    // observes a closed sink and redials instead of queueing
+                    // forever behind one stalled POST.
+                    break;
                 }
-                Ok(response) if !response.status().is_success() => {
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "mcp sse: POST failed");
+                    if let Some(message) = transport_error_message(&frame, &error.to_string()) {
+                        if inbound_tx.send(message).is_err() {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                Ok(Ok(response)) if !response.status().is_success() => {
                     let status = response.status().as_u16();
                     let www_authenticate = response
                         .headers()
@@ -396,7 +431,7 @@ where
                         }
                     }
                 }
-                Ok(_) => {}
+                Ok(Ok(_)) => {}
             }
         }
     });
@@ -419,6 +454,20 @@ where
         Box::pin(outbound),
         Some("Method not found".into()),
     ))
+}
+
+fn transport_error_message(request: &JsonRpcMessage, message: &str) -> Option<JsonRpcMessage> {
+    let request = serde_json::to_value(request).ok()?;
+    let id = request.get("id")?.clone();
+    if id.is_null() {
+        return None;
+    }
+    serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": -32001, "message": message }
+    }))
+    .ok()
 }
 
 fn http_error_message(

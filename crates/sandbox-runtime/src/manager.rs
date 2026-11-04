@@ -52,7 +52,7 @@ use crate::matcher::AskFn;
 use crate::mitm_ca::{create_mitm_ca, dispose_mitm_ca, MitmCa, MitmCaOptions};
 use crate::parent_proxy::resolve_parent_proxy;
 use crate::path_utils::{
-    contains_glob_chars, expand_glob_pattern, get_default_write_paths, remove_trailing_glob_suffix,
+    contains_glob_chars, get_default_write_paths, remove_trailing_glob_suffix, GlobListingCache,
 };
 use crate::socks_proxy::{serve_socks, SocksOptions};
 use crate::violation_store::SandboxViolationStore;
@@ -934,12 +934,13 @@ fn build_fs_configs(
 
     // expand: remove_trailing_glob_suffix; if still glob on Linux →
     // expand_glob_pattern, else the stripped path.
-    let expand = |paths: &[String]| -> Vec<String> {
+    let mut listings = GlobListingCache::default();
+    let mut expand = |paths: &[String]| -> Vec<String> {
         let mut out = Vec::new();
         for p in paths {
             let stripped = remove_trailing_glob_suffix(p);
             if contains_glob_chars(&stripped) {
-                out.extend(expand_glob_pattern(p));
+                out.extend(listings.expand(p));
             } else {
                 out.push(stripped);
             }
