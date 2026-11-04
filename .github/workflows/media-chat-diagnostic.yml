@@ -25,9 +25,12 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/llm-client
-      - uses: dtolnay/rust-toolchain@1.94.0
+      - id: checkout
+        uses: actions/checkout@v4
+      - id: llm-client
+        uses: ./.github/actions/llm-client
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
       - name: Record diagnostic source and toolchain
         shell: bash
         run: |
@@ -52,6 +55,17 @@ jobs:
               exit "$result"
             fi
           done
+      - name: Test mobile App Agent factory recovery
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.llm-client.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/media-chat-diagnostic"
+          cargo test --locked -p harness-runtime --no-default-features --features mobile --lib \
+            mobile::app_agent::history_model_capability_tests:: 2>&1 |
+            tee "$RUNNER_TEMP/media-chat-diagnostic/mobile-factory.log"
+          grep -Fqx 'test mobile::app_agent::history_model_capability_tests::factory_initializes_new_chat_and_resumes_its_verified_profile ... ok' "$RUNNER_TEMP/media-chat-diagnostic/mobile-factory.log"
+          grep -Fqx 'test mobile::app_agent::history_model_capability_tests::app_chat_mode_uses_the_committed_profile_and_rejects_mismatched_sources ... ok' "$RUNNER_TEMP/media-chat-diagnostic/mobile-factory.log"
       - name: Preserve diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
