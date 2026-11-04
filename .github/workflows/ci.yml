@@ -35,6 +35,39 @@ jobs:
           python3 scripts/tests/test_http_proxy_ownership.py
           python3 scripts/tests/test_http_proxy_reconnect.py
 
+  native-ca-snapshot-tests:
+    name: Native CA snapshots (${{ matrix.sanitizer }})
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [none, address, thread]
+    env:
+      CC: clang
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      MBEDTLS_TEST_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Test native configuration and include contracts
+        if: matrix.sanitizer == 'none'
+        run: |
+          python3 scripts/tests/test_mbedtls_build_env.py
+          python3 scripts/tests/test_mbedtls_consumer_include.py
+      - name: Build native libraries and test CA rotation
+        env:
+          CA_SANITIZER: ${{ matrix.sanitizer }}
+        run: python3 scripts/tests/run_mbedtls_ca.py --sanitizer "$CA_SANITIZER" --output-dir "$RUNNER_TEMP/mbedtls-ca-logs"
+      - name: Preserve CA test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mbedtls-ca-${{ matrix.sanitizer }}
+          path: ${{ runner.temp }}/mbedtls-ca-logs
+          retention-days: 7
+
   script-gates:
     runs-on: ubuntu-latest
     steps:
