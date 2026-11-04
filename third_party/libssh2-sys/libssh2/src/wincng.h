@@ -149,7 +149,7 @@ extern struct _libssh2_wincng_ctx _libssh2_wincng;
  */
 
 #define libssh2_crypto_init() \
-    _libssh2_wincng_init()
+    (_libssh2_wincng_init(), 0)
 #define libssh2_crypto_exit() \
     _libssh2_wincng_free()
 

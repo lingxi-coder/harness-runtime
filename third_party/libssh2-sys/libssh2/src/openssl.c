@@ -1251,7 +1251,8 @@ _libssh2_rsa_new_private_frommemory(libssh2_rsa_ctx ** rsa,
         (pem_read_bio_func) &PEM_read_bio_RSAPrivateKey;
 #endif
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = read_private_key_from_memory((void **)rsa, read_rsa,
                                       filedata, filedata_len,
@@ -1605,7 +1606,8 @@ _libssh2_rsa_new_openssh_private(libssh2_rsa_ctx ** rsa,
         return -1;
     }
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp) {
@@ -1659,7 +1661,8 @@ _libssh2_rsa_new_private(libssh2_rsa_ctx ** rsa,
         (pem_read_bio_func) &PEM_read_bio_RSAPrivateKey;
 #endif
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = read_private_key_from_file((void **) rsa, read_rsa,
                                     filename, passphrase);
@@ -1691,7 +1694,8 @@ _libssh2_dsa_new_private_frommemory(libssh2_dsa_ctx ** dsa,
         (pem_read_bio_func) &PEM_read_bio_DSAPrivateKey;
 #endif
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = read_private_key_from_memory((void **)dsa, read_dsa,
                                       filedata, filedata_len,
@@ -1962,7 +1966,8 @@ _libssh2_dsa_new_openssh_private(libssh2_dsa_ctx ** dsa,
         return -1;
     }
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp) {
@@ -2016,7 +2021,8 @@ _libssh2_dsa_new_private(libssh2_dsa_ctx ** dsa,
         (pem_read_bio_func) &PEM_read_bio_DSAPrivateKey;
 #endif
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = read_private_key_from_file((void **) dsa, read_dsa,
                                     filename, passphrase);
@@ -2048,7 +2054,8 @@ _libssh2_ecdsa_new_private_frommemory(libssh2_ecdsa_ctx ** ec_ctx,
         (pem_read_bio_func) &PEM_read_bio_ECPrivateKey;
 #endif
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = read_private_key_from_memory((void **)ec_ctx, read_ec,
                                       filedata, filedata_len,
@@ -2549,7 +2556,8 @@ _libssh2_ed25519_new_private(libssh2_ed25519_ctx ** ed_ctx,
         return -1;
     }
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp) {
@@ -2618,7 +2626,8 @@ _libssh2_ed25519_new_private_sk(libssh2_ed25519_ctx **ed_ctx,
         return -1;
     }
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp) {
@@ -2679,7 +2688,8 @@ _libssh2_ed25519_new_private_frommemory(libssh2_ed25519_ctx ** ed_ctx,
 {
     libssh2_ed25519_ctx *ctx = NULL;
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     if(read_private_key_from_memory((void **)&ctx,
                                     (pem_read_bio_func)
@@ -3886,7 +3896,8 @@ _libssh2_ecdsa_new_openssh_private(libssh2_ecdsa_ctx ** ec_ctx,
         return -1;
     }
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp) {
@@ -3949,7 +3960,8 @@ _libssh2_ecdsa_new_openssh_private_sk(libssh2_ecdsa_ctx ** ec_ctx,
         return -1;
     }
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp) {
@@ -4009,7 +4021,8 @@ _libssh2_ecdsa_new_private(libssh2_ecdsa_ctx ** ec_ctx,
         (pem_read_bio_func) &PEM_read_bio_ECPrivateKey;
 #endif
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = read_private_key_from_file((void **) ec_ctx, read_ec,
                                     filename, passphrase);
@@ -4042,7 +4055,8 @@ _libssh2_ecdsa_new_private_sk(libssh2_ecdsa_ctx ** ec_ctx,
         (pem_read_bio_func) &PEM_read_bio_ECPrivateKey;
 #endif
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = read_private_key_from_file((void **) ec_ctx, read_ec,
                                     filename, passphrase);
@@ -4545,7 +4559,8 @@ _libssh2_pub_priv_openssh_keyfile(LIBSSH2_SESSION *session,
         return -1;
     }
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(privatekey, "r");
     if(!fp) {
@@ -4757,7 +4772,8 @@ _libssh2_pub_priv_openssh_keyfilememory(LIBSSH2_SESSION *session,
         return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
                               "type is invalid");
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = _libssh2_openssh_pem_parse_memory(session, passphrase,
                                            privatekeydata,
@@ -4902,7 +4918,8 @@ _libssh2_sk_pub_openssh_keyfilememory(LIBSSH2_SESSION *session,
         return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
                               "type is invalid");
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     rc = _libssh2_openssh_pem_parse_memory(session, passphrase,
                                            privatekeydata,
