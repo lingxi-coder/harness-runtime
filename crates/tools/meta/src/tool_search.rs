@@ -28,7 +28,7 @@
 //! a `ToolRegistryView` handle at construction time; the composition root
 //! populates the shared cell after the registry is fully assembled.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -466,6 +466,12 @@ fn handle_select_source(
     }
     let original_rest = &query_units[prefix.len()..];
 
+    let mut by_lower_name = HashMap::<Vec<u16>, &str>::with_capacity(entries.len());
+    for entry in entries {
+        let lower = lowercase_source_units(&entry.name.encode_utf16().collect::<Vec<_>>());
+        by_lower_name.entry(lower).or_insert(entry.name.as_str());
+    }
+    let mut seen = HashSet::<&str>::new();
     let mut found = Vec::<String>::new();
     for raw in original_rest.split(|unit| *unit == u16::from(b',')) {
         let name = trim_source_units(raw);
@@ -473,11 +479,9 @@ fn handle_select_source(
             continue;
         }
         let lower_name = lowercase_source_units(name);
-        if let Some(entry) = entries.iter().find(|entry| {
-            lowercase_source_units(&entry.name.encode_utf16().collect::<Vec<_>>()) == lower_name
-        }) {
-            if !found.contains(&entry.name) {
-                found.push(entry.name.clone());
+        if let Some(matched) = by_lower_name.get(&lower_name).copied() {
+            if seen.insert(matched) {
+                found.push(matched.to_string());
             }
         }
     }
@@ -549,71 +553,76 @@ fn search_tools_with_keywords_source(
 
     let entry_text =
         |value: &Utf16JsonProjection| value.string_units("").unwrap_or_default().to_vec();
-    let entry_matches_term = |entry: &ToolSearchEntry, term: &[u16]| {
-        let parsed = parse_tool_name(&entry.name);
-        let desc = lowercase_source_units(&entry_text(&entry.description));
-        let hint = entry
-            .search_hint
-            .as_ref()
-            .map(|value| entry_text(value))
-            .map(|text| lowercase_source_units(&text))
-            .unwrap_or_default();
-        parsed.parts.iter().any(|part| {
-            let part = lowercase_source_units(&part.encode_utf16().collect::<Vec<_>>());
-            part == term || source_contains(&part, term)
-        }) || word_boundary_contains_units(&desc, term)
-            || (!hint.is_empty() && word_boundary_contains_units(&hint, term))
-    };
-
-    let candidates: Vec<&ToolSearchEntry> = if required_terms.is_empty() {
-        entries.iter().collect()
-    } else {
-        entries
-            .iter()
-            .filter(|entry| {
-                required_terms
-                    .iter()
-                    .all(|term| entry_matches_term(entry, term))
-            })
-            .collect()
-    };
-
-    let mut scored: Vec<(String, i64)> = candidates
+    // Lowercase each catalog field once. The required-term filter and the
+    // scorer used to repeat that work for every term.
+    struct Prepared<'a> {
+        entry: &'a ToolSearchEntry,
+        is_mcp: bool,
+        parts: Vec<Vec<u16>>,
+        full: Vec<u16>,
+        desc: Vec<u16>,
+        hint: Vec<u16>,
+    }
+    let prepared: Vec<Prepared<'_>> = entries
         .iter()
         .map(|entry| {
             let parsed = parse_tool_name(&entry.name);
-            let desc = lowercase_source_units(&entry_text(&entry.description));
             let hint = entry
                 .search_hint
                 .as_ref()
                 .map(|value| entry_text(value))
                 .map(|text| lowercase_source_units(&text))
                 .unwrap_or_default();
-            let parts = parsed
-                .parts
-                .iter()
-                .map(|part| lowercase_source_units(&part.encode_utf16().collect::<Vec<_>>()))
-                .collect::<Vec<_>>();
-            let full = lowercase_source_units(&parsed.full.encode_utf16().collect::<Vec<_>>());
+            Prepared {
+                entry,
+                is_mcp: parsed.is_mcp,
+                parts: parsed
+                    .parts
+                    .iter()
+                    .map(|part| lowercase_source_units(&part.encode_utf16().collect::<Vec<_>>()))
+                    .collect(),
+                full: lowercase_source_units(&parsed.full.encode_utf16().collect::<Vec<_>>()),
+                desc: lowercase_source_units(&entry_text(&entry.description)),
+                hint,
+            }
+        })
+        .collect();
+    let matches_term = |item: &Prepared<'_>, term: &[u16]| {
+        item.parts.iter().any(|part| part.as_slice() == term || source_contains(part, term))
+            || word_boundary_contains_units(&item.desc, term)
+            || (!item.hint.is_empty() && word_boundary_contains_units(&item.hint, term))
+    };
 
+    let candidates: Vec<&Prepared<'_>> = if required_terms.is_empty() {
+        prepared.iter().collect()
+    } else {
+        prepared
+            .iter()
+            .filter(|item| required_terms.iter().all(|term| matches_term(item, term)))
+            .collect()
+    };
+
+    let mut scored: Vec<(String, i64)> = candidates
+        .iter()
+        .map(|item| {
             let mut score: i64 = 0;
             for term in &all_scoring_terms {
-                if parts.iter().any(|part| part == term) {
-                    score += if parsed.is_mcp { 12 } else { 10 };
-                } else if parts.iter().any(|part| source_contains(part, term)) {
-                    score += if parsed.is_mcp { 6 } else { 5 };
+                if item.parts.iter().any(|part| part.as_slice() == term) {
+                    score += if item.is_mcp { 12 } else { 10 };
+                } else if item.parts.iter().any(|part| source_contains(part, term)) {
+                    score += if item.is_mcp { 6 } else { 5 };
                 }
-                if score == 0 && source_contains(&full, term) {
+                if score == 0 && source_contains(&item.full, term) {
                     score += 3;
                 }
-                if !hint.is_empty() && word_boundary_contains_units(&hint, term) {
+                if !item.hint.is_empty() && word_boundary_contains_units(&item.hint, term) {
                     score += 4;
                 }
-                if word_boundary_contains_units(&desc, term) {
+                if word_boundary_contains_units(&item.desc, term) {
                     score += 2;
                 }
             }
-            (entry.name.clone(), score)
+            (item.entry.name.clone(), score)
         })
         .filter(|(_, score)| *score > 0)
         .collect();

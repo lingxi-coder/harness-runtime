@@ -31,6 +31,19 @@ another product host lacks the feature. Offer that host's native route where kno
 
 The product web console and each SDK have their own delivery state. A page or
 API declaration alone does not establish a running hosted Agent or cloud Bot.
+The website `/login` console is a prototype and does not create a product
+account. Remote sign-in is the remote page, not that console.
+
+The public handbook is the user-facing contract for install, a first session,
+provider accounts, the CLI, desktop, phone, permissions, models, remote
+control, and help. These topics are its offline copy. The installed npm
+command is `lingxi`; help and `/doctor` identify the same program as
+`lingxi-cli`. A source checkout runs `lingxi-cli`. Do not invent a public
+registry release, an Intel/Windows/Linux desktop package, or an App Store,
+TestFlight, or public APK link. The desktop build this site records is an
+Apple silicon Mac beta that runs a local engine, without cloud accounts or
+cross-device sync. Phone builds recorded there are internal betas. Adding a
+provider account does not create a LingXi subscription.
 
 Source anchors: Harness `crates/runtime/src/{desktop,mobile}`,
 `crates/tool-api/src/registry.rs`; product host composition and Remote Control.

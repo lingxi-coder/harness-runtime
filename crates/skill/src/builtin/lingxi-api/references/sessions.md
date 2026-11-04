@@ -28,9 +28,32 @@ catalog/schema again. A description loaded earlier is not a permanent grant.
 Report pending permission or question state rather than treating it as an idle
 or completed Agent.
 
+On the CLI, no argument opens an interactive session. A positional prompt runs
+one turn; `-p` / `--print` prints that turn and exits. `--continue` reopens the
+latest session in this directory. `--resume` picks one, and `--resume ID`
+reopens that id. `--resume ID --fork-session` keeps that history under a new
+session id. Trust a folder only when the user does; after confirmation the
+session can read, edit, and run files there.
+
+Instruction files are the project-root `{{memory_file}}`,
+`{{config_dir}}/{{memory_file}}`, and `{{memory_local_file}}`, plus the user
+file `~/{{config_dir}}/{{memory_file}}`. `/init` creates the project
+`{{memory_file}}`. With the default instruction mode, a project that already
+has one of those branded files does not also load `AGENTS.md`. When it has
+none, LingXi reads `AGENTS.md` or `{{config_dir}}/AGENTS.md`. An import that
+points outside the project asks before it is read. `/memory` lists the files
+loaded for this session.
+
+The config home is `{{config_dir_env}}` when that variable is set, including an
+empty value. The CLI resolves a relative or empty value against the working
+directory. When the variable is unset, the home is `~/{{config_dir}}`.
+`/doctor` prints the home it is using. Settings for the session are
+`settings.json` in that directory.
+
 Source anchors: Harness `crates/session`, `crates/compaction`,
-`crates/runtime/src/mobile/skill_loader.rs`, `crates/runtime/src/app_agent_input.rs`;
-product native conversation and remote session controls.
+`crates/memory/src/lingxi_md`, `crates/runtime/src/mobile/skill_loader.rs`,
+`crates/runtime/src/app_agent_input.rs`; product `apps/cli/host/src/argv.rs`
+and native conversation and remote session controls.
 
 Mobile currently exposes ForkSession with target_mode and rejects an in-flight
 mode fork. Desktop does not expose that same fork command. Creating a new

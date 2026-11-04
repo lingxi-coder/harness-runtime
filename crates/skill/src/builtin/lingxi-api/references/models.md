@@ -28,7 +28,15 @@ maintain them. Use the account/provider source when the user needs current data.
 Source anchors: llm-client `src/client/{mod,live}.rs`, `src/protocol`,
 `src/providers`; Harness `crates/runtime/src/api.rs` and model/provider commands.
 
-Read the accounts topic for host-global multi-account selection. Logical
+In a session, `/model` lists selectable models. `--model` sets the model for
+that launch. The choice is saved as `model` in the user `settings.json`, and
+up to eight recent choices are kept in `recentModels`, newest first. If the
+config directory cannot be found, the choice stays in the current session. A
+managed allowlist can hide models; a normal install has none, so the picker
+shows what the configured providers offer.
+
+Read the accounts topic for host-global multi-account selection. A model name
+alone is not a usable connection. Logical
 provider profile, account ID and execution binding are different identities.
 A request can select another healthy allowed account at execution/retry time;
 do not infer its route from a display name. Desktop model selection is native

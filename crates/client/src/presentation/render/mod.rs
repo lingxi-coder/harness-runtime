@@ -21,7 +21,7 @@ pub mod syntax;
 
 /// The 16 named SGR colors (8 standard + 8 bright). Carried over from M6's
 /// `AnsiColor`; lives inside [`StyleColor::Named`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum NamedColor {
     /// SGR 30 / 40.
     Black,
@@ -58,7 +58,7 @@ pub enum NamedColor {
 }
 
 /// A foreground or background color slot. Supersedes M6's `AnsiColor`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, serde::Serialize)]
 pub enum StyleColor {
     /// Terminal default — no override.
     #[default]

@@ -16,9 +16,17 @@
 //! [`expand_glob_pattern`]) read the real `dirs::home_dir()` /
 //! `std::env::current_dir()`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use regex::Regex;
+
+/// Reuses directory listings for one sandbox wrap. Do not keep this across
+/// wraps: a later edit must be visible to the next allow-list expansion.
+#[derive(Default)]
+pub struct GlobListingCache {
+    listings: HashMap<String, Vec<String>>,
+}
 
 /// Dangerous files that should be protected from writes.
 ///
@@ -532,30 +540,41 @@ fn read_dir_recursive(base_dir: &Path, out: &mut Vec<String>) {
 /// Ported from `sandbox-utils.js:429-471` (`expandGlobPattern`).
 #[must_use]
 pub fn expand_glob_pattern(glob_path: &str) -> Vec<String> {
-    let normalized_pattern = normalize_path_for_sandbox(glob_path);
+    GlobListingCache::default().expand(glob_path)
+}
 
-    // Extract the static directory prefix before any glob characters.
-    let static_prefix = split_at_first_glob(&normalized_pattern);
-    if static_prefix.is_empty() || static_prefix == "/" {
-        tracing::debug!("[Sandbox] Glob pattern too broad, skipping: {glob_path}");
-        return Vec::new();
+impl GlobListingCache {
+    /// Expand one glob. Listings for the same static directory prefix are
+    /// walked once per cache.
+    pub fn expand(&mut self, glob_path: &str) -> Vec<String> {
+        let normalized_pattern = normalize_path_for_sandbox(glob_path);
+
+        // Extract the static directory prefix before any glob characters.
+        let static_prefix = split_at_first_glob(&normalized_pattern);
+        if static_prefix.is_empty() || static_prefix == "/" {
+            tracing::debug!("[Sandbox] Glob pattern too broad, skipping: {glob_path}");
+            return Vec::new();
+        }
+
+        // Get the base directory from the static prefix.
+        let base_dir = if static_prefix.ends_with('/') {
+            static_prefix[..static_prefix.len() - 1].to_string()
+        } else {
+            posix_dirname(&static_prefix)
+        };
+
+        if !Path::new(&base_dir).exists() {
+            tracing::debug!("[Sandbox] Base directory for glob does not exist: {base_dir}");
+            return Vec::new();
+        }
+
+        if !self.listings.contains_key(&base_dir) {
+            let mut entries = Vec::new();
+            read_dir_recursive(Path::new(&base_dir), &mut entries);
+            self.listings.insert(base_dir.clone(), entries);
+        }
+        filter_glob_matches(&normalized_pattern, &self.listings[&base_dir])
     }
-
-    // Get the base directory from the static prefix.
-    let base_dir = if static_prefix.ends_with('/') {
-        static_prefix[..static_prefix.len() - 1].to_string()
-    } else {
-        posix_dirname(&static_prefix)
-    };
-
-    if !Path::new(&base_dir).exists() {
-        tracing::debug!("[Sandbox] Base directory for glob does not exist: {base_dir}");
-        return Vec::new();
-    }
-
-    let mut entries = Vec::new();
-    read_dir_recursive(Path::new(&base_dir), &mut entries);
-    filter_glob_matches(&normalized_pattern, &entries)
 }
 
 #[cfg(test)]

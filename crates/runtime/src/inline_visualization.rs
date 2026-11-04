@@ -212,7 +212,7 @@ pub async fn delete_sessions(store: &VisualizationStore, sessions: &[uuid::Uuid]
         if let Err(error) = store.delete_session(session).await {
             tracing::warn!(%session, %error, "visualization: session delete failed");
         }
-        match std::fs::remove_dir_all(store.session_dir(session)) {
+        match tokio::fs::remove_dir_all(store.session_dir(session)).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {

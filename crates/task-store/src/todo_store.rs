@@ -335,6 +335,43 @@ fn lock_for(dir: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
+fn departure_temp_path(dir: &Path) -> PathBuf {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    dir.join(format!(
+        ".departure-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
+fn write_departure_at(dir: &Path, task: &TodoTask) -> std::io::Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec_pretty(task).map_err(std::io::Error::other)?;
+    let temporary = departure_temp_path(dir);
+    let destination = dir.join(format!("{}.json", sanitize_path_component(&task.id)));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let result = file
+        .write_all(&bytes)
+        .and_then(|()| std::fs::rename(&temporary, destination));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+async fn write_departure_async(dir: &Path, task: &TodoTask) -> std::io::Result<()> {
+    let dir = dir.to_path_buf();
+    let task = task.clone();
+    match tokio::task::spawn_blocking(move || write_departure_at(&dir, &task)).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => Err(std::io::Error::other(error.to_string())),
+    }
+}
+
 /// File-backed task store for a single task list.
 pub struct TodoStore {
     dir: PathBuf,
@@ -398,61 +435,71 @@ impl TodoStore {
     /// Ensure the list-level lock target file exists (claude-code
     /// `writeFile(t,"",{flag:"wx"})` — create empty, tolerate `EEXIST`), so the
     /// mkdir-based lock has a stable sibling to guard.
-    fn ensure_list_lock_target(&self) {
+    async fn ensure_list_lock_target(&self) {
         let path = self.list_lock_target();
         // `create_new` == flag "wx"; an existing file (or a benign race) is fine.
-        let _ = std::fs::OpenOptions::new()
+        let _ = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path);
+            .open(&path)
+            .await;
     }
 
-    fn ensure_dir(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)
+    async fn ensure_dir(&self) -> std::io::Result<()> {
+        tokio::fs::create_dir_all(&self.dir).await
     }
 
-    fn read_high_water_mark(&self) -> i64 {
-        std::fs::read_to_string(self.hwm_path())
+    async fn read_high_water_mark(&self) -> i64 {
+        tokio::fs::read_to_string(self.hwm_path())
+            .await
             .ok()
             .and_then(|s| s.trim().parse::<i64>().ok())
             .unwrap_or(0)
     }
 
-    fn write_high_water_mark(&self, value: i64) -> std::io::Result<()> {
-        std::fs::write(self.hwm_path(), value.to_string())
+    async fn write_high_water_mark(&self, value: i64) -> std::io::Result<()> {
+        tokio::fs::write(self.hwm_path(), value.to_string()).await
     }
 
     /// Highest id from existing `<id>.json` files (ignores the high-water mark).
-    fn highest_id_from_files(&self) -> i64 {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+    async fn highest_id_from_files(&self) -> i64 {
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
             return 0;
         };
         let mut highest = 0_i64;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if let Some(stem) = name.strip_suffix(".json") {
-                if let Ok(n) = stem.parse::<i64>() {
-                    if n > highest {
-                        highest = n;
+        loop {
+            match entries.next_entry().await {
+                Ok(Some(entry)) => {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if let Some(stem) = name.strip_suffix(".json") {
+                        if let Ok(n) = stem.parse::<i64>() {
+                            if n > highest {
+                                highest = n;
+                            }
+                        }
                     }
                 }
+                Ok(None) => break,
+                // `ReadDir::flatten` skips a bad entry and keeps going.
+                Err(_) => continue,
             }
         }
         highest
     }
 
     /// Highest id ever assigned (max of existing files and the high-water mark).
-    fn highest_id(&self) -> i64 {
+    async fn highest_id(&self) -> i64 {
         self.highest_id_from_files()
-            .max(self.read_high_water_mark())
+            .await
+            .max(self.read_high_water_mark().await)
     }
 
-    fn write_task(&self, task: &TodoTask) -> std::io::Result<()> {
+    async fn write_task(&self, task: &TodoTask) -> std::io::Result<()> {
         // TS `jsonStringify(task, null, 2)`.
         let json = serde_json::to_string_pretty(task)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(self.task_path(&task.id), json)
+        tokio::fs::write(self.task_path(&task.id), json).await
     }
 
     /// Create a new task with a unique decimal id. Port of `createTask`:
@@ -461,30 +508,26 @@ impl TodoStore {
     /// # Errors
     /// Propagates filesystem errors from directory creation or the task write.
     pub async fn create(&self, mut task: TodoTask) -> std::io::Result<String> {
-        let _guard = self.lock.lock().await;
-        self.ensure_dir()?;
-        // Cross-process serialisation: hold the list-level lock across
-        // highest_id() -> write so two processes never assign the same id.
-        // Best-effort — a failure to acquire (only under sustained >retry-budget
-        // contention) degrades to the previous in-process-only behaviour rather
-        // than making create newly fallible.
-        self.ensure_list_lock_target();
+        // Directory creation and the cross-process lock wait do not need the
+        // in-process mutex. The id read-modify-write still does: `delete`
+        // bumps the high-water mark under that mutex without the list lock,
+        // and a failed list-lock acquire is best-effort.
+        self.ensure_dir().await?;
+        self.ensure_list_lock_target().await;
         let _xlock = crate::proper_lockfile::lock(&self.list_lock_target())
             .await
             .ok();
-        let id = (self.highest_id() + 1).to_string();
+        let _guard = self.lock.lock().await;
+        let id = (self.highest_id().await + 1).to_string();
         task.id.clone_from(&id);
-        self.write_task(&task)?;
+        self.write_task(&task).await?;
         Ok(id)
     }
 
     /// Read a task by id, or `None` if it is missing / fails to parse (port of
     /// `getTask`: a parse failure is swallowed and surfaces as `null`).
-    // `async` is kept for store-API uniformity (callers `.await` every method);
-    // the single-process read takes no lock so there is nothing to await here.
-    #[allow(clippy::unused_async)]
     pub async fn get(&self, id: &str) -> Option<TodoTask> {
-        let content = std::fs::read_to_string(self.task_path(id)).ok()?;
+        let content = tokio::fs::read_to_string(self.task_path(id)).await.ok()?;
         serde_json::from_str::<TodoTask>(&content).ok()
     }
 
@@ -494,21 +537,27 @@ impl TodoStore {
     /// `src_160357157.js` @17604); an older
     /// comment here claimed claude returns raw readdir order, which was stale.
     pub async fn list(&self) -> Vec<TodoTask> {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
             return Vec::new();
         };
         let mut ids: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if let Some(stem) = name.strip_suffix(".json") {
-                ids.push(stem.to_string());
+        loop {
+            match entries.next_entry().await {
+                Ok(Some(entry)) => {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if let Some(stem) = name.strip_suffix(".json") {
+                        ids.push(stem.to_string());
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => continue,
             }
         }
         ids.sort_by_key(|id| id.parse::<i64>().unwrap_or(i64::MAX));
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            let content = match std::fs::read_to_string(self.task_path(&id)) {
+            let content = match tokio::fs::read_to_string(self.task_path(&id)).await {
                 Ok(content) => content,
                 Err(_) => continue,
             };
@@ -523,6 +572,8 @@ impl TodoStore {
     /// the list lock. Port of `updateTask`: returns the updated task, or `None`
     /// if the task does not exist / cannot be read. `id` is always preserved.
     pub async fn update(&self, id: &str, mutate: impl FnOnce(&mut TodoTask)) -> Option<TodoTask> {
+        // Mutex before the per-task lock. `try_unassign` holds this mutex
+        // across its file locks; the opposite order deadlocks.
         let _guard = self.lock.lock().await;
         // Cross-process serialisation: claude-code `updateTask` locks the
         // individual task file (`<id>.json` -> `<id>.json.lock`) around its
@@ -530,11 +581,11 @@ impl TodoStore {
         // Best-effort acquire (see `create`).
         let task_path = self.task_path(id);
         let _xlock = crate::proper_lockfile::lock(&task_path).await.ok();
-        let content = std::fs::read_to_string(&task_path).ok()?;
+        let content = tokio::fs::read_to_string(&task_path).await.ok()?;
         let mut task = serde_json::from_str::<TodoTask>(&content).ok()?;
         mutate(&mut task);
         task.id = id.to_string();
-        self.write_task(&task).ok()?;
+        self.write_task(&task).await.ok()?;
         Some(task)
     }
 
@@ -546,11 +597,11 @@ impl TodoStore {
         {
             let _guard = self.lock.lock().await;
             if let Ok(n) = id.parse::<i64>() {
-                if n > self.read_high_water_mark() {
-                    let _ = self.write_high_water_mark(n);
+                if n > self.read_high_water_mark().await {
+                    let _ = self.write_high_water_mark(n).await;
                 }
             }
-            match std::fs::remove_file(self.task_path(id)) {
+            match tokio::fs::remove_file(self.task_path(id)).await {
                 Ok(()) => {}
                 Err(_) => return false,
             }
@@ -603,12 +654,12 @@ impl TodoStore {
     /// lock in [`crate::proper_lockfile`] is not reentrant, so the `RZn` path
     /// (which already holds `<id>.json`'s lock) must not go through
     /// [`Self::update`].
-    fn xod_merge_owner(&self, id: &str, owner: &str) -> Option<TodoTask> {
-        let content = std::fs::read_to_string(self.task_path(id)).ok()?;
+    async fn xod_merge_owner(&self, id: &str, owner: &str) -> Option<TodoTask> {
+        let content = tokio::fs::read_to_string(self.task_path(id)).await.ok()?;
         let mut task = serde_json::from_str::<TodoTask>(&content).ok()?;
         task.owner = Some(owner.to_string());
         task.id = id.to_string();
-        self.write_task(&task).ok()?;
+        self.write_task(&task).await.ok()?;
         Some(task)
     }
 
@@ -656,6 +707,7 @@ impl TodoStore {
             return self.claim_task_with_busy_check(task_id, owner).await;
         }
 
+        // Mutex before the per-task lock (same order as `update` / unassign).
         let _guard = self.lock.lock().await;
         // Lock the individual task file (oracle `my(ASr(e,t), u4t)`).
         // Best-effort acquire, matching `create`/`update`.
@@ -683,7 +735,7 @@ impl TodoStore {
                 blocked_by_tasks,
             };
         }
-        match self.xod_merge_owner(task_id, owner) {
+        match self.xod_merge_owner(task_id, owner).await {
             Some(task) => ClaimResult::Success { task },
             None => ClaimResult::TaskNotFound,
         }
@@ -692,12 +744,13 @@ impl TodoStore {
     /// The `$t` arm of [`Self::claim_task`] — see there. LATENT: nothing in
     /// 2.1.263 passes `checkAgentBusy: true`.
     async fn claim_task_with_busy_check(&self, task_id: &str, owner: &str) -> ClaimResult {
-        let _guard = self.lock.lock().await;
-        // Oracle `m4s`: ensure + lock the LIST-level `.lock`.
-        self.ensure_list_lock_target();
+        // Same list-lock-then-mutex order as `create`. Holding the mutex while
+        // waiting for the list lock deadlocks with `create`.
+        self.ensure_list_lock_target().await;
         let _xlock = crate::proper_lockfile::lock(&self.list_lock_target())
             .await
             .ok();
+        let _guard = self.lock.lock().await;
 
         // `$t` works from the full list snapshot (`RC`), not a point read.
         let all = self.list().await;
@@ -739,7 +792,7 @@ impl TodoStore {
         // reentrancy hazard).
         let task_path = self.task_path(task_id);
         let _tlock = crate::proper_lockfile::lock(&task_path).await.ok();
-        match self.xod_merge_owner(task_id, owner) {
+        match self.xod_merge_owner(task_id, owner).await {
             Some(task) => ClaimResult::Success { task },
             None => ClaimResult::TaskNotFound,
         }
@@ -756,63 +809,62 @@ impl TodoStore {
         name: &str,
         reason: TeammateEndReason,
     ) -> Result<UnassignOutcome, UnassignError> {
-        self.try_unassign_with_writer(agent_id, name, reason, |task| {
-            self.write_departure_task(task)
+        let dir = self.dir.clone();
+        self.try_unassign_with_writer(agent_id, name, reason, move |task| {
+            let dir = dir.clone();
+            let task = task.clone();
+            async move { write_departure_async(&dir, &task).await }
         })
         .await
     }
 
     // Atomic replacement leaves the original owner intact on failed writes so
     // a later Stop can retry, rather than finding a truncated task file.
+    // Tests call this directly; production goes through [`write_departure_async`].
+    #[cfg(test)]
     fn write_departure_task(&self, task: &TodoTask) -> std::io::Result<()> {
-        use std::io::Write;
-        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let bytes = serde_json::to_vec_pretty(task).map_err(std::io::Error::other)?;
-        let temporary = self.dir.join(format!(
-            ".departure-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        let result = file
-            .write_all(&bytes)
-            .and_then(|()| std::fs::rename(&temporary, self.task_path(&task.id)));
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result
+        write_departure_at(&self.dir, task)
     }
 
-    async fn try_unassign_with_writer(
+    async fn try_unassign_with_writer<W, F>(
         &self,
         agent_id: &str,
         name: &str,
         reason: TeammateEndReason,
-        write: impl Fn(&TodoTask) -> std::io::Result<()>,
-    ) -> Result<UnassignOutcome, UnassignError> {
+        mut write: W,
+    ) -> Result<UnassignOutcome, UnassignError>
+    where
+        W: FnMut(&TodoTask) -> F,
+        F: std::future::Future<Output = std::io::Result<()>>,
+    {
+        // Held across the per-file locks. Acquiring those locks first would
+        // invert order with `update` / `claim` and deadlock.
         let _guard = self.lock.lock().await;
         let mut progress = Vec::new();
         let result: std::io::Result<()> = async {
-            let entries = match std::fs::read_dir(&self.dir) {
+            let mut entries = match tokio::fs::read_dir(&self.dir).await {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(error) => return Err(error),
             };
             let mut ids = Vec::new();
-            for entry in entries {
-                let entry = entry?;
-                if let Some(id) = entry.file_name().to_string_lossy().strip_suffix(".json") {
-                    ids.push(id.to_owned());
+            loop {
+                match entries.next_entry().await {
+                    Ok(Some(entry)) => {
+                        if let Some(id) = entry.file_name().to_string_lossy().strip_suffix(".json")
+                        {
+                            ids.push(id.to_owned());
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => return Err(error),
                 }
             }
             ids.sort_by_key(|id| id.parse::<i64>().unwrap_or(i64::MAX));
             for id in ids {
                 let path = self.task_path(&id);
                 let _file_lock = crate::proper_lockfile::lock(&path).await?;
-                let bytes = match std::fs::read(&path) {
+                let bytes = match tokio::fs::read(&path).await {
                     Ok(bytes) => bytes,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
@@ -828,7 +880,7 @@ impl TodoStore {
                 task.id = id;
                 task.owner = None;
                 task.status = TodoState::Pending;
-                write(&task)?;
+                write(&task).await?;
                 progress.push(UnassignedTask {
                     id: task.id,
                     subject: task.subject,
@@ -1228,14 +1280,15 @@ mod tests {
         let before = std::fs::read(store.task_path(&second)).unwrap();
         let error = store
             .try_unassign_with_writer("id", "nova", TeammateEndReason::Shutdown, |task| {
-                if task.id == second {
+                let result = if task.id == second {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
                         "injected write failure",
                     ))
                 } else {
                     store.write_departure_task(task)
-                }
+                };
+                async move { result }
             })
             .await
             .unwrap_err();
@@ -1292,7 +1345,7 @@ mod tests {
             } else {
                 changed.owner = Some("other".into());
             }
-            store.write_task(&changed).unwrap(); // another process holding the file lock
+            store.write_task(&changed).await.unwrap(); // another process holding the file lock
             drop(held);
             assert!(departure.await.unwrap().unassigned_tasks.is_empty());
             assert_eq!(store.get(&id).await.unwrap(), changed);

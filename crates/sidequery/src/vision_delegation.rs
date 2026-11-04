@@ -397,15 +397,22 @@ impl VisionDelegationService {
             }
             let mut bytes = Vec::new();
             let mut stream = response.stream;
-            while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
-                let chunk = chunk.map_err(|error| map_http_error(&error))?;
-                if bytes.len().saturating_add(chunk.len()) > MAX_DECODED_BYTES_PER_QUERY {
-                    return Err(remote_fetch_error(
-                        "image URL exceeds the 24 MiB delegation limit",
-                    ));
+            let body = async {
+                while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
+                {
+                    let chunk = chunk.map_err(|error| map_http_error(&error))?;
+                    if bytes.len().saturating_add(chunk.len()) > MAX_DECODED_BYTES_PER_QUERY {
+                        return Err(remote_fetch_error(
+                            "image URL exceeds the 24 MiB delegation limit",
+                        ));
+                    }
+                    bytes.extend_from_slice(&chunk);
                 }
-                bytes.extend_from_slice(&chunk);
-            }
+                Ok::<(), SideQueryError>(())
+            };
+            tokio::time::timeout(REMOTE_FETCH_TIMEOUT, body)
+                .await
+                .map_err(|_| remote_fetch_error("image URL fetch timed out"))??;
             return Ok(FetchedImage {
                 media_type,
                 data: base64::engine::general_purpose::STANDARD.encode(&bytes),

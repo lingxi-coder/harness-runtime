@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -748,6 +748,13 @@ struct NativeOutputObservation {
     revision: u64,
     bytes: u64,
 }
+#[derive(Clone, Copy)]
+struct ProtocolLogTail {
+    bytes: u64,
+    count: usize,
+    terminal: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SequencedEvent {
@@ -771,6 +778,9 @@ pub struct AgentStore {
     // grant/admission changes. Never hold this lock across an async await.
     protocol_commit: Mutex<()>,
     ledger: Mutex<Ledger>,
+    // Validated tail of each protocol log. A later append skips the full scan
+    // when the file length is still the length we validated.
+    protocol_log_tails: Mutex<HashMap<PathBuf, ProtocolLogTail>>,
     // Any ledger write can fail after rename. Until reopening the store, its
     // old in-memory ledger must not overwrite that uncertain disk.
     storage_uncertain: AtomicBool,
@@ -1351,6 +1361,7 @@ impl AgentStore {
             events_root,
             protocol_commit: Mutex::new(()),
             ledger: Mutex::new(ledger),
+            protocol_log_tails: Mutex::new(HashMap::new()),
             storage_uncertain: AtomicBool::new(false),
             #[cfg(test)]
             fail_next_persist_after_rename: AtomicBool::new(false),
@@ -2347,8 +2358,24 @@ impl AgentStore {
             .as_deref()
             .ok_or_else(|| invalid("Agent task is not an AG-UI run"))?;
         validate_event_identity(&event, thread_id, &record.task.request_id)?;
-        let events = read_protocol_events(&path, Some((thread_id, &record.task.request_id)))?;
-        if events.is_empty() {
+        let file_len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+        let cached = self
+            .protocol_log_tails
+            .lock()
+            .ok()
+            .and_then(|tails| tails.get(&path).filter(|tail| tail.bytes == file_len).cloned());
+        let (event_count, terminal) = if let Some(tail) = cached {
+            (tail.count, tail.terminal)
+        } else {
+            let events = read_protocol_events(&path, Some((thread_id, &record.task.request_id)))?;
+            (
+                events.len(),
+                events
+                    .last()
+                    .is_some_and(|entry| is_terminal_event(&entry.event)),
+            )
+        };
+        if event_count == 0 {
             if event["type"] != "RUN_STARTED" {
                 return Err(invalid("AG-UI run must begin with RUN_STARTED"));
             }
@@ -2356,22 +2383,16 @@ impl AgentStore {
             if event["type"] == "RUN_STARTED" {
                 return Err(invalid("AG-UI run already has RUN_STARTED"));
             }
-            if events
-                .last()
-                .is_some_and(|entry| is_terminal_event(&entry.event))
-            {
+            if terminal {
                 return Err(invalid("AG-UI run already has a terminal event"));
             }
         }
-        let sequence = events.len() as u64 + 1;
+        let sequence = event_count as u64 + 1;
         let entry = SequencedEvent { sequence, event };
         let encoded = serde_json::to_vec(&entry)?;
         if encoded.len() > 3 * 1024 * 1024
-            || events.len() >= 10_000
-            || fs::metadata(&path)
-                .map_or(0, |metadata| metadata.len())
-                .saturating_add(encoded.len() as u64 + 1)
-                > MAX_PROTOCOL_EVENT_LOG_BYTES
+            || event_count >= 10_000
+            || file_len.saturating_add(encoded.len() as u64 + 1) > MAX_PROTOCOL_EVENT_LOG_BYTES
         {
             return Err(invalid("AG-UI event log exceeds its storage limit"));
         }
@@ -2398,14 +2419,27 @@ impl AgentStore {
                 return Err(std::io::Error::other("injected protocol event sync failure").into());
             }
             file.sync_data()?;
-            // A newly created event filename must be durable too.
-            fs::File::open(&self.events_root)?.sync_all()?;
+            // The directory entry only needs a durability sync when this write
+            // creates the file. Later appends reuse that name.
+            if file_len == 0 {
+                fs::File::open(&self.events_root)?.sync_all()?;
+            }
             Ok(())
         })();
         if write.is_err() {
             self.quarantine_storage();
         }
         write?;
+        if let Ok(mut tails) = self.protocol_log_tails.lock() {
+            tails.insert(
+                path,
+                ProtocolLogTail {
+                    bytes: file_len.saturating_add(encoded.len() as u64 + 1),
+                    count: event_count.saturating_add(1),
+                    terminal: is_terminal_event(&entry.event),
+                },
+            );
+        }
         Ok(sequence)
     }
     /// Read-only bounded replay for a public runId; the cursor is a transport

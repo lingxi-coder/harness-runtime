@@ -155,6 +155,8 @@ pub const RATE_LIMIT_TIER_ENV: &str = "LINGXI_RATE_LIMIT_TIER";
 
 /// Disable the agent-view command surface.
 pub const DISABLE_AGENT_VIEW_ENV: &str = "LINGXI_DISABLE_AGENT_VIEW";
+/// Explicitly enable the skill-doctor command when its feature flag is off.
+pub const ENABLE_SKILL_DOCTOR_ENV: &str = "LINGXI_ENABLE_SKILL_DOCTOR";
 /// Time to retain an API-key helper result before refreshing it.
 pub const API_KEY_HELPER_TTL_MS_ENV: &str = "LINGXI_API_KEY_HELPER_TTL_MS";
 /// Number of substantive user turns between Ultracode reminders.
@@ -369,6 +371,7 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     SUBSCRIPTION_TYPE_ENV,
     RATE_LIMIT_TIER_ENV,
     DISABLE_AGENT_VIEW_ENV,
+    ENABLE_SKILL_DOCTOR_ENV,
     API_KEY_HELPER_TTL_MS_ENV,
     ULTRACODE_CADENCE_ENV,
     MOD_BUN_EXECUTABLE_ENV,

@@ -52,8 +52,6 @@ G1	crates/client/tests/listings_test.rs	\.lingxi
 G1	crates/client/tests/snapshot_test.rs	LINGXI
 G1	crates/client/tests/snapshot_test.rs	\.lingxi
 G1	crates/command-api/src/argument_substitution.rs	LINGXI
-G1	crates/command-api/src/builtin_support/names.rs	LINGXI
-G1	crates/command-api/src/builtin_support/names.rs	LingXi
 G1	crates/command-api/src/builtins/autocompact.rs	LINGXI
 G1	crates/command-api/src/builtins/bundled/builtin_skill.rs	\.lingxi
 G1	crates/command-api/src/builtins/bundled/checkup_body.md	LINGXI
@@ -76,7 +74,6 @@ G1	crates/command-api/src/builtins/bundled/fewer_permission_prompts_skill.rs	\.c
 G1	crates/command-api/src/builtins/bundled/fewer_permission_prompts_skill.rs	\.lingxi
 G1	crates/command-api/src/builtins/bundled/keybindings_help_skill.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/command-api/src/builtins/bundled/keybindings_help_skill.rs	\.lingxi
-G1	crates/command-api/src/builtins/bundled/loop_skill.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/command-api/src/builtins/bundled/mod.rs	\.lingxi
 G1	crates/command-api/src/builtins/bundled/run_skill.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/command-api/src/builtins/bundled/run_skill.rs	\.lingxi
@@ -84,7 +81,6 @@ G1	crates/command-api/src/builtins/bundled/run_skill_generator_skill.rs	LingXi
 G1	crates/command-api/src/builtins/bundled/run_skill_generator_skill.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/command-api/src/builtins/bundled/run_skill_generator_skill.rs	\.lingxi
 G1	crates/command-api/src/builtins/bundled/update_config_body.md	LingXi
-G1	crates/command-api/src/builtins/bundled/update_config_body.md	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/command-api/src/builtins/bundled/update_config_hook_construction.md	\.lingxi
 G1	crates/command-api/src/builtins/bundled/update_config_hooks_reference.md	\.lingxi
 G1	crates/command-api/src/builtins/bundled/update_config_skill.rs	LingXi
@@ -110,7 +106,6 @@ G1	crates/command-api/src/builtins/stop.rs	LINGXI
 G1	crates/command-api/src/builtins/templates.rs	LINGXI
 G1	crates/command-api/src/builtins/templates.rs	LingXi
 G1	crates/command-api/src/builtins/version.rs	LINGXI
-G1	crates/command-api/src/cd.rs	CLAUDE\.md
 G1	crates/command-api/src/expand.rs	LINGXI
 G1	crates/command-api/src/expand.rs	\.lingxi
 G1	crates/command-api/src/markdown_loader.rs	\.lingxi
@@ -706,7 +701,6 @@ G3	crates/client/tests/listings_test.rs	.lingxi
 G3	crates/client/tests/listings_test.rs	LINGXI.md
 G3	crates/client/tests/snapshot_test.rs	.lingxi
 G3	crates/client/tests/snapshot_test.rs	LINGXI.md
-G3	crates/command-api/src/builtin_support/names.rs	LINGXI.md
 G3	crates/command-api/src/builtins/bundled/builtin_skill.rs	.lingxi-plugin
 G3	crates/command-api/src/builtins/bundled/checkup_body.md	.lingxi
 G3	crates/command-api/src/builtins/bundled/checkup_body.md	.lingxi.json
@@ -736,7 +730,6 @@ G3	crates/command-api/src/builtins/bundled/run_body.md	.lingxi
 G3	crates/command-api/src/builtins/bundled/run_skill.rs	.lingxi
 G3	crates/command-api/src/builtins/bundled/run_skill_generator_body.md	.lingxi
 G3	crates/command-api/src/builtins/bundled/run_skill_generator_skill.rs	.lingxi
-G3	crates/command-api/src/builtins/bundled/update_config_body.md	.lingxi
 G3	crates/command-api/src/builtins/bundled/update_config_hook_construction.md	.lingxi
 G3	crates/command-api/src/builtins/bundled/update_config_hooks_reference.md	.lingxi
 G3	crates/command-api/src/builtins/bundled/verify_body.md	.lingxi
