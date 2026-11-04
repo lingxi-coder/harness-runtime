@@ -803,17 +803,6 @@ impl SideChatManager {
                             .await;
                     }
                 }
-                if let Err(error) = manager.checkpoint(&side_id, None, true).await {
-                    side.replay
-                        .emit(ClientEvent::SystemNotice {
-                            message: error.into(),
-                            is_error: true,
-                        })
-                        .await;
-                }
-                if let Some(terminal) = side.replay.terminal.lock().await.take() {
-                    side.replay.publish(terminal).await;
-                }
                 let missing_terminal = {
                     let replay = side.replay.events.lock().await;
                     let turn = &replay[replay_start..];
@@ -823,9 +812,9 @@ impl SideChatManager {
                             .iter()
                             .any(|event| matches!(event, ClientEvent::TurnEnded { .. }))
                 };
-                if missing_terminal {
+                if missing_terminal && side.replay.terminal.lock().await.is_none() {
                     side.replay
-                        .publish(ClientEvent::TurnEnded {
+                        .emit(ClientEvent::TurnEnded {
                             outcome: if terminal_cancel.is_cancelled() {
                                 client::protocol::events::TurnOutcomeDto::Cancelled
                             } else {
@@ -837,6 +826,17 @@ impl SideChatManager {
                             ),
                         })
                         .await;
+                }
+                if let Err(error) = manager.checkpoint(&side_id, None, true).await {
+                    side.replay
+                        .emit(ClientEvent::SystemNotice {
+                            message: error.into(),
+                            is_error: true,
+                        })
+                        .await;
+                }
+                if let Some(terminal) = side.replay.terminal.lock().await.take() {
+                    side.replay.publish(terminal).await;
                 }
                 side.session.permission_gate.drain().await;
                 side.session.question_broker.drain().await;
@@ -2977,5 +2977,83 @@ mod tests {
         );
         drop(events);
         manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_finishes_a_committed_turn_even_if_terminal_delivery_was_lost() {
+        let owner = parent();
+        let sink = Arc::new(Sink::default());
+        let original =
+            SideChatManager::new_recoverable(owner.clone(), Arc::new(Factory), sink.clone());
+        let id = original
+            .create("completion-window".into(), None, None, None)
+            .await
+            .unwrap();
+        let side = original.side(&id).await.unwrap();
+        side.replay
+            .emit(ClientEvent::TurnStarted { turn_id: Some(7) })
+            .await;
+        side.replay
+            .emit(ClientEvent::TurnEnded {
+                outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
+                stop_reason: None,
+                cost: client::adapter::lowering::lower_cost_snapshot(
+                    &side.session.orchestrator.snapshot_cost_real().await,
+                ),
+            })
+            .await;
+        // Crash exactly after the completed checkpoint, before live terminal publication.
+        original.checkpoint(&id, None, true).await.unwrap();
+        let (checkpoint, events) = last_checkpoint(&sink, &id).await;
+        let metadata: serde_json::Value = serde_json::from_str(&checkpoint).unwrap();
+        assert_eq!(metadata["interrupted"], false);
+        assert_eq!(metadata["terminal"]["type"], "turn_ended");
+        assert!(!events.iter().any(|event| matches!(
+            serde_json::from_str::<ClientEvent>(event),
+            Ok(ClientEvent::TurnEnded { .. })
+        )));
+        let restored =
+            SideChatManager::new_recoverable(owner, Arc::new(Factory), Arc::new(Sink::default()));
+        restored.restore(&id, &checkpoint, events).await.unwrap();
+        let replay = restored.snapshot(&id).await.unwrap();
+        let terminal = replay
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(terminal.len(), 1);
+        assert!(matches!(
+            terminal[0],
+            ClientEvent::TurnEnded {
+                outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
+                ..
+            }
+        ));
+        // A subsequent checkpoint and restore must not append the terminal twice.
+        let repeat_sink = Arc::new(Sink::default());
+        let repeat = SideChatManager::new_recoverable(
+            restored.parent.clone(),
+            Arc::new(Factory),
+            repeat_sink,
+        );
+        let delivered = replay
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // The host can have received the live terminal after the same checkpoint.
+        repeat.restore(&id, &checkpoint, delivered).await.unwrap();
+        assert_eq!(
+            repeat
+                .snapshot(&id)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+                .count(),
+            1
+        );
+        original.shutdown().await.unwrap();
+        restored.shutdown().await.unwrap();
+        repeat.shutdown().await.unwrap();
     }
 }

@@ -15,6 +15,7 @@ struct Checkpoint {
     interrupted: bool,
     turn_id: Option<u64>,
     slash: bool,
+    terminal: Option<ClientEvent>,
 }
 
 impl SideChatManager {
@@ -105,6 +106,11 @@ impl SideChatManager {
             interrupted,
             turn_id: turn_id.or(active_id),
             slash: matches!(command, Some(ClientCommand::RunSlashCommand { .. })),
+            terminal: if turn_complete {
+                side.replay.terminal.lock().await.clone()
+            } else {
+                None
+            },
         };
         let checkpoint_json = serde_json::to_string(&checkpoint)
             .map_err(|_| "Side Chat context could not be checkpointed")?;
@@ -168,6 +174,14 @@ impl SideChatManager {
                 ClientEvent::SideChatPermission { .. } | ClientEvent::AskUserQuestion { .. }
             )
         });
+        let last_started = events
+            .iter()
+            .rposition(|event| matches!(event, ClientEvent::TurnStarted { .. }));
+        let last_ended = events
+            .iter()
+            .rposition(|event| matches!(event, ClientEvent::TurnEnded { .. }));
+        let terminal_missing =
+            last_started.is_some_and(|start| last_ended.is_none_or(|end| end < start));
         let replay = Arc::new(ReplaySink {
             side_id: id.to_owned(),
             owner: self.owner.clone(),
@@ -227,6 +241,10 @@ impl SideChatManager {
                     ),
                 })
                 .await;
+        } else if terminal_missing {
+            if let Some(terminal) = checkpoint.terminal {
+                side.replay.publish(terminal).await;
+            }
         }
         side.replay.publish(ClientEvent::SystemNotice { message: "This Side Chat was restored after the engine exited. Interrupted requests are not replayed.".into(), is_error: false }).await;
         self.checkpoint(id, None, false).await?;
