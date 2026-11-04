@@ -27,10 +27,15 @@ main observed during this comparison is
 `5ce972b8c1a547f54808114681327cb731155fcf`; a Git diff from the metadata
 snapshot shows no changed TOML file or Cargo lockfile and no changed xcap
 references in Rust/TOML files. The top-level Cargo.lock SHA-256 is
-`0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015`. A fresh metadata run at that Product revision
-is still required. The Harness comparison branch was fast-forwarded to
-`ac70a2bd150f913d90535947cc28c8fa0824883d` before preparing this report;
-its xcap consumer and lockfile were unchanged from the prior comparison base.
+`0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015`.
+A fresh locked, frozen, all-features metadata run on 5ce972 returned 1052
+packages and byte-identical JSON to the original snapshot. The Harness
+comparison branch was fast-forwarded to
+`ac70a2bd150f913d90535947cc28c8fa0824883d` before preparing this report.
+Before the candidate commit, it also merged main
+`274e8f3ea6b955bccdf0534af63126eca69f5437`; that commit changes seven
+branding-related source/baseline files, not the xcap consumer or Cargo
+manifests/lockfile.
 
 Harness builds its real backend only on macOS and returns `None` elsewhere
 ([source](https://github.com/lingxi-coder/harness-runtime/blob/ac70a2bd150f913d90535947cc28c8fa0824883d/crates/platforms/macos-computer-control/src/lib.rs#L14-L35)).
@@ -86,3 +91,27 @@ The previous published 0.5.2 archive identifies revision
 This comparison is source/metadata evidence, not a macOS build, a live capture,
 or a full Product supply-chain pass. Those validations remain required for the
 candidate and again after integration with the final Harness revision.
+
+## Candidate validation
+
+The candidate copied the 0.9.8 macOS source and shared public wrapper files
+byte-for-byte from the archived crate, preserving the upstream license and
+manifest. It adapted the display label to `friendly_name()`, removed the
+obsolete image pin, and updated the Harness lock to image 0.25.10. No Linux
+capture implementation or advisory exception was introduced.
+
+On the candidate Harness tree, `cargo metadata --format-version 1
+--all-features --locked --frozen` succeeded for the complete, unfiltered
+743-package graph. It contains one local xcap 0.9.8 edge from the macOS
+consumer and no `zbus`, `zbus_names`, `zvariant`, or
+`zvariant_derive` package. `cargo deny` 0.19.8, using this metadata and
+RustSec database revision `965bf9ad083b58e6340d65829d85217b18be9290`,
+passed advisories, bans, licenses and sources with the existing configuration.
+Warnings include the already-yanked `clipboard-win` 5.4.1 and duplicate
+versions. The [command and output evidence](evidence/xcap-macos-candidate-2026-11-04.json)
+includes the initial failed attempts and the successful check; no warning was
+reclassified or ignored for this result.
+
+This is still not evidence of a macOS consumer build, live capture, permission
+behavior, the final Product graph, or final CI. Those checks remain necessary
+before considering the dependency migration complete.

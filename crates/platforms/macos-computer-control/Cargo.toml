@@ -16,8 +16,7 @@ license.workspace = true
 # of a bundled Swift module, so there is no native toolchain/signing
 # dependency beyond what the Rust build already requires.
 #
-# Compiles on every desktop target (enigo/xcap/arboard are themselves
-# cross-platform), but every method returns `ComputerError::Unsupported` off
+# Compiles on every desktop target, but every method returns `ComputerError::Unsupported` off
 # macOS via `#[cfg(target_os = "macos")]` — `MacosComputerControl::new()` is
 # only exported when the target is actually darwin, so a non-macOS composition
 # root simply never constructs one (mirrors upstream's darwin-only guard).
@@ -30,13 +29,9 @@ async-trait.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # Platform versions are validated with the workspace Rust 1.94 toolchain.
 enigo = "=0.3.0"
-xcap = "=0.5.2"
-# xcap depends on `image = "0.25"` unconstrained; left alone the resolver
-# floats to the newest 0.25.x, which pulls in `moxcms` (edition2024). Pinning
-# our own requirement to the last edition2021-compatible patch forces the
-# whole graph down to it.
-image = { version = "=0.25.6", default-features = false, features = ["png"] }
-arboard = { version = "3", default-features = false } # default "image"/"image-data" features pull the same moxcms chain; we only need text
+xcap = { path = "../../../third_party/xcap-macos" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+arboard = { version = "3", default-features = false } # Only text clipboard support is used.
 plist = "=1.10.1" # XML parsing fixes; supported by the workspace Rust 1.94 toolchain
 objc2 = "0.6"
 objc2-foundation = "0.3"
