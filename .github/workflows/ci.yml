@@ -185,7 +185,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -343,7 +343,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
+        os: [ubuntu-24.04, macos-15, windows-2022]
     steps:
       - name: Enable long Git paths on Windows
         if: runner.os == 'Windows'
@@ -365,7 +365,7 @@ jobs:
 
   harness-ios:
     name: Harness iOS (${{ matrix.target }})
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
