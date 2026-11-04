@@ -21,6 +21,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 SEAM = ROOT / "third_party/mbedtls-sys"
 TEST = ROOT / "scripts/tests/test_mbedtls_ca_snapshot.py"
+SSH_TEST = ROOT / "scripts/tests/run_libssh2_mbedtls_init.py"
+SSH_FIXTURE = ROOT / "scripts/tests/fixtures/libssh2_mbedtls_init.c"
 CC_VERSION = "1.2.62"
 
 LOCK = '''# Generated fixture lock; dependency versions and checksums are deliberate.
@@ -94,7 +96,7 @@ def native_env(compiler, sanitizer):
                name in ("HOST_" + key, "TARGET_" + key) for key in names):
             env.pop(name)
     # O1 keeps the ECDSA/TSan stress test within its timeout on CI runners.
-    flags = ["-O1", "-g", "-fno-omit-frame-pointer"]
+    flags = ["-O1", "-g0", "-fno-omit-frame-pointer"]
     if sanitizer != "none":
         flags.append("-fsanitize=" + sanitizer)
     env.update(CC=compiler, CFLAGS=" ".join(flags), CC_ENABLE_DEBUG_OUTPUT="1",
@@ -226,6 +228,11 @@ def main():
         for forbidden in ("MBEDTLS_SELF_TEST", "MBEDTLS_USE_PSA_CRYPTO", "MBEDTLS_CTR_DRBG_USE_PSA_CRYPTO"):
             if re.search(r"^#define " + forbidden + r"\b", macros, re.M):
                 raise RuntimeError(f"native configuration unexpectedly enables {forbidden}")
+        ssh_test = run([sys.executable, str(SSH_TEST), "--include", str(include),
+                        "--lib-dir", str(native), "--sanitizer", args.sanitizer],
+                       env=env, cwd=ROOT, log=logdir / "libssh2-init.log")
+        if "real entropy failure, cleanup, retry, references and PSA ownership passed" not in ssh_test.stdout:
+            raise RuntimeError("libssh2 initialization test did not complete")
         (directory / "openssl.cnf").write_text(OPENSSL_CONFIG)
         results = []
         for algorithm in ("rsa", "ec"):
@@ -259,6 +266,9 @@ def main():
                     "ca_source_sha256": digest(ROOT / "third_party/git2-rs/libgit2-sys/libgit2/src/libgit2/streams/mbedtls.c"),
                     "test_sha256": digest(TEST),
                     "handshake_fixture_sha256": digest(ROOT / "scripts/tests/fixtures/mbedtls_ca_handshake.c"),
+                    "libssh2_init_test_sha256": digest(SSH_TEST),
+                    "libssh2_init_fixture_sha256": digest(SSH_FIXTURE),
+                    "libssh2_init_log_sha256": digest(logdir / "libssh2-init.log"),
                     "runner_sha256": digest(Path(__file__).resolve()), "results": results}
         (logdir / "results.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"Passed RSA and ECDSA CA tests ({args.sanitizer}); {count} native sources compiled.")
