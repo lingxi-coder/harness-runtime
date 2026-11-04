@@ -22,7 +22,9 @@ use tokio::sync::Mutex;
 /// may use an invocation identity only after its exact assistant row is durable.
 #[derive(Clone)]
 pub struct DurableToolOrigins {
+    /// Per-(tool-use ID, assistant UUID) durable row acknowledgment or write failure.
     pub sources: Arc<Mutex<std::collections::HashMap<(String, String), Result<String, String>>>>,
+    /// Wake pending tools when the dispatch publishes their row acknowledgments.
     pub changed: Arc<tokio::sync::Notify>,
 }
 
