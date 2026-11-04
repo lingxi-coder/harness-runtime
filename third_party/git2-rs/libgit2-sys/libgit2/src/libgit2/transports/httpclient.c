@@ -1118,8 +1118,10 @@ on_error:
 		git_error_save(&last_error);
 	/* The server TLS wrapper may still borrow the proxy stream for shutdown. */
 	close_stream(&client->server);
-	if (error != GIT_RETRY)
+	if (error != GIT_RETRY) {
 		close_stream(&client->proxy);
+		client->proxy_connected = 0;
+	}
 
 	if (last_error)
 		git_error_restore(last_error);
