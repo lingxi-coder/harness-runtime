@@ -15,7 +15,7 @@
 //! use rtc::media_stream::{MediaStreamTrack, MediaStreamTrackId, MediaStreamId};
 //! use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 //! use rtc::media::Sample;
-//! use std::time::Duration;
+//! use std::time::{Duration, Instant};
 //! use std::sync::Arc;
 //!
 //! # async fn example() -> webrtc::error::Result<()> {
@@ -27,13 +27,13 @@
 //!     RtpCodecKind::Video,
 //!     vec![],
 //! );
-//! let local_track = Arc::new(TrackLocalStaticSample::new(track)?);
+//! let local_track = Arc::new(TrackLocalStaticSample::new(Instant::now(), track)?); // Exemption: usage in #doctest code
 //!
 //! // Write a raw VP8/H.264 frame as a sample
 //! let sample = Sample {
 //!     data: bytes::Bytes::from(vec![0x00, 0x01, 0x02]),
 //!     duration: Duration::from_millis(33), // ~30 fps
-//!     ..Default::default()
+//!     ..Sample::new(Instant::now())
 //! };
 //!
 //! // Write the sample to SSRC 1234 and PT 96
@@ -53,10 +53,16 @@ use rtc::{rtcp, rtp};
 
 /// Events that can occur on a [`TrackLocal`] (a track we send).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TrackLocalEvent {
     /// Fired when RTCP feedback about this sent track is received from the remote peer —
     /// e.g. Receiver Reports, or PLI/FIR keyframe requests. An SFU relays such feedback
     /// upstream to the publisher.
+    ///
+    /// Only for feedback an interceptor marked with `Attribute::DeliverToApplication`. Inbound
+    /// RTCP otherwise stops at the end of the chain, where the interceptors that act on it are, so
+    /// on a default chain this never fires — silence here means nothing vouched for a packet, not
+    /// that the remote sent none. The `rtcp-processing` example shows the interceptor that does it.
     OnRtcpPacket(Vec<Box<dyn rtcp::Packet>>),
 }
 
@@ -95,9 +101,20 @@ pub trait TrackLocal: Track {
     async fn unbind(&self);
 
     /// Writes an RTP packet to the track.
+    ///
+    /// The packet passes through the interceptor chain before going out on the wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the track is not bound — writing before negotiation completes, or
+    /// after the peer connection has closed.
     async fn write_rtp(&self, packet: rtp::Packet) -> Result<()>;
 
     /// Writes RTCP packets to the track.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the track is not bound; see [`write_rtp`](Self::write_rtp).
     async fn write_rtcp(&self, packets: Vec<Box<dyn rtcp::Packet>>) -> Result<()>;
 
     /// Polls for the next event on the local track (RTCP feedback from the remote peer).

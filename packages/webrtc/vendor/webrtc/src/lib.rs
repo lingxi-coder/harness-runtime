@@ -35,7 +35,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! webrtc = { version = "0.20", default-features = false, features = ["runtime-smol"] }
+//! webrtc = { version = "0.21", default-features = false, features = ["runtime-smol"] }
 //! ```
 //!
 //! Additional runtimes (async-std, embassy) are on the roadmap behind the same
@@ -52,7 +52,7 @@
 //! | [`runtime`] | The [`Runtime`](crate::runtime::Runtime) trait, for supplying your own executor |
 //! | [`error`] | [`Error`](crate::error::Error) and [`Result`](crate::error::Result), re-exported so you never import from `rtc-shared` directly |
 //!
-//! Beyond the Quick Start below, the repository ships [35 runnable
+//! Beyond the Quick Start below, the repository ships [39 runnable
 //! examples](https://github.com/webrtc-rs/webrtc/tree/master/examples) covering data
 //! channels, media playback and recording, simulcast, ICE restart, and insertable streams.
 //!
@@ -114,6 +114,23 @@ pub mod media_stream;
 pub mod peer_connection;
 pub mod rtp_transceiver;
 pub mod runtime;
+
+/// Private supertrait used to seal the traits this library alone implements.
+///
+/// [`PeerConnection`](peer_connection::PeerConnection),
+/// [`DataChannel`](data_channel::DataChannel), [`RtpSender`](rtp_transceiver::RtpSender),
+/// [`RtpReceiver`](rtp_transceiver::RtpReceiver) and
+/// [`RtpTransceiver`](rtp_transceiver::RtpTransceiver) describe objects that only `webrtc`
+/// can construct, so downstream implementations would be meaningless. Sealing them lets us
+/// add methods in a minor release instead of a major one — see `docs/semver.md`.
+///
+/// Extension points deliberately left open — [`Runtime`](runtime::Runtime), the socket and
+/// timer traits, [`PeerConnectionEventHandler`](peer_connection::PeerConnectionEventHandler)
+/// and the application-provided track traits — do not have this supertrait.
+pub(crate) mod sealed {
+    /// Implemented only by this crate's concrete types.
+    pub trait Sealed {}
+}
 
 /// Error and Result types
 ///

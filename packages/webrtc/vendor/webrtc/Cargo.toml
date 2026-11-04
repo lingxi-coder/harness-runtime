@@ -10,9 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
+exclude = ["/Cargo.toml.orig", "/.cargo_vcs_info.json"]
 edition = "2024"
 name = "webrtc"
-version = "0.20.3"
+version = "0.21.1"
 authors = ["Rain Liu <yliu@webrtc.rs>"]
 build = false
 autolib = false
@@ -34,7 +35,12 @@ license = "MIT/Apache-2.0"
 repository = "https://github.com/webrtc-rs/webrtc"
 
 [features]
-default = ["runtime-tokio"]
+crypto-aws-lc-rs = ["rtc/crypto-aws-lc-rs"]
+crypto-ring = ["rtc/crypto-ring"]
+default = [
+    "runtime-tokio",
+    "crypto-ring",
+]
 runtime-mock = []
 runtime-smol = ["dep:smol"]
 runtime-tokio = ["dep:tokio"]
@@ -42,6 +48,11 @@ runtime-tokio = ["dep:tokio"]
 [lib]
 name = "webrtc"
 path = "src/lib.rs"
+
+[[example]]
+name = "bandwidth-estimation-from-disk"
+path = "examples/bandwidth-estimation-from-disk/bandwidth-estimation-from-disk.rs"
+bench = false
 
 [[example]]
 name = "broadcast"
@@ -136,6 +147,11 @@ path = "examples/mdns-query-and-gather/mdns-query-and-gather.rs"
 bench = false
 
 [[example]]
+name = "play-from-disk-fec"
+path = "examples/play-from-disk-fec/play-from-disk-fec.rs"
+bench = false
+
+[[example]]
 name = "play-from-disk-h26x"
 path = "examples/play-from-disk-h26x/play-from-disk-h26x.rs"
 bench = false
@@ -180,6 +196,11 @@ bench = false
 [[example]]
 name = "save-to-disk-av1"
 path = "examples/save-to-disk-av1/save-to-disk-av1.rs"
+bench = false
+
+[[example]]
+name = "save-to-disk-fec"
+path = "examples/save-to-disk-fec/save-to-disk-fec.rs"
 bench = false
 
 [[example]]
@@ -237,6 +258,14 @@ name = "bind_failures_skip_addresses"
 path = "tests/bind_failures_skip_addresses.rs"
 
 [[test]]
+name = "close_ends_event_streams"
+path = "tests/close_ends_event_streams.rs"
+
+[[test]]
+name = "close_releases_connection_with_transceivers"
+path = "tests/close_releases_connection_with_transceivers.rs"
+
+[[test]]
 name = "codec_negotiation"
 path = "tests/codec_negotiation.rs"
 
@@ -245,12 +274,24 @@ name = "configuration_test"
 path = "tests/configuration_test.rs"
 
 [[test]]
+name = "crypto_provider_features"
+path = "tests/crypto_provider_features.rs"
+
+[[test]]
+name = "crypto_provider_integration"
+path = "tests/crypto_provider_integration.rs"
+
+[[test]]
 name = "custom_runtime_interop"
 path = "tests/custom_runtime_interop.rs"
 
 [[test]]
 name = "data_channel_close_wakes_send"
 path = "tests/data_channel_close_wakes_send.rs"
+
+[[test]]
+name = "data_channel_dropped_handle_does_not_stall"
+path = "tests/data_channel_dropped_handle_does_not_stall.rs"
 
 [[test]]
 name = "data_channel_send_after_close"
@@ -267,6 +308,14 @@ path = "tests/data_channel_send_blocking.rs"
 [[test]]
 name = "data_channel_send_unbounded"
 path = "tests/data_channel_send_unbounded.rs"
+
+[[test]]
+name = "data_channel_slow_consumer"
+path = "tests/data_channel_slow_consumer.rs"
+
+[[test]]
+name = "data_channel_stall_does_not_block_media"
+path = "tests/data_channel_stall_does_not_block_media.rs"
 
 [[test]]
 name = "data_channel_survives_send_failure"
@@ -295,6 +344,10 @@ path = "tests/dedicated_reactor_data_channel.rs"
 [[test]]
 name = "dedicated_reactor_drop"
 path = "tests/dedicated_reactor_drop.rs"
+
+[[test]]
+name = "flexfec03_encoder_decoder"
+path = "tests/flexfec03_encoder_decoder.rs"
 
 [[test]]
 name = "ice_restart_by_rtc_interop"
@@ -369,8 +422,16 @@ name = "statistics"
 path = "tests/statistics.rs"
 
 [[test]]
+name = "transport_objects"
+path = "tests/transport_objects.rs"
+
+[[test]]
 name = "turn_credential_rotation"
 path = "tests/turn_credential_rotation.rs"
+
+[[test]]
+name = "turn_release_on_close"
+path = "tests/turn_release_on_close.rs"
 
 [[test]]
 name = "wildcard_bind_expands_interfaces"
@@ -403,7 +464,8 @@ features = ["log"]
 default-features = false
 
 [dependencies.rtc]
-version = "0.20.3"
+version = "0.21.1"
+default-features = false
 
 [dependencies.smol]
 version = "2.0.2"
@@ -459,5 +521,8 @@ version = "0.10.1"
 version = "1.0.150"
 
 [dev-dependencies.signal]
-version = "0.20.3"
+version = "0.21.1"
 package = "rtc-signal"
+
+[dev-dependencies.socket2]
+version = "0.6.5"

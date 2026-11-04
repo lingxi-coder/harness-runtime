@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/webrtc", "vendor/nix"]
 members = ["core", "test-server", "media", "mobile"]
 
 [patch.crates-io]

@@ -9,16 +9,17 @@ No constants are fabricated and no replacement WebRTC stack is introduced.
 
 # webrtc TURN close fix
 
-Source: crates.io webrtc 0.20.3 (MIT OR Apache-2.0), copied unchanged except
-three runtime files. The registry archive and original manifests identify the
-pinned version. Preserve the upstream license files.
+Source: crates.io webrtc 0.21.1 (MIT OR Apache-2.0), archive SHA-256
+`b621e736302bef784948cc8d8099fd0a8fdb5757693c80a344ffbe38c49387d2`.
+Preserve the upstream license files.
 
-- turn_relayer.rs: queue authenticated zero-lifetime Refresh before dropping an
-  allocation, as required by RFC 8656 section 8.
-- driver.rs: flush queued release packets before ending either shutdown path.
-- mod.rs: allow both shared and dedicated drivers up to 250 ms to finish before
-  aborting; this stays inside the embedding core's two-second close deadline.
+The previous 0.20.3 fork queued authenticated zero-lifetime TURN Refreshes,
+flushed them on both driver shutdown paths before dropping sockets, and gave
+both driver types up to 250 ms to finish. Upstream 0.21.1 contains those
+release and flush behaviors, including both runtime modes, via
+https://github.com/webrtc-rs/webrtc/pull/912. The only local source change
+retains the 250 ms shutdown bound instead of the upstream 100 ms bound, keeping
+this below the embedding core's two-second close deadline.
 
-This fixes fixed-source-port reconnect collisions and retained relay allocations;
-it does not add another transport or change ordinary SDP/DataChannel ownership.
-The ignored same-port Coturn regression exercises repeated real allocation/close.
+The ignored forced-relay and same-port Coturn regressions exercise relay-only
+negotiation, RTP, DataChannel, authentication failure and allocation cleanup.

@@ -16,6 +16,7 @@ version = "5.3.0-harness.1"
 authors = ["Tristan Hume <tristan@thume.ca>"]
 build = false
 exclude = [
+    "/Cargo.toml.orig",
     "testdata/*",
     "/scripts/*",
     "/Makefile",

@@ -48,13 +48,22 @@ check [Pion Examples](https://github.com/pion/webrtc/tree/master/examples#readme
   Simulcast streams. It then returns the media as 3 independent Tracks back to the sender.
 - ✅ [Swap Tracks](swap-tracks): The swap-tracks demonstrates how to swap multiple incoming tracks on a single outgoing
   track.
-- ✅ [RTCP Processing](rtcp-processing): The rtcp-processing example demonstrates how to create a custom
-  RtcpForwarderInterceptor using the derive macros. This allows access to media statistics and control information.
+- ✅ [RTCP Processing](rtcp-processing): The rtcp-processing example demonstrates how a custom RtcpForwarderInterceptor
+  narrows inbound RTCP to keyframe requests and marks them with `Attribute::DeliverToApplication`, which is what gets
+  them past the end of the chain to the application.
 - ✅ [Save to Disk AV1](save-to-disk-av1): The save-to-disk-av1 is a simple application that shows how to save a video to
   disk using AV1.
 - ✅ [Play from Disk Playlist Control](play-from-disk-playlist-control): Streams Opus pages from multi or single track
   Ogg containers, exposes the playlist over an SCTP DataChannel, and lets the browser hop between tracks while showing
   artist/title metadata parsed from OpusTags.
+- ✅ [Play from Disk FEC](play-from-disk-fec): The play-from-disk-fec demonstrates how to use FlexFEC-03 while sending
+  video to your Chrome-based browser from a file saved to disk. A custom interceptor stands at the wire and drops media
+  packets after they have been protected, so the browser recovers them from the repair stream.
+- ✅ [Save to Disk FEC](save-to-disk-fec): The save-to-disk-fec demonstrates how to use the FlexFEC-03 decoder while
+  receiving video from the play-from-disk-fec example, rebuilding the packets that example dropped and saving the
+  result to disk.
+- ✅ [Bandwidth Estimation From Disk](bandwidth-estimation-from-disk): bandwidth-estimation-from-disk demonstrates how to
+  use Bandwidth Estimation APIs, switching between three pre-encoded renditions as the estimate moves.
 
 ### Miscellaneous
 
@@ -78,12 +87,6 @@ check [Pion Examples](https://github.com/pion/webrtc/tree/master/examples#readme
   implementing the `Runtime` trait over `async-executor` + `async-io` — neither Tokio nor smol — and injecting it with
   `with_runtime`. Run it with `--no-default-features` to prove nothing in the library is hard-wired to a built-in
   runtime.
-
-### TODO
-
-- 🚧 [Play from Disk FEC](TODO): The play-from-disk-fec demonstrates how to use forward error correction (FlexFEC-03)
-  while sending video to your Chrome-based browser from files saved to disk. The example is designed to drop 40% of the
-  media packets, but browser will recover them using the FEC packets and the delivered packets.
 
 ### Not Applicable
 

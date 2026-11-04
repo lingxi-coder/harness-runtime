@@ -5,17 +5,24 @@
 ## What it shows
 
 1. Building a `PeerConnection` with the async `PeerConnectionBuilder` pattern used by the other async examples.
-2. Registering a custom `RtcpForwarderInterceptor` so RTCP is forwarded out of the interceptor chain.
-3. Receiving forwarded RTCP on the async side through `TrackRemoteEvent::OnRtcpPacket`.
-4. Printing RTCP packet headers and human-readable packet bodies as media flows.
+2. Adding a custom `RtcpForwarderInterceptor` that narrows inbound RTCP to keyframe requests — PLI and FIR — and marks
+   those with `Attribute::DeliverToApplication` so they reach the application instead of stopping at the end of the chain.
+4. Receiving those requests on the async side through `TrackRemoteEvent::OnRtcpPacket`.
+5. Printing their headers and human-readable bodies as media flows.
 
-## Why the custom interceptor is needed
+## Why a packet has to be marked
 
-By default, RTCP is consumed inside the interceptor chain for reports, NACK handling, congestion control, and similar
-logic.
-This example mirrors the sansio `rtc/examples/rtcp-processing` example by adding an outer interceptor that
-queues RTCP
-for application delivery before passing it down the normal chain.
+By default, inbound RTCP is consumed inside the interceptor chain for reports, NACK handling, congestion control, and
+similar logic — it is control traffic the interceptors act on, not media the application asked for. An interceptor that
+attaches `Attribute::DeliverToApplication` to a packet vouches for it, and that packet arrives alongside the media.
+
+Marking is the mechanism because a copy cannot outrun the end of the chain: a chain is a flat list, and what an
+interceptor emits rejoins that list *behind* itself, where the stage that ends the inbound RTCP path is still ahead of
+it. A marked packet finishes the walk normally and that stage reads the mark.
+
+Marking also keeps the judgement per-packet, which a chain-wide switch could not: this example vouches for keyframe
+requests and lets the receiver reports its own chain is acting on stop where they always did. This example mirrors the
+sansio `rtc/examples/rtcp-processing` example.
 
 ### Open rtcp-processing example page
 
@@ -69,5 +76,11 @@ println! ("{packet}");
 }
 ```
 
-Without the custom `RtcpForwarderInterceptor`, `TrackRemoteEvent::OnRtcpPacket` will not be emitted for normal inbound
-RTCP.
+Without an interceptor marking packets, `TrackRemoteEvent::OnRtcpPacket` is not emitted at all: the chain ends the
+inbound RTCP path before the application. With the `RtcpForwarderInterceptor`, only PLI and FIR arrive — this peer is
+receive-only in the jsfiddle above, so it is the one *sending* keyframe requests and will print nothing until something
+downstream asks it for one.
+
+To see every inbound RTCP packet instead, widen what the interceptor vouches for rather than removing it: mark each
+`Packet::Rtcp` unconditionally in its `handle_read`. Removing the line altogether leaves nothing to mark them, and the
+application sees no RTCP at all.

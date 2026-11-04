@@ -86,6 +86,34 @@ mod tests {
             JsonSchemaValidation::Invalid { .. }
         ));
     }
+    #[tokio::test]
+    async fn schema_patterns_use_ecmascript_whitespace() {
+        for (pattern, whitespace_valid) in [(r"^\s+$", true), (r"^\S+$", false)] {
+            let schema = NativeSchema::compile(&serde_json::json!({
+                "type": "string",
+                "pattern": pattern
+            }))
+            .unwrap();
+            for (character, expected) in [
+                ('\u{2000}', whitespace_valid),
+                ('\u{2028}', whitespace_valid),
+                ('a', !whitespace_valid),
+                ('\u{200b}', !whitespace_valid),
+            ] {
+                let input = serde_json::to_string(&character.to_string()).unwrap();
+                let result = schema
+                    .validate(&Utf16JsonProjection::parse(&input).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    matches!(result, JsonSchemaValidation::Valid),
+                    expected,
+                    "pattern {pattern}, U+{:04X}",
+                    character as u32
+                );
+            }
+        }
+    }
     #[test]
     fn invalid_and_external_schemas_fail_before_execution() {
         for schema in [

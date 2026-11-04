@@ -7,7 +7,7 @@ use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -126,8 +126,9 @@ async fn run_test() -> Result<()> {
     let rtc_local_addr = std_socket.local_addr()?;
     let rtc_socket = runtime.wrap_udp_socket(std_socket)?;
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Server)
+        .build();
 
     let mut rtc_media_engine = MediaEngine::default();
     rtc_media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -138,7 +139,7 @@ async fn run_test() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(rtc_media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
 
     let test_ssrc = 0x1020_3040;
     let output_track = MediaStreamTrack::new(
@@ -171,7 +172,7 @@ async fn run_test() -> Result<()> {
     rtc_pc.add_local_candidate(RTCIceCandidate::from(&candidate).to_json()?)?;
 
     let offer = rtc_pc.create_offer(None)?;
-    rtc_pc.set_local_description(offer.clone())?;
+    rtc_pc.set_local_description(Instant::now(), offer.clone())?;
 
     webrtc_pc
         .set_remote_description(rtc::peer_connection::sdp::RTCSessionDescription::offer(
@@ -186,9 +187,10 @@ async fn run_test() -> Result<()> {
         .local_description()
         .await
         .expect("local description should be set");
-    rtc_pc.set_remote_description(rtc::peer_connection::sdp::RTCSessionDescription::answer(
-        answer_with_cands.sdp,
-    )?)?;
+    rtc_pc.set_remote_description(
+        Instant::now(),
+        rtc::peer_connection::sdp::RTCSessionDescription::answer(answer_with_cands.sdp)?,
+    )?;
 
     let mut buf = vec![0u8; 2000];
     let mut rtc_connected = false;
@@ -248,7 +250,7 @@ async fn run_test() -> Result<()> {
                 },
                 payload: bytes::Bytes::from_static(&[0x90, 0x90, 0x90, 0x90]),
             };
-            let _ = rtp_sender.write_rtp(packet);
+            let _ = rtp_sender.write_rtp(Instant::now(), packet);
             sequence_number = sequence_number.wrapping_add(1);
         }
 

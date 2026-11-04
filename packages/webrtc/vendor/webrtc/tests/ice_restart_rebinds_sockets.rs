@@ -18,16 +18,17 @@
 use anyhow::Result;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use webrtc::data_channel::RTCDataChannelInit;
 use webrtc::peer_connection::{PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler};
-use webrtc::peer_connection::{
-    RTCIceConnectionState, RTCIceGatheringState, RTCPeerConnectionState,
-};
+use webrtc::peer_connection::{RTCIceGatheringState, RTCPeerConnectionState};
 use webrtc::runtime::{Sender, channel};
 
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::transport::{
+    RTCIceProtocol, RTCIceTcpCandidateType, RTCIceTransportState,
+};
 
 mod common;
 use common::{block_on, runtime, sleep, timeout};
@@ -35,22 +36,6 @@ use common::{block_on, runtime, sleep, timeout};
 struct Handler {
     gather_tx: Sender<()>,
     connected_tx: Sender<()>,
-    /// The most recent ICE connection state this peer reported.
-    ///
-    /// 0.20 has no accessor for it — the transport graph that exposes
-    /// `ice_transport().state()` arrives in 0.21 — so the state is captured here as the events
-    /// go by and read back by [`wait_ice_connected`].
-    ice_state: Mutex<RTCIceConnectionState>,
-}
-
-impl Handler {
-    fn new(gather_tx: Sender<()>, connected_tx: Sender<()>) -> Arc<Self> {
-        Arc::new(Self {
-            gather_tx,
-            connected_tx,
-            ice_state: Mutex::new(RTCIceConnectionState::New),
-        })
-    }
 }
 
 #[async_trait::async_trait]
@@ -66,90 +51,66 @@ impl PeerConnectionEventHandler for Handler {
             let _ = self.connected_tx.try_send(());
         }
     }
-
-    async fn on_ice_connection_state_change(&self, state: RTCIceConnectionState) {
-        *self.ice_state.lock().unwrap() = state;
-    }
-}
-
-/// The candidate attributes of a session description, one `Vec` of whitespace-separated fields
-/// per `a=candidate:` line.
-///
-/// 0.20 has no way to ask a `PeerConnection` for its local candidates, so the SDP it just
-/// published is the observation point. That is weaker than reading the transport graph — it shows
-/// what was *advertised* rather than what ICE will check over — but for this suite the two
-/// coincide: a candidate is only advertised because a socket was bound for it, which is exactly
-/// the property under test.
-///
-/// The `a=end-of-candidates` line also contains "candidate", hence matching on the full
-/// `a=candidate:` prefix rather than a substring.
-fn candidate_fields(sdp: &str) -> impl Iterator<Item = Vec<&str>> {
-    sdp.lines()
-        .filter_map(|line| line.trim().strip_prefix("a=candidate:"))
-        .map(|rest| rest.split_whitespace().collect())
-}
-
-/// The port of a candidate line: `<foundation> <component> <transport> <priority> <ip> <port> …`.
-fn candidate_port(fields: &[&str]) -> Option<u16> {
-    fields.get(5)?.parse().ok()
-}
-
-/// The value of a candidate's `tcptype` extension, if it carries one.
-fn candidate_tcp_type<'a>(fields: &[&'a str]) -> Option<&'a str> {
-    fields
-        .windows(2)
-        .find(|pair| pair[0].eq_ignore_ascii_case("tcptype"))
-        .map(|pair| pair[1])
-}
-
-/// The ports a peer is currently advertising, keeping only the candidates `keep` accepts.
-async fn advertised_ports(
-    pc: &impl PeerConnection,
-    keep: impl Fn(&[&str]) -> bool,
-) -> Result<BTreeSet<u16>> {
-    let desc = pc
-        .local_description()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("no local description to read candidates from"))?;
-    Ok(candidate_fields(&desc.sdp)
-        .filter(|fields| keep(fields))
-        .filter_map(|fields| candidate_port(&fields))
-        .collect())
 }
 
 /// The local candidate ports the restarting peer is currently advertising.
+///
+/// Read through the transport graph rather than by parsing SDP, so this asserts what ICE will
+/// actually check over.
 async fn local_ports(pc: &impl PeerConnection) -> Result<BTreeSet<u16>> {
-    advertised_ports(pc, |_| true).await
+    let ice = pc
+        .sctp()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("SCTP not negotiated"))?
+        .transport()
+        .ice_transport();
+    Ok(ice
+        .get_local_candidates()
+        .await?
+        .iter()
+        .map(|candidate| candidate.port)
+        .collect())
 }
 
 /// The ports of the peer's passive TCP candidates — i.e. the ports its ICE-TCP listeners are
 /// bound to. Active TCP candidates are excluded: they carry the placeholder discard port 9, not a
 /// listener port, so they would never change and would mask a listener that was not rebound.
 async fn tcp_listener_ports(pc: &impl PeerConnection) -> Result<BTreeSet<u16>> {
-    advertised_ports(pc, |fields| {
-        fields.get(2).is_some_and(|t| t.eq_ignore_ascii_case("tcp"))
-            && candidate_tcp_type(fields).is_some_and(|t| t.eq_ignore_ascii_case("passive"))
-    })
-    .await
+    let ice = pc
+        .sctp()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("SCTP not negotiated"))?
+        .transport()
+        .ice_transport();
+    Ok(ice
+        .get_local_candidates()
+        .await?
+        .iter()
+        .filter(|candidate| {
+            candidate.protocol == RTCIceProtocol::Tcp
+                && candidate.tcp_type == RTCIceTcpCandidateType::Passive
+        })
+        .map(|candidate| candidate.port)
+        .collect())
 }
 
 /// The ports of the peer's UDP candidates — i.e. the ports its UDP sockets are bound to. Kept
 /// separate from [`local_ports`] because that set also contains the discard port 9 of the active
 /// TCP candidate, which never changes and would hide a socket that was not rebound.
 async fn udp_socket_ports(pc: &impl PeerConnection) -> Result<BTreeSet<u16>> {
-    advertised_ports(pc, |fields| {
-        fields.get(2).is_some_and(|t| t.eq_ignore_ascii_case("udp"))
-    })
-    .await
-}
-
-/// A [`SettingEngine`] with the ICE-restart rebind opt-in set as given.
-///
-/// 0.20 configures the engine through setters rather than 0.21's `SettingEngineBuilder`.
-fn setting_engine(discard_local_candidates: bool) -> SettingEngine {
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_discard_local_candidates_during_ice_restart(discard_local_candidates);
-    setting_engine
+    let ice = pc
+        .sctp()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("SCTP not negotiated"))?
+        .transport()
+        .ice_transport();
+    Ok(ice
+        .get_local_candidates()
+        .await?
+        .iter()
+        .filter(|candidate| candidate.protocol == RTCIceProtocol::Udp)
+        .map(|candidate| candidate.port)
+        .collect())
 }
 
 /// The number of file descriptors this process holds open.
@@ -165,14 +126,16 @@ fn open_fd_count() -> Option<usize> {
         .find_map(|dir| std::fs::read_dir(dir).ok().map(|entries| entries.count()))
 }
 
-async fn wait_ice_connected(handler: &Handler) -> Result<()> {
+async fn wait_ice_connected(pc: &impl PeerConnection) -> Result<()> {
     for _ in 0..200 {
-        let state = *handler.ice_state.lock().unwrap();
-        if matches!(
-            state,
-            RTCIceConnectionState::Connected | RTCIceConnectionState::Completed
-        ) {
-            return Ok(());
+        if let Some(sctp) = pc.sctp().await {
+            let state = sctp.transport().ice_transport().state().await?;
+            if matches!(
+                state,
+                RTCIceTransportState::Connected | RTCIceTransportState::Completed
+            ) {
+                return Ok(());
+            }
         }
         sleep(Duration::from_millis(50)).await;
     }
@@ -187,18 +150,22 @@ async fn ice_restart_rebinds(discard_local_candidates: bool) -> Result<()> {
     let (b_gather_tx, mut b_gather_rx) = channel::<()>(1);
     let (b_conn_tx, mut _b_conn_rx) = channel::<()>(1);
 
-    // Held past `build()` so the ICE state each peer reports stays readable.
-    let a_handler = Handler::new(a_gather_tx, a_conn_tx);
-    let b_handler = Handler::new(b_gather_tx, b_conn_tx);
-
     // Both peers opt in. The offerer arms explicitly at `restart_ice()`; the answerer is never
     // told a restart is coming and has to notice the core restarting while it applies the offer.
     // `:0` is what makes either rebind observable.
+    let setting_engine = || {
+        SettingEngineBuilder::new()
+            .with_discard_local_candidates_during_ice_restart(discard_local_candidates)
+            .build()
+    };
 
     let pc_a = PeerConnectionBuilder::new()
-        .with_handler(a_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: a_gather_tx,
+            connected_tx: a_conn_tx,
+        }))
         .with_runtime(runtime.clone())
-        .with_setting_engine(setting_engine(discard_local_candidates))
+        .with_setting_engine(setting_engine())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .build()
         .await?;
@@ -213,9 +180,12 @@ async fn ice_restart_rebinds(discard_local_candidates: bool) -> Result<()> {
     let offer_sdp = pc_a.local_description().await.expect("offer");
 
     let pc_b = PeerConnectionBuilder::new()
-        .with_handler(b_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: b_gather_tx,
+            connected_tx: b_conn_tx,
+        }))
         .with_runtime(runtime.clone())
-        .with_setting_engine(setting_engine(discard_local_candidates))
+        .with_setting_engine(setting_engine())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .build()
         .await?;
@@ -270,8 +240,8 @@ async fn ice_restart_rebinds(discard_local_candidates: bool) -> Result<()> {
         );
         // Rebinding is for recovery, not novelty: the restarted generation has to connect over
         // the new sockets, on both sides.
-        wait_ice_connected(&a_handler).await?;
-        wait_ice_connected(&b_handler).await?;
+        wait_ice_connected(&pc_a).await?;
+        wait_ice_connected(&pc_b).await?;
 
         // A plain renegotiation afterwards must NOT rebind. This is the case that catches
         // over-arming: applying the *answer* to a restart carries the peer's new credentials, so
@@ -337,20 +307,23 @@ async fn ice_restart_rebinds_with_static_local_credentials() -> Result<()> {
     let (b_gather_tx, mut b_gather_rx) = channel::<()>(1);
     let (b_conn_tx, mut _b_conn_rx) = channel::<()>(1);
 
-    // Held past `build()` so the ICE state each peer reports stays readable.
-    let a_handler = Handler::new(a_gather_tx, a_conn_tx);
-    let b_handler = Handler::new(b_gather_tx, b_conn_tx);
-
     // pc_a pins its credentials and answers; pc_b keeps random ones and initiates the restart.
-    let mut pinned = setting_engine(true);
-    pinned.set_ice_credentials(
-        "fixedufrag".to_owned(),
-        "fixedpasswordlongenough".to_owned(),
-    );
-    let random = setting_engine(true);
+    let pinned = SettingEngineBuilder::new()
+        .with_discard_local_candidates_during_ice_restart(true)
+        .with_ice_credentials(
+            "fixedufrag".to_owned(),
+            "fixedpasswordlongenough".to_owned(),
+        )
+        .build();
+    let random = SettingEngineBuilder::new()
+        .with_discard_local_candidates_during_ice_restart(true)
+        .build();
 
     let pc_a = PeerConnectionBuilder::new()
-        .with_handler(a_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: a_gather_tx,
+            connected_tx: a_conn_tx,
+        }))
         .with_runtime(runtime.clone())
         .with_setting_engine(pinned)
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
@@ -367,7 +340,10 @@ async fn ice_restart_rebinds_with_static_local_credentials() -> Result<()> {
     let offer_sdp = pc_a.local_description().await.expect("offer");
 
     let pc_b = PeerConnectionBuilder::new()
-        .with_handler(b_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: b_gather_tx,
+            connected_tx: b_conn_tx,
+        }))
         .with_runtime(runtime.clone())
         .with_setting_engine(random)
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
@@ -464,14 +440,17 @@ async fn ice_restart_rebinds_a_fixed_port() -> Result<()> {
     let (b_gather_tx, mut b_gather_rx) = channel::<()>(1);
     let (b_conn_tx, mut _b_conn_rx) = channel::<()>(1);
 
-    // Held past `build()` so the ICE state each peer reports stays readable.
-    let a_handler = Handler::new(a_gather_tx, a_conn_tx);
-    let b_handler = Handler::new(b_gather_tx, b_conn_tx);
+    let setting_engine = SettingEngineBuilder::new()
+        .with_discard_local_candidates_during_ice_restart(true)
+        .build();
 
     let pc_a = PeerConnectionBuilder::new()
-        .with_handler(a_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: a_gather_tx,
+            connected_tx: a_conn_tx,
+        }))
         .with_runtime(runtime.clone())
-        .with_setting_engine(setting_engine(true))
+        .with_setting_engine(setting_engine)
         .with_udp_addrs(vec![fixed.to_string()])
         .build()
         .await?;
@@ -486,7 +465,10 @@ async fn ice_restart_rebinds_a_fixed_port() -> Result<()> {
     let offer_sdp = pc_a.local_description().await.expect("offer");
 
     let pc_b = PeerConnectionBuilder::new()
-        .with_handler(b_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: b_gather_tx,
+            connected_tx: b_conn_tx,
+        }))
         .with_runtime(runtime.clone())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .build()
@@ -525,10 +507,37 @@ async fn ice_restart_rebinds_a_fixed_port() -> Result<()> {
         Err(_) => anyhow::bail!("no re-gather after restart: the rebind failed"),
     }
 
-    let ports = local_ports(&pc_a).await?;
+    // Polled rather than read once, because "not yet" and "never" look identical in a single
+    // sample and only one of them is a bug.
+    //
+    // The `Complete` above is delivered through a capacity-1 `try_send`: a signal that arrives
+    // while one is already queued is dropped, so a stale one from the first generation can be what
+    // `recv` returns. Combined with `discard_local_candidates_during_ice_restart`, which empties
+    // the set until the new generation gathers, that made an early read report an empty set — a
+    // failure indistinguishable from the rebind never reclaiming the port.
+    //
+    // Waiting cannot mask the bug this test is for. A rebind that fails with `EADDRINUSE` never
+    // produces the port, so this still fails; it just takes the timeout to say so, and says which
+    // of the two happened.
+    let deadline = Duration::from_secs(5);
+    let started = Instant::now();
+    let ports = loop {
+        let ports = local_ports(&pc_a).await?;
+        if ports.contains(&fixed.port()) {
+            break ports;
+        }
+        if started.elapsed() >= deadline {
+            break ports;
+        }
+        runtime.sleep(Duration::from_millis(50)).await;
+    };
+
     assert!(
         ports.contains(&fixed.port()),
-        "the configured fixed port is bound again after the rebind: {ports:?}"
+        "the rebind did not reclaim the configured fixed port {} within {deadline:?}; \
+         the peer is advertising {ports:?}. An empty set here means the new sockets never bound \
+         — the old ones were still open, which is what this test exists to catch.",
+        fixed.port()
     );
 
     pc_a.close().await?;
@@ -554,14 +563,19 @@ async fn ice_restart_rebinds_udp_and_tcp() -> Result<()> {
     let (b_gather_tx, mut b_gather_rx) = channel::<()>(1);
     let (b_conn_tx, mut _b_conn_rx) = channel::<()>(1);
 
-    // Held past `build()` so the ICE state each peer reports stays readable.
-    let a_handler = Handler::new(a_gather_tx, a_conn_tx);
-    let b_handler = Handler::new(b_gather_tx, b_conn_tx);
+    let setting_engine = || {
+        SettingEngineBuilder::new()
+            .with_discard_local_candidates_during_ice_restart(true)
+            .build()
+    };
 
     let pc_a = PeerConnectionBuilder::new()
-        .with_handler(a_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: a_gather_tx,
+            connected_tx: a_conn_tx,
+        }))
         .with_runtime(runtime.clone())
-        .with_setting_engine(setting_engine(true))
+        .with_setting_engine(setting_engine())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .with_tcp_addrs(vec!["127.0.0.1:0".to_string()])
         .build()
@@ -577,9 +591,12 @@ async fn ice_restart_rebinds_udp_and_tcp() -> Result<()> {
     let offer_sdp = pc_a.local_description().await.expect("offer");
 
     let pc_b = PeerConnectionBuilder::new()
-        .with_handler(b_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: b_gather_tx,
+            connected_tx: b_conn_tx,
+        }))
         .with_runtime(runtime.clone())
-        .with_setting_engine(setting_engine(true))
+        .with_setting_engine(setting_engine())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .with_tcp_addrs(vec!["127.0.0.1:0".to_string()])
         .build()
@@ -644,7 +661,7 @@ async fn ice_restart_rebinds_udp_and_tcp() -> Result<()> {
     );
 
     // The UDP path still has to work afterwards — rebinding TCP must not cost the connection.
-    wait_ice_connected(&a_handler).await?;
+    wait_ice_connected(&pc_a).await?;
 
     pc_a.close().await?;
     pc_b.close().await?;
@@ -678,14 +695,19 @@ async fn ice_restart_does_not_leak_sockets() -> Result<()> {
     let (b_gather_tx, mut b_gather_rx) = channel::<()>(1);
     let (b_conn_tx, mut _b_conn_rx) = channel::<()>(1);
 
-    // Held past `build()` so the ICE state each peer reports stays readable.
-    let a_handler = Handler::new(a_gather_tx, a_conn_tx);
-    let b_handler = Handler::new(b_gather_tx, b_conn_tx);
+    let setting_engine = || {
+        SettingEngineBuilder::new()
+            .with_discard_local_candidates_during_ice_restart(true)
+            .build()
+    };
 
     let pc_a = PeerConnectionBuilder::new()
-        .with_handler(a_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: a_gather_tx,
+            connected_tx: a_conn_tx,
+        }))
         .with_runtime(runtime.clone())
-        .with_setting_engine(setting_engine(true))
+        .with_setting_engine(setting_engine())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .with_tcp_addrs(vec!["127.0.0.1:0".to_string()])
         .build()
@@ -701,9 +723,12 @@ async fn ice_restart_does_not_leak_sockets() -> Result<()> {
     let offer_sdp = pc_a.local_description().await.expect("offer");
 
     let pc_b = PeerConnectionBuilder::new()
-        .with_handler(b_handler.clone())
+        .with_handler(Arc::new(Handler {
+            gather_tx: b_gather_tx,
+            connected_tx: b_conn_tx,
+        }))
         .with_runtime(runtime.clone())
-        .with_setting_engine(setting_engine(true))
+        .with_setting_engine(setting_engine())
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .with_tcp_addrs(vec!["127.0.0.1:0".to_string()])
         .build()
@@ -755,7 +780,7 @@ async fn ice_restart_does_not_leak_sockets() -> Result<()> {
 
     // The connection has to survive all of it; a "leak-free" driver that dropped the transport
     // would pass the count and fail here.
-    wait_ice_connected(&a_handler).await?;
+    wait_ice_connected(&pc_a).await?;
 
     pc_a.close().await?;
     pc_b.close().await?;

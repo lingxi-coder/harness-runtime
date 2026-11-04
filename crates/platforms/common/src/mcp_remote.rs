@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
 use lingxi_core::host::mcp_result::CancellationToken;
 use lingxi_core::host::mcp_result::{
-    JsonrpcMcpResultIo, McpInputRequiredOptions, McpResultError, connection_error_diagnostic,
-    drive_modern_request, result_error_diagnostic,
+    connection_error_diagnostic, drive_modern_request, result_error_diagnostic, JsonrpcMcpResultIo,
+    McpInputRequiredOptions, McpResultError,
 };
 use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError, McpIconDto,
@@ -1673,7 +1673,7 @@ pub fn directory_read_capability(capabilities: Option<&Utf16JsonProjection>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{RawResourceTemplate, RawTool, bounded_probe_timeout_ms};
+    use super::{bounded_probe_timeout_ms, RawResourceTemplate, RawTool};
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
     fn source(value: &serde_json::Value) -> Utf16JsonProjection {
@@ -1722,16 +1722,15 @@ mod tests {
             dto.icons[0].extra.string_at("/vendor~1accent"),
             Some("blue")
         );
-        assert!(
-            dto.meta
-                .as_ref()
-                .unwrap()
-                .semantically_eq(&source(&serde_json::json!({
-                    "anthropic/searchHint": "records lookup",
-                    "anthropic/alwaysLoad": true,
-                    "vendor/opaque": { "keep": [1, 2, 3] }
-                })))
-        );
+        assert!(dto
+            .meta
+            .as_ref()
+            .unwrap()
+            .semantically_eq(&source(&serde_json::json!({
+                "anthropic/searchHint": "records lookup",
+                "anthropic/alwaysLoad": true,
+                "vendor/opaque": { "keep": [1, 2, 3] }
+            }))));
     }
 
     #[test]

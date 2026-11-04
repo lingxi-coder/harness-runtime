@@ -4173,7 +4173,11 @@ pub enum ResponseTimingEvent {
 #[async_trait]
 pub trait OutputStream: Send + Sync {
     /// Observe selected accounts and sanitized aggregate routing failures.
-    async fn emit_provider_account_routing(&self, _event: &crate::host::provider_accounts::ProviderAccountRoutingEvent) {}
+    async fn emit_provider_account_routing(
+        &self,
+        _event: &crate::host::provider_accounts::ProviderAccountRoutingEvent,
+    ) {
+    }
     /// Whether this sink observes raw model-output progress for trusted host UI.
     /// This observation is separate from published messages and token accounting.
     fn wants_model_output_progress(&self) -> bool {
