@@ -40,6 +40,7 @@ PREFIX = r'''
 #include <sys/types.h>
 typedef struct { int initialized; } mbedtls_ssl_context;
 typedef struct { void *data; } git_cert_x509;
+typedef struct { int klass; const char *message; } git_error;
 typedef struct git_stream git_stream;
 struct git_stream {
  int version, encrypted, proxy_support;
@@ -57,6 +58,15 @@ struct git_stream {
 #define GIT_ERROR_CHECK_ALLOC(x) do { if (!(x)) return -1; } while (0)
 #define git_error_set(...) ((void)0)
 static int attempts, fail_at, outstanding, closes, frees, setup_failure, socket_failure;
+static int teardown_failure, close_failure;
+static git_error diagnostic, saved_error;
+static void set_diagnostic(int klass, const char *message) {
+ diagnostic.klass = klass; diagnostic.message = message;
+}
+static int git_error_save(git_error **out) {
+ saved_error = diagnostic; *out = &saved_error; return 0;
+}
+static int git_error_restore(git_error *error) { diagnostic = *error; return 0; }
 static int mbedtls_config;
 static void *allocate(size_t n) {
  if (++attempts == fail_at) return NULL;
@@ -75,7 +85,11 @@ static void mbedtls_ssl_free(mbedtls_ssl_context *s) { assert(s && s->initialize
 static int mbedtls_ssl_setup(mbedtls_ssl_context *s, void *config) {
  (void)config; assert(s->initialized); return setup_failure ? -1 : 0;
 }
-static int socket_close(git_stream *s) { assert(s); ++closes; return 0; }
+static int socket_close(git_stream *s) {
+ assert(s); ++closes;
+ if (close_failure) set_diagnostic(2, "socket close");
+ return close_failure;
+}
 static void socket_free(git_stream *s) { assert(s); ++frees; free(s); }
 static int git_stream_close(git_stream *s) { return s->close(s); }
 static void git_stream_free(git_stream *s) { if (s) s->free(s); }
@@ -98,13 +112,19 @@ static ssize_t mbedtls_stream_read(git_stream *s, void *p, size_t n) {
 static ssize_t mbedtls_stream_write(git_stream *s, const char *p, size_t n, int f) {
  (void)s; (void)p; (void)n; (void)f; return 0;
 }
-static int ssl_teardown(mbedtls_ssl_context *s) { (void)s; return 0; }
+static int ssl_teardown(mbedtls_ssl_context *s) {
+ (void)s;
+ if (teardown_failure) set_diagnostic(GIT_ERROR_SSL, "TLS teardown");
+ return teardown_failure;
+}
 '''
 
 CASES = r'''
 static void reset(int allocation, int setup) {
  assert(outstanding == 0);
  attempts = closes = frees = socket_failure = 0;
+ teardown_failure = close_failure = 0;
+ diagnostic.klass = 0; diagnostic.message = NULL;
  fail_at = allocation; setup_failure = setup;
 }
 int main(void) {
@@ -139,6 +159,29 @@ int main(void) {
  reset(0, 0); socket_failure = 1; out = &sentinel;
  assert(git_mbedtls_stream_new(&out, "example.test", "443") == -7);
  assert(out == &sentinel && closes == 0 && frees == 0 && outstanding == 0);
+ /* TLS shutdown failure must still release an owned socket. Preserve the
+    TLS error when the socket's close reports a second error. */
+ for (int owned = 0; owned <= 1; ++owned) {
+  for (int failure = 0; failure <= 1; ++failure) {
+   reset(0, 0); input = socket_create(); out = NULL;
+   assert(mbedtls_stream_wrap(&out, input, "example.test", owned) == 0);
+   ((mbedtls_stream *)out)->connected = true;
+   teardown_failure = -5; close_failure = failure ? -7 : 0;
+   assert(out->close(out) == -1);
+   assert(diagnostic.klass == GIT_ERROR_SSL);
+   assert(strcmp(diagnostic.message, "TLS teardown") == 0);
+   assert(!((mbedtls_stream *)out)->connected && closes == owned);
+   out->free(out);
+   assert(frees == owned && outstanding == 0);
+   if (!owned) { git_stream_close(input); git_stream_free(input); }
+  }
+ }
+ reset(0, 0); out = NULL;
+ assert(git_mbedtls_stream_new(&out, "example.test", "443") == 0);
+ ((mbedtls_stream *)out)->connected = true; close_failure = -7;
+ assert(out->close(out) == -7); out->free(out);
+ assert(diagnostic.klass == 2 && strcmp(diagnostic.message, "socket close") == 0);
+ assert(closes == 1 && frees == 1 && outstanding == 0);
  return 0;
 }
 '''

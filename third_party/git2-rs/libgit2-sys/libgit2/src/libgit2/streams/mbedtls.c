@@ -12,6 +12,7 @@
 #include <ctype.h>
 
 #include "runtime.h"
+#include "errors.h"
 #include "stream.h"
 #include "streams/socket.h"
 #include "git2/transport.h"
@@ -329,14 +330,26 @@ static ssize_t mbedtls_stream_read(git_stream *stream, void *data, size_t len)
 static int mbedtls_stream_close(git_stream *stream)
 {
 	mbedtls_stream *st = (mbedtls_stream *) stream;
+	git_error *last_error = NULL;
 	int ret = 0;
 
-	if (st->connected && (ret = ssl_teardown(st->ssl)) != 0)
-		return -1;
+	if (st->connected && ssl_teardown(st->ssl) != 0)
+		ret = -1;
 
 	st->connected = false;
 
-	return st->owned ? git_stream_close(st->io) : 0;
+	if (st->owned) {
+		int close_ret;
+		if (ret)
+			git_error_save(&last_error);
+		close_ret = git_stream_close(st->io);
+		if (last_error)
+			git_error_restore(last_error);
+		if (!ret)
+			ret = close_ret;
+	}
+
+	return ret;
 }
 
 static void mbedtls_stream_free(git_stream *stream)
