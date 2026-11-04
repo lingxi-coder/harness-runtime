@@ -1470,6 +1470,10 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
     assert!(recovery.starts_with("HTTP/1.1 200 OK"));
     assert!(recovery.contains("Service-Worker-Allowed: /"));
     assert!(recovery.contains(&format!("\"appId\":\"{id}\"")));
+    assert!(recovery.contains(&format!(
+        "\"productName\":{}",
+        serde_json::to_string(branding::PRODUCT_NAME).unwrap()
+    )));
     assert!(recovery.contains("runId"));
     assert!(recovery.contains("lingxi-local-app-agui-"));
     assert!(recovery.contains("record.runId"));

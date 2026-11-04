@@ -1794,7 +1794,7 @@ test('iOS wake reconnects an accepted cross-tab run only when its full identity 
 
 test('iOS offline recovery offers native review only for waking records',
   {timeout: 5000}, async () => {
-  const config = {appId: 'app-one', revision: 3, hostPlatform: 'ios'};
+  const config = {appId: 'app-one', revision: 3, hostPlatform: 'ios', productName: 'Host Product'};
   const workerListeners = new Map();
   let recoveryHtml;
   const self = {
@@ -1851,6 +1851,7 @@ test('iOS offline recovery offers native review only for waking records',
     const links = row.children.filter(child => child && typeof child === 'object' && child.tag === 'a');
     if (state === 'waking') {
       assert.equal(links.length, 1);
+      assert.equal(links[0].textContent, ' Review this run in Host Product');
       const link = new URL(links[0].href);
       assert.equal(link.protocol, 'lingxi:');
       assert.equal(link.searchParams.get('review'), 'agent');

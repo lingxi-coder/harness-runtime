@@ -1231,7 +1231,8 @@ where
         let config = serde_json::json!({
             "appId": host.app_id,
             "revision": host.revision,
-            "hostPlatform": host.platform
+            "hostPlatform": host.platform,
+            "productName": branding::PRODUCT_NAME
         });
         let script = include_str!("recovery_sw.js")
             .replace("__LOCAL_APP_RECOVERY_CONFIGURATION__", &config.to_string());

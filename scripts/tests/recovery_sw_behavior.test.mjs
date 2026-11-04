@@ -4,7 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const recoverySource = readFileSync(new URL('../../crates/runtime/src/mobile/unified_local_apps/recovery_sw.js', import.meta.url), 'utf8');
-const recoveryConfig = {appId: 'diagnostic-app', revision: 17, hostPlatform: 'ios'};
+const recoveryConfig = {appId: 'diagnostic-app', revision: 17, hostPlatform: 'ios', productName: 'Host Product'};
 const origin = 'https://local-app.example';
 const recoveryUrl = `${origin}/__lingxi-offline-recovery`;
 
@@ -60,7 +60,7 @@ function trackedSignal() {
   return {controller, signal, listenerCount: () => active.size};
 }
 
-function createWorker(fetchImpl = async () => new Response('upstream ok', {status: 200}), {clock} = {}) {
+function createWorker(fetchImpl = async () => new Response('upstream ok', {status: 200}), {clock, config = recoveryConfig} = {}) {
   const listeners = new Map();
   const cached = new Map();
   const cache = {
@@ -73,7 +73,7 @@ function createWorker(fetchImpl = async () => new Response('upstream ok', {statu
     addEventListener(type, listener) { listeners.set(type, listener); },
     skipWaiting: async () => {}
   };
-  vm.runInNewContext(recoverySource.replaceAll('__LOCAL_APP_RECOVERY_CONFIGURATION__', JSON.stringify(recoveryConfig)), {
+  vm.runInNewContext(recoverySource.replaceAll('__LOCAL_APP_RECOVERY_CONFIGURATION__', JSON.stringify(config)), {
     self,
     caches: {open: async () => cache},
     fetch: (request, options) => fetchImpl(request, options),
@@ -156,6 +156,28 @@ function assertDiagnostic(html, reason, readyMarker) {
     reason === 'network_error' ? 'Network error' : reason ? `HTTP ${reason}` : 'Not available for this cached page.');
   assert.equal(pageNodes.get('#recovery-ready-marker').textContent, reason ? String(readyMarker) : 'Unavailable');
 }
+
+test('recovery document escapes the host product name in HTML and script', async () => {
+  const productName = 'Atlas </script><img src=x> & "Host"';
+  const worker = createWorker(undefined, {config: {...recoveryConfig, productName}});
+  await worker.install();
+  const html = await cachedRecoveryDocument(worker);
+  assert.match(html, /<title>Atlas &lt;\/script&gt;&lt;img src=x&gt; &amp; &quot;Host&quot; app paused<\/title>/u);
+  assert.equal((html.match(/<script>/gu) || []).length, 1);
+  assert.equal((html.match(/<\/script>/gu) || []).length, 1);
+  assert.doesNotMatch(html, /<img src=x>/u);
+  const pageScript = html.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
+  assert.ok(pageScript);
+  const nodes = new Map([
+    ['#recovery-diagnostic', {dataset: {reason: '', readyMarker: 'unavailable'}}],
+    ...['return', 'recovery-app-id', 'recovery-revision', 'recovery-reason',
+      'recovery-ready-marker', 'runs', 'status'].map(name => [`#${name}`, {}])
+  ]);
+  const context = vm.createContext({document: {querySelector: selector => nodes.get(selector)}});
+  assert.equal(vm.runInContext(`${pageScript}\nconfig.productName`, context), productName);
+  assert.throws(() => createWorker(undefined, {config: {...recoveryConfig, productName: null}}),
+    /must provide a product name/);
+});
 
 test('HTTP failures show only their numeric status and leave the cached recovery document generic', async () => {
   for (const status of [403, 404, 410, 503]) {
