@@ -53,9 +53,9 @@ class MbedtlsBuildEnvironmentTest(unittest.TestCase):
             )
             (library / "fixture.c").write_text(
                 '#include "mbedtls/fixture.h"\n'
-                "#ifndef LINGXI_TEST_VALUE\n#define LINGXI_TEST_VALUE 0\n#endif\n"
+                "#ifndef FIXTURE_VALUE\n#define FIXTURE_VALUE 0\n#endif\n"
                 "unsigned int mbedtls_version_get_number(void) { return 0; }\n"
-                "int mbedtls_fixture_value(void) { return LINGXI_TEST_VALUE; }\n"
+                "int mbedtls_fixture_value(void) { return FIXTURE_VALUE; }\n"
                 "int fixture_crypto_size(void) { return sizeof(struct fixture_abi); }\n"
             )
             (consumer / "Cargo.toml").write_text(
@@ -110,12 +110,12 @@ class MbedtlsBuildEnvironmentTest(unittest.TestCase):
                 self.assertEqual(actual, " ".join(map(str, [expected] + [layout] * 4)))
                 return result.stdout + result.stderr
 
-            environment["CFLAGS"] = "-DLINGXI_TEST_VALUE=1"
+            environment["CFLAGS"] = "-DFIXTURE_VALUE=1"
             build(1)
             self.assertIn("Fresh mbedtls-sys", build(1))
-            environment["CFLAGS"] = "-DLINGXI_TEST_VALUE=2"
+            environment["CFLAGS"] = "-DFIXTURE_VALUE=2"
             build(2)
-            environment["CFLAGS_" + normalized] = "-DLINGXI_TEST_VALUE=3"
+            environment["CFLAGS_" + normalized] = "-DFIXTURE_VALUE=3"
             build(3)
             del environment["CFLAGS_" + normalized]
             build(2)
