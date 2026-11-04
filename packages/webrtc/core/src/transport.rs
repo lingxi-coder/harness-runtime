@@ -358,10 +358,8 @@ impl Transport {
                     DataChannelEvent::OnMessage(message) => {
                         if let Err(error) = message_tx.try_send(message) {
                             // Closing is observable; never silently lose an Agent message.
-                            // The upstream driver also drops events once its own 256-event
-                            // queue fills, so this loop must keep draining it: awaiting
-                            // here would turn backpressure into silent loss. Senders pace
-                            // themselves with protocol acknowledgements.
+                            // Do not wait indefinitely when our own bounded queue is full.
+                            // Senders pace themselves with protocol acknowledgements.
                             overflow_flag.store(
                                 matches!(error, tokio::sync::mpsc::error::TrySendError::Full(_)),
                                 Ordering::Release,
@@ -372,6 +370,12 @@ impl Transport {
                     }
                     DataChannelEvent::OnBufferedAmountLow
                     | DataChannelEvent::OnBufferedAmountHigh => {}
+                    _ => {
+                        // A future event may affect channel state; stop rather than
+                        // continuing with an event we do not understand.
+                        let _ = observed.close().await;
+                        break;
+                    }
                 }
             }
             sender.send_replace(false);
