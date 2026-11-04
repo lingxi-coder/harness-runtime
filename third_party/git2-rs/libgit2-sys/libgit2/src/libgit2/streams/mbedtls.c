@@ -37,6 +37,9 @@
 #include <mbedtls/error.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
+#include <psa/crypto.h>
+#endif
 
 #undef inline
 
@@ -46,12 +49,133 @@
 static int ciphers_list[GIT_SSL_DEFAULT_CIPHERS_COUNT + 1];
 
 static bool initialized = false;
-static mbedtls_ssl_config mbedtls_config;
 static mbedtls_ctr_drbg_context mbedtls_rng;
 static mbedtls_entropy_context mbedtls_entropy;
 
-static bool has_ca_chain = false;
-static mbedtls_x509_crt mbedtls_ca_chain;
+typedef struct {
+	git_atomic32 refs;
+	mbedtls_ssl_config config;
+	mbedtls_x509_crt ca_chain;
+} mbedtls_ca_snapshot;
+
+static git_mutex ca_lock;
+static bool ca_lock_initialized = false;
+static mbedtls_ca_snapshot *current_ca;
+
+static void ca_snapshot_release(mbedtls_ca_snapshot *snapshot)
+{
+	if (snapshot && git_atomic32_dec(&snapshot->refs) == 0) {
+		mbedtls_ssl_config_free(&snapshot->config);
+		mbedtls_x509_crt_free(&snapshot->ca_chain);
+		git__free(snapshot);
+	}
+}
+
+static int ca_snapshot_create(mbedtls_ca_snapshot **out, const char *file, const char *path)
+{
+	mbedtls_ca_snapshot *snapshot;
+	char errbuf[512];
+	int ret;
+
+	snapshot = git__calloc(1, sizeof(*snapshot));
+	GIT_ERROR_CHECK_ALLOC(snapshot);
+	git_atomic32_set(&snapshot->refs, 1);
+	mbedtls_ssl_config_init(&snapshot->config);
+	mbedtls_x509_crt_init(&snapshot->ca_chain);
+	if (mbedtls_ssl_config_defaults(&snapshot->config,
+		MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+		MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
+		git_error_set(GIT_ERROR_SSL, "failed to initialize mbedTLS configuration");
+		goto on_error;
+	}
+#ifdef MBEDTLS_SSL_MINOR_VERSION_2
+	mbedtls_ssl_conf_min_version(&snapshot->config, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_2);
+#endif
+	/* Verification remains in verify_server_cert, including callback handling. */
+	mbedtls_ssl_conf_authmode(&snapshot->config, MBEDTLS_SSL_VERIFY_OPTIONAL);
+	mbedtls_ssl_conf_ciphersuites(&snapshot->config, ciphers_list);
+	mbedtls_ssl_conf_rng(&snapshot->config, mbedtls_ctr_drbg_random, &mbedtls_rng);
+	ret = file ? mbedtls_x509_crt_parse_file(&snapshot->ca_chain, file) : 0;
+	if (ret == 0 && path)
+		ret = mbedtls_x509_crt_parse_path(&snapshot->ca_chain, path);
+	/* Positive directory results include skipped parse, I/O and OOM errors.
+	 * Publish a complete replacement instead of a partial trust set. */
+	if (ret != 0) {
+		if (ret > 0)
+			git_error_set(GIT_ERROR_SSL, "failed to load %d CA certificate entries", ret);
+		else {
+			mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+			git_error_set(GIT_ERROR_SSL, "failed to load CA certificates: %#04x - %s", (unsigned int)ret, errbuf);
+		}
+		goto on_error;
+	}
+	if ((file || path) && (snapshot->ca_chain.version == 0 ||
+		!snapshot->ca_chain.raw.p || snapshot->ca_chain.raw.len == 0)) {
+		git_error_set(GIT_ERROR_SSL, "no CA certificates could be loaded");
+		goto on_error;
+	}
+	if (file || path)
+		mbedtls_ssl_conf_ca_chain(&snapshot->config, &snapshot->ca_chain, NULL);
+	*out = snapshot;
+	return 0;
+
+on_error:
+	ca_snapshot_release(snapshot);
+	return -1;
+}
+
+static int ca_snapshot_clone(mbedtls_ca_snapshot **out, const mbedtls_ca_snapshot *source)
+{
+	mbedtls_ca_snapshot *copy;
+	const mbedtls_x509_crt *certificate;
+	mbedtls_x509_crt *tail;
+
+	if (ca_snapshot_create(&copy, NULL, NULL) < 0)
+		return -1;
+	tail = &copy->ca_chain;
+	/* X.509 verification may mutate public-key contexts. Share only the
+	 * immutable encoded certificates, never a live key/config between streams. */
+	for (certificate = &source->ca_chain; certificate && certificate->version;
+		certificate = certificate->next) {
+		if (mbedtls_x509_crt_parse_der(tail,
+			certificate->raw.p, certificate->raw.len) != 0) {
+			git_error_set(GIT_ERROR_SSL, "failed to copy CA certificates");
+			ca_snapshot_release(copy);
+			return -1;
+		}
+		/* Append from the tail instead of rescanning the entire store. */
+		while (tail->next)
+			tail = tail->next;
+	}
+	if (copy->ca_chain.raw.len)
+		mbedtls_ssl_conf_ca_chain(&copy->config, &copy->ca_chain, NULL);
+	*out = copy;
+	return 0;
+}
+
+static int ca_snapshot_acquire(mbedtls_ca_snapshot **out)
+{
+	mbedtls_ca_snapshot *snapshot;
+	int error;
+
+	if (!ca_lock_initialized || git_mutex_lock(&ca_lock) != 0) {
+		git_error_set(GIT_ERROR_SSL, "failed to lock mbedTLS configuration");
+		return -1;
+	}
+	snapshot = current_ca;
+	if (snapshot)
+		git_atomic32_inc(&snapshot->refs);
+	git_mutex_unlock(&ca_lock);
+	if (!snapshot) {
+		git_error_set(GIT_ERROR_SSL, "mbedTLS configuration is unavailable");
+		return -1;
+	}
+	/* Parsing and setup stay outside the publication lock. Each stream owns
+	 * independent verification state; source bytes stay alive until copied. */
+	error = ca_snapshot_clone(out, snapshot);
+	ca_snapshot_release(snapshot);
+	return error;
+}
 
 /**
  * This function aims to clean-up the SSL context which
@@ -59,16 +183,17 @@ static mbedtls_x509_crt mbedtls_ca_chain;
  */
 static void shutdown_ssl(void)
 {
-	if (has_ca_chain) {
-		mbedtls_x509_crt_free(&mbedtls_ca_chain);
-		has_ca_chain = false;
-	}
-
+	/* libgit2's runtime must outlive its active streams and API calls. */
+	ca_snapshot_release(current_ca);
+	current_ca = NULL;
 	if (initialized) {
 		mbedtls_ctr_drbg_free(&mbedtls_rng);
-		mbedtls_ssl_config_free(&mbedtls_config);
 		mbedtls_entropy_free(&mbedtls_entropy);
 		initialized = false;
+	}
+	if (ca_lock_initialized) {
+		git_mutex_free(&ca_lock);
+		ca_lock_initialized = false;
 	}
 }
 
@@ -83,32 +208,31 @@ int git_mbedtls_stream_global_init(void)
 	char *cipher_string = NULL;
 	char *cipher_string_tmp = NULL;
 
-	mbedtls_ssl_config_init(&mbedtls_config);
+	if (git_mutex_init(&ca_lock) != 0) {
+		git_error_set(GIT_ERROR_SSL, "failed to initialize mbedTLS configuration lock");
+		return -1;
+	}
+	ca_lock_initialized = true;
 	mbedtls_entropy_init(&mbedtls_entropy);
 	mbedtls_ctr_drbg_init(&mbedtls_rng);
+	initialized = true;
 
-	if (mbedtls_ssl_config_defaults(&mbedtls_config,
-	                                MBEDTLS_SSL_IS_CLIENT,
-	                                MBEDTLS_SSL_TRANSPORT_STREAM,
-	                                MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
-		git_error_set(GIT_ERROR_SSL, "failed to initialize mbedTLS");
-		goto cleanup;
+#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
+	/* Complete PSA initialization before a stream can start a TLS handshake. */
+	{
+		psa_status_t status = psa_crypto_init();
+		if (status != PSA_SUCCESS) {
+			git_error_set(GIT_ERROR_SSL, "failed to initialize PSA crypto: %d", (int)status);
+			goto cleanup;
+		}
 	}
-
-	/* configure TLSv1.1 or better */
-#ifdef MBEDTLS_SSL_MINOR_VERSION_2
-	mbedtls_ssl_conf_min_version(&mbedtls_config, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_2);
 #endif
-
-	/* verify_server_cert is responsible for making the check.
-	 * OPTIONAL because REQUIRED drops the certificate as soon as the check
-	 * is made, so we can never see the certificate and override it. */
-	mbedtls_ssl_conf_authmode(&mbedtls_config, MBEDTLS_SSL_VERIFY_OPTIONAL);
 
 	/* set the list of allowed ciphersuites */
 	ciphers_known = 0;
 	cipher_string = cipher_string_tmp = git__strdup(GIT_SSL_DEFAULT_CIPHERS);
-	GIT_ERROR_CHECK_ALLOC(cipher_string);
+	if (!cipher_string)
+		goto cleanup;
 
 	while ((cipher_name = git__strtok(&cipher_string_tmp, ":")) != NULL) {
 		int cipherid = mbedtls_ssl_get_ciphersuite_id(cipher_name);
@@ -122,13 +246,13 @@ int git_mbedtls_stream_global_init(void)
 		ciphers_list[ciphers_known++] = cipherid;
 	}
 	git__free(cipher_string);
+	cipher_string = NULL;
 	ciphers_list[ciphers_known] = 0;
 
 	if (!ciphers_known) {
 		git_error_set(GIT_ERROR_SSL, "no cipher could be enabled");
 		goto cleanup;
 	}
-	mbedtls_ssl_conf_ciphersuites(&mbedtls_config, ciphers_list);
 
 	/* Seeding the random number generator */
 
@@ -138,7 +262,9 @@ int git_mbedtls_stream_global_init(void)
 		goto cleanup;
 	}
 
-	mbedtls_ssl_conf_rng(&mbedtls_config, mbedtls_ctr_drbg_random, &mbedtls_rng);
+	/* Prime configuration defaults before concurrent callers can build more. */
+	if (ca_snapshot_create(&current_ca, NULL, NULL) < 0)
+		goto cleanup;
 
 	/* load default certificates */
 	if (crtpath != NULL && stat(crtpath, &statbuf) == 0 && S_ISREG(statbuf.st_mode))
@@ -147,14 +273,13 @@ int git_mbedtls_stream_global_init(void)
 	if (!loaded && crtpath != NULL && stat(crtpath, &statbuf) == 0 && S_ISDIR(statbuf.st_mode))
 		loaded = (git_mbedtls__set_cert_location(NULL, crtpath) == 0);
 
-	initialized = true;
-
-	return git_runtime_shutdown_register(shutdown_ssl);
+	if (git_runtime_shutdown_register(shutdown_ssl) < 0)
+		goto cleanup;
+	return 0;
 
 cleanup:
-	mbedtls_ctr_drbg_free(&mbedtls_rng);
-	mbedtls_ssl_config_free(&mbedtls_config);
-	mbedtls_entropy_free(&mbedtls_entropy);
+	git__free(cipher_string);
+	shutdown_ssl();
 
 	return -1;
 }
@@ -233,6 +358,7 @@ typedef struct {
 	bool connected;
 	char *host;
 	mbedtls_ssl_context *ssl;
+	mbedtls_ca_snapshot *snapshot;
 	git_cert_x509 cert_info;
 } mbedtls_stream;
 
@@ -362,6 +488,7 @@ static void mbedtls_stream_free(git_stream *stream)
 	git__free(st->cert_info.data);
 	mbedtls_ssl_free(st->ssl);
 	git__free(st->ssl);
+	ca_snapshot_release(st->snapshot);
 	git__free(st);
 }
 
@@ -384,7 +511,9 @@ static int mbedtls_stream_wrap(
 	if (!st->ssl)
 		goto out_err;
 	mbedtls_ssl_init(st->ssl);
-	if (mbedtls_ssl_setup(st->ssl, &mbedtls_config)) {
+	if (ca_snapshot_acquire(&st->snapshot) < 0)
+		goto out_err;
+	if (mbedtls_ssl_setup(st->ssl, &st->snapshot->config)) {
 		git_error_set(GIT_ERROR_SSL, "failed to create ssl object");
 		error = -1;
 		goto out_err;
@@ -413,6 +542,7 @@ out_err:
 	if (st->ssl)
 		mbedtls_ssl_free(st->ssl);
 	git__free(st->ssl);
+	ca_snapshot_release(st->snapshot);
 	git__free(st->host);
 	git__free(st);
 
@@ -459,33 +589,25 @@ int git_mbedtls_stream_new(
 
 int git_mbedtls__set_cert_location(const char *file, const char *path)
 {
-	int ret = 0;
-	char errbuf[512];
+	mbedtls_ca_snapshot *candidate, *previous;
 
 	GIT_ASSERT_ARG(file || path);
-
-	if (has_ca_chain)
-		mbedtls_x509_crt_free(&mbedtls_ca_chain);
-
-	mbedtls_x509_crt_init(&mbedtls_ca_chain);
-
-	if (file)
-		ret = mbedtls_x509_crt_parse_file(&mbedtls_ca_chain, file);
-
-	if (ret >= 0 && path)
-		ret = mbedtls_x509_crt_parse_path(&mbedtls_ca_chain, path);
-
-	/* mbedtls_x509_crt_parse_path returns the number of invalid certs on success */
-	if (ret < 0) {
-		mbedtls_x509_crt_free(&mbedtls_ca_chain);
-		mbedtls_strerror( ret, errbuf, 512 );
-		git_error_set(GIT_ERROR_SSL, "failed to load CA certificates: %#04x - %s", ret, errbuf);
+	if (!ca_lock_initialized) {
+		git_error_set(GIT_ERROR_SSL, "mbedTLS configuration is unavailable");
 		return -1;
 	}
-
-	mbedtls_ssl_conf_ca_chain(&mbedtls_config, &mbedtls_ca_chain, NULL);
-	has_ca_chain = true;
-
+	/* Build a replacement without changing configuration in active streams. */
+	if (ca_snapshot_create(&candidate, file, path) < 0)
+		return -1;
+	if (git_mutex_lock(&ca_lock) != 0) {
+		ca_snapshot_release(candidate);
+		git_error_set(GIT_ERROR_SSL, "failed to lock mbedTLS configuration");
+		return -1;
+	}
+	previous = current_ca;
+	current_ca = candidate;
+	git_mutex_unlock(&ca_lock);
+	ca_snapshot_release(previous);
 	return 0;
 }
 

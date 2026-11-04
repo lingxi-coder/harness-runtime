@@ -3,11 +3,15 @@ use lingxi_core::host::{provider_accounts::AccountMetadata, rooted_fs};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Non-secret revision fence for one account identity and its credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountCredentialVersion {
+    /// Account identifier associated with this version record.
     pub account_id: String,
+    /// Generation of the account identity to which the revision belongs.
     pub identity_generation: u64,
+    /// Published credential revision within the identity generation.
     pub credential_revision: u64,
 }
 fn relative(account: &AccountMetadata) -> Result<PathBuf, String> {

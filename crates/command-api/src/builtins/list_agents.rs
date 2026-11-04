@@ -172,7 +172,13 @@ impl BuiltinCommandHandler for ListAgentsHandler {
     }
 
     fn description(&self) -> &str {
-        "List subagents, teammates, and other LingXi sessions you can message"
+        static DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "List subagents, teammates, and other {} sessions you can message",
+                branding::PRODUCT_NAME
+            )
+        });
+        DESCRIPTION.as_str()
     }
 
     fn aliases(&self) -> Vec<Utf16JsonProjection> {
@@ -204,7 +210,11 @@ fn render_local_roster_at(roster: &LocalAgentRoster, now_ms: u64) -> Utf16JsonPr
         if roster.local_list_failed {
             return LOCAL_LIST_FAILED_WARNING.into();
         }
-        return "No subagents, teammates or other LingXi sessions.".into();
+        return format!(
+            "No subagents, teammates or other {} sessions.",
+            branding::PRODUCT_NAME
+        )
+        .into();
     }
 
     let subagent_count = roster.subagents.len().to_string();
@@ -593,6 +603,37 @@ mod tests {
         ListAgentsCommandAvailability {
             harbor_kite_enabled: Some(true),
         }
+    }
+
+    #[tokio::test]
+    async fn empty_roster_and_catalog_use_product_identity() {
+        let provider = Arc::new(FakeProvider {
+            availability: enabled(),
+            result: Ok(LocalAgentRoster::default()),
+            calls: Mutex::new(0),
+        });
+        let handler = ListAgentsHandler::new(provider);
+        assert_eq!(
+            handler.description(),
+            format!(
+                "List subagents, teammates, and other {} sessions you can message",
+                branding::PRODUCT_NAME
+            )
+        );
+        let CommandResult::Done {
+            display: Some(display),
+        } = handler.handle(&args()).await
+        else {
+            panic!("expected an empty roster message");
+        };
+        assert_eq!(
+            display,
+            format!(
+                "No subagents, teammates or other {} sessions.",
+                branding::PRODUCT_NAME
+            )
+            .into()
+        );
     }
 
     #[tokio::test]

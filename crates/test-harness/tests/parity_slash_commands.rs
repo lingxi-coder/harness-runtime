@@ -1,12 +1,13 @@
-//! Parity: lock the 83 builtin slash-command names plus the per-command
+//! Parity: lock the product builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total builtin name count = 83
-//! - Core builtin name count = 18
+//! - Native fixture: 83 builtin names and 18 core names
+//! - Product projection: 81 builtin names and 16 core names; provider accounts
+//!   own authentication instead of the two old account commands
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
@@ -290,7 +291,6 @@ struct ParityCommandV2 {
     #[serde(default)]
     defer_reason: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     description: Option<String>,
 }
 
@@ -360,22 +360,71 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "workflows",
 ];
 
+const REMOVED_ACCOUNT_COMMANDS: [&str; 2] = ["login", "logout"];
+
 fn fixture() -> ParityFile {
-    // Fixture filename retained as `parity_slash_commands_102` for git-history
-    // continuity; the counts inside reflect the current 83-name lock.
-    load_fixture("parity_slash_commands_102")
+    // Preserve the historical oracle and project out only the two commands
+    // removed when authentication moved to per-provider accounts.
+    let mut fixture: ParityFile = load_fixture("parity_slash_commands_102");
+    for removed in REMOVED_ACCOUNT_COMMANDS {
+        let rows: Vec<_> = fixture
+            .commands
+            .iter()
+            .filter(|c| c.name == removed)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the source fixture must contain /{removed} exactly once"
+        );
+        assert!(rows[0].is_core, "the source /{removed} row must be core");
+    }
+    fixture
+        .commands
+        .retain(|c| !REMOVED_ACCOUNT_COMMANDS.contains(&c.name.as_str()));
+    fixture
 }
 
 fn fixture_v2() -> ParityFileV2 {
-    load_fixture("parity_slash_commands_102")
+    let mut fixture: ParityFileV2 = load_fixture("parity_slash_commands_102");
+    for removed in REMOVED_ACCOUNT_COMMANDS {
+        let rows: Vec<_> = fixture
+            .commands
+            .iter()
+            .filter(|c| c.name == removed)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the source fixture must contain /{removed} exactly once"
+        );
+        assert!(
+            rows[0].is_core && rows[0].implemented,
+            "/{removed} source status drift"
+        );
+        assert_eq!(rows[0].claude_type, "local");
+        assert_eq!(rows[0].rust_status, "implemented");
+        assert_eq!(rows[0].target_status, "implemented");
+        assert!(!rows[0].requires_tui);
+        let expected_description = match removed {
+            "login" => "Sign in with your Anthropic account",
+            "logout" => "Sign out from your Anthropic account",
+            _ => unreachable!(),
+        };
+        assert_eq!(rows[0].description.as_deref(), Some(expected_description));
+    }
+    fixture
+        .commands
+        .retain(|c| !REMOVED_ACCOUNT_COMMANDS.contains(&c.name.as_str()));
+    fixture
 }
 
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
     assert_eq!(f.meta.total_count_lock, 83);
-    assert_eq!(f.commands.len(), 83);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
+    assert_eq!(f.commands.len(), 81);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 81);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -388,9 +437,9 @@ fn fixture_core_matches_constant() {
         .filter(|c| c.is_core)
         .map(|c| c.name.as_str())
         .collect();
-    assert_eq!(fixture_core.len(), 18);
+    assert_eq!(fixture_core.len(), 16);
     assert_eq!(f.meta.core_count_lock, 18);
-    assert_eq!(BUILTIN_CORE_NAMES.len(), 18);
+    assert_eq!(BUILTIN_CORE_NAMES.len(), 16);
 
     // Order-sensitive equality (both are ASCII-sorted by construction).
     let const_core: Vec<&str> = BUILTIN_CORE_NAMES.to_vec();
@@ -590,13 +639,14 @@ fn core_command_description_matches_fixture() {
 }
 
 // ============================================================================
-// T3 — M5-14: `implemented` field coverage (64 implemented / 19 unimplemented)
+// T3 — M5-14: projected coverage (62 implemented / 19 unimplemented)
 // ============================================================================
 
 #[test]
 fn implemented_count_tracks_target_runtime_surface() {
     let f = fixture_v2();
     let n_impl = f.commands.iter().filter(|c| c.implemented).count();
+    assert_eq!(n_impl, 62);
     assert_eq!(
         n_impl,
         TARGET_IMPLEMENTED.len(),

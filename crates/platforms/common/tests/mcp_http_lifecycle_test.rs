@@ -1,3 +1,5 @@
+//! Integration tests for MCP HTTP discovery, event reconnection, and session cleanup.
+
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},

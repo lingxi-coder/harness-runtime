@@ -68,7 +68,7 @@ mod tests {
     #[tokio::test]
     async fn request_context_survives_returning_the_stream_and_each_poll() {
         let config = OtelConfig::from_lookup(|key| match key {
-            "LINGXI_ENABLE_TELEMETRY" => Some("true".into()),
+            telemetry::otel::ENV_ENABLE_TELEMETRY => Some("true".into()),
             "OTEL_TRACES_EXPORTER" => Some("console".into()),
             "OTEL_METRICS_EXPORTER" | "OTEL_LOGS_EXPORTER" => Some("none".into()),
             _ => None,

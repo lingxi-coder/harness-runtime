@@ -2,8 +2,8 @@
 //! (and any platform command handlers registered directly in the composition
 //! roots):
 //!
-//! - [`names`] — the locked 83-name table (`BUILTIN_COMMAND_NAMES`),
-//!   the 18-name core list (`BUILTIN_CORE_NAMES`), `core_description`, the
+//! - [`names`] — the locked 81-name table (`BUILTIN_COMMAND_NAMES`),
+//!   the 16-name core list (`BUILTIN_CORE_NAMES`), `core_description`, the
 //!   bucket-(d) `INTENTIONALLY_DISABLED_COMMANDS` audit table, and its STUB.6
 //!   refinement into `CORRECT_BY_DESIGN_STUBS` (faithful) vs
 //!   `HOST_BOUND_DEFERRED_GAPS` (genuine deferred gaps).
@@ -23,3 +23,14 @@ pub use names::{
     INTENTIONALLY_DISABLED_COMMANDS, USAGE_CREDITS_BNR_GATED,
 };
 pub use unimplemented::UnimplementedCommandHandler;
+
+/// Shared gate for the skill-doctor command and Insights command-name facts.
+/// A host can enable it explicitly even when no flag service is configured.
+#[must_use]
+pub fn skill_doctor_enabled() -> bool {
+    lingxi_core::host::env::is_env_truthy(
+        std::env::var(branding::ENABLE_SKILL_DOCTOR_ENV)
+            .ok()
+            .as_deref(),
+    ) || telemetry::feature_flags::flag_bool("tengu_lantern_prism", false)
+}

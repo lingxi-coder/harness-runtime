@@ -1131,7 +1131,7 @@ mod imp {
         file.lock_exclusive()
             .map_err(|error| map_io(relative, error))?;
         Ok(RootedFileLock {
-            _file: file,
+            _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: None,
         })
@@ -1982,7 +1982,7 @@ mod imp {
         file.lock_exclusive()
             .map_err(|error| map_io(relative, error))?;
         let guard = RootedFileLock {
-            _file: file,
+            _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: expected
                 .map(|identity| (root.to_path_buf(), relative.to_path_buf(), *identity)),
@@ -2015,7 +2015,7 @@ mod imp {
             }
         })?;
         Ok(RootedFileLock {
-            _file: file,
+            _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: None,
         })
@@ -2101,7 +2101,7 @@ impl Default for AtomicWriteOptions {
 
 /// OS advisory lock held on a root-confined file.
 pub struct RootedFileLock {
-    _file: std::fs::File,
+    _file: Option<std::fs::File>,
     path: String,
     validation: Option<(PathBuf, PathBuf, RootIdentity)>,
 }
@@ -2111,18 +2111,29 @@ impl RootedFileLock {
     /// reopening the lock pathname after acquisition.
     pub fn write_owner(&mut self, owner: &str) -> Result<(), FsError> {
         use std::io::{Seek as _, SeekFrom, Write as _};
-        self._file
-            .set_len(0)
-            .and_then(|()| self._file.seek(SeekFrom::Start(0)).map(|_| ()))
-            .and_then(|()| self._file.write_all(owner.as_bytes()))
-            .and_then(|()| self._file.sync_all())
+        let file = self._file.as_mut().expect("lock file is present");
+        file.set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|()| file.write_all(owner.as_bytes()))
+            .and_then(|()| file.sync_all())
             .map_err(|error| FsError::Io(format!("{}: {error}", self.path)))
     }
 
-    /// Transfer the exact locked file handle to a higher-level RAII owner.
+    /// Transfer the exact locked file handle to a higher-level RAII owner. The
+    /// new owner is responsible for explicitly releasing the lock.
     #[must_use]
-    pub fn into_file(self) -> std::fs::File {
-        self._file
+    pub fn into_file(mut self) -> std::fs::File {
+        self._file.take().expect("lock file is present")
+    }
+}
+
+impl Drop for RootedFileLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self._file {
+            // Closing alone can leave the lock held by a duplicated descriptor,
+            // including one inherited by a child before close-on-exec runs.
+            let _ = FileExt::unlock(file);
+        }
     }
 }
 
@@ -2135,10 +2146,11 @@ impl FlockGuard for RootedFileLock {
         let Some((root, relative, expected)) = &self.validation else {
             return Ok(());
         };
-        validate_open_file_single_link(&self._file)?;
+        let file = self._file.as_ref().expect("lock file is present");
+        validate_open_file_single_link(file)?;
         let current = imp::open_read_file_pinned(root, relative, Some(expected))?;
         validate_open_file_single_link(&current)?;
-        if opened_file_identity(&current)? != opened_file_identity(&self._file)? {
+        if opened_file_identity(&current)? != opened_file_identity(file)? {
             return Err(FsError::OutsideWorkspace(relative.display().to_string()));
         }
         Ok(())
@@ -3277,7 +3289,7 @@ mod imp {
         file.lock_exclusive()
             .map_err(|error| map_io(relative, error))?;
         Ok(RootedFileLock {
-            _file: file,
+            _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: None,
         })
@@ -4150,7 +4162,7 @@ mod imp {
         file.lock_exclusive()
             .map_err(|error| map_io(relative, error))?;
         let guard = RootedFileLock {
-            _file: file,
+            _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: expected
                 .map(|identity| (root.to_path_buf(), relative.to_path_buf(), *identity)),
@@ -4183,7 +4195,7 @@ mod imp {
             }
         })?;
         Ok(RootedFileLock {
-            _file: file,
+            _file: Some(file),
             path: root.join(relative).display().to_string(),
             validation: None,
         })
@@ -4560,6 +4572,46 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn dropping_lock_releases_it_when_a_duplicate_descriptor_is_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::path::Path::new("lease.lock");
+        let lock = super::try_lock_exclusive(directory.path(), path, 0o700, 0o600).unwrap();
+        // A forked child can temporarily keep this same open-file description
+        // even when the original descriptor has close-on-exec set.
+        let duplicate = lock._file.as_ref().unwrap().try_clone().unwrap();
+        assert!(matches!(
+            super::try_lock_exclusive(directory.path(), path, 0o700, 0o600),
+            Err(super::FsError::AlreadyExists(_))
+        ));
+
+        drop(lock);
+        let replacement = super::try_lock_exclusive(directory.path(), path, 0o700, 0o600)
+            .expect("dropping the lock must release it even while the duplicate is open");
+        drop(duplicate);
+        assert!(matches!(
+            super::try_lock_exclusive(directory.path(), path, 0o700, 0o600),
+            Err(super::FsError::AlreadyExists(_))
+        ));
+        drop(replacement);
+        assert!(super::try_lock_exclusive(directory.path(), path, 0o700, 0o600).is_ok());
+    }
+
+    #[test]
+    fn into_file_transfers_the_lock_until_the_new_owner_releases_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::path::Path::new("lease.lock");
+        let lock = super::try_lock_exclusive(directory.path(), path, 0o700, 0o600).unwrap();
+        let file = lock.into_file();
+        assert!(matches!(
+            super::try_lock_exclusive(directory.path(), path, 0o700, 0o600),
+            Err(super::FsError::AlreadyExists(_))
+        ));
+        fs2::FileExt::unlock(&file).unwrap();
+        assert!(super::try_lock_exclusive(directory.path(), path, 0o700, 0o600).is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn durable_append_rejects_hard_link_without_changing_target() {

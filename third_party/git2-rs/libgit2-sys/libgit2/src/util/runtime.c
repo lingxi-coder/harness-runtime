@@ -117,8 +117,12 @@ int git_runtime_init(git_runtime_init_fn init_fns[], size_t cnt)
 
 	/* Only do work on a 0 -> 1 transition of the refcount */
 	if ((ret = git_atomic32_inc(&init_count)) == 1) {
-		if (init_common(init_fns, cnt) < 0)
+		if (init_common(init_fns, cnt) != 0) {
+			/* Unwind registered subsystems before allowing another init. */
+			shutdown_common();
+			git_atomic32_dec(&init_count);
 			ret = -1;
+		}
 	}
 
 	if (init_unlock() < 0)
@@ -150,8 +154,11 @@ int git_runtime_shutdown(void)
 	if (init_lock() < 0)
 		return -1;
 
+	/* A failed or unmatched initialization must not underflow the count. */
+	if (git_atomic32_get(&init_count) <= 0)
+		ret = -1;
 	/* Only do work on a 1 -> 0 transition of the refcount */
-	if ((ret = git_atomic32_dec(&init_count)) == 0)
+	else if ((ret = git_atomic32_dec(&init_count)) == 0)
 		shutdown_common();
 
 	/* Exit the lock */

@@ -19,13 +19,19 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+/// Public routing and attachment metadata for a chat message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatMessageMetadata {
+    /// Stable message identifier within the chat.
     pub message_id: String,
+    /// Task run associated with the message.
     pub run_id: String,
+    /// Role of the message author.
     pub role: ChatRole,
+    /// Message creation time in milliseconds since the Unix epoch.
     pub created_at: u64,
+    /// Attachment metadata without the attachment contents.
     pub attachments: Vec<AttachmentMetadata>,
 }
 
@@ -350,6 +356,7 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Open or initialize the chat index and retry pending directory cleanup.
     pub fn open(root: &Path) -> Result<Self, AppError> {
         // Check before creating directories or performing tombstone cleanup.
         // This also rechecks a host's earlier read-only preflight.
@@ -688,6 +695,7 @@ impl ChatStore {
         Ok(result)
     }
 
+    /// Create a chat for a request and host session, or return its prior result.
     pub fn create(
         &self,
         request_id: &str,
@@ -792,6 +800,7 @@ impl ChatStore {
         }
     }
 
+    /// Return one chat's public summary.
     pub fn get(&self, chat_id: &str) -> Result<ChatSummary, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -803,6 +812,7 @@ impl ChatStore {
             .ok_or_else(|| AppError::NotFound("App Chat".into()))
     }
 
+    /// List a bounded set of summaries after an optional chat cursor.
     pub fn list(
         &self,
         cursor: Option<&str>,
@@ -867,6 +877,7 @@ impl ChatStore {
         Ok(chats.into_iter().cloned().collect())
     }
 
+    /// Return the private Harness session identifier associated with a chat.
     pub fn session_id(&self, chat_id: &str) -> Result<String, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -896,6 +907,7 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Install host-provided recovery frontiers for subsequent chat reads.
     pub fn install_recovery_authority(
         &self,
         authority: BTreeMap<String, ChatRecoveryFrontier>,
@@ -924,6 +936,7 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Remove a chat's recovery fence after its authority has been installed.
     pub fn finish_recovery(&self, chat_id: &str) -> Result<(), AppError> {
         let mut state = self
             .index
@@ -1005,6 +1018,7 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Resolve the private transcript path for the chat's active generation.
     pub fn transcript_path(&self, chat_id: &str) -> Result<PathBuf, AppError> {
         let session_id = self.session_id(chat_id)?;
         let index = self.lock_chat_index(chat_id)?;
@@ -1017,6 +1031,7 @@ impl ChatStore {
         Ok(directory.join(format!("{session_id}.jsonl")))
     }
 
+    /// Mark a non-archived chat as running for the supplied task run.
     pub fn start_turn(&self, chat_id: &str, run_id: &str) -> Result<(), AppError> {
         if !safe_id(chat_id) || run_id.is_empty() || run_id.len() > 128 {
             return Err(invalid("invalid Chat turn"));
@@ -1039,6 +1054,7 @@ impl ChatStore {
         })
     }
 
+    /// Return the chat to idle if the supplied run is its active turn.
     pub fn finish_turn(&self, chat_id: &str, run_id: &str) -> Result<(), AppError> {
         self.change_chat(chat_id, |index| {
             let record = index
@@ -1071,6 +1087,7 @@ impl ChatStore {
         })
     }
 
+    /// Return the active task run ID for a chat, if any.
     pub fn active_run(&self, chat_id: &str) -> Result<Option<String>, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -1082,6 +1099,7 @@ impl ChatStore {
             .ok_or_else(|| AppError::NotFound("App Chat".into()))
     }
 
+    /// Persist message metadata, rejecting reuse of an ID with different data.
     pub fn record_message(
         &self,
         chat_id: &str,
@@ -1178,6 +1196,7 @@ impl ChatStore {
             .collect())
     }
 
+    /// List visible message metadata in creation-time and message-ID order.
     pub fn message_metadata(&self, chat_id: &str) -> Result<Vec<ChatMessageMetadata>, AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -1296,6 +1315,7 @@ impl ChatStore {
         })
     }
 
+    /// Remove a matching protocol message and try to clean unreferenced assets.
     pub fn rollback_protocol_message(
         &self,
         chat_id: &str,
@@ -1348,6 +1368,7 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Remove message metadata only when both its message and run IDs match.
     pub fn rollback_message_metadata(
         &self,
         chat_id: &str,
@@ -1373,6 +1394,7 @@ impl ChatStore {
         })
     }
 
+    /// Return ordered digests for the currently visible protocol history.
     pub fn protocol_history_digests(
         &self,
         chat_id: &str,
@@ -1397,6 +1419,7 @@ impl ChatStore {
             .collect())
     }
 
+    /// Load a visible protocol message, rehydrating and validating its assets.
     pub fn protocol_message(&self, chat_id: &str, message_id: &str) -> Result<Value, AppError> {
         if !safe_id(chat_id) || message_id.is_empty() || message_id.len() > 128 {
             return Err(invalid("invalid AG-UI message selector"));
@@ -1671,6 +1694,7 @@ impl ChatStore {
         Ok(message)
     }
 
+    /// Set a default-titled chat's initial title from a nonempty prompt.
     pub fn set_initial_title(&self, chat_id: &str, prompt: &str) -> Result<(), AppError> {
         let title = prompt
             .split_whitespace()
@@ -1695,6 +1719,7 @@ impl ChatStore {
         })
     }
 
+    /// Archive a chat that has no running turn.
     pub fn archive(&self, chat_id: &str) -> Result<(), AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));
@@ -1713,6 +1738,9 @@ impl ChatStore {
         })
     }
 
+    /// Tombstone a non-running chat and remove its private directory.
+    ///
+    /// Cleanup can fail after the tombstone is durable and may require retry.
     pub fn delete(&self, chat_id: &str) -> Result<(), AppError> {
         if !safe_id(chat_id) {
             return Err(invalid("invalid Chat ID"));

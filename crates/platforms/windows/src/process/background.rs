@@ -390,27 +390,31 @@ async fn retain_failed_child(
     // PID after this task eventually reaps it.
     drop(registration);
     tokio::spawn(async move {
-        loop {
-            #[cfg(windows)]
-            let tree_stopped = deadline
-                .job
-                .as_ref()
-                .is_some_and(|job| job.terminate().is_ok());
+        {
+            // Retain the job until the child has been waited; closing it then
+            // terminates any remaining members before output is drained.
+            let reap_deadline = deadline;
             #[cfg(not(windows))]
-            let tree_stopped = true;
-            let _ = start_child_kill(&mut child);
-            let waited = matches!(
-                tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await,
-                Ok(Ok(_))
-            );
-            if tree_stopped && waited {
-                break;
+            let _ = &reap_deadline;
+            loop {
+                #[cfg(windows)]
+                let tree_stopped = reap_deadline
+                    .job
+                    .as_ref()
+                    .is_some_and(|job| job.terminate().is_ok());
+                #[cfg(not(windows))]
+                let tree_stopped = true;
+                let _ = start_child_kill(&mut child);
+                let waited = matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await,
+                    Ok(Ok(_))
+                );
+                if tree_stopped && waited {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        // Close the job only after the held child was waited; its close also
-        // terminates any remaining members. The failed operation stays failed.
-        drop(deadline);
         if let Some(mut output) = output {
             let drained = drain(
                 &mut child,
@@ -881,7 +885,7 @@ async fn run_inner(
             false
         };
         let waited = if retry_unsettled {
-            Err(result.as_ref().err().expect("failed drain").clone())
+            Err(result.as_ref().expect_err("failed drain").clone())
         } else {
             child.wait().await.map_err(io_error)
         };

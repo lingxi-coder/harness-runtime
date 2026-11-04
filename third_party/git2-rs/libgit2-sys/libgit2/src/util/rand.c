@@ -146,18 +146,26 @@ int git_rand_global_init(void)
 {
 	uint64_t seed = 0;
 
-	if (git_mutex_init(&state_lock) < 0 || getseed(&seed) < 0)
+	if (git_mutex_init(&state_lock) != 0)
 		return -1;
+
+	if (getseed(&seed) < 0)
+		goto fail;
 
 	if (!seed) {
 		git_error_set(GIT_ERROR_INTERNAL, "failed to generate random seed");
-		return -1;
+		goto fail;
 	}
 
 	git_rand_seed(seed);
-	git_runtime_shutdown_register(git_rand_global_shutdown);
+	if (git_runtime_shutdown_register(git_rand_global_shutdown) < 0)
+		goto fail;
 
 	return 0;
+
+fail:
+	git_mutex_free(&state_lock);
+	return -1;
 }
 
 /*

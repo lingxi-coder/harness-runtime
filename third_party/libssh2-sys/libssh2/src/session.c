@@ -475,9 +475,12 @@ libssh2_session_init_ex(LIBSSH2_ALLOC_FUNC((*my_alloc)),
         session->flag.quote_paths = 1; /* default behavior is to quote paths
                                           for the scp subsystem */
         session->kex = NULL;
+        if(_libssh2_init_if_needed()) {
+            local_free(session, &abstract);
+            return NULL;
+        }
         _libssh2_debug((session, LIBSSH2_TRACE_TRANS,
                        "New session resource allocated"));
-        _libssh2_init_if_needed();
     }
     return session;
 }

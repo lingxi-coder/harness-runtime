@@ -15,7 +15,7 @@
 //! LingXi-specific / internal commands without one. The 8 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total is 1 header + 76 visible commands = 77 lines: 75 visible
+//! default total is 1 header + 74 visible commands = 75 lines: 73 visible
 //! builtin rows plus the Native bundled `/doctor` prompt. The `/commit` bundled
 //! prompt is omitted while `tengu_cinder_relay` is at its default-off value.
 
@@ -106,8 +106,8 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_77_lines_at_default_native_factory_gates() {
-        // 1 header + 76 visible commands = 77 lines. This is 83 builtins minus
+    fn output_has_exactly_75_lines_at_default_native_factory_gates() {
+        // 1 header + 74 visible commands = 75 lines. This is 81 builtins minus
         // 8 hidden/default-disabled rows, plus bundled `/doctor`; `/commit` is
         // absent while its GrowthBook gate is at the Native default false.
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
@@ -123,8 +123,8 @@ mod tests {
         );
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 77,
-            "expected 77 lines (1 header + 76 visible commands), got {n}"
+            n, 75,
+            "expected 75 lines (1 header + 74 visible commands), got {n}"
         );
     }
 

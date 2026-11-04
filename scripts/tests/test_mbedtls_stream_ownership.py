@@ -38,7 +38,8 @@ PREFIX = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-typedef struct { int initialized; } mbedtls_ssl_context;
+typedef struct { int initialized; const void *config; } mbedtls_ssl_context;
+typedef struct { int config; } mbedtls_ca_snapshot;
 typedef struct { void *data; } git_cert_x509;
 typedef struct { int klass; const char *message; } git_error;
 typedef struct git_stream git_stream;
@@ -58,6 +59,8 @@ struct git_stream {
 #define GIT_ERROR_CHECK_ALLOC(x) do { if (!(x)) return -1; } while (0)
 #define git_error_set(klass, ...) do { if (emit_failure_diagnostic) set_diagnostic(klass, "TLS setup"); } while (0)
 static int attempts, fail_at, outstanding, closes, frees, setup_failure, socket_failure;
+static int acquire_failure, snapshot_refs = 1;
+static mbedtls_ca_snapshot global_snapshot;
 static int teardown_failure, close_failure, free_overwrites, emit_failure_diagnostic;
 static bool diagnostic_present;
 static git_error diagnostic, saved_error;
@@ -75,7 +78,16 @@ static bool git_error_exists(void) { return diagnostic_present; }
 static void git_error_clear(void) {
  diagnostic.klass = 0; diagnostic.message = NULL; diagnostic_present = false;
 }
-static int mbedtls_config;
+static int ca_snapshot_acquire(mbedtls_ca_snapshot **out) {
+ if (acquire_failure) {
+  if (emit_failure_diagnostic) set_diagnostic(GIT_ERROR_SSL, "snapshot acquisition");
+  return -1;
+ }
+ *out = &global_snapshot; ++snapshot_refs; return 0;
+}
+static void ca_snapshot_release(mbedtls_ca_snapshot *snapshot) {
+ if (snapshot) { assert(snapshot == &global_snapshot && snapshot_refs > 1); --snapshot_refs; }
+}
 static void *allocate(size_t n) {
  if (++attempts == fail_at) {
   if (emit_failure_diagnostic) set_diagnostic(3, "allocation");
@@ -92,9 +104,13 @@ static char *git__strdup(const char *s) {
 }
 #define git__free release
 static void mbedtls_ssl_init(mbedtls_ssl_context *s) { s->initialized = 1; }
-static void mbedtls_ssl_free(mbedtls_ssl_context *s) { assert(s && s->initialized); }
+static void mbedtls_ssl_free(mbedtls_ssl_context *s) {
+ assert(s && s->initialized);
+ if (s->config) assert(snapshot_refs > 1);
+}
 static int mbedtls_ssl_setup(mbedtls_ssl_context *s, void *config) {
- (void)config; assert(s->initialized); return setup_failure ? -1 : 0;
+ assert(s->initialized && config == &global_snapshot.config);
+ s->config = config; return setup_failure ? -1 : 0;
 }
 static int socket_close(git_stream *s) {
  assert(s); ++closes;
@@ -136,17 +152,18 @@ static int ssl_teardown(mbedtls_ssl_context *s) {
 
 CASES = r'''
 static void reset(int allocation, int setup) {
- assert(outstanding == 0);
+ assert(outstanding == 0 && snapshot_refs == 1);
  attempts = closes = frees = socket_failure = 0;
- teardown_failure = close_failure = free_overwrites = 0;
+ teardown_failure = close_failure = free_overwrites = acquire_failure = 0;
  emit_failure_diagnostic = 1; git_error_clear();
  fail_at = allocation; setup_failure = setup;
 }
 int main(void) {
  git_stream sentinel = {0};
- /* Each of the wrapper's three allocations, and SSL setup, can fail. */
- for (int scenario = 1; scenario <= 4; ++scenario) {
+ /* Each allocation, SSL setup and CA snapshot acquisition can fail. */
+ for (int scenario = 1; scenario <= 5; ++scenario) {
   reset(scenario <= 3 ? scenario : 0, scenario == 4);
+  acquire_failure = scenario == 5;
   git_stream *input = socket_create(), *out = &sentinel;
   assert(git_mbedtls_stream_wrap(&out, input, "example.test") == -1);
   assert(out == &sentinel && closes == 0 && frees == 0 && outstanding == 0);
@@ -154,6 +171,7 @@ int main(void) {
   assert(closes == 1 && frees == 1);
 
   reset(scenario <= 3 ? scenario : 0, scenario == 4);
+  acquire_failure = scenario == 5;
   out = &sentinel;
   assert(git_mbedtls_stream_new(&out, "example.test", "443") == -1);
   assert(out == &sentinel && closes == 1 && frees == 1 && outstanding == 0);
@@ -211,6 +229,7 @@ int main(void) {
  assert(out->close(out) == -7); out->free(out);
  assert(diagnostic.klass == 2 && strcmp(diagnostic.message, "socket close") == 0);
  assert(closes == 1 && frees == 1 && outstanding == 0);
+ assert(snapshot_refs == 1);
  return 0;
 }
 '''
@@ -225,6 +244,7 @@ HOSTNAME_PREFIX = r'''
 typedef struct { int marker; } git_stream;
 typedef struct { int marker; } git_cert_x509;
 typedef struct { int marker; } mbedtls_ssl_context;
+typedef struct { int marker; } mbedtls_ca_snapshot;
 #define GIT_ASSERT(x) assert(x)
 #define GIT_ERROR_SSL 1
 #define GIT_ECERTIFICATE -17
@@ -333,6 +353,7 @@ int main(void) {
 CIPHER_HEADER = r'''
 #include <assert.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -340,26 +361,36 @@ CIPHER_HEADER = r'''
 
 CIPHER_PREFIX = r'''
 typedef struct { int unused; } fake_context;
-static fake_context mbedtls_config, mbedtls_entropy, mbedtls_rng;
+typedef struct { int unused; } mbedtls_ca_snapshot;
+static fake_context mbedtls_entropy, mbedtls_rng;
+static mbedtls_ca_snapshot snapshot, *current_ca;
+static int ca_lock;
+static bool ca_lock_initialized;
 static bool initialized;
 static int mode, names_seen, configured, consumed, registrations, ca_calls;
+static int psa_result, psa_calls, diagnostic_class, psa_diagnostic;
+typedef int psa_status_t;
+#define PSA_SUCCESS 0
+#define MBEDTLS_SSL_PROTO_TLS1_3 1
 #define GIT_DEFAULT_CERT_LOCATION NULL
 #define GIT_ERROR_SSL 1
 #define GIT_ERROR_CHECK_ALLOC(x) do { if (!(x)) return -1; } while (0)
-#define git_error_set(...) ((void)0)
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define MBEDTLS_SSL_IS_CLIENT 0
 #define MBEDTLS_SSL_TRANSPORT_STREAM 0
 #define MBEDTLS_SSL_PRESET_DEFAULT 0
 #define MBEDTLS_SSL_VERIFY_OPTIONAL 0
 
-static void mbedtls_ssl_config_init(fake_context *p) { (void)p; }
+static void git_error_set(int klass, const char *format, ...) {
+ diagnostic_class = klass;
+ if (strcmp(format, "failed to initialize PSA crypto: %d") == 0) {
+  va_list args; va_start(args, format); psa_diagnostic = va_arg(args, int); va_end(args);
+ }
+}
+static psa_status_t psa_crypto_init(void) { ++psa_calls; return psa_result; }
 static void mbedtls_entropy_init(fake_context *p) { (void)p; }
 static void mbedtls_ctr_drbg_init(fake_context *p) { (void)p; }
-static int mbedtls_ssl_config_defaults(fake_context *p, int a, int b, int c) {
- (void)p; (void)a; (void)b; (void)c; return 0;
-}
-static void mbedtls_ssl_conf_authmode(fake_context *p, int mode_) { (void)p; (void)mode_; }
+static int git_mutex_init(int *lock) { (void)lock; return 0; }
 static char *git__strdup(const char *s) {
  char *copy = malloc(strlen(s) + 1); assert(copy); strcpy(copy, s); return copy;
 }
@@ -375,15 +406,13 @@ static int mbedtls_ssl_get_ciphersuite_id(const char *name) {
  assert(*name); ++names_seen;
  return mode == 2 || (mode == 1 && names_seen != 1) ? 0 : names_seen;
 }
-static void mbedtls_ssl_conf_ciphersuites(fake_context *p, const int *suites) {
- (void)p; ++configured; consumed = 0;
- /* Model the library's zero-terminated read, including the final read. */
- while (suites[consumed] != 0) ++consumed;
+static int ca_snapshot_create(mbedtls_ca_snapshot **out, const char *file, const char *path) {
+ assert(!file && !path); ++configured; consumed = 0;
+ /* The real snapshot config passes this array to a zero-terminated consumer. */
+ while (ciphers_list[consumed] != 0) ++consumed;
+ *out = &snapshot; return 0;
 }
 static int mbedtls_entropy_func(void *p, unsigned char *out, size_t n) {
- (void)p; (void)out; (void)n; return 0;
-}
-static int mbedtls_ctr_drbg_random(void *p, unsigned char *out, size_t n) {
  (void)p; (void)out; (void)n; return 0;
 }
 static int mbedtls_ctr_drbg_seed(fake_context *p,
@@ -391,37 +420,36 @@ static int mbedtls_ctr_drbg_seed(fake_context *p,
  const unsigned char *custom, size_t length) {
  (void)p; (void)f; (void)entropy; (void)custom; (void)length; return 0;
 }
-static void mbedtls_ssl_conf_rng(fake_context *p,
- int (*f)(void *, unsigned char *, size_t), void *rng) {
- (void)p; (void)f; (void)rng;
-}
 static int git_mbedtls__set_cert_location(const char *file, const char *path) {
  (void)file; (void)path; ++ca_calls; return 0;
 }
-static void shutdown_ssl(void) {}
+static void shutdown_ssl(void) { initialized = false; ca_lock_initialized = false; current_ca = NULL; }
 static int git_runtime_shutdown_register(void (*callback)(void)) {
  assert(callback == shutdown_ssl); ++registrations; return 0;
 }
-static void mbedtls_ctr_drbg_free(fake_context *p) { (void)p; }
-static void mbedtls_ssl_config_free(fake_context *p) { (void)p; }
-static void mbedtls_entropy_free(fake_context *p) { (void)p; }
 '''
 
 CIPHER_CASES = r'''
 int main(void) {
+ psa_result = -148;
+ assert(git_mbedtls_stream_global_init() == -1);
+ assert(psa_calls == 1 && diagnostic_class == GIT_ERROR_SSL && psa_diagnostic == -148);
+ assert(!initialized && !ca_lock_initialized && current_ca == NULL && configured == 0);
+ psa_result = 0;
  mode = 0;
  assert(git_mbedtls_stream_global_init() == 0);
  assert(names_seen == GIT_SSL_DEFAULT_CIPHERS_COUNT);
  assert(configured == 1 && consumed == GIT_SSL_DEFAULT_CIPHERS_COUNT);
- assert(initialized && registrations == 1 && ca_calls == 0);
+ assert(initialized && registrations == 1 && ca_calls == 0 && psa_calls == 2);
 
  /* A later shorter list must not retain nonzero entries from the first. */
+ shutdown_ssl();
  mode = 1; names_seen = 0;
  assert(git_mbedtls_stream_global_init() == 0);
  assert(names_seen == GIT_SSL_DEFAULT_CIPHERS_COUNT);
  assert(configured == 2 && consumed == 1 && registrations == 2 && ca_calls == 0);
 
- mode = 2; names_seen = 0;
+ shutdown_ssl(); mode = 2; names_seen = 0;
  assert(git_mbedtls_stream_global_init() == -1);
  assert(names_seen == GIT_SSL_DEFAULT_CIPHERS_COUNT);
  assert(configured == 2 && registrations == 2 && ca_calls == 0);

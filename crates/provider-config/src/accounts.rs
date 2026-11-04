@@ -2,11 +2,13 @@
 use lingxi_core::host::provider_accounts::{AccountMetadata, AccountSnapshot};
 use std::collections::HashSet;
 
+/// In-memory account snapshot with revision-checked metadata mutations.
 #[derive(Debug, Clone)]
 pub struct AccountRegistry {
     snapshot: AccountSnapshot,
 }
 impl AccountRegistry {
+    /// Create an empty registry for a credential store scope at revision zero.
     pub fn new(store_scope: String) -> Self {
         Self {
             snapshot: AccountSnapshot {
@@ -21,6 +23,7 @@ impl AccountRegistry {
             },
         }
     }
+    /// Validate account identities and credential references in a snapshot.
     pub fn from_snapshot(snapshot: AccountSnapshot) -> Result<Self, String> {
         let mut ids = HashSet::new();
         let mut refs = HashSet::new();
@@ -33,9 +36,11 @@ impl AccountRegistry {
         }
         Ok(Self { snapshot })
     }
+    /// Return a copy of the current account snapshot.
     pub fn snapshot(&self) -> AccountSnapshot {
         self.snapshot.clone()
     }
+    /// Reject a mutation when its expected configuration revision is stale.
     pub fn check_revision(&self, expected: u64) -> Result<(), String> {
         if self.snapshot.config_revision != expected {
             return Err(format!(
@@ -45,6 +50,7 @@ impl AccountRegistry {
         }
         Ok(())
     }
+    /// Add a validated account at the next provider priority and revision.
     pub fn add(&mut self, mut account: AccountMetadata, expected: u64) -> Result<(), String> {
         self.check_revision(expected)?;
         validate(&account, &self.snapshot.store_scope)?;
@@ -65,6 +71,7 @@ impl AccountRegistry {
         self.snapshot.accounts.push(account);
         Ok(())
     }
+    /// Update account metadata while preserving its bound route and priority.
     pub fn update(&mut self, account: AccountMetadata, expected: u64) -> Result<(), String> {
         self.check_revision(expected)?;
         validate(&account, &self.snapshot.store_scope)?;
@@ -90,6 +97,7 @@ impl AccountRegistry {
         };
         Ok(())
     }
+    /// Replace a provider's metered-fallback policy at the expected revision.
     pub fn set_policy(
         &mut self,
         provider_id: String,
@@ -117,6 +125,9 @@ impl AccountRegistry {
         );
         Ok(())
     }
+    /// Remove account metadata and matching entries from the snapshot's health list.
+    ///
+    /// Credential storage is managed separately by the caller.
     pub fn remove(&mut self, account_id: &str, expected: u64) -> Result<AccountMetadata, String> {
         self.check_revision(expected)?;
         let index = self
@@ -129,6 +140,7 @@ impl AccountRegistry {
         self.snapshot.health.retain(|h| h.account_id != account_id);
         Ok(self.snapshot.accounts.remove(index))
     }
+    /// Set provider priorities from a list containing each of its accounts once.
     pub fn reorder(
         &mut self,
         provider_id: &str,

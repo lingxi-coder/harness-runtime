@@ -77,8 +77,8 @@ mod tests {
                 // policy-only `/heapdump` object is absent from recognition.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 77 newline-terminated lines: one header plus 76 visible command
-                // rows (83 builtins minus 8 hidden commands, plus bundled `/doctor`).
+                // 75 newline-terminated lines: one header plus 74 visible command
+                // rows (81 builtins minus 8 hidden commands, plus bundled `/doctor`).
                 // `/commit` is omitted while `tengu_cinder_relay` defaults off.
                 let text = s.string_at("").unwrap();
                 assert!(
@@ -86,7 +86,7 @@ mod tests {
                         .any(|line| line.starts_with("  /team-onboarding ")),
                     "the source-visible Native team-onboarding command must appear"
                 );
-                assert_eq!(text.matches('\n').count(), 77);
+                assert_eq!(text.matches('\n').count(), 75);
                 assert!(s.contains("  /bug "));
                 assert!(s.contains("  /powerup "));
                 assert!(s.contains("  /output-style "));

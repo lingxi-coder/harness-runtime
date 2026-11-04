@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// [`crate::builtin_support::UnimplementedCommandHandler`] that return the locked
 /// stub literal `"{name}: not implemented in v0.6.0 (M5)"`.
 ///
-/// The 18 core names listed in [`crate::builtin_support::BUILTIN_CORE_NAMES`] are
+/// The 16 core names listed in [`crate::builtin_support::BUILTIN_CORE_NAMES`] are
 /// **also** registered here against the shared unimplemented handler
 /// **first**, then immediately overwritten by [`register_core_placeholders`]
 /// (called at the end of this function) with their per-name placeholder
@@ -662,10 +662,10 @@ mod registry_tests {
     use crate::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_83_native_builtin_names() {
+    fn register_all_registers_exactly_81_product_builtin_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 81);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(&(*name).into()).is_some(),
@@ -673,6 +673,9 @@ mod registry_tests {
             );
         }
         for name in [
+            // Account authentication is managed by the provider-account API.
+            "login",
+            "logout",
             "commit",
             "doctor",
             "commit-push-pr",
@@ -834,7 +837,7 @@ mod registry_tests {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
 
-        // Pick a definitely-not-in-the-18-core command.
+        // Pick a definitely-not-in-the-core command.
         let h = reg
             .get_handler(&"teleport".into())
             .expect("teleport handler missing");

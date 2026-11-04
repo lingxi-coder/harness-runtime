@@ -232,8 +232,7 @@ impl InsightsNativeCommandNameFactsProvider for RuntimeInsightsNativeCommandName
         let agent_view_enabled =
             lingxi_core::host::agent_view::is_enabled_with_setting(self.disable_agent_view_setting);
         let is_demo = native_boolean_environment_value("IS_DEMO");
-        let skill_doctor = telemetry::feature_flags::flag_bool("tengu_lantern_prism", false)
-            || native_boolean_environment_value("CLAUDE_CODE_LANTERN_PRISM");
+        let skill_doctor = command_api::builtin_support::skill_doctor_enabled();
 
         let (model, profile) = {
             let session = self.session.lock().await;
