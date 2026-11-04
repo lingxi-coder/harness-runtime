@@ -49,6 +49,33 @@ pub struct AppAgentChatResume {
     pub context_source: Option<session::jsonl::CapturedChatTranscript>,
     pub context_authorized: Arc<dyn Fn() -> bool + Send + Sync>,
 }
+
+fn app_chat_conversation_mode(
+    chat: &AppAgentChatResume,
+) -> Result<lingxi_core::host::session_context::ConversationMode, String> {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    if chat.writer.active_path().as_path() != chat.transcript_path.as_path() {
+        return Err("chat_transcript_unavailable".into());
+    }
+    match (&chat.replayed, &chat.context_source) {
+        (None, None) => Ok(ConversationMode::Chat),
+        (Some(replayed), Some(source))
+            if source.path() == chat.transcript_path.as_path()
+                && source.session_id() == chat.session_id.as_uuid()
+                && replayed.transcript_path == chat.transcript_path
+                && replayed.state.session_id == chat.session_id =>
+        {
+            session::JsonlWriter::fixed_session_profile_from_source(
+                source.source(),
+                &chat.session_id.as_uuid().to_string(),
+            )
+            .map(|profile| profile.mode)
+            .map_err(|_| "chat_transcript_unavailable".into())
+        }
+        _ => Err("chat_transcript_unavailable".into()),
+    }
+}
 const BUILTINS: &[&str] = &[
     "Read",
     "Write",
@@ -289,6 +316,7 @@ impl AppAgentFactory {
         if let Some(replayed) = chat.as_ref().and_then(|chat| chat.replayed.as_ref()) {
             validate_local_app_chat_resume(replayed)?;
         }
+        let chat_mode = chat.as_ref().map(app_chat_conversation_mode).transpose()?;
         let model = &admission.task.model;
         let route =
             stateless::resolve_selected_route(&self.api, &model.model_id, &model.provider_id)?;
@@ -593,6 +621,7 @@ impl AppAgentFactory {
             let authorized = chat.context_authorized.clone();
             let context_lease = lease.clone();
             builder = builder
+                .with_conversation_mode(chat_mode.ok_or("chat_transcript_unavailable")?)
                 .with_persistent_app_chat()
                 .with_jsonl_writer(chat.writer.clone())
                 .with_persistent_chat_context(orchestrator::PersistentChatContextConfig {
@@ -604,6 +633,13 @@ impl AppAgentFactory {
                 })?;
         }
         let orch = ConversationOrchestrator::into_shared(builder);
+        if chat.as_ref().is_some_and(|chat| chat.replayed.is_none()) {
+            // The fixed profile is the first durable record. Initialize it
+            // before model selection or any turn can write to the transcript.
+            orch.initialize_conversation_mode()
+                .await
+                .map_err(|_| "chat_transcript_unavailable")?;
+        }
         orch.switch_model(&model.model_id, Some(&model.provider_id))
             .await
             .map_err(|_| "model_unavailable")?;
@@ -853,6 +889,27 @@ mod history_model_capability_tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AvailableCredentials;
+
+    impl llm_runtime::CredentialProvider for AvailableCredentials {
+        fn source<'a>(
+            &'a self,
+            _: &'a llm_runtime::CredentialScope,
+        ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::CredentialSource, llm_runtime::LlmError>>
+        {
+            Box::pin(async { Ok(llm_runtime::CredentialSource::Stored) })
+        }
+
+        fn load<'a>(
+            &'a self,
+            _: &'a llm_runtime::CredentialScope,
+        ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::Credential, llm_runtime::LlmError>>
+        {
+            Box::pin(async { Ok(llm_runtime::Credential::ApiKey("fixture".into())) })
+        }
+    }
+
     fn factory(
         root: &std::path::Path,
         vision: bool,
@@ -897,6 +954,34 @@ mod history_model_capability_tests {
             },
             transport,
         )
+    }
+
+    fn ready_factory(root: &std::path::Path) -> (AppAgentFactory, Arc<NoDispatch>) {
+        let (mut factory, transport) = factory(root, true, true);
+        let config = serde_json::from_value(json!({"providers":[{
+            "provider_id":"anthropic_first_party", "profile_name":"provider", "protocol":"anthropic_messages",
+            "base_url":"https://capability.invalid", "auth":"api_key", "credential":{"type":"host_managed","id":"fixture"},
+            "models":[{"display_model":"model", "request_model":"claude-sonnet-4-6", "billing_model":"claude-sonnet-4-6",
+                "capabilities":{"streaming":true,"tools":true,"vision":true,"documents":true,"reasoning":false,"structured_output":false}}]
+        }]})).unwrap();
+        factory.api = Arc::new(llm_runtime::ApiService::new_with_routing(
+            Arc::new(
+                llm_runtime::ModelRuntime::from_config(config)
+                    .unwrap()
+                    .with_credential_provider(Arc::new(AvailableCredentials)),
+            ),
+            transport.clone(),
+            Default::default(),
+            Default::default(),
+            "test",
+            None,
+            None,
+            None,
+            Default::default(),
+            Some(0),
+            Some(0),
+        ));
+        (factory, transport)
     }
 
     fn assistant(content: Vec<ContentBlock>) -> ConversationMessage {
@@ -951,6 +1036,19 @@ mod history_model_capability_tests {
     async fn cold_chat(
         history: Vec<ConversationMessage>,
     ) -> (tempfile::TempDir, AppAgentChatResume, Vec<u8>) {
+        cold_chat_with_profile(
+            history,
+            lingxi_core::host::session_context::ConversationMode::Chat,
+            0,
+        )
+        .await
+    }
+
+    async fn cold_chat_with_profile(
+        history: Vec<ConversationMessage>,
+        mode: lingxi_core::host::session_context::ConversationMode,
+        epoch: u64,
+    ) -> (tempfile::TempDir, AppAgentChatResume, Vec<u8>) {
         let root = tempfile::tempdir().unwrap();
         let chat_id = uuid::Uuid::new_v4().to_string();
         let session_id = SessionId::new();
@@ -970,6 +1068,10 @@ mod history_model_capability_tests {
                 .await
                 .unwrap(),
         );
+        writer
+            .initialize_fixed_session_mode(&session_id.as_uuid().to_string(), mode, epoch)
+            .await
+            .unwrap();
         let orch = ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
@@ -982,6 +1084,7 @@ mod history_model_capability_tests {
             root.path().to_path_buf(),
         )
         .with_session_id(session_id)
+        .with_conversation_mode(mode)
         .with_persistent_app_chat()
         .with_jsonl_writer(writer.clone());
         for message in &history {
@@ -1019,6 +1122,199 @@ mod history_model_capability_tests {
             },
             bytes,
         )
+    }
+
+    #[tokio::test]
+    async fn app_chat_mode_uses_the_committed_profile_and_rejects_mismatched_sources() {
+        use lingxi_core::host::session_context::ConversationMode;
+
+        for (mode, epoch) in [(ConversationMode::Chat, 0), (ConversationMode::Code, 7)] {
+            let history = vec![ConversationMessage::user(MessageId::new(), "hello".into())];
+            let (_root, mut chat, original) = cold_chat_with_profile(history, mode, epoch).await;
+            assert_eq!(app_chat_conversation_mode(&chat).unwrap(), mode);
+            let profile = session::JsonlWriter::fixed_session_profile_from_source(
+                chat.context_source.as_ref().unwrap().source(),
+                &chat.session_id.as_uuid().to_string(),
+            )
+            .unwrap();
+            assert_eq!(profile.instruction_epoch, epoch);
+
+            let source = chat.context_source.take();
+            assert_eq!(
+                app_chat_conversation_mode(&chat).unwrap_err(),
+                "chat_transcript_unavailable"
+            );
+            chat.context_source = source;
+            let replayed = chat.replayed.as_mut().unwrap();
+            let replayed_path = replayed.transcript_path.clone();
+            replayed.transcript_path = replayed_path.with_file_name("other.jsonl");
+            assert_eq!(
+                app_chat_conversation_mode(&chat).unwrap_err(),
+                "chat_transcript_unavailable"
+            );
+            chat.replayed.as_mut().unwrap().transcript_path = replayed_path;
+            chat.transcript_path = chat.transcript_path.with_file_name("other.jsonl");
+            assert_eq!(
+                app_chat_conversation_mode(&chat).unwrap_err(),
+                "chat_transcript_unavailable"
+            );
+            assert_eq!(std::fs::read(chat.writer.active_path()).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn factory_initializes_new_chat_and_resumes_its_verified_profile() {
+        use lingxi_core::host::session_context::ConversationMode;
+
+        let root = tempfile::tempdir().unwrap();
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let session_id = SessionId::new();
+        let app_id = format!("a{}", "1".repeat(32));
+        let path = root
+            .path()
+            .join("local-apps/v2/apps")
+            .join(&app_id)
+            .join("agent/agui-v1/chats")
+            .join(&chat_id)
+            .join(format!("{}.jsonl", session_id.as_uuid()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
+        );
+        let writer = Arc::new(
+            session::JsonlWriter::open_persistent_chat(path.clone(), fs.clone(), None)
+                .await
+                .unwrap(),
+        );
+        let normalized = local_app::v2::agent::protocol::normalize_run_input(
+            &json!({"threadId":chat_id,"runId":"new-run","messages":[{
+                "id":"new-user","role":"user","content":"hello"
+            }]}),
+            &[],
+        )
+        .unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "factory-profile-test".into(),
+        };
+        let store = local_app::v2::agent::AgentStore::open(&root.path().join("tasks")).unwrap();
+        store
+            .configure(
+                owner.clone(),
+                Some(local_app::v2::agent::Settings {
+                    model: local_app::v2::agent::Model {
+                        provider_id: "provider".into(),
+                        model_id: "claude-sonnet-4-6".into(),
+                    },
+                    tools: BTreeMap::new(),
+                    skills: vec![],
+                    background: false,
+                    max_turns: 1,
+                    timeout_ms: 1000,
+                }),
+            )
+            .unwrap();
+        let admission = store
+            .admit_scoped(&owner, &normalized.input, &[], &[], Some(&chat_id), true)
+            .unwrap();
+        let (factory, transport) = ready_factory(root.path());
+        let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
+        let fresh = AppAgentChatResume {
+            chat_id: chat_id.clone(),
+            session_id,
+            transcript_path: path.clone(),
+            replayed: None,
+            writer: writer.clone(),
+            context_source: None,
+            context_authorized: Arc::new(|| true),
+        };
+        let first = factory
+            .build(
+                &owner,
+                &admission,
+                &normalized.input,
+                root.path().to_path_buf(),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(NoOpPermissionGate),
+                tokio_util::sync::CancellationToken::new(),
+                question_tx.clone(),
+                Some(fresh),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("fresh App Chat setup failed: {error}"));
+        let initial = std::fs::read_to_string(&path).unwrap();
+        let profile = session::JsonlWriter::fixed_session_profile_from_source(
+            &initial,
+            &session_id.as_uuid().to_string(),
+        )
+        .unwrap();
+        assert_eq!(profile.mode, ConversationMode::Chat);
+        assert_eq!(profile.instruction_epoch, 0);
+        assert!(first
+            .orchestrator
+            .ensure_conversation_mode(ConversationMode::Code)
+            .await
+            .is_err());
+        let user = ConversationMessage::user(MessageId::new(), "hello".into());
+        first
+            .orchestrator
+            .append_external_history_message(user.clone())
+            .await;
+        let captured = first
+            .orchestrator
+            .verify_persistent_chat_checkpoint(true)
+            .await
+            .unwrap();
+        drop(first);
+        drop(writer);
+
+        let writer = Arc::new(
+            session::JsonlWriter::open_persistent_chat(
+                path.clone(),
+                fs,
+                Some(captured.checkpoint().clone()),
+            )
+            .await
+            .unwrap(),
+        );
+        let source = writer
+            .capture_persistent_chat_snapshot(false)
+            .await
+            .unwrap();
+        let replayed = ConversationOrchestrator::replay_persistent_chat_snapshot(&source).unwrap();
+        let resumed = AppAgentChatResume {
+            chat_id,
+            session_id,
+            transcript_path: path,
+            replayed: Some(replayed),
+            writer,
+            context_source: Some(source),
+            context_authorized: Arc::new(|| true),
+        };
+        let second = factory
+            .build(
+                &owner,
+                &admission,
+                &normalized.input,
+                root.path().to_path_buf(),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(NoOpPermissionGate),
+                tokio_util::sync::CancellationToken::new(),
+                question_tx,
+                Some(resumed),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("resumed App Chat setup failed: {error}"));
+        assert_eq!(second.orchestrator.snapshot_history().await, vec![user]);
+        second
+            .orchestrator
+            .ensure_conversation_mode(ConversationMode::Chat)
+            .await
+            .unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
     }
 
     async fn assert_factory_preflight(
