@@ -369,14 +369,15 @@ fn scan_descriptor_line(line: &str, descriptor: &mut SessionDescriptor) {
             }
         }
     }
-    if descriptor.first_message.is_none()
-        && line.contains("\"role\":\"user\"")
-        && !line.contains("\"content\":\"<command-name>/")
-        && !line.contains("\"content\":[")
-    {
+    if descriptor.first_message.is_none() {
         if let Some(mut message) = first_user_message_units(line) {
-            replace_units(&mut message, &[b'\\' as u16, b'n' as u16], b' ' as u16);
-            replace_units(&mut message, &[b'\\' as u16, b'"' as u16], b'"' as u16);
+            // Match the existing one-line descriptor presentation after JSON
+            // decoding; a literal backslash followed by n remains literal.
+            for unit in &mut message {
+                if *unit == b'\n' as u16 {
+                    *unit = b' ' as u16;
+                }
+            }
             if message.len() > 3 && message.first() != Some(&(b'<' as u16)) {
                 message.truncate(SESSION_TITLE_MAX_UTF16_UNITS);
                 descriptor.first_message = Some(message);
@@ -400,30 +401,23 @@ fn decimal_after(line: &str, marker: &str) -> Option<u64> {
 }
 
 fn first_user_message_units(line: &str) -> Option<Vec<u16>> {
-    let start = line.find("\"role\":\"user\"")?;
-    let user_row = line[start..].split('}').next()?;
-    let marker = "\"content\":\"";
-    let content_start = user_row.rfind(marker)? + marker.len();
-    let content = user_row[content_start..].split('"').next()?;
-    Some(content.encode_utf16().collect())
-}
-
-fn replace_units(units: &mut Vec<u16>, needle: &[u16], replacement: u16) {
-    if needle.is_empty() {
-        return;
+    let record = Utf16JsonProjection::parse(line).ok()?;
+    if record
+        .get_property("type")
+        .is_some_and(|kind| kind.as_str() != Some("user"))
+    {
+        return None;
     }
-    let mut output = Vec::with_capacity(units.len());
-    let mut cursor = 0;
-    while cursor < units.len() {
-        if units[cursor..].starts_with(needle) {
-            output.push(replacement);
-            cursor += needle.len();
-        } else {
-            output.push(units[cursor]);
-            cursor += 1;
+    match record.get_property("role") {
+        Some(role) if role.as_str() == Some("user") => record.string_units("/content"),
+        Some(_) => None,
+        None => {
+            if record.string_at("/message/role") != Some("user") {
+                return None;
+            }
+            record.string_units("/message/content")
         }
     }
-    *units = output;
 }
 
 fn read_mcp_server_origins(cwd: &Path, server_names: &[String]) -> HashMap<String, String> {
@@ -836,6 +830,95 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_decodes_user_json_without_double_unescaping() {
+        let line =
+            r#"{ "role": "user", "content": "Fix {one} and \"two\"; 中文 😀\nnext \\n literal" }"#;
+        let mut descriptor = SessionDescriptor::default();
+        scan_descriptor_line(line, &mut descriptor);
+        let expected = "Fix {one} and \"two\"; 中文 😀 next \\n literal";
+        assert_eq!(
+            descriptor.first_message,
+            Some(expected.encode_utf16().collect())
+        );
+    }
+
+    #[test]
+    fn descriptor_reads_only_current_user_record_shapes() {
+        let line =
+            r#"{"type":"user","message":{"content":"Nested {task} says \"go\"","role":"user"}}"#;
+        let mut descriptor = SessionDescriptor::default();
+        scan_descriptor_line(line, &mut descriptor);
+        assert_eq!(
+            descriptor.first_message,
+            Some("Nested {task} says \"go\"".encode_utf16().collect())
+        );
+
+        let rejected = [
+            r#"{"role":"assistant","content":"not a user turn"}"#,
+            r#"{"type":"assistant","role":"user","content":"wrong record type"}"#,
+            r#"{"type":0,"message":{"role":"user","content":"invalid record type"}}"#,
+            r#"{"role":null,"message":{"role":"user","content":"invalid outer role"}}"#,
+            r#"{"type":"assistant","message":{"role":"user","content":"wrong record type"}}"#,
+            r#"{"role":"assistant","message":{"role":"user","content":"wrong outer role"}}"#,
+            r#"{"type":"user","message":{"role":"assistant","content":"wrong message role"}}"#,
+            r#"{"other":{"role":"user","content":"not a message"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"not text"}]}}"#,
+            r#"{"role":"user","content":"incomplete"#,
+            r#"{"role":"user","content":"<command-name>/help</command-name>"}"#,
+        ];
+        for line in rejected {
+            let mut descriptor = SessionDescriptor::default();
+            scan_descriptor_line(line, &mut descriptor);
+            assert_eq!(descriptor.first_message, None, "must not select: {line}");
+        }
+
+        let mut descriptor = SessionDescriptor::default();
+        scan_descriptor_line(r#"{"role":"user","content":"malformed"#, &mut descriptor);
+        scan_descriptor_line(
+            r#"{"role":"user","content":"first valid"}"#,
+            &mut descriptor,
+        );
+        scan_descriptor_line(
+            r#"{"role":"user","content":"later valid"}"#,
+            &mut descriptor,
+        );
+        assert_eq!(
+            descriptor.first_message,
+            Some("first valid".encode_utf16().collect())
+        );
+    }
+
+    #[test]
+    fn descriptor_preserves_surrogates_and_caps_at_200_utf16_units() {
+        let mut descriptor = SessionDescriptor::default();
+        scan_descriptor_line(
+            r#"{"type":"user","message":{"role":"user","content":"ab\ud800cd"}}"#,
+            &mut descriptor,
+        );
+        assert_eq!(
+            descriptor.first_message,
+            Some(vec![
+                b'a' as u16,
+                b'b' as u16,
+                0xd800,
+                b'c' as u16,
+                b'd' as u16
+            ])
+        );
+
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}😀 tail"}}}}"#,
+            "a".repeat(199)
+        );
+        let mut descriptor = SessionDescriptor::default();
+        scan_descriptor_line(&line, &mut descriptor);
+        let message = descriptor.first_message.unwrap();
+        assert_eq!(message.len(), 200);
+        assert_eq!(message.last(), Some(&0xd83d));
+        assert!(quote_utf16(&message).ends_with(r#"\ud83d""#));
+    }
+
+    #[test]
     fn onboarding_marker_is_persisted_before_a_failing_usage_scan() {
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join(branding::GLOBAL_CONFIG_FILE);
@@ -925,7 +1008,7 @@ mod tests {
         fs::write(
             project_dir.join("recent.jsonl"),
             concat!(
-                "{\"role\":\"user\",\"content\":\"Please fix the parser\"}\n",
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Fix {parser} with \\\"Claude\\\" {{PRODUCT_NAME}}\"}}\n",
                 "{\"content\":\"<command-name>/review</command-name> <command-name>/review</command-name> <command-name>/commit</command-name>\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__search\"}\n",
                 "{\"type\":\"tool_use\",\"name\":\"mcp__local__read\"}\n",
@@ -1000,7 +1083,7 @@ mod tests {
         assert_eq!(data["sessionDescriptors"][0]["prNumbers"][0], 42);
         assert_eq!(
             data["sessionDescriptors"][0]["firstMessage"],
-            "Please fix the parser"
+            "Fix {parser} with \"Claude\" {{PRODUCT_NAME}}"
         );
         assert!(!prompt.contains("secret-token"));
         assert!(!prompt.contains("secret@example.test"));
