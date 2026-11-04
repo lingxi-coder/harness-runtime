@@ -588,7 +588,9 @@ fn search_tools_with_keywords_source(
         })
         .collect();
     let matches_term = |item: &Prepared<'_>, term: &[u16]| {
-        item.parts.iter().any(|part| part.as_slice() == term || source_contains(part, term))
+        item.parts
+            .iter()
+            .any(|part| part.as_slice() == term || source_contains(part, term))
             || word_boundary_contains_units(&item.desc, term)
             || (!item.hint.is_empty() && word_boundary_contains_units(&item.hint, term))
     };
