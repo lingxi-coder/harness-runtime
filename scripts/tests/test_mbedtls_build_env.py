@@ -81,6 +81,9 @@ class MbedtlsBuildEnvironmentTest(unittest.TestCase):
             )
 
             environment = os.environ.copy()
+            # Freshness assertions inspect Cargo text, including in CI where
+            # CARGO_TERM_COLOR=always otherwise inserts ANSI between words.
+            environment["CARGO_TERM_COLOR"] = "never"
             # Do not let the invoking shell's toolchain overrides mask a case.
             for key in list(environment):
                 if any(key == name or key.startswith(name + "_") or
