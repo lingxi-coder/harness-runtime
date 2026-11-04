@@ -5,6 +5,32 @@ on:
     branches: [main]
 
 jobs:
+  native-cleanup-tests:
+    name: Native cleanup (${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: plain
+            asan: "0"
+          - mode: address-sanitizer
+            asan: "1"
+    env:
+      CC: clang
+      MBEDTLS_OWNERSHIP_ASAN: ${{ matrix.asan }}
+      GIT_ERROR_SAVE_ASAN: ${{ matrix.asan }}
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test native error and stream lifecycles
+        run: |
+          python3 scripts/tests/test_git_error_save.py
+          python3 scripts/tests/test_mbedtls_stream_ownership.py
+          python3 scripts/tests/test_http_proxy_ownership.py
+          python3 scripts/tests/test_http_proxy_reconnect.py
+
   script-gates:
     runs-on: ubuntu-latest
     steps:
