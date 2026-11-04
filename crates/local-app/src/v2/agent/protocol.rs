@@ -16,7 +16,7 @@ const SCHEMA: &str =
     include_str!("../../../../../packages/local-app-agui/spec/ag-ui-1.0.schema.json");
 const PINNED_SCHEMA_SHA256: &str =
     "4b5c93226838a0e72d88e6c5df20633c686c49fcb75d9be2815c6cbf9e48e71a";
-const APP_OPTIONS_KEY: &str = "com.lingxi.localApp";
+const APP_OPTIONS_KEY: &str = branding::LOCAL_APP_AGUI_EXTENSION_KEY;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MAX_THREAD_ID_BYTES: usize = 128;
 const MAX_INPUT_BYTES: usize = 116 * 1024 * 1024;
