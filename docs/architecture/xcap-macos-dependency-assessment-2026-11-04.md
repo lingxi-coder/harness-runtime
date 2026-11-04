@@ -9,9 +9,9 @@ archive checksum below to review provenance, and call the upstream
 `friendly_name` API for display labels. This removes an unreachable platform
 subgraph at its source; it does not silence or filter any advisory. The copy
 will need a clear maintenance owner and upstream comparison on future updates.
-This is a candidate, not approval to ship: native macOS cargo checks pass,
-but it still needs a linked build, the final locked Product graph, and
-screen/permission behavior checks.
+This is a candidate, not approval to ship: native macOS checks and a
+synthetic-window mask capture pass, but the final locked Product graph, full
+product flow, and CI still need validation.
 
 The Product graph checked at
 `17d987cdd1ad05a4072a3e445f6b3c020a28758f` resolves Harness
@@ -55,7 +55,7 @@ geometry, ordering, and permission behavior, not just an image of the display.
 | Published xcap 0.9.8, unchanged | Maintained upstream release, but its Linux manifest still requires zbus 5.17, so upgrading the version alone does not remove the advisory path. It also references the Linux wayshot Git branch. |
 | xcap upstream refactor `9780e04ee954edfdfb4044f5ec402a5b90cf4b7f` | Its [manifest](https://github.com/nashaofu/xcap/blob/9780e04ee954edfdfb4044f5ec402a5b90cf4b7f/Cargo.toml#L69-L81) refers to `ashpd` Git `main`. A full SHA on xcap does not make a fresh downstream resolution of that transitive branch immutable. Its [screenshot path](https://github.com/nashaofu/xcap/blob/9780e04ee954edfdfb4044f5ec402a5b90cf4b7f/src/linux/wayland_capture.rs#L84-L102) attempts wlroots screencopy after any portal error, including denial/cancellation. Its [recorder construction](https://github.com/nashaofu/xcap/blob/9780e04ee954edfdfb4044f5ec402a5b90cf4b7f/src/linux/wayland_video_recorder.rs#L61-L110) returns the stream while local session/proxy bindings go out of scope; it connects PipeWire [without a portal-provided remote FD](https://github.com/nashaofu/xcap/blob/9780e04ee954edfdfb4044f5ec402a5b90cf4b7f/src/linux/wayland_video_recorder.rs#L123-L128). The [capture thread and stop method](https://github.com/nashaofu/xcap/blob/9780e04ee954edfdfb4044f5ec402a5b90cf4b7f/src/linux/wayland_video_recorder.rs#L295-L322) do not show quit/join. These are source observations, not a verified runtime failure or proof of the resolved advisory graph. |
 | Local xcap 0.5.2 Linux zbus-6 fork | Implemented and tested on actual Linux ARM64 D-Bus with five portal tests under each of the default and Tokio runtime features. Its portal worker retains the session and handles rejection without fallback. It keeps Linux code the current product cannot reach and carries more custom capture implementation. The inherited PipeWire capture thread still lacks an explicit quit/join; portal-worker lifetime tests do not prove complete capture-thread cleanup. |
-| macOS-only xcap 0.9.8 source copy | Removes Linux/Windows/etc. code and dependencies while keeping the official macOS implementation, including recorder source. This introduces an intentionally narrower vendored dependency and update responsibility. The consumer adaptation passes a native cargo check; linked build and runtime behavior still need validation. |
+| macOS-only xcap 0.9.8 source copy | Removes Linux/Windows/etc. code and dependencies while keeping the official macOS implementation, including recorder source. This introduces an intentionally narrower vendored dependency and update responsibility. The consumer adaptation passes a native build and synthetic-window mask capture; full product and multi-display behavior still need validation. |
 | New ScreenCaptureKit-based backend | Would change the capture implementation and entail substantial permission, window filtering, geometry, packaging, and OS support verification. A screenshot-manager API has newer OS availability; existing helper scripts mention macOS 13, but these scripts alone do not establish the application's minimum OS. No equivalent replacement was demonstrated. |
 
 Published xcap 0.9.8 archive SHA-256:
@@ -124,9 +124,9 @@ deprecated CoreGraphics/NSWorkspace APIs in unchanged upstream source.
 The [native compile evidence](evidence/xcap-macos-compile-2026-11-04.json)
 records the commands, complete output, toolchain, and disk guard measurements.
 
-These checks are not evidence of a linked build, live capture, permission
-behavior, the final Product graph, or final CI. Those checks remain necessary
-before considering the dependency migration complete.
+Those compile checks alone did not establish capture behavior, the final
+Product graph, or final CI; the scoped native checks below add further
+evidence.
 
 ## Native test execution and permission boundary
 
@@ -148,3 +148,23 @@ was performed during these checks. The
 [commands and raw results](evidence/xcap-macos-native-validation-2026-11-04.json)
 retain both environments and the initially interrupted result. The declared
 `mask` capability is not itself evidence of pixel filtering.
+
+## Native application-mask capture
+
+On the normal native macOS execution path, an independently built probe queried
+the backend's permissions without requesting them and obtained `true/true`
+for that probe process. Two disposable AppKit windows with distinct test-only
+bundle identifiers were placed so the denied window covered part of the
+allowed one. The probe called `screenshot_for_apps` on the actual backend:
+
+- With an empty allowlist, every pixel was opaque black.
+- With only the first fixture allowed, a visible point in it was red, the
+  overlap covered by the denied fixture was black, and no nonblack pixel lay
+  outside the allowed fixture's bounds.
+
+The 3024 × 1964 images were decoded and checked only in memory; no screen image
+was written or uploaded, and no input or permission request was sent.
+[Fixture and probe source, commands, and raw results](evidence/xcap-macos-mask-capture-2026-11-04.json)
+are retained without pixel data. This covers one primary display and synthetic
+local windows; it is not full Product UI, Agent authorization, multi-display,
+remote-device, or final CI acceptance.
