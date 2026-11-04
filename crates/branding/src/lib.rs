@@ -253,6 +253,9 @@ pub const MANAGED_PREFERENCES_DOMAIN: &str = "com.lingxi.code";
 pub const GLOBAL_CONFIG_FILE: &str = ".lingxi.json";
 /// Desktop Local App preparation marker, excluded from published source.
 pub const LOCAL_APP_PREPARATION_MARKER: &str = ".lingxi-prepared.json";
+/// Fixed AG-UI extension key shared by Local App hosts and clients.
+/// This is a wire identity and must not vary with the display name.
+pub const LOCAL_APP_AGUI_EXTENSION_KEY: &str = "com.lingxi.localApp";
 
 /// Append-only sidecar suffix holding durable session-message identities.
 pub const SESSION_MESSAGE_IDENTITY_LOG_SUFFIX: &str = ".lingxi-message-identities";
@@ -429,6 +432,7 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     MANAGED_PREFERENCES_DOMAIN,
     GLOBAL_CONFIG_FILE,
     LOCAL_APP_PREPARATION_MARKER,
+    LOCAL_APP_AGUI_EXTENSION_KEY,
     SESSION_MESSAGE_IDENTITY_LOG_SUFFIX,
     SESSION_MESSAGE_IDENTITY_LOCK_SUFFIX,
     CONFIG_DIR_ENV,
@@ -569,6 +573,7 @@ mod tests {
         assert_eq!(DOT_DIR, ".lingxi");
         assert_eq!(GLOBAL_CONFIG_FILE, ".lingxi.json");
         assert_eq!(LOCAL_APP_PREPARATION_MARKER, ".lingxi-prepared.json");
+        assert_eq!(LOCAL_APP_AGUI_EXTENSION_KEY, "com.lingxi.localApp");
         assert_eq!(CONFIG_DIR_ENV, "LINGXI_CONFIG_DIR");
         assert_eq!(MEMORY_FILE, "LINGXI.md");
         assert_eq!(MEMORY_LOCAL_FILE, "LINGXI.local.md");

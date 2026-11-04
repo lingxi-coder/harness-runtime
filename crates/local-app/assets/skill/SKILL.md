@@ -160,7 +160,7 @@ const {result, newMessages} = await localApp.agent.run({
   runId: crypto.randomUUID(),
   messages: [{id: crypto.randomUUID(), role: "user", content}],
   forwardedProps: {
-    "com.lingxi.localApp": {version: 1, outputSchema: applicationSchema}
+    "{{LOCAL_APP_AGUI_EXTENSION_KEY}}": {version: 1, outputSchema: applicationSchema}
   }
 });
 ```
@@ -255,7 +255,7 @@ completion, validate any structured `RunAgentResult.result` against the declared
 The creating chat can call `LocalApp({"action":"agent_catalog"})` to discover
 exact public tool IDs. Discovery grants nothing. Declare tool and Skill IDs in
 the release, get native grants, then request them only in
-`forwardedProps["com.lingxi.localApp"]` (`version:1`, optional `tools`, `skills`,
+`forwardedProps["{{LOCAL_APP_AGUI_EXTENSION_KEY}}"]` (`version:1`, optional `tools`, `skills`,
 `outputSchema`, `maxTurns`, `timeoutMs`). Standard top-level AG-UI frontend tools
 cannot grant host tools. The current host profile rejects unsupported frontend
 tools, state, context and resume features explicitly. Pages cannot approve tools
