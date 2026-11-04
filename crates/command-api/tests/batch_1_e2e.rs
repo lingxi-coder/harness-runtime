@@ -78,15 +78,15 @@ async fn help_dispatch() {
                 branding::DOT_DIR
             );
             assert!(text.contains(agents_description.as_str()));
-            // Fixed 2.1.295 catalog: one header plus 76 visible command rows
-            // (83 builtins minus 8 hidden commands, plus bundled `/doctor`).
+            // Current product catalog: one header plus 74 visible command rows
+            // (81 builtins minus 8 hidden commands, plus bundled `/doctor`).
             // The Native team-onboarding row is visible; hidden/disabled rows stay out.
             assert!(
                 text.lines()
                     .any(|line| line.starts_with("  /team-onboarding ")),
                 "the source-visible Native team-onboarding command must appear"
             );
-            assert_eq!(text.matches('\n').count(), 77);
+            assert_eq!(text.matches('\n').count(), 75);
         }
         other => panic!("{other:?}"),
     }

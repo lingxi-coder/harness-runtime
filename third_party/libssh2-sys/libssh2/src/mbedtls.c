@@ -66,7 +66,7 @@ static mbedtls_ctr_drbg_context _libssh2_mbedtls_ctr_drbg;
  * mbedTLS backend: Generic functions
  */
 
-void
+int
 _libssh2_mbedtls_init(void)
 {
     int ret;
@@ -77,8 +77,13 @@ _libssh2_mbedtls_init(void)
     ret = mbedtls_ctr_drbg_seed(&_libssh2_mbedtls_ctr_drbg,
                                 mbedtls_entropy_func,
                                 &_libssh2_mbedtls_entropy, NULL, 0);
-    if(ret)
+    if(ret) {
         mbedtls_ctr_drbg_free(&_libssh2_mbedtls_ctr_drbg);
+        mbedtls_entropy_free(&_libssh2_mbedtls_entropy);
+        return LIBSSH2_ERROR_RANDGEN;
+    }
+
+    return 0;
 }
 
 void
@@ -1767,7 +1772,8 @@ _libssh2_ed25519_new_private(libssh2_ed25519_ctx **ed_ctx,
     if(!session)
         return -1;
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp)
@@ -1820,7 +1826,8 @@ _libssh2_ed25519_new_private_frommemory(libssh2_ed25519_ctx **ed_ctx,
     if(!session)
         return -1;
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     if(_libssh2_openssh_pem_parse_memory(session, passphrase,
                                          filedata, filedata_len,
@@ -1872,7 +1879,8 @@ _libssh2_ed25519_new_private_sk(libssh2_ed25519_ctx **ed_ctx,
     if(!session)
         return -1;
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     fp = fopen(filename, "r");
     if(!fp)
@@ -1932,7 +1940,8 @@ _libssh2_ed25519_new_private_frommemory_sk(libssh2_ed25519_ctx **ed_ctx,
     if(!session)
         return -1;
 
-    _libssh2_init_if_needed();
+    if(_libssh2_init_if_needed())
+        return -1;
 
     if(_libssh2_openssh_pem_parse_memory(session, passphrase,
                                          filedata, filedata_len,

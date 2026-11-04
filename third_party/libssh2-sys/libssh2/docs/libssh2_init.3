@@ -16,6 +16,11 @@ libssh2_init(int flags);
 Initialize the libssh2 functions. This typically initialize the
 crypto library. It uses a global state, and is not thread safe -- you
 must make sure this function is not called concurrently.
+The first successful initialization decides whether libssh2 owns the crypto
+library for the lifetime of the corresponding references. The mbedTLS backend
+always initializes its private entropy and random generator state, including
+when LIBSSH2_INIT_NO_CRYPTO is set. This does not initialize an external PSA
+crypto context.
 .SH RETURN VALUE
 Returns 0 if succeeded, or a negative value for error.
 .SH AVAILABILITY

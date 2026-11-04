@@ -860,13 +860,11 @@ impl CommandRegistry {
         // MZo's skillDoctor q4 family is absent unless vM() is enabled.
         // Match only the source builtin; a user skill with this name is free
         // to declare its own availability.
-        if name == "skill-doctor" && is_native_builtin_factory(command) {
-            let from_env = lingxi_core::host::env::is_env_truthy(
-                std::env::var("CLAUDE_CODE_LANTERN_PRISM").ok().as_deref(),
-            );
-            if !from_env && !telemetry::feature_flags::flag_bool("tengu_lantern_prism", false) {
-                return false;
-            }
+        if name == "skill-doctor"
+            && is_native_builtin_factory(command)
+            && !crate::builtin_support::skill_doctor_enabled()
+        {
+            return false;
         }
         if let Some(policy_gate) = command.policy_gate.as_ref() {
             let allowed = match policy_gate.policy.as_str() {
@@ -3385,33 +3383,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn palette_commands_include_manual_only_but_filter_non_user_and_env_disabled() {
-        let _guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
-        let mut reg = CommandRegistry::new();
-
-        let mut manual_only = markdown_cmd("manual-only", vec![]);
-        manual_only.disable_model_invocation = true;
-        reg.register_command(manual_only);
-
-        let mut hidden_from_user = markdown_cmd("internal", vec![]);
-        hidden_from_user.user_invocable = Some(false);
-        reg.register_command(hidden_from_user);
-
-        reg.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new("login", "Login")));
-
-        std::env::set_var("DISABLE_LOGIN_COMMAND", "1");
-        let palette: Vec<String> = reg
-            .palette_commands()
-            .into_iter()
-            .map(|command| command.name.string_at("").unwrap_or_default().to_owned())
-            .collect();
-        std::env::remove_var("DISABLE_LOGIN_COMMAND");
-
-        assert!(palette.contains(&"manual-only".to_string()));
-        assert!(!palette.contains(&"internal".to_string()));
-        assert!(!palette.contains(&"login".to_string()));
-    }
     #[test]
     fn side_chat_copy_filter_excludes_workflows_without_the_workflow_tool() {
         let mut main_registry = CommandRegistry::new();

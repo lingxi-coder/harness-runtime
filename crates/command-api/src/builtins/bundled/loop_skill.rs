@@ -753,9 +753,13 @@ mod tests {
                 .as_nanos()
         ));
         let cwd = root.as_path().join("nested");
-        std::fs::create_dir_all(root.as_path().join(".claude")).unwrap();
+        std::fs::create_dir_all(root.as_path().join(branding::DOT_DIR)).unwrap();
         std::fs::create_dir(&cwd).unwrap();
-        std::fs::write(root.as_path().join(".claude/loop.md"), "project tasks").unwrap();
+        std::fs::write(
+            root.as_path().join(branding::DOT_DIR).join("loop.md"),
+            "project tasks",
+        )
+        .unwrap();
         cron::autonomous_loop::set_loop_ended(true);
         let text = LoopPromptFn
             .try_build_at(
