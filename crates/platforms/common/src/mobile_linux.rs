@@ -1774,9 +1774,10 @@ mod tests {
         );
 
         let foreign_account_command = ProcessCommand {
-            cwd: Some(PathBuf::from(
-                "/home/lingxi/.lingxi/.apps/calorie-a1b2c3d4/source",
-            )),
+            cwd: Some(PathBuf::from(format!(
+                "/home/lingxi/{}/.apps/calorie-a1b2c3d4/source",
+                branding::DOT_DIR
+            ))),
             ..command
         };
         let error = sandbox
