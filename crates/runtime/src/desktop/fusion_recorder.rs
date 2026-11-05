@@ -1411,6 +1411,14 @@ mod tests {
         writer
             .activate_session_target(session_id, writer.path().to_path_buf(), cwd.clone())
             .unwrap();
+        writer
+            .initialize_fixed_session_mode(
+                &session_id.as_uuid().to_string(),
+                lingxi_core::host::session_context::ConversationMode::Code,
+                0,
+            )
+            .await
+            .unwrap();
         let recorder = DesktopFusionRecorder::new(
             coordinator.clone(),
             Some(FusionTranscriptTarget::new(writer).for_session(session_id)),
