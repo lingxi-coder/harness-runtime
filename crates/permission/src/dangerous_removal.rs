@@ -136,12 +136,19 @@ fn normalize_macos_private(p: &str) -> String {
     if !cfg!(target_os = "macos") {
         return p.to_string();
     }
-    if p.len() <= PREFIX.len() || !p[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+    if p.len() <= PREFIX.len()
+        || !p
+            .get(..PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+    {
         return p.to_string();
     }
     let rest = &p[PREFIX.len()..];
     for name in ["etc", "var", "tmp", "home"] {
-        if rest.len() >= name.len() && rest[..name.len()].eq_ignore_ascii_case(name) {
+        if rest
+            .get(..name.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+        {
             let after = &rest[name.len()..];
             if after.is_empty() || after.starts_with('/') {
                 // `/private/<name>` → `/<name>` (preserve the matched case).

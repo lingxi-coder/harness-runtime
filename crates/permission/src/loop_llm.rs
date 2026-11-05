@@ -20,57 +20,118 @@ pub fn system_prompt(
     settings: &serde_json::Value,
     deny_rules: &[Utf16JsonProjection],
 ) -> Utf16JsonProjection {
-    let mut prompt = TEMPLATE.to_string();
-    for (slot, field) in [
-        ("user_allow_rules_to_replace", "allow"),
-        ("user_soft_deny_rules_to_replace", "soft_deny"),
-        ("user_hard_deny_rules_to_replace", "hard_deny"),
-        ("user_environment_to_replace", "environment"),
-    ] {
-        let start_tag = format!("<{slot}>");
-        let end_tag = format!("</{slot}>");
-        let Some(start) = prompt.find(&start_tag) else {
+    let slots = ["allow", "soft_deny", "hard_deny", "environment"].map(|field| {
+        settings
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .filter(|values| !values.is_empty())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(|value| value.encode_utf16().collect())
+                    .collect()
+            })
+    });
+    render_system_prompt(slots, deny_rules)
+}
+
+/// Render the host's live trusted-source merge without a lossy JSON/String
+/// conversion. Isolated UTF-16 units in policy text stay exact until transport.
+pub fn system_prompt_with_trusted_settings(
+    settings: &lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings,
+    deny_rules: &[Utf16JsonProjection],
+) -> Utf16JsonProjection {
+    let slots = [
+        &settings.allow,
+        &settings.soft_deny,
+        &settings.hard_deny,
+        &settings.environment,
+    ]
+    .map(|values| {
+        (!values.is_empty()).then(|| {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .string_units("")
+                        .expect("trusted classifier rules are strings")
+                        .to_vec()
+                })
+                .collect()
+        })
+    });
+    render_system_prompt(slots, deny_rules)
+}
+
+fn render_system_prompt(
+    slots: [Option<Vec<Vec<u16>>>; 4],
+    deny_rules: &[Utf16JsonProjection],
+) -> Utf16JsonProjection {
+    fn find(haystack: &[u16], needle: &[u16]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+    let mut prompt = TEMPLATE.encode_utf16().collect::<Vec<_>>();
+    for (slot, values) in [
+        "user_allow_rules_to_replace",
+        "user_soft_deny_rules_to_replace",
+        "user_hard_deny_rules_to_replace",
+        "user_environment_to_replace",
+    ]
+    .into_iter()
+    .zip(slots)
+    {
+        let start_tag = format!("<{slot}>").encode_utf16().collect::<Vec<_>>();
+        let end_tag = format!("</{slot}>").encode_utf16().collect::<Vec<_>>();
+        let Some(start) = find(&prompt, &start_tag) else {
             continue;
         };
-        let Some(end) = prompt[start + start_tag.len()..]
-            .find(&end_tag)
-            .map(|offset| start + start_tag.len() + offset)
+        let content_start = start + start_tag.len();
+        let Some(end) = find(&prompt[content_start..], &end_tag).map(|end| end + content_start)
         else {
             continue;
         };
-        let default = &prompt[start + start_tag.len()..end];
-        let values = settings.get(field).and_then(serde_json::Value::as_array);
-        let rendered = if let Some(values) = values.filter(|values| !values.is_empty()) {
-            let mut parts = Vec::new();
+        let default = &prompt[content_start..end];
+        let rendered = if let Some(values) = values {
+            let mut rendered = Vec::new();
             let mut defaults_added = false;
-            for value in values.iter().filter_map(serde_json::Value::as_str) {
-                if value == "$defaults" {
-                    if !defaults_added {
-                        parts.push(default.to_string());
-                        defaults_added = true;
-                    }
+            let mut first = true;
+            for value in values {
+                let is_default = value.iter().copied().eq("$defaults".encode_utf16());
+                if is_default && defaults_added {
+                    continue;
+                }
+                if !first {
+                    rendered.push(b'\n' as u16);
+                }
+                first = false;
+                if is_default {
+                    rendered.extend_from_slice(default);
+                    defaults_added = true;
                 } else {
-                    parts.push(format!("- {value}"));
+                    rendered.extend("- ".encode_utf16());
+                    rendered.extend(value);
                 }
             }
-            parts.join("\n")
+            rendered
         } else {
-            default.to_string()
+            default.to_vec()
         };
-        prompt.replace_range(start..end + end_tag.len(), &rendered);
+        prompt.splice(start..end + end_tag.len(), rendered);
     }
-    let marker = "<settings_deny_rules>";
+    let marker = "<settings_deny_rules>".encode_utf16().collect::<Vec<_>>();
     let mut units = Vec::new();
     let mut cursor = 0;
-    while let Some(relative) = prompt[cursor..].find(marker) {
+    while let Some(relative) = find(&prompt[cursor..], &marker) {
         let start = cursor + relative;
-        units.extend(prompt[cursor..start].encode_utf16());
+        units.extend_from_slice(&prompt[cursor..start]);
         append_deny_rules(&mut units, deny_rules);
         cursor = start + marker.len();
     }
-    units.extend(prompt[cursor..].encode_utf16());
-    let display = String::from_utf16_lossy(&units);
-    Utf16JsonProjection::root_string(display, units)
+    units.extend_from_slice(&prompt[cursor..]);
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
         .expect("classifier system prompt is an exact root-string projection")
 }
 
@@ -509,6 +570,16 @@ pub async fn classify_detailed(
     .await
     {
         Ok(reply) => reply,
+        Err(_) if fast.stop_reason == "refusal" && parse_block(&fast.text) != Some(true) => {
+            return classified(
+                transport,
+                AutoModeClassifierVerdict::NoVerdict {
+                    reason: REFUSED.into(),
+                    message: refused_message(REFUSED),
+                },
+                Some(ClassifierFailure::Refused),
+            );
+        }
         Err(error) => return query_failed(transport, tool_name, error),
     };
     let verdict = match parse_block(&reply.text) {

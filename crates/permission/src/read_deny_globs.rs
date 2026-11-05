@@ -262,10 +262,16 @@ fn relativize_for_cwd(pattern_root: &Path, pattern: &str, cwd: &Path) -> Vec<Str
     let s_with_sep = format!("{s}/");
     if case_fold(Path::new(&joined)).starts_with(&s_with_sep) {
         // `r.slice(n.length)` — slice the ORIGINAL (non-folded) joined string
-        // by the cwd byte length (TS slices the un-folded `r`).
+        // by the cwd UTF-16 length (TS slices the un-folded `r`). Case folding
+        // can change the byte length, so it cannot provide a UTF-8 boundary.
         let cwd_str = cwd.to_string_lossy();
-        let sliced = &joined[cwd_str.len()..];
-        return vec![aho(sliced)];
+        let sliced = String::from_utf16_lossy(
+            &joined
+                .encode_utf16()
+                .skip(cwd_str.encode_utf16().count())
+                .collect::<Vec<_>>(),
+        );
+        return vec![aho(&sliced)];
     }
     // `i = posix.relative(s, o)` — cwd → patternRoot. Drop if it escapes.
     let rel = posix_relative_str(cwd, pattern_root);
@@ -670,9 +676,17 @@ mod tests {
                 behavior: PermissionBehavior::Deny,
                 source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             }],
-        )
-        .with_roots(roots("/proj"));
+        );
+        assert_eq!(
+            p.denied_search_path(Path::new("/proj/file")),
+            ReadPathPolicyMatch::NoMatch
+        );
+        let p = p.with_roots(roots("/proj"));
         assert!(read_deny_exclude_globs(&p, Path::new("/proj")).is_empty());
+        assert_eq!(
+            p.denied_search_path(Path::new("/proj/file")),
+            ReadPathPolicyMatch::NoMatch
+        );
     }
 
     #[test]

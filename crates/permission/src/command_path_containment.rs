@@ -55,7 +55,7 @@
 use crate::filesystem::{path_in_allowed_working_path, FsRoots};
 use crate::path_constraints::PathConstraintAsk;
 use regex::Regex;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The per-command file-operation type — 1:1 with TS `FileOperationType`
@@ -124,6 +124,48 @@ fn command_spec(command: &str) -> Option<(OperationType, &'static str)> {
     Some(spec)
 }
 
+/// Path analysis only unwraps shell precommands that can execute in the same
+/// shell. Privilege wrappers belong to the separate Deny/Ask argv matcher.
+fn path_analysis_argv(command: &str) -> Vec<String> {
+    let mut argv = split_argv(&crate::shell_command::strip_safe_wrappers(command));
+    loop {
+        let Some(program) = argv.first() else {
+            return argv;
+        };
+        let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+        let skip = match base {
+            "command" => {
+                let mut at = 1;
+                while argv.get(at).is_some_and(|arg| {
+                    arg.starts_with('-') && arg[1..].chars().all(|c| c == 'p') && arg.len() > 1
+                }) {
+                    at += 1;
+                }
+                if argv.get(at).is_some_and(|arg| arg == "--") {
+                    at += 1;
+                }
+                if argv.get(at).is_none_or(|arg| arg.starts_with('-')) {
+                    return argv;
+                }
+                at
+            }
+            "builtin" if program == "builtin" => {
+                if argv.get(1).is_some_and(|arg| arg == "--") {
+                    2
+                } else {
+                    1
+                }
+            }
+            "noglob" if program == "noglob" => 1,
+            _ => return argv,
+        };
+        if skip >= argv.len() {
+            return argv;
+        }
+        argv.drain(..skip);
+    }
+}
+
 /// Oracle `CU`: basename-strip `rm`/`rmdir`/`tee`, and map `tee.exe` / `TEE.EXE`
 /// (any case) onto `tee`. Other commands keep the original argv[0] so a
 /// `/usr/bin/cat` stays unrestricted unless the table lists that spelling.
@@ -152,7 +194,7 @@ fn command_spec_name(command: &str) -> &str {
 /// from each token (matching `parseCommandArguments`, which yields bare
 /// strings). Identical in behavior to [`crate::dangerous_removal`]'s splitter;
 /// kept module-local so each guard stays self-contained (the crate convention).
-fn split_argv(subcommand: &str) -> Vec<String> {
+pub(crate) fn split_argv(subcommand: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
     let mut has_token = false;
@@ -1179,8 +1221,10 @@ fn glob_segment_can_match_dotdot(segment: &str) -> bool {
             '?' => re.push('.'),
             '[' => {
                 let negated = matches!(chars.get(i + 1), Some('!') | Some('^'));
-                let close = chars[i + if negated { 3 } else { 2 }..]
-                    .iter()
+                let close = chars
+                    .get(i + if negated { 3 } else { 2 }..)
+                    .into_iter()
+                    .flatten()
                     .position(|c| *c == ']')
                     .map(|p| p + i + if negated { 3 } else { 2 });
                 match close {
@@ -1297,7 +1341,7 @@ fn working_dir_paths(roots: &FsRoots, additional: &[PathBuf]) -> Vec<PathBuf> {
 /// Native a6t's global cB check, before child/path decisions. This verdict
 /// applies to the complete command; checking the interpreter alone loses it.
 pub(crate) fn check_code_on_stdin_read_block(command: &str) -> Option<PathConstraintAsk> {
-    let subs = crate::shell_command::split_command(command);
+    let subs = crate::shell_command::split_command_for_path_analysis(command);
     let has_heredoc = command.contains("<<");
     let has_pipe = command.contains('|');
     for (idx, sub) in subs.iter().enumerate() {
@@ -1334,7 +1378,23 @@ pub fn check_command_path_containment(
     additional: &[PathBuf],
     read_block_dirs: Option<&[PathBuf]>,
 ) -> Option<PathConstraintAsk> {
-    let subs = crate::shell_command::split_command(command);
+    check_command_path_containment_with_read_denies(
+        command,
+        roots,
+        additional,
+        read_block_dirs,
+        false,
+    )
+}
+
+pub(crate) fn check_command_path_containment_with_read_denies(
+    command: &str,
+    roots: &FsRoots,
+    additional: &[PathBuf],
+    read_block_dirs: Option<&[PathBuf]>,
+    read_denies_active: bool,
+) -> Option<PathConstraintAsk> {
+    let subs = crate::shell_command::split_command_for_path_analysis(command);
     let compound_has_cd = compound_has_cd(&subs);
     let home = roots
         .home
@@ -1587,6 +1647,18 @@ pub fn check_command_path_containment(
             continue;
         }
         let paths = extract_paths(spec_name, args, home.as_deref());
+        if compound_has_cd
+            && operation_type == OperationType::Read
+            && read_denies_active
+            && paths.iter().any(|path| !Path::new(path).is_absolute())
+        {
+            return Some(PathConstraintAsk {
+                message: format!("{spec_name} reads a file by a relative path after a cd in a compound command; which file that is cannot be resolved statically while a Read() deny rule is configured, so this needs approval."),
+                reason: "Compound command contains cd with a relative file read while a Read() deny rule exists".into(),
+                blocked_path: None,
+                outside_reads_blocked: false,
+            });
+        }
         for path in &paths {
             match validate_path(path, operation_type, roots) {
                 PathGuard::Ask(reason) => {
@@ -1731,6 +1803,9 @@ pub struct CommandPathTarget {
     /// `true` for write/create-op commands (checked against Edit-deny rules);
     /// `false` for read-op commands (checked against Read-deny rules).
     pub is_write: bool,
+    /// Native unknown-cwd fallback: match this original read path under each
+    /// deny pattern directory, rather than pretending its initial cwd is final.
+    pub unresolved_cwd: bool,
     /// The byte-exact message CC surfaces for a rule-typed command-path deny
     /// (`yPg`'s `S`, the containment template reused when `decisionReason.type
     /// === "rule"`).
@@ -1752,19 +1827,112 @@ pub fn command_path_deny_targets(
     roots: &FsRoots,
     additional: &[PathBuf],
 ) -> Vec<CommandPathTarget> {
-    let subs = crate::shell_command::split_command(command);
+    let subs = crate::shell_command::split_command_for_path_analysis(command);
     let compound_has_cd = compound_has_cd(&subs);
     let home = roots
         .home
         .as_deref()
         .map(|p| p.to_string_lossy().into_owned());
     let mut targets = Vec::new();
+    let mut current = Some(roots.cwd.clone());
+    let mut previous = None;
+    let mut stack = Vec::new();
+    let mut candidates = vec![roots.cwd.clone()];
+    let mut unresolved_cwd = false;
     for sub in &subs {
         let stripped = crate::shell_command::strip_safe_wrappers(sub);
-        let tokens = split_argv(&stripped);
+        let tokens = path_analysis_argv(sub);
         let Some((base, args)) = tokens.split_first() else {
             continue;
         };
+        let directory_command = base.rsplit(['/', '\\']).next().unwrap_or(base);
+        if matches!(directory_command, "cd" | "chdir" | "pushd" | "popd") {
+            let positional = args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() != "--" && (arg.as_str() == "-" || !arg.starts_with('-'))
+                })
+                .collect::<Vec<_>>();
+            let options = args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() != "--"
+                        && arg.as_str() != "-"
+                        && arg.starts_with('-')
+                        && !arg[1..].chars().all(|c| "PLe@".contains(c))
+                })
+                .collect::<Vec<_>>();
+            if matches!(directory_command, "pushd" | "popd")
+                && options.len() == 1
+                && options[0] == "-n"
+            {
+                continue;
+            }
+            let target = if positional.len() == 1 {
+                Some(positional[0].as_str())
+            } else if positional.is_empty() && matches!(directory_command, "cd" | "chdir") {
+                Some("~")
+            } else {
+                None
+            };
+            let restored = if options.is_empty() {
+                if directory_command == "popd" && positional.is_empty() {
+                    stack.pop()
+                } else if target == Some("-") {
+                    previous.clone().map(Some)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(restored) = restored {
+                previous = current;
+                current = restored;
+            } else if let Some(target) = target.filter(|path| {
+                options.is_empty()
+                    && directory_command != "popd"
+                    && *path != "-"
+                    && !path.strip_prefix(['+', '-']).is_some_and(|number| {
+                        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    && !has_glob_metachar(path)
+                    && !path.contains(['$', '`'])
+                    && (!path.starts_with('~') || *path == "~" || path.starts_with("~/"))
+            }) {
+                if directory_command == "pushd" {
+                    stack.push(current.clone());
+                }
+                previous = current.clone();
+                let from_initial = crate::filesystem::expand_path(target, roots);
+                if !candidates.contains(&from_initial) {
+                    candidates.push(from_initial);
+                }
+                current = current.map(|cwd| {
+                    crate::filesystem::expand_path(
+                        target,
+                        &FsRoots {
+                            cwd,
+                            ..roots.clone()
+                        },
+                    )
+                });
+                if let Some(path) = &current {
+                    if !candidates.contains(path) {
+                        candidates.push(path.clone());
+                    }
+                }
+            } else {
+                if directory_command == "pushd" {
+                    stack.push(current.clone());
+                }
+                unresolved_cwd = true;
+                previous = current;
+                current = None;
+            }
+            unresolved_cwd |= current.is_none();
+            continue;
+        }
         let spec_name = command_spec_name(base);
         let Some((mut operation_type, action_verb)) = command_spec(spec_name) else {
             continue;
@@ -1789,22 +1957,31 @@ pub fn command_path_deny_targets(
         }
         let paths = extract_paths(spec_name, args, home.as_deref());
         for path in &paths {
-            // Only paths that clear every pre-guard (resolved) are deny-checked;
-            // a pre-guard Ask preempts the deny walk in CC.
-            if let PathGuard::Check(resolved) = validate_path(path, operation_type, roots) {
-                let dirs = all_working_directories(roots, additional);
-                let dir_list = format_directory_list(&dirs);
-                let resolved_str = resolved.to_string_lossy().into_owned();
-                let blocked_message = format!(
-                    "{spec_name} in '{resolved_str}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
-                );
+            for cwd in &candidates {
+                let command_roots = FsRoots {
+                    cwd: cwd.clone(),
+                    ..roots.clone()
+                };
+                if let PathGuard::Check(resolved) =
+                    validate_path(path, operation_type, &command_roots)
+                {
+                    let dirs = all_working_directories(roots, additional);
+                    let dir_list = format_directory_list(&dirs);
+                    let resolved_str = resolved.to_string_lossy().into_owned();
+                    targets.push(CommandPathTarget {
+                        blocked_message: format!("{spec_name} in '{resolved_str}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."),
+                        resolved: resolved_str,
+                        is_write: operation_type != OperationType::Read,
+                        unresolved_cwd: false,
+                    });
+                }
+            }
+            if unresolved_cwd && operation_type == OperationType::Read {
                 targets.push(CommandPathTarget {
-                    resolved: resolved_str,
-                    is_write: matches!(
-                        operation_type,
-                        OperationType::Write | OperationType::Create
-                    ),
-                    blocked_message,
+                    resolved: path.clone(),
+                    is_write: false,
+                    unresolved_cwd: true,
+                    blocked_message: String::new(),
                 });
             }
         }
@@ -1816,10 +1993,12 @@ pub fn command_path_deny_targets(
 /// compound-`cd`-with-write ask. A leading-word `cd` in ANY subcommand counts.
 fn compound_has_cd(subs: &[String]) -> bool {
     subs.iter().any(|s| {
-        let stripped = crate::shell_command::strip_safe_wrappers(s);
-        split_argv(&stripped)
-            .first()
-            .is_some_and(|first| first == "cd")
+        path_analysis_argv(s).first().is_some_and(|first| {
+            matches!(
+                first.rsplit(['/', '\\']).next().unwrap_or(first),
+                "cd" | "chdir" | "pushd" | "popd"
+            )
+        })
     })
 }
 

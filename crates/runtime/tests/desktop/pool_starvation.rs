@@ -262,6 +262,7 @@ fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
         model_profile: None,
         api_client: Some(model),
         tool_invoker: None,
+        supplied_mcp_tools: Vec::new(),
         new_diagnostics_source: None,
         tool_schemas: vec![],
         schema: None,

@@ -922,6 +922,7 @@ impl PoolSubagentSpawner {
             // over the live registry per the resolved definition's policy.
             api_client: None,
             tool_invoker: None,
+            supplied_mcp_tools: Vec::new(),
             new_diagnostics_source: None,
             tool_schemas: vec![],
             // Overwritten by `spawn` from `request.schema` (like `tool_schemas`).
@@ -1585,6 +1586,19 @@ impl PoolSubagentSpawner {
             ctx.handback = Some(runtime);
         }
         ctx.tool_schemas = tool_schemas;
+        if !matches!(
+            ctx.agent_definition.tools,
+            crate::definition::AgentToolPolicy::All {
+                use_exact_tools: true
+            }
+        ) {
+            ctx.supplied_mcp_tools = agent_mcp
+                .tools
+                .iter()
+                .filter(|tool| allowed_tools.iter().any(|name| name == tool.name()))
+                .cloned()
+                .collect();
+        }
         ctx.allowed_tools = allowed_tools;
         // Per-agent working directory (claude-code `me = cwd ?? worktreePath`):
         // resolve this before rendering the mutable mobile workspace reminder.

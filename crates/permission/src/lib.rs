@@ -37,6 +37,7 @@ pub mod bash_security;
 pub mod bash_tree_sitter;
 pub mod bypass_guard;
 pub mod classifier;
+pub mod classifier_settings;
 pub mod cli_mode;
 pub mod command_path_containment;
 pub mod computer_access;

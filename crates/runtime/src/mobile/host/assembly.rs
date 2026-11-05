@@ -622,6 +622,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
     )
     .with_projects_session_host(projects_session_host.clone())
+    .with_connection_admission(plugin_mcp_admission.clone())
     .with_plugin_mcp_admission(plugin_mcp_admission)
     .with_headers_helper_cwd(cwd.clone())
     .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
@@ -1426,6 +1427,25 @@ pub(super) async fn build_mobile_inner_with_ask(
         // LAST so its rules/defaultMode win — mirrors desktop. Mobile does not
         // PERSIST to it (no `.with_persist`), but a synced/checked-in
         // settings.local.json's deny/allow rules + defaultMode are now honored.
+        let classifier_user_path = user.clone();
+        let classifier_user_enabled = user != proj;
+        let classifier_settings_provider: Arc<
+            dyn Fn() -> Option<
+                    lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings,
+                > + Send
+                + Sync,
+        > = Arc::new(move || {
+            if !classifier_user_enabled {
+                return Some(Default::default());
+            }
+            let raw = permission::auto_mode_io::secure_read_capped(
+                &classifier_user_path,
+                1_048_576,
+                false,
+            )?;
+            permission::classifier_settings::merge_trusted_auto_mode_settings(&[raw])
+        });
+        let classifier_settings = classifier_settings_provider();
         let local = cwd.join(branding::DOT_DIR).join("settings.local.json");
         let mut sources: Vec<(std::path::PathBuf, permission::PermissionRuleSource)> = Vec::new();
         if user != proj {
@@ -1589,6 +1609,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         }
         resolved_permission_mode = mode;
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
+            .with_classify_all_shell(
+                classifier_settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.classify_all_shell),
+            )
             // `zj`'s `!Ae()` — plan mode counts as bypassPermissions only in an
             // interactive launch. A mobile foreground host is one; a cron-fired
             // throwaway runtime is not.
@@ -1619,7 +1644,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         // disagree about which mount a path belongs to. `fs` only translates
         // when a mobile-linux runtime is selected; otherwise the trait default
         // returns `Ok(None)` and the gate is byte-identical to desktop.
-        let mut gate = permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
+        let mut gate = permission::PolicyPermissionGate::new(policy, adapter_gate.clone())
+            .with_classifier_auto_mode_settings_provider(classifier_settings_provider);
+        gate.set_classifier_auto_mode_settings(classifier_settings);
         let live_cwd = live_session_cwd.clone();
         let root_fs = fs.clone();
         let boot_cwd = permission_cwd.clone();

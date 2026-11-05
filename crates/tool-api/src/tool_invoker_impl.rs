@@ -538,7 +538,9 @@ impl RegistryToolInvoker {
             // delegates to `check_with_worker` and maps `Allow`→`Allow{None}`, so
             // a gate that only overrides `check_with_worker` (or `check`) is
             // unchanged. Behavior is identical when `updated_input` is `None`.
-            let check_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+            let tool_check_ceiling = tool.tool_check_permission_ceiling(&input).await;
+            let mut check_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+                tool_check_ceiling,
                 pause_observer: ctx.permission_pause_observer.clone(),
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
@@ -547,7 +549,8 @@ impl RegistryToolInvoker {
                 // persistence guard alongside the transport metadata so TUI,
                 // adapter, and stdio hosts cannot offer or honor a stale
                 // AllowAlways response for subagent dispatches.
-                suppress_always_allow_rule: tool.requires_user_interaction(),
+                suppress_always_allow_rule: tool.requires_user_interaction()
+                    || tool_check_ceiling == Some(lingxi_core::host::McpPermissionCeiling::Ask),
                 request_source: ctx.request_source,
                 // Per-call permission-mode override (claude-code 2.1.207 Agent
                 // `mode` → the child's `toolPermissionContext.mode`): a
@@ -575,6 +578,9 @@ impl RegistryToolInvoker {
                 background_owned: self.background_owned,
                 ..Default::default()
             };
+            if tool_ask_is_protected {
+                permission::policy_gate::apply_ask_context(&mut check_ctx, &tool_permission_result);
+            }
             // Tool-local DENY has priority over every policy result.  For a
             // protected tool ASK, resolve the policy without its transport
             // first, then send the single ASK through that same worker-aware
@@ -885,6 +891,7 @@ mod tests {
         result: PermissionResult,
         is_mcp: bool,
         calls: Arc<AtomicUsize>,
+        ceiling: Option<lingxi_core::host::McpPermissionCeiling>,
     }
 
     #[async_trait]
@@ -903,6 +910,12 @@ mod tests {
         }
         fn is_mcp(&self) -> bool {
             self.is_mcp
+        }
+        async fn tool_check_permission_ceiling(
+            &self,
+            _: &Utf16JsonProjection,
+        ) -> Option<lingxi_core::host::McpPermissionCeiling> {
+            self.ceiling
         }
         fn max_result_size_chars(&self) -> usize {
             1024
@@ -1941,6 +1954,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(ToolPermissionProbe {
+            ceiling: None,
             result: allow_for_tests(),
             is_mcp: false,
             calls: calls.clone(),
@@ -2486,6 +2500,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_review_protected_mcp_ask_carries_its_origin_and_organization_persistence_guard() {
+        for ceiling in [None, Some(lingxi_core::host::McpPermissionCeiling::Ask)] {
+            let seen = Arc::new(StdMutex::new(None));
+            let gate = Arc::new(ContextRecordingGate {
+                seen: seen.clone(),
+                outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: vec![],
+                    decision_classification: None,
+                },
+            });
+            let mut registry = ToolRegistry::new();
+            registry.register_builtin(Arc::new(ToolPermissionProbe {
+                result: PermissionResult::Ask {
+                    reason: PermissionDecisionReason::MatchedRule {
+                        rule: permission::rule::PermissionRule {
+                            value: permission::PermissionRuleValue::from_rule_string(
+                                "ToolPermissionProbe",
+                            ),
+                            behavior: permission::PermissionBehavior::Ask,
+                            source: permission::PermissionRuleSource::Session,
+                        },
+                    },
+                    prompt: permission::result::PermissionPrompt {
+                        title: "Approve?".into(),
+                        message: "local server Ask".into(),
+                        options: vec![],
+                    },
+                    pending_classifier_check: None,
+                    metadata: PermissionMetadata::default(),
+                },
+                is_mcp: true,
+                calls: Arc::new(AtomicUsize::new(0)),
+                ceiling,
+            }));
+            let mut context = ctx_with_tool_use_id("toolu_org");
+            context.is_non_interactive_session = false;
+            RegistryToolInvoker::new(Arc::new(registry))
+                .with_gate(gate)
+                .invoke("ToolPermissionProbe", json!({}), context)
+                .await
+                .unwrap();
+            let context = seen.lock().unwrap().clone().unwrap();
+            assert_eq!(context.tool_check_ceiling, ceiling);
+            assert_eq!(context.suppress_always_allow_rule, ceiling.is_some());
+            assert_eq!(context.decision_reason_type.as_deref(), Some("rule"));
+        }
+    }
+
+    #[tokio::test]
     async fn dispatch_forwards_frozen_command_denies_as_a_separate_source_array() {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
@@ -2840,6 +2904,7 @@ mod tests {
     ) -> Arc<ToolRegistry> {
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(ToolPermissionProbe {
+            ceiling: None,
             result,
             is_mcp,
             calls,

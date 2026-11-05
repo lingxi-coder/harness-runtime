@@ -2367,6 +2367,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         server_fallback_model_enforcement: None,
         api_client: None,
         tool_invoker: None,
+        supplied_mcp_tools: Vec::new(),
         new_diagnostics_source: None,
         tool_schemas: vec![],
         schema: None,
@@ -14770,4 +14771,169 @@ async fn pool_hard_abort_drains_skill_publication_after_disk_write() {
         );
     }
     skills::reset_for_test();
+}
+
+struct PrivateMcpRouteProbe {
+    origin: &'static str,
+    denied: bool,
+    calls: Arc<AtomicUsize>,
+    schema: Utf16JsonProjection,
+}
+#[async_trait]
+impl tool_api::Tool for PrivateMcpRouteProbe {
+    fn name(&self) -> &str {
+        "mcp__private__run"
+    }
+    fn aliases(&self) -> &[&str] {
+        &["mcp__private__alias"]
+    }
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        &self.schema
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+    fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
+        true
+    }
+    fn is_mcp(&self) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
+        true
+    }
+    fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
+        true
+    }
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &tool_api::ToolUseContext,
+    ) -> permission::PermissionResult {
+        if self.denied {
+            permission::PermissionResult::Deny {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "private restriction".into(),
+                },
+                explanation: Some("private restriction".into()),
+                metadata: Default::default(),
+            }
+        } else {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "fixture".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: Default::default(),
+            }
+        }
+    }
+    async fn description(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &tool_api::DescriptionOptions,
+    ) -> String {
+        "private probe".into()
+    }
+    async fn prompt(&self, _: &tool_api::PromptOptions) -> Utf16JsonProjection {
+        "private probe".into()
+    }
+    async fn call(
+        &self,
+        _: Utf16JsonProjection,
+        _: tool_api::ToolUseContext,
+        _: tool_api::ToolProgressSender,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(tool_api::ToolCallResult {
+            data: test_projection(&serde_json::json!({"origin":self.origin})),
+            model_content: None,
+            new_messages: vec![],
+            context_modifier: None,
+            mcp_meta: None,
+            is_error: false,
+            subagent_hooks_fired: false,
+        })
+    }
+}
+struct PrivateMcpRouteGate;
+#[async_trait]
+impl lingxi_core::host::PermissionGate for PrivateMcpRouteGate {
+    async fn check(
+        &self,
+        _: &str,
+        _: &Utf16JsonProjection,
+    ) -> lingxi_core::host::PermissionDecision {
+        lingxi_core::host::PermissionDecision::Allow
+    }
+}
+#[tokio::test]
+async fn full_review_live_dispatch_calls_private_mcp_handles_and_enforces_their_permissions() {
+    for parent_collision in [false, true] {
+        for denied in [false, true] {
+            for name in ["mcp__private__run", "mcp__private__alias"] {
+                let parent_calls = Arc::new(AtomicUsize::new(0));
+                let private_calls = Arc::new(AtomicUsize::new(0));
+                let make_tool = |origin, denied, calls| {
+                    Arc::new(PrivateMcpRouteProbe {
+                        origin,
+                        denied,
+                        calls,
+                        schema: test_projection(&serde_json::json!({"type":"object"})),
+                    })
+                };
+                let mut registry = tool_api::ToolRegistry::new();
+                if parent_collision {
+                    registry.register_builtin(make_tool("parent", false, parent_calls.clone()));
+                }
+                let mut ctx = fresh_subagent_ctx();
+                ctx.tool_invoker = Some(Arc::new(
+                    tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
+                        .with_gate(Arc::new(PrivateMcpRouteGate)),
+                ));
+                ctx.supplied_mcp_tools = vec![make_tool("private", denied, private_calls.clone())];
+                ctx.allowed_tools = vec![name.into()];
+                let id = ToolUseId::new();
+                let call = live_tools::LiveAgentToolCall {
+                    block_index: 0,
+                    id: id.clone(),
+                    name: name.into(),
+                    input: test_projection(&serde_json::json!({})),
+                    provider_id: None,
+                    concurrency_safe: false,
+                    context: invocation_context_for_tool(
+                        &ctx,
+                        name,
+                        &id,
+                        MessageId::new(),
+                        &[],
+                        None,
+                        "fixture",
+                        None,
+                        &ctx.allowed_tools,
+                        None,
+                    ),
+                };
+                let result = live_agent_tool_dispatch(&ctx).unwrap()(call).await;
+                if denied {
+                    assert!(result.is_err());
+                } else {
+                    assert_eq!(result.unwrap().data.string_at("/origin"), Some("private"));
+                }
+                assert_eq!(parent_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(private_calls.load(Ordering::SeqCst), usize::from(!denied));
+            }
+        }
+    }
 }

@@ -64,6 +64,16 @@ pub fn is_shell_tool(tool_name: &str) -> bool {
 /// are entirely `#` comments are dropped (claude-code `stripCommentLines`).
 #[must_use]
 pub fn split_command(command: &str) -> Vec<String> {
+    split_command_impl(command, false)
+}
+
+/// Native's path-deny walk consumes individual AST commands, including jobs
+/// separated by `&`. Keep the legacy rule splitter's public behavior separate.
+pub(crate) fn split_command_for_path_analysis(command: &str) -> Vec<String> {
+    split_command_impl(command, true)
+}
+
+fn split_command_impl(command: &str, split_background: bool) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let chars: Vec<char> = command.chars().collect();
@@ -117,12 +127,24 @@ pub fn split_command(command: &str) -> Vec<String> {
                     None
                 };
                 match two {
+                    Some(('|', '&')) if split_background => {
+                        parts.push(std::mem::take(&mut cur));
+                        i += 2;
+                        continue;
+                    }
                     Some(('&', '&') | ('|', '|') | (';', ';')) => {
                         parts.push(std::mem::take(&mut cur));
                         i += 2;
                         continue;
                     }
-                    _ if c == ';' || c == '|' || c == '\n' => {
+                    _ if c == ';'
+                        || c == '|'
+                        || c == '\n'
+                        || split_background
+                            && c == '&'
+                            && !matches!(chars.get(i.wrapping_sub(1)), Some('>' | '<'))
+                            && chars.get(i + 1) != Some(&'>') =>
+                    {
                         parts.push(std::mem::take(&mut cur));
                         i += 1;
                         continue;
@@ -369,6 +391,213 @@ pub fn strip_all_leading_env_vars(command: &str, blocklist: Option<fn(&str) -> b
     stripped.trim().to_string()
 }
 
+/// Native `eRt`: argv-derived candidates are only used for Deny/Ask. Wrapper
+/// flags and mini-command strings must never broaden an Allow rule.
+fn deny_ask_argv_candidates(argv: &[String]) -> Vec<String> {
+    fn base(value: &str) -> &str {
+        value.rsplit(['/', '\\']).next().unwrap_or(value)
+    }
+    fn assignment(value: &str) -> bool {
+        let Some((name, _)) = value.split_once('=') else {
+            return false;
+        };
+        let name = name.strip_suffix('+').unwrap_or(name);
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+    let mut args = argv.to_vec();
+    'unwrap: loop {
+        while args.first().is_some_and(|arg| assignment(arg)) {
+            args.remove(0);
+        }
+        let Some(program) = args.first() else { break };
+        let command = base(program);
+        // Q0o's strict wrappers precede the generic flag tables.
+        let simple_skip = match command {
+            "time" | "nohup" => {
+                let at = if command == "time" && args.get(1).is_some_and(|a| a == "-p") {
+                    2
+                } else {
+                    1
+                };
+                if args
+                    .get(at)
+                    .is_some_and(|a| a.starts_with('-') && a != "--")
+                {
+                    break;
+                }
+                Some(at + usize::from(args.get(at).is_some_and(|a| a == "--")))
+            }
+            "nice"
+                if args.get(1).is_some_and(|a| a == "-n")
+                    && args.get(2).is_some_and(|a| a.parse::<i64>().is_ok()) =>
+            {
+                Some(if args.get(3).is_some_and(|a| a == "--") {
+                    4
+                } else {
+                    3
+                })
+            }
+            "timeout" => {
+                let mut at = 1;
+                while let Some(flag) = args.get(at) {
+                    if flag == "--" {
+                        at += 1;
+                        break;
+                    }
+                    if ["--foreground", "--preserve-status", "--verbose", "-v"]
+                        .contains(&flag.as_str())
+                    {
+                        at += 1;
+                    } else if ["--kill-after", "--signal", "-k", "-s"].contains(&flag.as_str())
+                        && args.get(at + 1).is_some_and(|a| {
+                            a.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c))
+                        })
+                    {
+                        at += 2;
+                    } else if flag
+                        .strip_prefix("--kill-after=")
+                        .or_else(|| flag.strip_prefix("--signal="))
+                        .or_else(|| flag.strip_prefix("-k"))
+                        .or_else(|| flag.strip_prefix("-s"))
+                        .is_some_and(|a| {
+                            !a.is_empty()
+                                && a.chars()
+                                    .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c))
+                        })
+                    {
+                        at += 1;
+                    } else {
+                        break;
+                    }
+                }
+                static DURATION: OnceLock<Regex> = OnceLock::new();
+                if !args.get(at).is_some_and(|a| {
+                    DURATION
+                        .get_or_init(|| Regex::new(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$").unwrap())
+                        .is_match(a)
+                }) {
+                    break;
+                }
+                Some(at + 1)
+            }
+            _ => None,
+        };
+        if let Some(skip) = simple_skip {
+            args.drain(..skip.min(args.len()));
+            continue;
+        }
+        let (value_flags, string_flags, positional) = match command {
+            "env" => ("-u -C --unset --chdir", "-S --split-string", 0),
+            "sudo" => ("-u -g -U -C -D -h -p -r -R -t -T --user --group --other-user --close-from --chdir --host --prompt --role --chroot --type --command-timeout -a --auth-type", "", 0),
+            "doas" => ("-a -u -C", "", 0),
+            "pkexec" => ("--user", "", 0),
+            "watch" => ("-n --interval --equexit", "", 0),
+            "ionice" => ("-c -n -p -P -u --class --classdata --pid --pgid --uid", "", 0),
+            "setsid" => ("", "", 0),
+            "taskset" => ("-c --cpu-list", "", 1),
+            "chrt" => ("-p --pid -T -P -D --sched-runtime --sched-period --sched-deadline", "", 2),
+            "strace" => ("-e -o -p -s -E -P -S -a -b -I -u -X -O -U --output --trace --expr --attach --string-limit --env --trace-path --columns --user --interruptible --detach-on --const-print-style --summary-sort-by --summary-syscall-overhead --summary-columns", "", 0),
+            "ltrace" => ("-a -A -e -l -n -o -p -s -u -x -D -F --align --config --debug --indent --library --output --string-max -w --where", "", 0),
+            "flock" => ("-w -E --timeout --wait --conflict-exit-code", "-c --command", 3),
+            "script" => ("-E -T -m -o -O -B -I --echo --log-timing --logging-format --output-limit --log-out --log-io --log-in", "-c --command", 3),
+            "unshare" => ("-R -w -S -G --setuid --setgid --root --wd --propagation --setgroups --monotonic --boottime", "", 0),
+            "nsenter" => ("-t -S -G --target --setuid --setgid", "", 0),
+            "exec" => ("-a", "", 0),
+            "command" | "builtin" | "noglob" | "nocorrect" => ("", "", 0),
+            _ => break,
+        };
+        let consumes_positional = |value: &str| match positional {
+            1 => value.strip_prefix("0x").map_or_else(
+                || value.chars().all(|c| c.is_ascii_digit()),
+                |s| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit()),
+            ),
+            2 => !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()),
+            3 => true,
+            _ => false,
+        };
+        let has = |flags: &str, value: &str| flags.split_whitespace().any(|flag| flag == value);
+        let mut at = 1;
+        let mut consumed_positional = false;
+        let mut command_string = None;
+        while let Some(arg) = args.get(at) {
+            if arg == "--" {
+                at += 1;
+                if !consumed_positional && at + 1 < args.len() && consumes_positional(&args[at]) {
+                    consumed_positional = true;
+                    at += 1;
+                    continue;
+                }
+                break;
+            }
+            let string_value = if has(string_flags, arg) {
+                args.get(at + 1).map(|value| (value.as_str(), 2))
+            } else if let Some((flag, value)) = arg.split_once('=') {
+                has(string_flags, flag).then_some((value, 1))
+            } else if arg.len() > 2 && arg.as_bytes()[0] == b'-' && arg.as_bytes()[1] != b'-' {
+                arg.get(..2)
+                    .filter(|flag| has(string_flags, flag))
+                    .map(|_| (&arg[2..], 1))
+            } else {
+                None
+            };
+            if let Some((value, skip)) = string_value {
+                if !value.trim().is_empty() {
+                    command_string = Some(value.trim().to_owned());
+                    break;
+                }
+                at += skip;
+                continue;
+            }
+            if arg.starts_with('-') && (arg != "-" || positional == 0) {
+                // `command -v/-V` performs a lookup rather than running argv.
+                if command == "command" && arg.chars().skip(1).any(|c| c == 'v' || c == 'V') {
+                    break 'unwrap;
+                }
+                at += if has(value_flags, arg) && at + 1 < args.len() {
+                    2
+                } else {
+                    1
+                };
+                continue;
+            }
+            if command == "env" && assignment(arg) {
+                at += 1;
+                continue;
+            }
+            if !consumed_positional && at + 1 < args.len() && consumes_positional(arg) {
+                consumed_positional = true;
+                at += 1;
+                continue;
+            }
+            break;
+        }
+        if let Some(command) = command_string {
+            args = command.split_whitespace().map(str::to_owned).collect();
+        } else if at < args.len() {
+            args.drain(..at);
+        } else {
+            break;
+        }
+    }
+    let mut candidates = Vec::new();
+    if !args.is_empty() && args.first() != argv.first() {
+        candidates.push(args.join(" "));
+    }
+    if let Some(program) = args.first_mut() {
+        let basename = base(program).to_owned();
+        if basename != *program {
+            *program = basename;
+            candidates.push(args.join(" "));
+        }
+    }
+    candidates
+}
+
 /// claude-code `containsExcludedCommand` candidate worklist
 /// (shouldUseSandbox.ts:82-101): fixed-point over
 /// `stripAllLeadingEnvVars(_, BINARY_HIJACK_VARS)` and `stripSafeWrappers`.
@@ -428,7 +657,15 @@ fn candidates(subcommand: &str, aggressive_env: bool, seed_original: bool) -> Ve
         out.push(trimmed);
     }
     if seen.insert(stripped.clone()) {
-        out.push(stripped);
+        out.push(stripped.clone());
+    }
+    if aggressive_env {
+        let argv = crate::command_path_containment::split_argv(&stripped);
+        for unwrapped in deny_ask_argv_candidates(&argv) {
+            if seen.insert(unwrapped.clone()) {
+                out.push(unwrapped);
+            }
+        }
     }
     let mut start = 0;
     while start < out.len() {
@@ -1092,8 +1329,9 @@ mod tests {
             "bazel:*",
             "FOO=a\"b\" bazel build"
         ));
-        // Native's Eue-shaped fallback retains expansion-bearing assignments.
-        assert!(!rule_matches_any_subcommand(
+        // Native 2.1.318 also supplies eRt's argv candidate, which strips
+        // assignments independently of the legacy Eue text fallback below.
+        assert!(rule_matches_any_subcommand(
             "bazel:*",
             "FOO=$VAR bazel build"
         ));

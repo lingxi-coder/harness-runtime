@@ -55,8 +55,36 @@ const fileMatches=[
  [String.raw`[\ca]`, "\u0001"], [String.raw`[\c0]`, "\u0010"],
  [String.raw`[\ca-z]`, "b"], [String.raw`[\c0-z]`, "b"], [String.raw`[\c_-z]`, "b"],
  [String.raw`[a\-z]`, "b"], [String.raw`[a\-z]`, "-"],
-].map(([pattern,input])=>{const prepared=api.preprocess(pattern,false);return {pattern,input,expected:prepared!==null&&api.ignore().add(prepared).test(input).ignored}});
-const result={fileMatches,version:"2.1.318",sha256,ranges,scope:"Pure rule parser/public aliases, wildcard, gitignore validation and cwd rebasing; eval/REPL feature gate fixed off, POSIX path implementation. No live permission UI/model/network execution.",parses,serializations,wildcards:wildcardInputs,prefixes,rebases,preprocess};
+];
+// A class-set escape is not a scalar range endpoint in legacy RegExp.
+// Include both endpoint positions, complements and non-ASCII whitespace.
+for (const escape of ["d", "D", "s", "S", "w", "W"]) {
+ for (const body of [`\\${escape}-z`, `a-\\${escape}`, `!-\\${escape}`, `\\${escape}`, `\\${escape}-!`, `\\${escape}--\\${escape}`]) {
+  for (const input of ["f", "-", "0", "z", "_", "\t", "\u00a0", "\u2028", "\u0085", "ſ", "K", "σ"]) {
+   fileMatches.push([`x[${body}]y`, `x${input}y`]);
+  }
+ }
+ // Wildcards are rewritten before node-ignore parses character classes.
+ for (const wildcard of ["?", "*", String.raw`\?`, String.raw`\*`]) {
+  for (const body of [`\\${escape}${wildcard}`, `${wildcard}\\${escape}`]) {
+   for (const input of ["0", "f", "]", "0]", "f]", "^]", "[]", "0a]", "0/]", "\\]"]) {
+    fileMatches.push([`x[${body}]y`, `x${input}y`]);
+   }
+  }
+ }
+}
+for (const pattern of [String.raw`x[\d\-?]y`, String.raw`x[\d**]y`, String.raw`x[\x80?]y`, String.raw`x[\u0080?]y`, String.raw`x[?\-?]y`, "x[\\d*\r]y", "x[\\d**\r]y", "x[\\d*\u2028]y", "x[\\d\\ \u00a0?]y"]) {
+ for (const input of ["x0y", "x0]y", "xf]y", "x^]y", "x\u0080]y", "x]y", "x\ry", "x\u2028y", "x ]y"]) {
+  fileMatches.push([pattern, input]);
+ }
+}
+for (const pattern of [String.raw`x[\x80]y`, String.raw`x[\u0080]y`, String.raw`x[\s\x80]y`, String.raw`x[\x61]y`, String.raw`x[\141]y`, String.raw`x[\t]y`]) {
+ for (const input of ["x0y", "x8y", "xxy", "xuy", "xay", "x\u0080y", "x\ty", "x y"]) {
+  fileMatches.push([pattern, input]);
+ }
+}
+const matchedFiles=fileMatches.map(([pattern,input])=>{const prepared=api.preprocess(pattern,false);return {pattern,input,expected:prepared!==null&&api.ignore().add(prepared).test(input).ignored}});
+const result={fileMatches:matchedFiles,version:"2.1.318",sha256,ranges,scope:"Pure rule parser/public aliases, wildcard, gitignore validation and cwd rebasing; eval/REPL feature gate fixed off, POSIX path implementation. No live permission UI/model/network execution.",parses,serializations,wildcards:wildcardInputs,prefixes,rebases,preprocess};
 const fixture=fileURLToPath(new URL('../../crates/permission/tests/fixtures/permission_rules_2_1_318.json',import.meta.url));
 const output=JSON.stringify(result,null,2)+"\n";
 if(process.argv.includes("--write")){writeFileSync(fixture,output);console.log("wrote "+fixture)}

@@ -184,6 +184,140 @@ fn escaped_classes_preserve_allow_scope_and_deny_precedence() {
     }
 }
 
+#[test]
+fn class_set_escapes_cannot_expand_grants_or_erase_restrictions() {
+    use permission::rule::PermissionRule;
+    use permission::{PermissionMode, PermissionPolicy, PermissionResult};
+    let roots = FsRoots {
+        cwd: "/proj".into(),
+        home: None,
+        lingxi_home: "/proj/.lingxi".into(),
+    };
+    for (pattern, outside, inside) in [
+        (r"x[\d-z]y", "xfy", "x-y"),
+        (r"x[\s-z]y", "xty", "x-y"),
+        (r"x[\W-z]y", "xfy", "x-y"),
+        (r"x[!-\d]y", "xfy", "x0y"),
+    ] {
+        let rule = |tool, behavior| PermissionRule {
+            value: PermissionRuleValue::from_rule_string(&format!("{tool}({pattern})")),
+            behavior,
+            source: PermissionRuleSource::Session,
+        };
+        let allow = PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            [rule("Edit", PermissionBehavior::Allow)],
+        )
+        .with_roots(roots.clone());
+        for (filename, allowed) in [(outside, false), (inside, true)] {
+            let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":format!("/proj/{filename}"),"old_string":"old","new_string":"new"}),
+            )
+            .unwrap();
+            assert_eq!(
+                matches!(
+                    allow.authorize("Edit", &input),
+                    PermissionResult::Allow { .. }
+                ),
+                allowed,
+                "Edit({pattern}) {filename}"
+            );
+        }
+        for behavior in [PermissionBehavior::Deny, PermissionBehavior::Ask] {
+            let policy = PermissionPolicy::from_rules(
+                PermissionMode::BypassPermissions,
+                [
+                    rule("Read", behavior),
+                    PermissionRule {
+                        value: PermissionRuleValue::from_rule_string("Read"),
+                        behavior: PermissionBehavior::Allow,
+                        source: PermissionRuleSource::Session,
+                    },
+                ],
+            )
+            .with_roots(roots.clone());
+            let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":format!("/proj/{inside}")}),
+            )
+            .unwrap();
+            match (behavior, policy.authorize("Read", &input)) {
+                (PermissionBehavior::Deny, PermissionResult::Deny { .. })
+                | (PermissionBehavior::Ask, PermissionResult::Ask { .. }) => {}
+                (_, result) => panic!("Read({pattern}) {inside}: {result:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn class_wildcard_rewrites_preserve_grants_and_restrictions() {
+    use permission::rule::PermissionRule;
+    use permission::{PermissionMode, PermissionPolicy, PermissionResult};
+    let roots = FsRoots {
+        cwd: "/proj".into(),
+        home: None,
+        lingxi_home: "/proj/.lingxi".into(),
+    };
+    for (pattern, outside, inside) in [
+        (r"x[\d?]y", "x0y", "x0]y"),
+        (r"x[\D?]y", "xfy", "xf]y"),
+        (r"x[\d*]y", "x0y", "x]y"),
+        (r"x[\d\?]y", "x0y", "x0]y"),
+        (r"x[?\d]y", "x0y", "x[0]y"),
+        (r"x[\d\-?]y", "x0y", "x0]y"),
+        (r"x[\d**]y", "xf]y", "x0]y"),
+        (r"x[\x80?]y", "x0]y", "x\u{80}]y"),
+        (r"x[?\-?]y", "x^]y", "x^-a]y"),
+    ] {
+        let rule = |tool, behavior| PermissionRule {
+            value: PermissionRuleValue::from_rule_string(&format!("{tool}({pattern})")),
+            behavior,
+            source: PermissionRuleSource::Session,
+        };
+        let allow = PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            [rule("Edit", PermissionBehavior::Allow)],
+        )
+        .with_roots(roots.clone());
+        for (filename, expected) in [(outside, false), (inside, true)] {
+            let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":format!("/proj/{filename}"),"old_string":"old","new_string":"new"}),
+            ).unwrap();
+            assert_eq!(
+                matches!(
+                    allow.authorize("Edit", &input),
+                    PermissionResult::Allow { .. }
+                ),
+                expected,
+                "{pattern} {filename}"
+            );
+        }
+        for behavior in [PermissionBehavior::Deny, PermissionBehavior::Ask] {
+            let policy = PermissionPolicy::from_rules(
+                PermissionMode::BypassPermissions,
+                [
+                    rule("Read", behavior),
+                    PermissionRule {
+                        value: PermissionRuleValue::from_rule_string("Read"),
+                        behavior: PermissionBehavior::Allow,
+                        source: PermissionRuleSource::Session,
+                    },
+                ],
+            )
+            .with_roots(roots.clone());
+            let input = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":format!("/proj/{inside}")}),
+            )
+            .unwrap();
+            match (behavior, policy.authorize("Read", &input)) {
+                (PermissionBehavior::Deny, PermissionResult::Deny { .. })
+                | (PermissionBehavior::Ask, PermissionResult::Ask { .. }) => {}
+                (_, result) => panic!("Read({pattern}) {inside}: {result:?}"),
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn rooted_restrictions_follow_symlinks_and_remember_previous_landings() {

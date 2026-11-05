@@ -812,6 +812,11 @@ pub struct PolicyPermissionGate {
     /// `None` means the host could not resolve every trusted source.
     classifier_auto_mode_settings:
         std::sync::RwLock<Option<core_permission::PermissionClassifierAutoModeSettings>>,
+    classifier_auto_mode_settings_provider: Option<
+        Arc<
+            dyn Fn() -> Option<core_permission::PermissionClassifierAutoModeSettings> + Send + Sync,
+        >,
+    >,
     /// Host-owned classifier workspace capabilities and roots.
     classifier_host_capabilities:
         std::sync::RwLock<core_permission::PermissionClassifierHostCapabilities>,
@@ -826,6 +831,22 @@ pub struct PolicyPermissionGate {
     /// Folded into the deny bucket at evaluation time instead, which keeps both
     /// producers and gives this one the lifetime it is supposed to have.
     command_input_denies: std::sync::RwLock<Vec<Utf16JsonProjection>>,
+}
+
+/// Carry an established tool Ask through the prompt boundary. A transport
+/// must not reauthorize it from a cached grant after its provenance is lost.
+pub fn apply_ask_context(ctx: &mut PermissionCheckContext, result: &PermissionResult) {
+    if let PermissionResult::Ask {
+        reason, metadata, ..
+    } = result
+    {
+        ctx.decision_reason_type = decision_reason_type(reason).map(str::to_owned);
+        ctx.decision_reason = serialize_decision_reason(reason);
+        ctx.classifier_approvable = classifier_approvable(reason);
+        ctx.matched_ask_rule = matched_ask_rule(metadata);
+        ctx.permission_suggestions = metadata.permission_suggestions.clone();
+        ctx.blocked_path = metadata.blocked_path.clone();
+    }
 }
 
 impl PolicyPermissionGate {
@@ -1001,6 +1022,7 @@ impl PolicyPermissionGate {
             path_translator: None,
             command_input_denies: std::sync::RwLock::new(Vec::new()),
             classifier_auto_mode_settings: std::sync::RwLock::new(None),
+            classifier_auto_mode_settings_provider: None,
             classifier_host_capabilities: std::sync::RwLock::new(
                 core_permission::PermissionClassifierHostCapabilities::default(),
             ),
@@ -1021,6 +1043,34 @@ impl PolicyPermissionGate {
             .classifier_auto_mode_settings
             .write()
             .unwrap_or_else(|error| error.into_inner()) = settings;
+    }
+
+    /// Hosts without a settings watcher may supply their trusted live source.
+    /// This is distinct from reconstructing trust from an ambient config path.
+    pub fn with_classifier_auto_mode_settings_provider(
+        mut self,
+        provider: Arc<
+            dyn Fn() -> Option<core_permission::PermissionClassifierAutoModeSettings> + Send + Sync,
+        >,
+    ) -> Self {
+        self.classifier_auto_mode_settings_provider = Some(provider);
+        self
+    }
+
+    fn current_classifier_auto_mode_settings(
+        &self,
+    ) -> Option<core_permission::PermissionClassifierAutoModeSettings> {
+        self.classifier_auto_mode_settings_provider
+            .as_ref()
+            .map_or_else(
+                || {
+                    self.classifier_auto_mode_settings
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone()
+                },
+                |provider| provider(),
+            )
     }
 
     /// Attach the host's explicit workspace and disk capabilities before the
@@ -1519,86 +1569,13 @@ impl PolicyPermissionGate {
         input: &Utf16JsonProjection,
         mode: PermissionMode,
     ) -> PermissionResult {
-        let folded = FoldedPermissionContext::default();
-        // GUEST-COORD (mobile DIVERGENCE). The model names files in guest
-        // coordinates while every root in `FsRoots` is a host path, so a rule
-        // like `Edit(./**)` relativizes the target to `../…` and matches
-        // nothing. Rewrite the tool's declared path field onto its host twin
-        // FOR THE DURATION OF THIS EVALUATION ONLY: the rewritten value is a
-        // local. `permission` only ever emits `updated_input: None`, so the
-        // prompt transport, the `updatedInput` back-flow, and the tool body
-        // all keep seeing the model's own coordinates.
-        let Some(rewritten) = self
-            .path_translator
-            .as_ref()
-            .and_then(|t| crate::model_path::rewrite_tool_input(t.as_ref(), name, input))
-        else {
-            // Desktop, non-file tools, relative paths, host-coordinate paths,
-            // and fenced guest regions: one evaluation, byte-identical to the
-            // pre-existing behavior.
-            return self.authorize_with_layers(
-                name,
-                input,
-                mode,
-                &folded,
-                PermissionCheckPhase::Execution,
-            );
-        };
-
-        // UNION OF BOTH COORDINATE SPACES, with the lattice
-        //     Deny (either) > Allow (either) > Ask.
-        //
-        // Evaluating only the host form would be a net FAIL-OPEN for any rule
-        // written in the coordinates the model actually uses:
-        // `Deny(Edit(//workspace/**))` resolves against root `/` and matches
-        // the guest spelling today, but can never match the host twin. So the
-        // ORIGINAL guest form is re-evaluated and a Deny from either side wins.
-        //
-        // Symmetrically, an ALLOW that already matched the guest path must
-        // keep working — returning the host verdict whenever the guest side is
-        // merely not-a-Deny would turn such a grant into a prompt, a
-        // regression introduced by the fix itself.
-        //
-        // `Ask` never wins on its own: it is the no-rule-matched fallback, and
-        // a guest path failing to match is precisely the bug being repaired.
-        // Letting it veto would make the host Allow unreachable and leave
-        // every write prompting.
-        let host_verdict = self.authorize_with_layers(
+        self.authorize_with_layers(
             name,
-            &rewritten,
+            input,
             mode,
-            &folded,
+            &FoldedPermissionContext::default(),
             PermissionCheckPhase::Execution,
-        );
-        // COST, accepted: a file-tool call whose path actually needs
-        // translation walks the rule set twice and deep-clones the tool input
-        // (a `Write`'s `content` included). Both are inherent to joining two
-        // coordinate spaces — the guest form cannot be evaluated without the
-        // original input, and a rule may read any field. It is bounded to
-        // mobile, to file tools, and to absolute guest paths under a mount;
-        // a decided deny on the host form short-circuits the second walk.
-        //
-        // A DECIDED deny is final and skips the second walk. A deny that merely
-        // reflects the MODE is not a decision — `DontAsk` rewrites every
-        // unmatched Ask into one — and must not pre-empt the guest evaluation,
-        // or a grant spelled only in guest coordinates would flip from Allow to
-        // Deny the moment a translator is installed.
-        if Self::coordinate_rank(&host_verdict) == Self::RANK_DECIDED_DENY {
-            return host_verdict;
-        }
-        let guest_verdict =
-            self.authorize_with_layers(name, input, mode, &folded, PermissionCheckPhase::Execution);
-        // Ties go to the GUEST form. Equal rank means both spaces decided the
-        // same way, so the verdicts are interchangeable in strength — but only
-        // the guest one carries paths the model actually used. `ask_plan_mutation`
-        // embeds the target path in its prompt, and that prompt is surfaced
-        // verbatim as the headless deny reason, so preferring host here would
-        // report a host container path the model never named.
-        if Self::coordinate_rank(&host_verdict) > Self::coordinate_rank(&guest_verdict) {
-            host_verdict
-        } else {
-            guest_verdict
-        }
+        )
     }
 
     /// Build THIS call's ordered permission-layer stack — the port of
@@ -1657,6 +1634,60 @@ impl PolicyPermissionGate {
     /// i.e. byte-identical to the pre-layer path — which is the case for every
     /// call that carries no layers.
     fn authorize_with_layers(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+        mode: PermissionMode,
+        folded: &FoldedPermissionContext,
+        phase: PermissionCheckPhase,
+    ) -> PermissionResult {
+        // Every phase and caller joins guest and host coordinates using the
+        // same precedence: explicit Deny > explicit Ask > Allow > mode fallback.
+        let Some(rewritten) = self
+            .path_translator
+            .as_ref()
+            .and_then(|t| crate::model_path::rewrite_tool_input(t.as_ref(), name, input))
+        else {
+            // Desktop, non-file tools, relative paths, host-coordinate paths,
+            // and fenced guest regions: one evaluation, byte-identical to the
+            // pre-existing behavior.
+            return self.authorize_in_coordinate(name, input, mode, folded, phase);
+        };
+
+        // A rule or guard in either coordinate space constrains the call.
+        // Mode fallbacks cannot hide a grant in the other coordinate space.
+        let host_verdict = self.authorize_in_coordinate(name, &rewritten, mode, folded, phase);
+        // COST, accepted: a file-tool call whose path actually needs
+        // translation walks the rule set twice and deep-clones the tool input
+        // (a `Write`'s `content` included). Both are inherent to joining two
+        // coordinate spaces — the guest form cannot be evaluated without the
+        // original input, and a rule may read any field. It is bounded to
+        // mobile, to file tools, and to absolute guest paths under a mount;
+        // a decided deny on the host form short-circuits the second walk.
+        //
+        // A DECIDED deny is final and skips the second walk. A deny that merely
+        // reflects the MODE is not a decision — `DontAsk` rewrites every
+        // unmatched Ask into one — and must not pre-empt the guest evaluation,
+        // or a grant spelled only in guest coordinates would flip from Allow to
+        // Deny the moment a translator is installed.
+        if Self::coordinate_rank(&host_verdict) == Self::RANK_DECIDED_DENY {
+            return host_verdict;
+        }
+        let guest_verdict = self.authorize_in_coordinate(name, input, mode, folded, phase);
+        // Ties go to the GUEST form. Equal rank means both spaces decided the
+        // same way, so the verdicts are interchangeable in strength — but only
+        // the guest one carries paths the model actually used. `ask_plan_mutation`
+        // embeds the target path in its prompt, and that prompt is surfaced
+        // verbatim as the headless deny reason, so preferring host here would
+        // report a host container path the model never named.
+        if Self::coordinate_rank(&host_verdict) > Self::coordinate_rank(&guest_verdict) {
+            host_verdict
+        } else {
+            guest_verdict
+        }
+    }
+
+    fn authorize_in_coordinate(
         &self,
         name: &str,
         input: &Utf16JsonProjection,
@@ -1745,11 +1776,16 @@ impl PolicyPermissionGate {
                 working_dirs.insert(dir.clone(), PermissionRuleSource::Session);
             }
         }
-        self.policy
+        let mut policy = self
+            .policy
             .clone_with_live_state(allow_rules, deny_rules, live.ask_rules, working_dirs)
             .with_tool_aliases(live.tool_aliases)
             .expect("live toolAliases were validated before publication")
-            .with_bash_command_clamps(folded.bash_command_clamps.clone())
+            .with_bash_command_clamps(folded.bash_command_clamps.clone());
+        if let (Some(provider), Some(roots)) = (&self.cwd_provider, policy.roots.as_mut()) {
+            roots.cwd = provider();
+        }
+        policy
     }
 
     /// `dKo`'s **acceptEdits simulation** — the fast path that answers an Auto
@@ -1975,100 +2011,26 @@ impl PolicyPermissionGate {
         result: PermissionResult,
         name: &str,
         input: &Utf16JsonProjection,
-        worker: Option<crate::gate::PromptWorker>,
+        worker: Option<core_permission::PromptWorker>,
     ) -> PermissionDecision {
-        match result {
-            PermissionResult::Allow { .. } => {
-                self.record_auto_mode_non_deny(mode);
+        let ctx = PermissionCheckContext {
+            worker,
+            ..Default::default()
+        };
+        let folded = self.fold_call_context(&ctx);
+        match self
+            .decide_outcome_with_context(mode, result, name, input, &ctx, &|| {
+                self.accept_edits_fast_path(name, input, &folded)
+            })
+            .await
+        {
+            Ok(PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. }) => {
                 PermissionDecision::Allow
             }
-            PermissionResult::Deny {
-                reason,
-                explanation,
-                ..
-            } => PermissionDecision::Deny {
-                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
+            Ok(PermissionOutcome::Deny { reason }) => PermissionDecision::Deny { reason },
+            Err(abort) => PermissionDecision::Deny {
+                reason: abort.message.into(),
             },
-            PermissionResult::Ask {
-                ref reason,
-                ref metadata,
-                ..
-            } => {
-                if self.policy.is_restricted_protected_mutation(name, input) {
-                    // Protected restricted writes must never enter the
-                    // classifier or an unsuppressed transport path. A TUI or
-                    // configured handler may still approve once, but it may
-                    // not persist an AllowAlways rule for this call.
-                    let ctx = PermissionCheckContext {
-                        worker: worker.clone(),
-                        suppress_always_allow_rule: true,
-                        ..PermissionCheckContext::default()
-                    };
-                    let decision = match self.inner.check_with_context(name, input, &ctx).await {
-                        PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
-                            PermissionDecision::Allow
-                        }
-                        PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
-                    };
-                    if matches!(decision, PermissionDecision::Allow) {
-                        self.record_auto_mode_non_deny(mode);
-                    }
-                    return decision;
-                }
-                let ask_rule_reason = metadata
-                    .matched_ask_rule
-                    .as_ref()
-                    .map(|rule| PermissionDecisionReason::MatchedRule { rule: rule.clone() });
-                match self
-                    .auto_mode_classifier_result(
-                        mode,
-                        ask_rule_reason.as_ref().unwrap_or(reason),
-                        name,
-                        input,
-                        false,
-                        &|| {
-                            self.accept_edits_fast_path(
-                                name,
-                                input,
-                                &FoldedPermissionContext::default(),
-                            )
-                        },
-                    )
-                    .await
-                {
-                    Ok(AutoModeClassifierResult::Classified(classified)) => {
-                        return self.classified_result_to_decision(classified, name);
-                    }
-                    Ok(AutoModeClassifierResult::NoDecision)
-                    | Ok(AutoModeClassifierResult::PromptFallback { .. }) => {}
-                    Err(abort) => {
-                        // `false` above makes this unreachable; retain a
-                        // fail-closed mapping for custom/future classifiers on
-                        // this legacy two-valued surface.
-                        return PermissionDecision::Deny {
-                            reason: abort.message.into(),
-                        };
-                    }
-                }
-                if metadata.matched_ask_rule.is_none()
-                    && read_only_default_auto_allows(name, reason, mode)
-                {
-                    // Read-only / agent-local tool with NO explicit `ask` rule —
-                    // auto-allow rather than ask-storm (phase-2 stand-in for the
-                    // per-tool default). An explicit `ask` rule (tool-wide or
-                    // content) tags the ask `MatchedRule` and is NOT short-circuited
-                    // here — it falls through to the prompt transport below.
-                    PermissionDecision::Allow
-                } else {
-                    // Surface the prompt through the host's transport, carrying
-                    // the worker identity so it is attributed in the dialog.
-                    let decision = self.inner.check_with_worker(name, input, worker).await;
-                    if matches!(decision, PermissionDecision::Allow) {
-                        self.record_auto_mode_non_deny(mode);
-                    }
-                    decision
-                }
-            }
         }
     }
 
@@ -2124,6 +2086,54 @@ impl PolicyPermissionGate {
                 ref prompt,
                 ..
             } => {
+                let protected = self.policy.restricted && {
+                    let policy = self.live_policy_with_layers(&self.fold_call_context(ctx));
+                    policy.is_restricted_protected_mutation(name, input)
+                        || self
+                            .path_translator
+                            .as_ref()
+                            .and_then(|translator| {
+                                crate::model_path::rewrite_tool_input(
+                                    translator.as_ref(),
+                                    name,
+                                    input,
+                                )
+                            })
+                            .is_some_and(|input| {
+                                policy.is_restricted_protected_mutation(name, &input)
+                            })
+                };
+                if protected {
+                    let mut prompt_ctx = ctx.clone();
+                    apply_ask_context(&mut prompt_ctx, &result);
+                    prompt_ctx.suppress_always_allow_rule = true;
+                    prompt_ctx.auto_mode_prompt = None;
+                    return Ok(
+                        match self.check_prompt_transport(name, input, &prompt_ctx).await {
+                            PermissionOutcome::Allow {
+                                updated_input,
+                                decision_classification,
+                                ..
+                            } => {
+                                self.record_auto_mode_non_deny(mode);
+                                PermissionOutcome::Allow {
+                                    updated_input,
+                                    permission_updates: vec![],
+                                    decision_classification,
+                                }
+                            }
+                            PermissionOutcome::AllowAuto { updated_input } => {
+                                self.record_auto_mode_non_deny(mode);
+                                PermissionOutcome::Allow {
+                                    updated_input,
+                                    permission_updates: vec![],
+                                    decision_classification: None,
+                                }
+                            }
+                            denied => denied,
+                        },
+                    );
+                }
                 // PERM-07 (claude-code 2.1.238 `STv`): inside the Auto-mode ask
                 // arm (`if($mt(d)||h)`), a hook-established ask floor in a
                 // session that cannot surface prompts is a hard DENY, not a
@@ -2668,26 +2678,6 @@ impl PolicyPermissionGate {
         }
     }
 
-    fn classified_result_to_decision(
-        &self,
-        result: PermissionResult,
-        name: &str,
-    ) -> PermissionDecision {
-        match result {
-            PermissionResult::Allow { .. } => PermissionDecision::Allow,
-            PermissionResult::Deny {
-                reason,
-                explanation,
-                ..
-            } => PermissionDecision::Deny {
-                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
-            },
-            PermissionResult::Ask { .. } => PermissionDecision::Deny {
-                reason: format!("Permission to use {name} has been denied.").into(),
-            },
-        }
-    }
-
     fn classified_result_to_outcome(
         &self,
         result: PermissionResult,
@@ -3160,29 +3150,16 @@ impl PermissionGate for PolicyPermissionGate {
         use lingxi_core::host::permission_gate::NonInteractivePermissionDecision;
 
         let mode = self.effective_mode_for_tool(name);
-        let mut live = self
-            .live_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let command_rules = live
-            .allow_rules
-            .entry(PermissionRuleSource::Command)
-            .or_default();
-        command_rules.extend(transient_allow_rules.iter().map(|spec| PermissionRule {
-            value: PermissionRuleValue::from_rule_string(spec),
-            behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Command,
-        }));
-        let mut deny_rules = live.deny_rules;
-        self.fold_command_input_denies(&mut deny_rules);
-        let policy = self.policy.clone_with_live_state(
-            live.allow_rules,
-            deny_rules,
-            live.ask_rules,
-            live.additional_working_dirs,
-        );
-        Some(match policy.authorize_with_mode(name, input, mode) {
+        let folded = FoldedPermissionContext {
+            allow_command_rules: transient_allow_rules
+                .iter()
+                .map(|spec| Utf16JsonProjection::from(spec.as_str()))
+                .collect(),
+            ..Default::default()
+        };
+        let result =
+            self.authorize_with_layers(name, input, mode, &folded, PermissionCheckPhase::Execution);
+        Some(match result {
             PermissionResult::Allow { .. } => NonInteractivePermissionDecision::Allow,
             PermissionResult::Deny { explanation, .. } => NonInteractivePermissionDecision::Deny {
                 reason: explanation,
@@ -4303,11 +4280,7 @@ impl PermissionGate for PolicyPermissionGate {
             block_reads_outside_working_directories: policy.block_reads_outside_working_directories,
             restricted: policy.restricted,
             classify_all_shell: policy.classify_all_shell,
-            classifier_auto_mode_settings: self
-                .classifier_auto_mode_settings
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone(),
+            classifier_auto_mode_settings: self.current_classifier_auto_mode_settings(),
             classifier_host_capabilities: self
                 .classifier_host_capabilities
                 .read()

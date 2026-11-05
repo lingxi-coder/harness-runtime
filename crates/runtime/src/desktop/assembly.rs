@@ -3672,6 +3672,30 @@ pub async fn build_with_credential_stack(
     let plugin_mcp_bare_mode = cfg.customization_gates.bare;
     let plugin_mcp_strict_config = cfg.strict_mcp_config;
     let plugin_mcp_setting_source_scope = cfg.setting_source_scope;
+    let connection_policy_home = plugin_mcp_policy_home.clone();
+    let connection_policy_cwd = plugin_mcp_policy_cwd.clone();
+    let connection_flag_settings = plugin_mcp_flag_settings.clone();
+    let connection_admission: Arc<mcp::registry::PluginMcpAdmission> = Arc::new(move |config| {
+        let managed_exclusive = config.scope == mcp::ConfigScope::Agent
+            && mcp::enterprise_policy::enterprise_mcp_active();
+        let policy = mcp::enterprise_policy::read_effective_mcp_policy_with_scope(
+            &connection_policy_home,
+            &connection_policy_cwd,
+            connection_flag_settings.as_ref(),
+            plugin_mcp_setting_source_scope,
+        );
+        if !managed_exclusive && mcp::enterprise_policy::is_server_allowed(config, &policy) {
+            return None;
+        }
+        Some(mcp::registry::PluginMcpRefusal::new(
+            "policy",
+            format!(
+                "Your organization's MCP policy does not allow \"{}\".",
+                config.name
+            )
+            .into(),
+        ))
+    });
     let plugin_mcp_admission: Arc<
         dyn Fn(&mcp::McpServerConfig) -> Option<mcp::registry::PluginMcpRefusal> + Send + Sync,
     > = Arc::new(move |config| {
@@ -3716,6 +3740,7 @@ pub async fn build_with_credential_stack(
         .with_projects_session_host(projects_session_host)
         .with_json_schema_validator(json_schema_validator.clone())
         .with_hook_dispatcher(Some(elicitation_dispatcher))
+        .with_connection_admission(connection_admission)
         .with_plugin_mcp_admission(plugin_mcp_admission)
         .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
             cfg.lingxi_home.join("mcp-discovery-cache"),

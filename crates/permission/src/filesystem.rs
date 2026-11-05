@@ -822,7 +822,8 @@ fn test_rule_pattern_impl(
 ) -> RulePatternMatch {
     let file_abs = expand_path(input_path, roots);
     let (rel_pattern, root_opt) = pattern_with_root(pattern, source, roots);
-    let Some(rel_pattern) = prepare_permission_pattern(&rel_pattern, behavior) else {
+    let Some(rel_pattern) = prepare_permission_pattern_impl(&rel_pattern, behavior, source_units)
+    else {
         return RulePatternMatch::NoMatch;
     };
     // Native `Tn/hh` compiles non-allow rooted patterns against both their
@@ -963,6 +964,14 @@ pub(crate) fn prepare_permission_pattern(
     pattern: &str,
     behavior: crate::rule::PermissionBehavior,
 ) -> Option<String> {
+    prepare_permission_pattern_impl(pattern, behavior, false)
+}
+
+fn prepare_permission_pattern_impl(
+    pattern: &str,
+    behavior: crate::rule::PermissionBehavior,
+    source_units: bool,
+) -> Option<String> {
     let mut normalized = String::with_capacity(pattern.len());
     for ch in pattern.chars() {
         if ch != '/' || !normalized.ends_with('/') {
@@ -1018,10 +1027,7 @@ pub(crate) fn prepare_permission_pattern(
         .rev()
         .take_while(|ch| *ch == '\\')
         .count();
-    let invalid_range = globset::GlobBuilder::new(&strip_native_reversed_ascii_ranges(&validation))
-        .backslash_escape(true)
-        .build()
-        .is_err_and(|error| matches!(error.kind(), globset::ErrorKind::InvalidRange(..)));
+    let invalid_range = has_invalid_native_class_range(&validation, source_units);
     let skipped = invalid_range
         || validation
             .trim_matches(crate::source_input::is_js_trim_char)
@@ -1529,15 +1535,100 @@ fn native_ignore_case_fold_char(ch: char) -> char {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SourceGlobClassAtom {
+    Scalar(u32, bool),
+    Set(char),
+    Hyphen,
+}
+
+impl SourceGlobClassAtom {
+    fn literal(ch: char) -> Self {
+        let mapped = (0xf0000..=0xfff7f).contains(&(ch as u32));
+        Self::Scalar(
+            if mapped {
+                ch as u32 - 0xf0000 + 0x80
+            } else {
+                ch as u32
+            },
+            mapped,
+        )
+    }
+
+    fn range_endpoint(self) -> Option<(u32, bool)> {
+        match self {
+            Self::Scalar(unit, mapped) => Some((unit, mapped)),
+            Self::Hyphen => Some((b'-' as u32, false)),
+            Self::Set(_) => None,
+        }
+    }
+
+    fn append_ranges(self, raw: &mut Vec<(u32, u32)>, mapped: &mut Vec<(u32, u32)>) {
+        if let Self::Set(escape) = self {
+            append_class_set_ranges(mapped, escape);
+        } else if let Some((unit, is_mapped)) = self.range_endpoint() {
+            let ranges = if is_mapped { mapped } else { raw };
+            ranges.push((unit, unit));
+        }
+    }
+}
+
+/// Legacy ECMAScript class escapes operate on UTF-16 units. Keep sets out of
+/// scalar ranges and union their intervals before folding, including repeated
+/// complements, rather than expanding the BMP once per escape.
+fn append_class_set_ranges(ranges: &mut Vec<(u32, u32)>, escape: char) {
+    let positive: &[(u32, u32)] = match escape {
+        'd' | 'D' => &[(0x30, 0x39)],
+        'w' | 'W' => &[(0x30, 0x39), (0x41, 0x5a), (0x5f, 0x5f), (0x61, 0x7a)],
+        's' | 'S' => &[
+            (0x09, 0x0d),
+            (0x20, 0x20),
+            (0xa0, 0xa0),
+            (0x1680, 0x1680),
+            (0x2000, 0x200a),
+            (0x2028, 0x2029),
+            (0x202f, 0x202f),
+            (0x205f, 0x205f),
+            (0x3000, 0x3000),
+            (0xfeff, 0xfeff),
+        ],
+        _ => unreachable!("only ECMAScript class-set escapes create set atoms"),
+    };
+    if escape.is_ascii_lowercase() {
+        ranges.extend_from_slice(positive);
+    } else {
+        let mut next = 0;
+        for &(start, end) in positive {
+            if next < start {
+                ranges.push((next, start - 1));
+            }
+            next = end + 1;
+        }
+        ranges.push((next, 0xffff));
+    }
+}
+
 /// Case-fold each member of a class rather than its endpoints: `[Z-a]`
 /// remains a valid range under `/i`. Node-ignore treats leading `!` and `^`
 /// as class literals; globset would otherwise interpret them as negation.
 fn native_ignore_case_fold_glob(
     pattern: &str,
 ) -> Result<(String, Vec<(char, String)>), SourceGlobBuildError> {
-    let chars = strip_native_reversed_ascii_ranges(pattern)
-        .chars()
-        .collect::<Vec<_>>();
+    native_ignore_case_fold_glob_impl(pattern, true)
+}
+
+fn native_ignore_case_fold_glob_impl(
+    pattern: &str,
+    rewrite_class_wildcards: bool,
+) -> Result<(String, Vec<(char, String)>), SourceGlobBuildError> {
+    let normalized = if rewrite_class_wildcards {
+        strip_native_reversed_ascii_ranges_impl(pattern, true)
+    } else {
+        // A regex fragment has already passed Qd's class rewrite. In
+        // particular, classes containing inserted slashes skipped Jd.
+        pattern.to_owned()
+    };
+    let chars = normalized.chars().collect::<Vec<_>>();
     let mut out = String::new();
     let mut classes = Vec::new();
     let mut class_markers = std::collections::HashMap::<Vec<char>, char>::new();
@@ -1573,6 +1664,13 @@ fn native_ignore_case_fold_glob(
             at = end + 1;
             continue;
         }
+        let rewritten_class = if rewrite_class_wildcards
+            && chars[at + 1..end].iter().any(|ch| matches!(ch, '?' | '*'))
+        {
+            Some(native_class_glob_regex(&chars[at..=end])?)
+        } else {
+            None
+        };
         let mut members = Vec::<(u32, u32)>::new();
         let mut mapped_ranges = Vec::new();
         let mut raw_ranges = Vec::new();
@@ -1587,62 +1685,85 @@ fn native_ignore_case_fold_glob(
             == 1;
         // Parse atoms before ranges: a control escape such as \ca is one
         // endpoint in [\ca-z], rather than a standalone member followed by
-        // a literal hyphen. Escaped hyphens never act as range separators.
-        let atom = |ch: char, separator| {
-            let mapped = (0xf0000..=0xfff7f).contains(&(ch as u32));
-            let unit = if mapped {
-                ch as u32 - 0xf0000 + 0x80
-            } else {
-                ch as u32
-            };
-            (unit, mapped, separator)
-        };
+        // a literal hyphen. Escaped hyphens never act as range separators;
+        // class-set escapes never act as scalar endpoints.
+        use SourceGlobClassAtom::{Hyphen, Scalar, Set};
         let mut atoms = Vec::new();
-        let mut index = if empty_class { end } else { at + 1 };
+        let mut index = if empty_class || rewritten_class.is_some() {
+            end
+        } else {
+            at + 1
+        };
         while index < end {
             if chars[index] == '\\' && index + 1 < end {
                 if chars[index + 1] == 'c' {
                     if let Some(operand) = chars.get(index + 2).copied().filter(|operand| {
                         index + 2 < end && (operand.is_ascii_alphanumeric() || *operand == '_')
                     }) {
-                        atoms.push(((operand as u32) & 31, false, false));
+                        atoms.push(Scalar((operand as u32) & 31, false));
                         index += 3;
                     } else {
                         // Legacy non-Unicode RegExp keeps both characters
                         // when a control escape lacks an ASCII word operand.
-                        atoms.push(atom('\\', false));
-                        atoms.push(atom('c', false));
+                        atoms.push(SourceGlobClassAtom::literal('\\'));
+                        atoms.push(SourceGlobClassAtom::literal('c'));
                         index += 2;
                     }
                 } else {
-                    atoms.push(atom(chars[index + 1], false));
+                    let escaped = chars[index + 1];
+                    if matches!(
+                        escaped,
+                        'b' | 'f' | 'n' | 'r' | 't' | 'v' | 'x' | 'u' | '0'..='7'
+                    ) {
+                        let (unit, consumed) = native_regex_scalar_escape(&chars[index + 1..end])?;
+                        atoms.push(Scalar(unit, (0x80..=0xffff).contains(&unit)));
+                        index += 1 + consumed;
+                        continue;
+                    }
+                    atoms.push(if matches!(escaped, 'd' | 'D' | 's' | 'S' | 'w' | 'W') {
+                        Set(escaped)
+                    } else {
+                        SourceGlobClassAtom::literal(escaped)
+                    });
                     index += 2;
                 }
             } else {
-                atoms.push(atom(chars[index], chars[index] == '-'));
+                atoms.push(if chars[index] == '-' {
+                    Hyphen
+                } else {
+                    SourceGlobClassAtom::literal(chars[index])
+                });
                 index += 1;
             }
         }
         let mut index = 0;
         while index < atoms.len() {
-            if index + 2 < atoms.len() && atoms[index + 1].2 {
-                let (start, mapped_start, _) = atoms[index];
-                let (finish, mapped_finish, _) = atoms[index + 2];
-                if start > finish {
-                    return Err(SourceGlobBuildError::Invalid);
-                }
-                let ranges = if mapped_start || mapped_finish {
-                    &mut mapped_ranges
+            if index + 2 < atoms.len() && matches!(atoms[index + 1], Hyphen) {
+                if let (Some((start, mapped_start)), Some((finish, mapped_finish))) = (
+                    atoms[index].range_endpoint(),
+                    atoms[index + 2].range_endpoint(),
+                ) {
+                    if start > finish {
+                        return Err(SourceGlobBuildError::Invalid);
+                    }
+                    let ranges = if mapped_start || mapped_finish {
+                        &mut mapped_ranges
+                    } else {
+                        &mut raw_ranges
+                    };
+                    if start <= finish.min(0xffff) {
+                        ranges.push((start, finish.min(0xffff)));
+                    }
                 } else {
-                    &mut raw_ranges
-                };
-                if start <= finish.min(0xffff) {
-                    ranges.push((start, finish.min(0xffff)));
+                    // Annex B treats a range with a set endpoint as the
+                    // endpoint sets and a literal hyphen, consuming all three.
+                    for atom in &atoms[index..index + 3] {
+                        atom.append_ranges(&mut raw_ranges, &mut mapped_ranges);
+                    }
                 }
                 index += 3;
             } else {
-                let (unit, mapped, _) = atoms[index];
-                append_folded_bmp_ranges(&mut members, unit, unit, mapped);
+                atoms[index].append_ranges(&mut raw_ranges, &mut mapped_ranges);
                 index += 1;
             }
         }
@@ -1653,7 +1774,7 @@ fn native_ignore_case_fold_glob(
                 append_folded_bmp_ranges(&mut members, start, end, mapped);
             }
         }
-        if members.is_empty() && !empty_class {
+        if members.is_empty() && !empty_class && rewritten_class.is_none() {
             return Err(SourceGlobBuildError::Invalid);
         }
         while char::from_u32(marker_code).is_none_or(|marker| pattern.contains(marker)) {
@@ -1662,7 +1783,9 @@ fn native_ignore_case_fold_glob(
         let marker = char::from_u32(marker_code).ok_or(SourceGlobBuildError::Invalid)?;
         marker_code += 1;
         out.push(marker);
-        let class = if empty_class {
+        let class = if let Some(rewritten) = rewritten_class {
+            rewritten
+        } else if empty_class {
             "[a&&b]".to_owned()
         } else {
             compact_source_glob_class(members)
@@ -1676,6 +1799,265 @@ fn native_ignore_case_fold_glob(
         at = end + 1;
     }
     Ok((out, classes))
+}
+
+/// Node-ignore rewrites wildcards before recognizing classes. In `[\d?]`,
+/// the inserted `[^/]` closes the outer RegExp class and leaves a literal `]`.
+/// Preserve that regex fragment as a single glob marker; masking the original
+/// class first would incorrectly grant the one-character path instead.
+fn native_class_glob_regex(source: &[char]) -> Result<String, SourceGlobBuildError> {
+    use std::sync::LazyLock;
+    static STARS: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(^|[^\\]+)((?:\\\*)+)").expect("native class star rewrite")
+    });
+    static DIRECTORY_STARS: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\\/(?:\\\*){2}").expect("native directory star rewrite")
+    });
+    static ESCAPED_SPECIAL: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\\{3}([$.*+(){^|])").expect("native escaped-special rewrite")
+    });
+    static CLASSES: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(\\)?\[([^\x5d/]*?)(\\*)($|\])").expect("native class rewrite")
+    });
+    // Qd normalizes backslash-whitespace runs before escaping metacharacters.
+    let mut normalized = Vec::new();
+    let mut at = 0;
+    while at < source.len() {
+        if source[at] == '\\' {
+            let end = (at..source.len())
+                .find(|&i| source[i] != '\\')
+                .unwrap_or(source.len());
+            if source.get(end).is_some_and(|&ch| {
+                char::from_u32(source_glob_unit(ch))
+                    .is_some_and(crate::source_input::is_js_trim_char)
+            }) {
+                normalized.extend(std::iter::repeat_n('\\', (end - at) / 2 * 2));
+                normalized.push(' ');
+                at = end + 1;
+                continue;
+            }
+            normalized.extend_from_slice(&source[at..end]);
+            at = end;
+            continue;
+        }
+        normalized.push(source[at]);
+        at += 1;
+    }
+    let mut escaped = String::new();
+    for ch in normalized {
+        if matches!(
+            ch,
+            '\\' | '$' | '.' | '|' | '*' | '+' | '(' | ')' | '{' | '^'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    let escaped = escaped.replace('?', "[^/]").replace('/', r"\/");
+    let directories = DIRECTORY_STARS.replace_all(&escaped, |caps: &regex::Captures<'_>| {
+        let rest = &escaped[caps.get(0).expect("whole match").end()..];
+        if rest.starts_with(r"\/") {
+            r"(?:\/[^\/]+)*".to_owned()
+        } else if rest.is_empty() {
+            r"\/.+".to_owned()
+        } else {
+            caps[0].to_owned()
+        }
+    });
+    let stars = STARS.replace_all(&directories, |caps: &regex::Captures<'_>| {
+        let next = directories[caps.get(0).expect("whole match").end()..]
+            .chars()
+            .next();
+        if next.is_some_and(|ch| !matches!(source_glob_unit(ch), 10 | 13 | 0x2028 | 0x2029)) {
+            // The repeated capture in Qd contains only its LAST star.
+            format!(r"{}[^\/]*", &caps[1])
+        } else if caps[2].len() > 2 {
+            // JS's (?=.+) can backtrack one star, but cannot consume a line
+            // terminator. Leave that last escaped star outside the rewrite.
+            format!(r"{}[^\/]*\*", &caps[1])
+        } else {
+            caps[0].to_owned()
+        }
+    });
+    let unescaped = ESCAPED_SPECIAL
+        .replace_all(&stars, |caps: &regex::Captures<'_>| {
+            format!(r"\{}", &caps[1])
+        })
+        .replace(r"\\", r"\");
+    let rewritten = CLASSES.replace_all(&unescaped, |caps: &regex::Captures<'_>| {
+        let slashes = &caps[3];
+        if caps.get(1).is_some() {
+            format!(
+                r"\[{}{}{}",
+                &caps[2],
+                &slashes[..slashes.len() - slashes.len() % 2],
+                &caps[4]
+            )
+        } else if &caps[4] == "]" && slashes.len() % 2 == 0 {
+            strip_native_reversed_ascii_ranges(&format!("[{}{slashes}]", &caps[2]))
+        } else {
+            "[]".to_owned()
+        }
+    });
+    let chars = rewritten.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut at = 0;
+    while at < chars.len() {
+        match chars[at] {
+            '[' => {
+                let start = at + 1;
+                let mut end = start;
+                while end < chars.len() && chars[end] != ']' {
+                    end += if chars[end] == '\\' && end + 1 < chars.len() {
+                        2
+                    } else {
+                        1
+                    };
+                }
+                if end == chars.len() {
+                    return Err(SourceGlobBuildError::Invalid);
+                }
+                let negative = chars.get(start) == Some(&'^');
+                let body = chars[start + usize::from(negative)..end]
+                    .iter()
+                    .collect::<String>();
+                out.push_str(&fold_native_regex_class(&body, negative)?);
+                at = end + 1;
+            }
+            '\\' => {
+                let (regex, consumed) = fold_native_regex_escape(&chars[at + 1..])?;
+                out.push_str(&regex);
+                at += 1 + consumed;
+            }
+            '*' => {
+                out.push('*');
+                at += 1;
+            }
+            '(' if chars.get(at + 1..at + 3) == Some(&['?', ':']) => {
+                out.push_str("(?:");
+                at += 3;
+            }
+            ')' | '+' => {
+                out.push(chars[at]);
+                at += 1;
+            }
+            '.' => {
+                out.push_str(r"[^\x{a}\x{d}\x{f1fa8}\x{f1fa9}]");
+                at += 1;
+            }
+            ch => {
+                out.push_str(&regex::escape(
+                    &native_ignore_case_fold_char(ch).to_string(),
+                ));
+                at += 1;
+            }
+        }
+        if out.len() > MAX_SOURCE_GLOB_REGEX_BYTES {
+            return Err(SourceGlobBuildError::BudgetExceeded);
+        }
+    }
+    Ok(format!("(?:{out})"))
+}
+
+fn source_glob_unit(ch: char) -> u32 {
+    if (0xf0000..=0xfff7f).contains(&(ch as u32)) {
+        ch as u32 - 0xf0000 + 0x80
+    } else {
+        ch as u32
+    }
+}
+
+fn fold_native_regex_class(body: &str, negative: bool) -> Result<String, SourceGlobBuildError> {
+    if body.is_empty() {
+        return Ok(if negative { "(?s:.)" } else { "[a&&b]" }.to_owned());
+    }
+    let (actual, mut classes) = native_ignore_case_fold_glob_impl(&format!("[{body}]"), false)?;
+    if actual.chars().count() != 1 || classes.len() != 1 {
+        return Err(SourceGlobBuildError::Invalid);
+    }
+    let mut regex = classes.pop().expect("one class").1;
+    if negative {
+        if regex == "[a&&b]" {
+            return Ok("(?s:.)".to_owned());
+        }
+        regex.insert(1, '^');
+    }
+    Ok(regex)
+}
+
+/// Decode escapes that the wildcard rewrite moved outside the original class.
+/// The result still uses our one-scalar-per-UTF-16-unit operation alphabet.
+fn fold_native_regex_escape(chars: &[char]) -> Result<(String, usize), SourceGlobBuildError> {
+    let Some(&ch) = chars.first() else {
+        return Err(SourceGlobBuildError::Invalid);
+    };
+    if matches!(ch, 'd' | 'D' | 's' | 'S' | 'w' | 'W') {
+        return Ok((fold_native_regex_class(&format!(r"\{ch}"), false)?, 1));
+    }
+    if matches!(ch, 'b' | 'B') {
+        return Ok((format!(r"(?-u:\{ch})"), 1));
+    }
+    if ch == 'c' && !chars.get(1).is_some_and(char::is_ascii_alphabetic) {
+        return Ok((regex::escape(r"\c"), 1));
+    }
+    let (unit, consumed) = native_regex_scalar_escape(chars)?;
+    let mapped = if unit >= 0x80 && unit <= 0xffff {
+        0xf0000 + unit - 0x80
+    } else {
+        unit
+    };
+    let ch = char::from_u32(mapped).ok_or(SourceGlobBuildError::Invalid)?;
+    Ok((
+        regex::escape(&native_ignore_case_fold_char(ch).to_string()),
+        consumed,
+    ))
+}
+
+fn native_regex_scalar_escape(chars: &[char]) -> Result<(u32, usize), SourceGlobBuildError> {
+    let Some(&ch) = chars.first() else {
+        return Err(SourceGlobBuildError::Invalid);
+    };
+    let mut consumed = 1;
+    let unit = match ch {
+        'b' => 8,
+        'f' => 12,
+        'n' => 10,
+        'r' => 13,
+        't' => 9,
+        'v' => 11,
+        'c' => {
+            if let Some(operand) = chars.get(1).filter(|ch| ch.is_ascii_alphabetic()) {
+                consumed = 2;
+                *operand as u32 & 31
+            } else {
+                return Err(SourceGlobBuildError::Invalid);
+            }
+        }
+        'x' | 'u' => {
+            let count = if ch == 'x' { 2 } else { 4 };
+            if let Some(hex) = chars
+                .get(1..=count)
+                .filter(|hex| hex.iter().all(char::is_ascii_hexdigit))
+            {
+                consumed += count;
+                u32::from_str_radix(&hex.iter().collect::<String>(), 16).expect("hex digits")
+            } else {
+                ch as u32
+            }
+        }
+        '0'..='7' => {
+            let count = if ch <= '3' { 3 } else { 2 };
+            let octal = chars
+                .iter()
+                .take(count)
+                .take_while(|ch| matches!(ch, '0'..='7'))
+                .collect::<String>();
+            consumed = octal.len();
+            u32::from_str_radix(&octal, 8).expect("octal digits")
+        }
+        _ => ch as u32,
+    };
+    Ok((unit, consumed))
 }
 
 /// Consecutive source units with consecutive canonical values need only one
@@ -1820,6 +2202,56 @@ fn expand_source_glob_classes(regex: &str, classes: Vec<(char, String)>) -> Opti
 /// Node-ignore's `Jd` removes reversed `[0-z]-[0-z]` ranges before compiling
 /// a class. Other invalid ranges (e.g. `a--`) still invalidate the expression.
 fn strip_native_reversed_ascii_ranges(pattern: &str) -> String {
+    strip_native_reversed_ascii_ranges_impl(pattern, false)
+}
+
+fn has_invalid_native_class_range(pattern: &str, source_units: bool) -> bool {
+    let units = pattern.encode_utf16().collect::<Vec<_>>();
+    let mapped;
+    let pattern = if source_units {
+        pattern
+    } else {
+        let Some(strings) = crate::source_input::exact_operation_strings(&[&units]) else {
+            return false;
+        };
+        mapped = strings;
+        &mapped[0]
+    };
+    let normalized = strip_native_reversed_ascii_ranges(pattern);
+    let chars: Vec<_> = normalized.chars().collect();
+    let mut at = 0;
+    while at < chars.len() {
+        if chars[at] == '\\' {
+            at += 2;
+            continue;
+        }
+        if chars[at] == '[' {
+            if let Some(end) = (at + 1..chars.len())
+                .find(|&index| matches!(chars[index], ']' | '/'))
+                .filter(|&index| chars[index] == ']')
+            {
+                let class: String = chars[at..=end].iter().collect();
+                if chars[at + 1..end].contains(&'-')
+                    && matches!(
+                        native_ignore_case_fold_glob_impl(&class, false),
+                        Err(SourceGlobBuildError::Invalid)
+                    )
+                {
+                    return true;
+                }
+                at = end + 1;
+                continue;
+            }
+        }
+        at += 1;
+    }
+    false
+}
+
+fn strip_native_reversed_ascii_ranges_impl(
+    pattern: &str,
+    preserve_class_wildcards: bool,
+) -> String {
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut out = String::new();
     let mut at = 0;
@@ -1841,6 +2273,11 @@ fn strip_native_reversed_ascii_ranges(pattern: &str) -> String {
             at += 1;
             continue;
         };
+        if preserve_class_wildcards && chars[at + 1..end].iter().any(|ch| matches!(ch, '?' | '*')) {
+            out.extend(&chars[at..=end]);
+            at = end + 1;
+            continue;
+        }
         out.push('[');
         at += 1;
         while at < end {
@@ -2056,6 +2493,19 @@ mod tests {
             ),
             RulePatternMatch::NoMatch
         );
+    }
+
+    #[test]
+    fn repeated_class_set_complements_fold_the_union_once() {
+        for wildcard in ["", "?", "*"] {
+            let repeated = format!("[{}{wildcard}]", r"\D".repeat(4096));
+            let single = format!(r"[\D{wildcard}]");
+            let (_, repeated_classes) = native_ignore_case_fold_glob(&repeated).unwrap();
+            let (_, single_classes) = native_ignore_case_fold_glob(&single).unwrap();
+            assert_eq!(repeated_classes.len(), 1);
+            assert_eq!(repeated_classes[0].1, single_classes[0].1);
+            assert!(repeated_classes[0].1.len() < 32_768);
+        }
     }
 
     #[test]

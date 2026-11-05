@@ -186,7 +186,10 @@ pub fn catalog_permission_rules(
     for (key, state) in connections {
         let config = match state {
             crate::McpConnectionState::Connected { config, .. }
-            | crate::McpConnectionState::Cached { config, .. } => config,
+            | crate::McpConnectionState::Cached { config, .. }
+            | crate::McpConnectionState::Connecting { config, .. }
+            | crate::McpConnectionState::Reconnecting { config, .. }
+            | crate::McpConnectionState::HealthChecking { config, .. } => config,
             _ => continue,
         };
         if key != &config.name || config.disabled {
@@ -325,6 +328,39 @@ mod tests {
         );
         connections.remove("two");
         assert!(catalog_permission_rules(&connections).is_empty());
+    }
+
+    #[test]
+    fn full_review_transient_dial_states_keep_declared_restrictions() {
+        let config = crate::build_server_from_json_entry(
+            "server",
+            &serde_json::json!({
+                "type":"sdk", "name":"server", "tools":[
+                    {"name":"write","permission_policy":"always_deny"},
+                    {"name":"read","permission_policy":"always_ask"}
+                ]
+            }),
+            ConfigScope::Dynamic,
+        )
+        .unwrap();
+        let mut connections = std::collections::HashMap::from([(
+            "server".into(),
+            crate::McpConnectionState::Connecting {
+                config: config.clone(),
+                started_at: std::time::SystemTime::now(),
+            },
+        )]);
+        let during_connect = catalog_permission_rules(&connections);
+        assert_eq!(during_connect.len(), 2);
+        connections.insert(
+            "server".into(),
+            crate::McpConnectionState::Reconnecting {
+                config,
+                retry_count: 1,
+                next_retry_at: std::time::SystemTime::now(),
+            },
+        );
+        assert_eq!(catalog_permission_rules(&connections), during_connect);
     }
 
     #[test]

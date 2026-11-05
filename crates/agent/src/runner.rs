@@ -341,9 +341,11 @@ impl AgentStreamAttempt {
 fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAgentToolDispatch> {
     let invoker = ctx.tool_invoker.clone()?;
     let handback = ctx.handback.clone();
+    let supplied_mcp_tools = ctx.supplied_mcp_tools.clone();
     Some(std::sync::Arc::new(move |call| {
         let invoker = invoker.clone();
         let handback = handback.clone();
+        let supplied_mcp_tools = supplied_mcp_tools.clone();
         Box::pin(async move {
             if call.name == lingxi_core::host::handback::HANDBACK_TOOL_NAME
                 && handback.as_ref().is_some_and(|runtime| runtime.eligible)
@@ -364,6 +366,19 @@ fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAge
                         call.name,
                     ))
                 }
+            } else if let Some(tool) = supplied_mcp_tools.iter().find(|tool| {
+                tool.name() == call.name || tool.aliases().contains(&call.name.as_str())
+            }) {
+                invoker
+                    .invoke_supplied_detailed(
+                        &call.name,
+                        call.input,
+                        call.context,
+                        std::sync::Arc::new(tool_api::tool_invoker_impl::SuppliedTool(
+                            tool.clone(),
+                        )),
+                    )
+                    .await
             } else {
                 invoker
                     .invoke_detailed(&call.name, call.input, call.context)

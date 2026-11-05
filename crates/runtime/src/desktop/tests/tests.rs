@@ -10077,3 +10077,49 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
              the shipped workflow script"
     );
 }
+
+#[tokio::test]
+async fn agent_by_name_never_promotes_a_sibling_private_server() {
+    let registry = Arc::new(mcp::McpRegistry::new(Arc::new(
+        platform_posix::PosixMcpTransport::new(),
+    )));
+    let config = mcp::build_server_from_json_entry(
+        "private",
+        &serde_json::json!({
+            "type":"sdk", "name":"private", "tools":[{"name":"read","description":"private"}]
+        }),
+        mcp::ConfigScope::Agent,
+    )
+    .unwrap();
+    let key = mcp::registry::agent_scope_table_key(lingxi_core::types::AgentId::new(), "private");
+    registry.connections.write().await.insert(
+        key.clone(),
+        mcp::McpConnectionState::Connecting {
+            config,
+            started_at: std::time::SystemTime::now(),
+        },
+    );
+    let mut def = agent::builtin_agent_definitions().remove(0);
+    def.mcp_servers = vec![agent::AgentMcpServerSpec::ByName("private".into())];
+    let mut ctx = tool_api::test_support::ctx_for_file_tools(
+        tool_api::test_support::make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        vec!["/tmp".into()],
+    );
+    ctx.mcp_registry = Some(registry.clone());
+    let set = super::build_agent_mcp_tool_set(
+        registry.clone(),
+        ctx,
+        false,
+        false,
+        lingxi_core::types::AgentId::new(),
+        def,
+        None,
+    )
+    .await;
+    assert!(set.tools.is_empty());
+    let connections = registry.connections.read().await;
+    assert_eq!(connections.len(), 1);
+    assert!(connections.contains_key(&key));
+    assert!(!connections.contains_key("private"));
+}

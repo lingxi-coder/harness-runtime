@@ -43,8 +43,8 @@ behavioral evidence.
 | Rule syntax and aliases | Match current malformed-parenthesis handling, `Task` → `Agent`, removed historical output aliases, and raw UTF-16 round trips. |
 | Shell rule matching | Reject NUL, use JavaScript whitespace/prefix semantics, and retain wildcard behavior. |
 | Shell read-only inference | Replay 74 current flag configurations and the active native getter/callbacks. Split shell words on Bash blanks/newlines, preserving Unicode whitespace and other control characters inside executable names. Apply Native's public unquoted-glob command allowlist before table dispatch, retaining quoted/escaped literals. Keep the native GH table inert; reject executable preprocessors, browser launches, and remote/configuration controls. |
-| File rules | Match native non-Unicode case folding and character classes, including reversed ASCII range removal, empty classes from odd trailing backslashes and legacy control escapes as range endpoints; drop invalid allow expressions and preserve deny/ask literal paths. Merge overlapping source ranges, render compact folded ranges, reuse repeated classes and expand markers in one pass. Bound source, expansion and compiled-regex resources; exhausted patterns cannot grant access or retract an ask/deny. Normalize skipped gitignore patterns according to behavior and retain rooted physical twins for the session. |
-| Read-deny search filtering | Ignore negated exclusions and preserve residual globs when the search cwd is inside a rule root. Before opening/listing each candidate, apply a live Read-deny snapshot with the same case folding and path-spelling checks as direct Read. Capture policy-root aliases and retain the requested search-root spelling alongside the canonical walk root, including symlink search roots. Keep the changed-file snapshot's original single-spelling check separate. |
+| File rules | Match native non-Unicode case folding and character classes, including reversed ASCII range removal, empty classes from odd trailing backslashes and legacy control escapes as range endpoints. Keep the six class-set escapes distinct from scalar range endpoints, preserving their literal hyphens and ASCII/UTF-16 membership. For classes containing wildcards, preserve Native's wildcard-before-class rewrite order, repeated-star capture, escaped whitespace and line-terminator lookahead; decode the resulting regex fragment before folding. Drop invalid allow expressions and preserve deny/ask literal paths. Merge overlapping source ranges, including repeated set complements, render compact folded ranges, reuse repeated classes and expand markers in one pass. Bound source, expansion and compiled-regex resources; exhausted patterns cannot grant access or retract an ask/deny. Normalize skipped gitignore patterns according to behavior and retain rooted physical twins for the session. |
+| Read-deny search filtering | Ignore negated exclusions and preserve residual globs when the search cwd is inside a rule root. Before opening/listing each candidate, apply a live snapshot of path-specific Read denies with the same case folding and path-spelling checks as direct Read. A tool-wide Read deny does not hide independently authorized Grep/Glob results. Capture policy-root aliases and retain the requested search-root spelling alongside the canonical walk root, including symlink search roots. Keep the changed-file snapshot's original single-spelling check separate. |
 | Path safety | Check all symlink spellings, match Windows/WSL colon semantics, expand removal targets before evaluation, and protect glob deletion of additional working-directory roots. |
 | Parser exhaustion | Enforce time/node budgets and route exhausted parses to a fail-closed Ask instead of the unavailable-parser fallback. |
 | Explicit Ask | Run the tool-local check: its Deny wins, and its richer Ask keeps `matchedAskRule`; do not let bypass, whole-tool grants, Auto fast paths, Hook allow, or Mod projection erase it. |
@@ -92,10 +92,10 @@ still resolved to 2.1.318.
 
 | Check | Result |
 | --- | --- |
-| `cargo test -p permission --offline` | 1,727 passed across unit/integration suites |
-| Same suite with `--features bash-ast` | 1,909 passed |
+| `cargo test -p permission --offline` | 1,730 passed across unit/integration suites |
+| Same suite with `--features bash-ast` | 1,912 passed |
 | MCP registry unit suite | 727 passed in the preceding review-fix pass, including deterministic concurrency, slow-first-handshake, pre-registration policy and removal regressions |
-| File tools and tool-MCP unit suites | 396 + 169 passed, including exact case folding, policy/search-root aliases, SDK child isolation, remote bypass and organization Ask composition |
+| File tools and tool-MCP unit suites | 397 + 169 passed, including independent search authorization, exact case folding, policy/search-root aliases, SDK child isolation, remote bypass and organization Ask composition |
 | Real SDK/runtime MCP lifecycle and catalog tests | 35 passed |
 | Runtime agent-scoped MCP builders | 2 passed, covering organization metadata and private SDK ask/deny enforcement |
 | Runtime and CLI persistent-consent regressions | 1 + 1 passed |
@@ -113,7 +113,73 @@ passed. Registry, general SDK lifecycle, classifier and the other six artifact
 oracle results are retained from the preceding review-fix pass; consent,
 Mod/Hook, CLI compilation and mobile checks are retained from initial alignment.
 
-The five latest fixes cover a complete Default-mode Bash authorization for
+The fourth review-fix pass reran the full default/AST permission suites and
+file-tool unit suite. The updated rule oracle covers 329 file-match cases,
+including 288 class-set endpoint/membership cases. Public-policy regressions
+withhold out-of-scope Edit grants and retain Read deny/ask over a tool-wide
+allow or bypass. Search regressions cover Session/Project rules, live/static
+policies and tool-wide Read denies with and without a mixed-case path deny.
+The no-roots snapshot and 4,096 repeated class-set complements also have
+regressions. Other validation rows above retain the results described in the
+preceding passes.
+
+The fifth review-fix pass (2026-11-05) retains the same pinned 2.1.318 artifact;
+it does not claim a new latest-version check. The rule oracle now covers 890
+file-match cases, adding 561 wildcard/class combinations, including escaped
+wildcards, consecutive stars, hexadecimal units, escaped hyphens, CR and
+U+2028. Public-policy regressions both withhold the incorrect one-character
+grants and retain the original matcher’s longer-path grants and deny/ask
+precedence under bypass. Repeated-complement resource coverage includes the
+wildcard route. The final default/AST permission suites and file-tool suite
+were rerun. Independent Native/current/HEAD comparison of 2,684 patterns and
+120,780 inputs found no introduced differences in this repair’s corpus;
+unchanged differences outside the repaired combinations remain outside that
+claim, rather than being counted as whole-character-class equivalence.
+
+The full-module review repair pass (2026-11-05) keeps this pin and extends the
+rule corpus to 1,082 file-match cases. Scalar class escapes and Annex B set
+endpoints now use Native-compatible validation, including raw search rules.
+Public regressions cover guest/host coordinates across ToolCheck, execution
+and transient skill checks; live cwd with permission layers; generic Read
+fields; Unicode paths; literal brackets; static/conditional/unknown directory
+changes; and one-time argv-wrapper expansion. Directory candidates follow
+Native `OVt`'s bounded initial-cwd plus linear-cwd set, not a branch cross product.
+
+Legacy and contextual approval now share Ask provenance and protected restricted
+write handling. Local classifier prompts consume the trusted live settings
+snapshot on desktop and mobile without losing UTF-16 units. Newline/background
+operations cannot inherit a test-command fast Allow, and a safeguard refusal
+survives second-stage context overflow. MCP regressions exercise private supplied
+tool dispatch, parent-name collisions, organization Ask metadata, connection
+admission before cache reuse and every discovery route, and restrictions during
+Connecting/Reconnecting/HealthChecking. Child ByName lookup excludes private
+owner slots.
+
+TUI approval retains complete input behind Ctrl+O with size-independent paging;
+Android retains every input field in its scrollable detail view. The Rust AST
+adapter also caps semantic tree depth at 256 before recursive analysis, preventing
+unrecoverable debug-stack overflow; this is an implementation resource bound,
+not a claim of identical Native decisions on every over-budget input. Validation
+uses pure Native functions, local authorization/dispatch and fake transports;
+it does not execute a complete Native model/remote-server lifecycle.
+
+This pass reran all eight artifact oracles. The permission
+`--lib --test full_review_regressions --test permission_rules_318` checks passed
+1,635 + 17 + 13 tests by default and 1,816 + 18 + 13 with `bash-ast`.
+Seven new backend call-chain regressions passed, as did the related Adapter
+permission (24), tool invoker (46), MCP catalog policy (3), TUI permission (60),
+shared fixture (2), and actual desktop ByName builder (1) checks.
+The mobile runtime also passed its macOS host feature check with
+`--no-default-features --features mobile`.
+
+Android's permission mapper and native conversation fixture tests passed all
+17 JVM cases. That run excluded `verifyDirectMobileLinuxNative`: the normal
+task is blocked by the unavailable `native-manifest.json` in the existing
+direct native-support output. No APK installation or device acceptance is
+claimed. Changed Rust files passed rustfmt, and excluded dirty tracked paths
+were checked against the repair's initial hashes.
+
+The third pass's five fixes cover a complete Default-mode Bash authorization for
 Unicode executable-name separators, actual Grep/Glob calls behind the live
 gate (with ASCII/Greek deny cases and Kelvin-sign/long-s non-matching controls),
 requested symlink search roots, child SDK tool construction and permanent

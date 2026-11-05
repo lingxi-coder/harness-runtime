@@ -529,6 +529,7 @@ impl AdapterPermissionGate {
         background_owned: bool,
         suppress_always_allow_rule: bool,
         auto_mode_prompt: Option<AutoModePrompt>,
+        allow_cached_grant: bool,
     ) -> PermissionOutcome {
         // Capture the owner before the first await: a queued rule lookup must
         // not attach a call from a completed turn to its replacement turn.
@@ -564,7 +565,8 @@ impl AdapterPermissionGate {
         // A requiresUserInteraction tool must not be bypassed by an older rule.
         {
             let rules = self.session_allow_rules.lock().await;
-            if !suppress_always_allow_rule
+            if allow_cached_grant
+                && !suppress_always_allow_rule
                 && rules
                     .iter()
                     .any(|r| permission::call_matches_rule(r, name, input))
@@ -749,7 +751,7 @@ impl PermissionGate for AdapterPermissionGate {
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
-            .check_with_context_impl(name, input, worker, false, false, None)
+            .check_with_context_impl(name, input, worker, false, false, None, true)
             .await
         {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
@@ -773,6 +775,14 @@ impl PermissionGate for AdapterPermissionGate {
                 ctx.background_owned,
                 ctx.suppress_always_allow_rule,
                 ctx.auto_mode_prompt,
+                // A grant cached by this transport cannot override an Ask
+                // established by the outer policy, hook, or tool ceiling.
+                ctx.decision_reason_type
+                    .as_deref()
+                    .is_none_or(|kind| kind == "mode")
+                    && ctx.matched_ask_rule.is_none()
+                    && !ctx.hook_ask_floor
+                    && ctx.tool_check_ceiling.is_none(),
             )
             .await
         {
@@ -1032,6 +1042,67 @@ mod tests {
         // No request was emitted to the transport.
         assert!(sink.requests().await.is_empty());
         assert_eq!(gate.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn full_review_explicit_policy_ask_survives_cached_allow_always_on_both_entry_points() {
+        for legacy in [false, true] {
+            let sink = MockRequestSink::arc();
+            let transport = Arc::new(AdapterPermissionGate::new(sink.clone()));
+            let policy = permission::PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                [PermissionRule {
+                    value: permission::PermissionRuleValue::from_rule_string("Read(./secret.txt)"),
+                    behavior: permission::PermissionBehavior::Ask,
+                    source: permission::PermissionRuleSource::Session,
+                }],
+            )
+            .with_roots(permission::FsRoots {
+                cwd: "/proj".into(),
+                home: None,
+                lingxi_home: "/home/user/.lingxi".into(),
+            });
+            let outer = Arc::new(permission::PolicyPermissionGate::new(
+                Arc::new(policy),
+                transport.clone(),
+            ));
+            for response in [
+                PermissionResponseDto::AllowAlways,
+                PermissionResponseDto::Deny,
+            ] {
+                let outer = outer.clone();
+                let task = tokio::spawn(async move {
+                    let input = source_fixture(&json!({"file_path":"/proj/secret.txt"}));
+                    if legacy {
+                        matches!(outer.check("Read", &input).await, PermissionDecision::Allow)
+                    } else {
+                        matches!(
+                            outer
+                                .check_with_context(
+                                    "Read",
+                                    &input,
+                                    &PermissionCheckContext::default()
+                                )
+                                .await,
+                            PermissionOutcome::Allow { .. }
+                        )
+                    }
+                });
+                wait_for_pending(&transport, 1).await;
+                let request = sink.last().await;
+                assert!(
+                    transport
+                        .resolve(request.request_id, response, "Read")
+                        .await
+                );
+                assert_eq!(
+                    task.await.unwrap(),
+                    matches!(response, PermissionResponseDto::AllowAlways)
+                );
+            }
+            assert_eq!(sink.requests().await.len(), 2);
+            assert_eq!(transport.session_allow_rules().lock().await.len(), 1);
+        }
     }
 
     /// `gate_persists_allow_always` — `AllowAlways` appends a session rule.

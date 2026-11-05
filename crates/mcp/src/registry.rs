@@ -622,6 +622,7 @@ pub struct McpRegistry {
     /// Host policy for plugin-owned dynamic servers. `None` keeps standalone
     /// registries policy-neutral; production hosts inject their local policy.
     plugin_mcp_admission: Option<Arc<PluginMcpAdmission>>,
+    connection_admission: Option<Arc<PluginMcpAdmission>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
     /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
     /// client is `type === "pending"`".
@@ -1044,6 +1045,7 @@ impl McpRegistry {
             connections: Arc::clone(&self.connections),
             plugin_server_owners: Arc::clone(&self.plugin_server_owners),
             plugin_mcp_admission: self.plugin_mcp_admission.clone(),
+            connection_admission: self.connection_admission.clone(),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             permission_policy_publish_lock: Arc::clone(&self.permission_policy_publish_lock),
@@ -1095,6 +1097,7 @@ impl McpRegistry {
             connections: Arc::new(RwLock::new(HashMap::new())),
             plugin_server_owners: Arc::new(RwLock::new(HashMap::new())),
             plugin_mcp_admission: None,
+            connection_admission: None,
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             permission_policy_publish_lock: Arc::new(Mutex::new(())),
@@ -1368,6 +1371,16 @@ impl McpRegistry {
     pub fn with_plugin_mcp_admission(mut self, admission: Arc<PluginMcpAdmission>) -> Self {
         self.assert_configuration_mutable("with_plugin_mcp_admission");
         self.plugin_mcp_admission = Some(admission);
+        self
+    }
+
+    /// Enforce the host's common policy for every connection source, before
+    /// reusing a cached client or starting transport work. Plugin-only gates
+    /// remain on `with_plugin_mcp_admission`.
+    #[must_use]
+    pub fn with_connection_admission(mut self, admission: Arc<PluginMcpAdmission>) -> Self {
+        self.assert_configuration_mutable("with_connection_admission");
+        self.connection_admission = Some(admission);
         self
     }
 
@@ -2807,26 +2820,12 @@ impl McpRegistry {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
         self.remember_server_order(&key);
         Self::validate_connectable_config(&config)?;
-        if config.metadata.agent_source == Some(crate::connection::McpAgentSource::Plugin) {
-            let refusal = if config.disabled {
-                Some(PluginMcpRefusal::new(
-                    "disabled",
-                    Utf16JsonProjection::from(format!(
-                        "The MCP server \"{}\" is turned off; turn it on in /mcp.",
-                        config.name
-                    )),
-                ))
-            } else {
-                self.plugin_mcp_admission
-                    .as_ref()
-                    .and_then(|admission| admission(&config))
-            };
-            if let Some(refusal) = refusal {
-                if let Some(output) = plugin_refusal_out {
-                    *output = Some(refusal.clone());
-                }
-                return Err(refusal.as_mcp_error());
+        let refusal = self.connection_refusal(&config);
+        if let Some(refusal) = refusal {
+            if let Some(output) = plugin_refusal_out {
+                *output = Some(refusal.clone());
             }
+            return Err(refusal.as_mcp_error());
         }
         if operation_guard.is_some_and(|guard| !guard()) {
             return Err(operation_guard_rejected());
@@ -3394,11 +3393,42 @@ impl McpRegistry {
         Ok(())
     }
 
+    fn connection_refusal(&self, config: &McpServerConfig) -> Option<PluginMcpRefusal> {
+        if config.disabled {
+            Some(PluginMcpRefusal::new(
+                "disabled",
+                format!(
+                    "The MCP server \"{}\" is turned off; turn it on in /mcp.",
+                    config.name
+                )
+                .into(),
+            ))
+        } else {
+            self.connection_admission
+                .as_ref()
+                .and_then(|admission| admission(config))
+                .or_else(|| {
+                    (config.metadata.agent_source
+                        == Some(crate::connection::McpAgentSource::Plugin))
+                    .then(|| {
+                        self.plugin_mcp_admission
+                            .as_ref()
+                            .and_then(|admission| admission(config))
+                    })
+                    .flatten()
+                })
+        }
+    }
+
     async fn discover_live_connection(
         &self,
         config: &McpServerConfig,
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<LiveDiscovery, McpError> {
+        Self::validate_connectable_config(config)?;
+        if let Some(refusal) = self.connection_refusal(config) {
+            return Err(refusal.as_mcp_error());
+        }
         let connect_timeout = mcp_connection_timeout();
         let connect_started = std::time::Instant::now();
         let elicitation = crate::elicitation_capabilities::for_config(config);

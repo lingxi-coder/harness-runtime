@@ -1399,6 +1399,7 @@ impl InProcessTeammateHandler {
             model_resolution_context_provider: self.model_resolution_context_provider.clone(),
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
+            supplied_mcp_tools: Vec::new(),
             // Invoke the factory for every context. Cloning one source here
             // would merge teammate cursors and make diagnostics first-reader
             // wins across concurrent workers.

@@ -11703,3 +11703,77 @@ async fn app_guard_is_rechecked_after_authentication_reconnect() {
         "revoked retry must never emit a second RPC"
     );
 }
+
+#[tokio::test]
+async fn full_review_common_connection_admission_covers_private_and_shared_non_plugin_servers() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let policy_calls = Arc::new(AtomicUsize::new(0));
+    let registry = McpRegistry::with_raw_conn(mock.clone(), mock.clone())
+        .with_connection_admission(Arc::new({
+            let policy_calls = policy_calls.clone();
+            move |_| {
+                policy_calls.fetch_add(1, Ordering::SeqCst);
+                Some(PluginMcpRefusal::new(
+                    "policy",
+                    "enterprise boundary".into(),
+                ))
+            }
+        }));
+    let mut private = cfg("private");
+    private.scope = ConfigScope::Agent;
+    private.metadata.agent_source = Some(crate::connection::McpAgentSource::UserSettings);
+    assert!(registry
+        .connect_agent_scoped(private.clone(), lingxi_core::types::AgentId::new())
+        .await
+        .is_err());
+    assert!(registry.connect(private).await.is_err());
+    assert_eq!(policy_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+    let mut disabled = cfg("disabled");
+    disabled.disabled = true;
+    assert!(registry
+        .connect(disabled)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("turned off"));
+    assert_eq!(policy_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn full_review_common_admission_is_rechecked_for_atomic_replace_and_lazy_discovery() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let blocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registry = McpRegistry::with_raw_conn(mock.clone(), mock.clone())
+        .with_connection_admission(Arc::new({
+            let blocked = blocked.clone();
+            move |_| {
+                blocked
+                    .load(Ordering::SeqCst)
+                    .then(|| PluginMcpRefusal::new("policy", "enterprise restriction".into()))
+            }
+        }));
+    let original = cfg("live");
+    let connection_id = registry.connect(original.clone()).await.unwrap();
+    blocked.store(true, Ordering::SeqCst);
+    let mut replacement = original.clone();
+    replacement.timeout_ms = Some(42_000);
+    assert!(registry
+        .replace_config_atomically(replacement)
+        .await
+        .is_err());
+    let mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+        &original.spec,
+        original.metadata.transport.as_deref(),
+        5000,
+    );
+    assert!(registry
+        .discover_live_connection(&original, mode)
+        .await
+        .is_err());
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(registry.connections.read().await.get("live"), Some(McpConnectionState::Connected { connection_id: current, .. }) if *current == connection_id)
+    );
+}

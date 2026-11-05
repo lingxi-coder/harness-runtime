@@ -204,6 +204,5211 @@
       "pattern": "[a\\-z]",
       "input": "-",
       "expected": true
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-z]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\d]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\d]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d-!]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d--\\d]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d?]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\d]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x0/]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\d]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\?]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\d]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\d]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-z]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\D]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\D]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D-!]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D--\\D]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D?]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\D]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D*]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\D]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\?]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\D]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\D\\*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\D]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-z]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\s]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\s]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s-!]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s--\\s]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s?]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\s]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\s]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\?]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\s]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\s]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-z]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\S]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\S]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S-!]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S--\\S]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S?]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\S]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x0a]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x0/]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S*]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\S]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\?]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\S]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\S\\*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\S]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-z]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\w]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\w]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w-!]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "x_y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w--\\w]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w?]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\w]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x0a]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x0/]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\w]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "xf]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\?]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\w]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\w\\*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "xfy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\w]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "xzy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-z]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "x-y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "xſy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "xKy",
+      "expected": false
+    },
+    {
+      "pattern": "x[a-\\W]y",
+      "input": "xσy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[!-\\W]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W-!]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "x-y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "xzy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "x_y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "xſy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "xKy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W--\\W]y",
+      "input": "xσy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W?]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\W]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W*]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[*\\W]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x[]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\?]y",
+      "input": "x\\]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\?\\W]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\W\\*]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "xfy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x[]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x0a]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x0/]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\*\\W]y",
+      "input": "x\\]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\-?]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80?]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080?]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[?\\-?]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x\ry",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d*\r]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d**\r]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x0y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x0]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x^]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d* ]y",
+      "input": "x ]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x0]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "xf]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x^]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x]y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x\ry",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\d\\  ?]y",
+      "input": "x ]y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "x8y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "xxy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "xuy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "xay",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x80]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "x8y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "xxy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "xuy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "xay",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\u0080]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "x8y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "xxy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "xuy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "xay",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "xy",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\s\\x80]y",
+      "input": "x y",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "x8y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "xxy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "xuy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "xay",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\x61]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "x8y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "xxy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "xuy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "xay",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "x\ty",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\141]y",
+      "input": "x y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "x0y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "x8y",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "xxy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "xuy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "xay",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "xy",
+      "expected": false
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "x\ty",
+      "expected": true
+    },
+    {
+      "pattern": "x[\\t]y",
+      "input": "x y",
+      "expected": false
     }
   ],
   "version": "2.1.318",

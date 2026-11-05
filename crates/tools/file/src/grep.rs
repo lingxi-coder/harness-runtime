@@ -1635,6 +1635,91 @@ mod tests {
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
 
     #[tokio::test]
+    async fn tool_wide_read_deny_preserves_independently_allowed_searches() {
+        use lingxi_core::host::permission_gate::{PermissionDecision, PermissionGate};
+        use permission::rule::{
+            PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+        };
+        for source in [
+            PermissionRuleSource::Session,
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
+        ] {
+            for path_deny in [false, true] {
+                for live in [false, true] {
+                    let dir = TempDir::new().unwrap();
+                    std::fs::write(dir.path().join("ordinary.txt"), "SEARCH_MARKER\n").unwrap();
+                    std::fs::write(dir.path().join("secret"), "SEARCH_MARKER\n").unwrap();
+                    let mut rules = vec![
+                        ("Read", PermissionBehavior::Deny),
+                        ("Grep", PermissionBehavior::Allow),
+                        ("Glob", PermissionBehavior::Allow),
+                    ];
+                    if path_deny {
+                        rules.push(("Read(Secret)", PermissionBehavior::Deny));
+                    }
+                    let policy = Arc::new(
+                        permission::PermissionPolicy::from_rules(
+                            permission::PermissionMode::Default,
+                            rules.into_iter().map(|(rule, behavior)| PermissionRule {
+                                value: PermissionRuleValue::from_rule_string(rule),
+                                behavior,
+                                source,
+                            }),
+                        )
+                        .with_roots(permission::FsRoots {
+                            cwd: dir.path().into(),
+                            home: None,
+                            lingxi_home: dir.path().join(".lingxi"),
+                        }),
+                    );
+                    let gate = Arc::new(permission::PolicyPermissionGate::new(
+                        policy.clone(),
+                        Arc::new(permission::DenyOnAskGate),
+                    ));
+                    let mut ctx = tool_api::test_support::ctx_for_file_tools(
+                        make_dummy_fs(),
+                        Arc::new(AnalyticsBus::new()),
+                        vec![dir.path().into()],
+                    );
+                    ctx.read_deny_exclude_globs =
+                        permission::read_deny_globs::read_deny_exclude_globs(&policy, dir.path());
+                    ctx.permission_policy = policy;
+                    if live {
+                        ctx.permission_gate = Some(gate.clone());
+                    }
+                    let grep_input = crate::generated_result(
+                        &json!({"pattern":"SEARCH_MARKER","output_mode":"content"}),
+                    );
+                    let glob_input = crate::generated_result(&json!({"pattern":"**/*"}));
+                    assert_eq!(
+                        gate.check("Grep", &grep_input).await,
+                        PermissionDecision::Allow
+                    );
+                    assert_eq!(
+                        gate.check("Glob", &glob_input).await,
+                        PermissionDecision::Allow
+                    );
+                    let grep = GrepTool::new(ctx.clone())
+                        .call(grep_input, fresh_ctx(), fresh_tx())
+                        .await
+                        .unwrap();
+                    let content = grep.data.string_at("/content").unwrap();
+                    assert!(content.contains("ordinary.txt:1:SEARCH_MARKER"));
+                    assert_eq!(content.contains("secret:1:SEARCH_MARKER"), !path_deny);
+                    let glob = crate::glob::GlobTool::new(ctx)
+                        .call(glob_input, fresh_ctx(), fresh_tx())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        glob.data.number_at("/numFiles"),
+                        Some(if path_deny { 1.0 } else { 2.0 })
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn read_denies_filter_search_candidates_with_native_case_folding() {
         use lingxi_core::host::permission_gate::{PermissionDecision, PermissionGate};
         use permission::rule::{

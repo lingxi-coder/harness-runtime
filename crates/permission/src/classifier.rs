@@ -463,7 +463,7 @@ fn soft_shell_denial(lower: &str) -> bool {
 
 fn local_shell_allow(lower: &str) -> bool {
     let trimmed = lower.trim();
-    if contains_any(trimmed, &["|", ">", "<", "$(", "`", "&&", ";"]) {
+    if contains_any(trimmed, &["|", ">", "<", "$(", "`", "&", ";", "\n", "\r"]) {
         return false;
     }
     starts_with_any(

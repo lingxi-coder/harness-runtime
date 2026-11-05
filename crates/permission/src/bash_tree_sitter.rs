@@ -13,6 +13,9 @@ use tree_sitter::{Node, ParseOptions, Parser, Tree};
 const MAX_COMMAND_LENGTH: usize = 10_000;
 const PARSE_TIMEOUT: Duration = Duration::from_millis(50);
 const MAX_PARSE_NODES: usize = 50_000;
+// Semantic analysis uses recursive scope walks. Bound their stack independently
+// of node count, including in unoptimized hosts with the supported 8 MiB stack.
+const MAX_PARSE_DEPTH: usize = 256;
 
 /// Resource exhaustion is distinct from an unavailable parser: the security
 /// caller must ask instead of retrying its legacy allow heuristics.
@@ -106,12 +109,17 @@ fn parse_source_with_limits(
     // cannot overflow the Rust stack on a deeply nested input.
     let mut cursor = tree.walk();
     let mut count = 0usize;
+    let mut depth = 0usize;
     loop {
         count += 1;
-        if count > max_nodes || count % 128 == 0 && started.elapsed() >= timeout {
+        if count > max_nodes
+            || depth > MAX_PARSE_DEPTH
+            || count % 128 == 0 && started.elapsed() >= timeout
+        {
             return Err(ParseBudgetExceeded);
         }
         if cursor.goto_first_child() {
+            depth += 1;
             continue;
         }
         while !cursor.goto_next_sibling() {
@@ -119,6 +127,7 @@ fn parse_source_with_limits(
                 drop(cursor);
                 return Ok(Some(tree));
             }
+            depth -= 1;
         }
     }
 }

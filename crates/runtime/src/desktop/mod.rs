@@ -4511,7 +4511,11 @@ async fn build_agent_mcp_tool_set(
     }
     let existing_configs: Vec<mcp::McpServerConfig> = {
         let conns = mcp_registry.connections.read().await;
-        conns.values().map(|s| s.config().clone()).collect()
+        conns
+            .iter()
+            .filter(|(key, state)| key.as_str() == state.config().name)
+            .map(|(_, state)| state.config().clone())
+            .collect()
     };
     let scoped = agent::agent_mcp_specs_to_scoped_configs(
         &def,

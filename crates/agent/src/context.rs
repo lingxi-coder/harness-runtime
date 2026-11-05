@@ -316,6 +316,9 @@ pub struct SubagentContext {
     /// [`lingxi_core::host::subagent_spawn::SubagentInheritance`]. `None` means the agent
     /// cannot dispatch tools — a `tool_use` in that state surfaces a failure.
     pub tool_invoker: Option<Arc<dyn lingxi_core::host::ToolInvoker>>,
+    /// Exact private MCP handles advertised to this child. Dispatch them through
+    /// the inherited invoker's supplied-tool path, preserving its enforcement.
+    pub supplied_mcp_tools: Vec<Arc<dyn tool_api::Tool>>,
     /// Per-agent passive LSP diagnostics cursor. Each spawned agent receives
     /// an independent source so consuming a builder reminder cannot suppress
     /// the same diagnostic for the main conversation or another agent.

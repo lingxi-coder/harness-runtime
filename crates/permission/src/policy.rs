@@ -760,6 +760,16 @@ impl lingxi_core::host::permission_gate::ReadPathPolicySnapshot for PermissionPo
         path: &Path,
     ) -> lingxi_core::host::permission_gate::ReadPathPolicyMatch {
         use lingxi_core::host::permission_gate::ReadPathPolicyMatch;
+        // Search tools inherit path restrictions, not a tool-wide Read deny.
+        // In particular, an independently allowed Grep/Glob remains usable.
+        if !self
+            .deny_rules
+            .values()
+            .flatten()
+            .any(|rule| rule.value.tool_name == "Read" && rule.value.rule_content.is_some())
+        {
+            return ReadPathPolicyMatch::NoMatch;
+        }
         let Some(path) = path.to_str() else {
             return ReadPathPolicyMatch::Unavailable;
         };
@@ -767,21 +777,11 @@ impl lingxi_core::host::permission_gate::ReadPathPolicySnapshot for PermissionPo
         let input = crate::source_input::with_generated_string_field(&empty, "file_path", path)
             .expect("generated Read path");
         if self
-            .first_match(
-                &self.deny_rules,
-                &SOURCES_BY_PRIORITY,
-                "Read",
-                &input,
-                false,
-                &[],
-            )
+            .first_read_deny_match(&SOURCES_BY_PRIORITY, "Read", &input)
             .is_some()
-            || self
-                .first_read_deny_match(&SOURCES_BY_PRIORITY, "Read", &input)
-                .is_some()
         {
             ReadPathPolicyMatch::Match
-        } else if self.roots.is_none() && self.native_read_deny_rules_active() {
+        } else if self.roots.is_none() {
             ReadPathPolicyMatch::Unavailable
         } else {
             ReadPathPolicyMatch::NoMatch
@@ -1826,13 +1826,14 @@ impl PermissionPolicy {
                 read_block_dirs.as_deref(),
             )
             .is_some()
-                || crate::command_path_containment::check_command_path_containment(
+                || crate::command_path_containment::check_command_path_containment_with_read_denies(
                     command,
                     roots,
                     &self.additional_working_dirs.paths(),
                     self.block_reads_outside_working_directories
                         .then(|| self.read_block_working_dirs(roots))
                         .as_deref(),
+                    self.native_read_deny_rules_active(),
                 )
                 .is_some()
             {
@@ -2357,7 +2358,15 @@ impl PermissionPolicy {
         //     downgrading a deny to an ask.
         let content_deny =
             if file_tool_kind(tool_name) == FileToolKind::Reader && self.roots.is_some() {
-                self.first_read_deny_match(&sources, tool_name, input)
+                self.first_match(
+                    &self.deny_rules,
+                    &sources,
+                    tool_name,
+                    input,
+                    true,
+                    shell_ast_rule_candidates,
+                )
+                .or_else(|| self.first_read_deny_match(&sources, tool_name, input))
             } else {
                 self.first_match(
                     &self.deny_rules,
@@ -2723,13 +2732,14 @@ impl PermissionPolicy {
                     //      Shares this slot (after deny/ask, before exact/allow,
                     //      roots- + shell-gated) and the byte-locked ask path.
                     if let Some(ask) =
-                        crate::command_path_containment::check_command_path_containment(
+                        crate::command_path_containment::check_command_path_containment_with_read_denies(
                             command,
                             roots,
                             &self.additional_working_dirs.paths(),
                             self.block_reads_outside_working_directories
                                 .then(|| self.read_block_working_dirs(roots))
                                 .as_deref(),
+                            self.native_read_deny_rules_active(),
                         )
                     {
                         return self.resolve_guard_ask(
@@ -4045,6 +4055,62 @@ impl PermissionPolicy {
     /// positional command paths, using Native 2.1.289's command-denial
     /// message rather than the path-containment Ask copy. Returns the FIRST match, or
     /// `None`.
+    // Native yhs: after a dynamic directory change, test the relative read
+    // under the directory prefixes of every configured Read restriction.
+    fn unknown_cwd_read_candidates(
+        &self,
+        path: &str,
+        sources: &[PermissionRuleSource],
+        roots: &FsRoots,
+    ) -> Vec<String> {
+        if Path::new(path).is_absolute() || path.starts_with('~') {
+            return vec![crate::filesystem::expand_path(path, roots)
+                .to_string_lossy()
+                .into_owned()];
+        }
+        let components = path
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty() && *part != ".")
+            .skip_while(|part| *part == "..")
+            .collect::<Vec<_>>();
+        if components.is_empty() {
+            return Vec::new();
+        }
+        let relative = components.join("/");
+        let mut candidates = Vec::new();
+        for source in sources {
+            for rule in self
+                .deny_rules
+                .get(source)
+                .into_iter()
+                .flatten()
+                .filter(|rule| rule.value.tool_name == "Read")
+            {
+                let Some(pattern) = rule.value.rule_content_text() else {
+                    continue;
+                };
+                let (pattern, root) =
+                    crate::filesystem::pattern_with_root(pattern, rule.source, roots);
+                let root = root.unwrap_or_else(|| roots.cwd.clone());
+                let parts = pattern
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>();
+                for count in 0..parts.len().max(1) {
+                    let candidate = root
+                        .join(parts[..count].join("/"))
+                        .join(&relative)
+                        .to_string_lossy()
+                        .into_owned();
+                    if !candidates.contains(&candidate) {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
     fn command_path_deny(
         &self,
         sources: &[PermissionRuleSource],
@@ -4058,30 +4124,37 @@ impl PermissionPolicy {
             &self.additional_working_dirs.paths(),
         ) {
             let rule_tool = if target.is_write { "Edit" } else { "Read" };
-            for src in sources {
-                let Some(rules) = self.deny_rules.get(src) else {
-                    continue;
-                };
-                if let Some(rule) = decide_in_source(rules, |rule| {
-                    if rule.value.tool_name != rule_tool {
-                        return RulePatternMatch::NoMatch;
-                    }
-                    let Some(pattern) = rule.value.rule_content_text() else {
-                        return RulePatternMatch::NoMatch;
+            let paths = if target.unresolved_cwd {
+                self.unknown_cwd_read_candidates(&target.resolved, sources, roots)
+            } else {
+                vec![target.resolved]
+            };
+            for path in paths {
+                for src in sources {
+                    let Some(rules) = self.deny_rules.get(src) else {
+                        continue;
                     };
-                    test_rule_pattern(&target.resolved, pattern, rule.source, rule.behavior, roots)
-                }) {
-                    return Some(PermissionResult::Deny {
-                        reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
-                        explanation: Some(
-                            format!(
+                    if let Some(rule) = decide_in_source(rules, |rule| {
+                        if rule.value.tool_name != rule_tool {
+                            return RulePatternMatch::NoMatch;
+                        }
+                        let Some(pattern) = rule.value.rule_content_text() else {
+                            return RulePatternMatch::NoMatch;
+                        };
+                        test_rule_pattern(&path, pattern, rule.source, rule.behavior, roots)
+                    }) {
+                        return Some(PermissionResult::Deny {
+                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                            explanation: Some(
+                                format!(
                                 "Permission to use {tool_name} with command {} has been denied.",
                                 command.trim()
                             )
-                            .into(),
-                        ),
-                        metadata: PermissionMetadata::default(),
-                    });
+                                .into(),
+                            ),
+                            metadata: PermissionMetadata::default(),
+                        });
+                    }
                 }
             }
         }

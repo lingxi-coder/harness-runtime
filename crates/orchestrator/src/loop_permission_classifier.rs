@@ -8,8 +8,20 @@ use permission::classifier::{AutoModeClassifierVerdict, LoopPermissionClassifier
 use permission::loop_llm::{self, Query, QueryError, Reply, Transport};
 #[cfg(test)]
 use serde_json::json;
+#[cfg(test)]
 use serde_json::Value;
 use std::sync::{Arc, Weak};
+
+fn classifier_system_prompt(
+    gate: &dyn lingxi_core::host::permission_gate::PermissionGate,
+    deny_rules: &[Utf16JsonProjection],
+) -> Utf16JsonProjection {
+    let settings = gate
+        .permission_policy_snapshot()
+        .and_then(|snapshot| snapshot.classifier_auto_mode_settings)
+        .unwrap_or_default();
+    loop_llm::system_prompt_with_trusted_settings(&settings, deny_rules)
+}
 
 /// Keeps the existing credential/provider stack while weakly owning the session.
 pub struct SessionLoopClassifier {
@@ -61,18 +73,6 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             })
             .map(|listing| listing.request_model)
             .collect::<Vec<_>>();
-        let settings = orch
-            .config_home
-            .as_ref()
-            .and_then(|home| {
-                permission::auto_mode_io::secure_read_capped(
-                    &home.join("settings.json"),
-                    1_048_576,
-                    false,
-                )
-            })
-            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-            .unwrap_or(Value::Null);
         let user_configuration = orch.config_home.as_ref().and_then(|home| {
             permission::auto_mode_io::secure_read_capped(
                 &home.join(branding::MEMORY_FILE),
@@ -85,7 +85,7 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             model: classifier_model(&main_model, &available),
             profile,
             main_loop_tokens: compaction::grouping::estimate_tokens_for_range(&request.transcript),
-            system: loop_llm::system_prompt(&settings["autoMode"], deny_rules),
+            system: classifier_system_prompt(orch.perms.as_ref(), deny_rules),
             user_configuration,
         };
         permission::handback_review::report_review(
@@ -143,18 +143,6 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             .map(|listing| listing.request_model)
             .collect::<Vec<_>>();
         let model = classifier_model(&main_model, &available);
-        let settings = orch
-            .config_home
-            .as_ref()
-            .and_then(|home| {
-                permission::auto_mode_io::secure_read_capped(
-                    &home.join("settings.json"),
-                    1_048_576,
-                    false,
-                )
-            })
-            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-            .unwrap_or(Value::Null);
         let user_configuration = orch.config_home.as_ref().and_then(|home| {
             permission::auto_mode_io::secure_read_capped(
                 &home.join(branding::MEMORY_FILE),
@@ -167,7 +155,7 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             model,
             profile,
             main_loop_tokens: compaction::grouping::estimate_tokens_for_range(&history),
-            system: loop_llm::system_prompt(&settings["autoMode"], deny_rules),
+            system: classifier_system_prompt(orch.perms.as_ref(), deny_rules),
             user_configuration,
         };
         loop_llm::classify(
@@ -219,18 +207,6 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             })
             .map(|listing| listing.request_model)
             .collect::<Vec<_>>();
-        let settings = orch
-            .config_home
-            .as_ref()
-            .and_then(|home| {
-                permission::auto_mode_io::secure_read_capped(
-                    &home.join("settings.json"),
-                    1_048_576,
-                    false,
-                )
-            })
-            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-            .unwrap_or(Value::Null);
         let transport = ProviderTransport {
             service: self.service.clone(),
             model: classifier_model(&main_model, &available),
@@ -238,7 +214,7 @@ impl LoopPermissionClassifier for SessionLoopClassifier {
             // Only the child's rendered transcript is available here. Its
             // real text is included in classifier_input_tokens below.
             main_loop_tokens: 0,
-            system: loop_llm::system_prompt(&settings["autoMode"], &[]),
+            system: classifier_system_prompt(orch.perms.as_ref(), &[]),
             // A handoff review judges the subagent's work, not the user's
             // configuration; `EZe` passes no CLAUDE.md either.
             user_configuration: None,
@@ -916,6 +892,34 @@ fn quote_configuration(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_review_local_classifier_prompt_tracks_the_trusted_live_policy_snapshot() {
+        let gate = permission::PolicyPermissionGate::new(
+            Arc::new(permission::PermissionPolicy::new(
+                permission::PermissionMode::Auto,
+            )),
+            Arc::new(permission::DenyOnAskGate),
+        );
+        let mut settings =
+            lingxi_core::host::permission_gate::PermissionClassifierAutoModeSettings::default();
+        settings.hard_deny = vec![Utf16JsonProjection::from("first managed boundary")];
+        gate.set_classifier_auto_mode_settings(Some(settings.clone()));
+        let first = classifier_system_prompt(&gate, &[]);
+        assert!(first
+            .string_at("")
+            .unwrap()
+            .contains("first managed boundary"));
+        settings.hard_deny =
+            vec![Utf16JsonProjection::parse(r#""updated-\ud800-boundary""#).unwrap()];
+        gate.set_classifier_auto_mode_settings(Some(settings));
+        let updated = classifier_system_prompt(&gate, &[]);
+        assert!(updated.string_units("").unwrap().contains(&0xd800));
+        assert!(
+            !String::from_utf16_lossy(&updated.string_units("").unwrap())
+                .contains("first managed boundary")
+        );
+    }
 
     #[test]
     fn appended_host_context_preserves_source_utf16_units() {

@@ -818,6 +818,7 @@ mod tests {
             server_fallback_model_enforcement: None,
             api_client: Some(Arc::new(PendingModel::default())),
             tool_invoker: None,
+            supplied_mcp_tools: Vec::new(),
             new_diagnostics_source: None,
             tool_schemas: vec![],
             schema: None,
