@@ -101,6 +101,27 @@ fn global_managed_region_keeps_precedence() {
 }
 
 #[test]
+fn missing_host_settings_use_default_or_managed_region_without_project_input() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config(root.path(), "project");
+    for name in ["settings.json", "settings.local.json"] {
+        fs::write(
+            cfg.cwd.join(".lingxi").join(name),
+            r#"{"providerRegion":"china_mainland"}"#,
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        resolve_provider_region(&cfg, &policy("{}")).unwrap(),
+        llm_runtime::Region::International
+    ));
+    assert!(matches!(
+        resolve_provider_region(&cfg, &policy(r#"{"providerRegion":"china_mainland"}"#)).unwrap(),
+        llm_runtime::Region::ChinaMainland
+    ));
+}
+
+#[test]
 fn malformed_host_settings_fail_instead_of_using_project_region() {
     let root = tempfile::tempdir().unwrap();
     let cfg = config(root.path(), "project");
@@ -111,4 +132,82 @@ fn malformed_host_settings_fail_instead_of_using_project_region() {
     )
     .unwrap();
     assert!(resolve_provider_region(&cfg, &policy("{}")).is_err());
+    assert!(
+        resolve_provider_region(&cfg, &policy(r#"{"providerRegion":"china_mainland"}"#)).is_err()
+    );
+}
+
+#[test]
+fn invalid_non_file_or_oversized_host_settings_fail_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config(root.path(), "project");
+    let path = cfg.lingxi_home.join("settings.json");
+    fs::write(&path, r#"{"providerRegion":"invalid-region"}"#).unwrap();
+    assert!(resolve_provider_region(&cfg, &policy("{}")).is_err());
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(resolve_provider_region(&cfg, &policy("{}")).is_err());
+    fs::remove_dir(&path).unwrap();
+    fs::File::create(&path)
+        .unwrap()
+        .set_len(lingxi_core::settings::loader::MAX_SETTINGS_FILE_BYTES + 1)
+        .unwrap();
+    assert!(resolve_provider_region(&cfg, &policy("{}")).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn team_uses_admitted_region_without_reading_host_or_project_settings() {
+    use super::team_invocation::{
+        TeamInvocationIdentity, TeamInvocationLimits, TeamInvocationProfile,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = TeamInvocationProfile::prepare(
+        &root.path().canonicalize().unwrap(),
+        TeamInvocationIdentity {
+            owner_uid: "owner".into(),
+            bot_key: "bot".into(),
+            team_id: "team".into(),
+            conversation_id: "conversation".into(),
+            origin_human_uid: "human".into(),
+            membership_generation: 1,
+        },
+        uuid::Uuid::new_v4(),
+        "Team instructions".into(),
+        TeamInvocationLimits::default(),
+    )
+    .unwrap();
+    let mut cfg = DesktopConfig {
+        default_model: "anthropic/claude-sonnet-4-20250514".into(),
+        ..DesktopConfig::default()
+    };
+    profile.apply_to(&mut cfg).unwrap();
+    fs::write(cfg.lingxi_home.join("settings.json"), "{broken").unwrap();
+    fs::create_dir_all(cfg.cwd.join(".lingxi")).unwrap();
+    for name in ["settings.json", "settings.local.json"] {
+        fs::write(
+            cfg.cwd.join(".lingxi").join(name),
+            r#"{"providerRegion":"china_mainland"}"#,
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        resolve_provider_region(&cfg, &policy("{}")).unwrap(),
+        llm_runtime::Region::International
+    ));
+    cfg.flag_settings = Some(SettingsJson {
+        provider_region: Some(ProviderRegion::ChinaMainland),
+        ..SettingsJson::default()
+    });
+    assert!(matches!(
+        resolve_provider_region(&cfg, &policy("{}")).unwrap(),
+        llm_runtime::Region::ChinaMainland
+    ));
+    assert!(matches!(
+        resolve_provider_region(&cfg, &policy(r#"{"providerRegion":"international"}"#)).unwrap(),
+        llm_runtime::Region::International
+    ));
 }

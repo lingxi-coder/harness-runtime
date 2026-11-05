@@ -3768,8 +3768,20 @@ fn load_merged_settings(
 }
 
 /// Resolve the Host's global provider region, including its managed policy.
-/// Project settings and session flags cannot change the provider directory.
-/// Delegated Team invocations use their admitted, isolated owner snapshot.
+///
+/// For non-Team invocations, a missing host settings file defaults to the
+/// international region unless managed policy overrides it. An unreadable,
+/// malformed, invalid, or oversized host file returns an error even when
+/// managed policy supplies a region. Project settings and session flags
+/// cannot change the host provider region.
+///
+/// Delegated Team invocations instead use their admitted, isolated snapshot
+/// and managed policy without reading host, project, or local settings.
+///
+/// # Errors
+///
+/// Returns a settings error if host settings cannot be read or validated, or
+/// if extracting or merging the managed policy fails.
 pub fn resolve_provider_region(
     cfg: &DesktopConfig,
     managed: &Utf16JsonProjection,
@@ -3788,6 +3800,15 @@ pub fn resolve_provider_region(
         Vec::new()
     };
     let delegated = cfg.team_invocation.is_some();
+    // The general settings loader skips invalid files. Region selects provider
+    // routes, so a damaged host file must not silently become the default.
+    // Read it once and merge that snapshot below instead of reopening it.
+    let host_region = if delegated {
+        None
+    } else {
+        lingxi_core::settings::loader::read_settings_file(&cfg.lingxi_home.join("settings.json"))?
+            .and_then(|settings| settings.provider_region)
+    };
     let env = if delegated {
         settings_environment_for_config(cfg)
     } else {
@@ -3797,10 +3818,13 @@ pub fn resolve_provider_region(
         lingxi_core::settings::LoadInputs {
             env: &env,
             project_dir: &cfg.cwd,
-            defaults: lingxi_core::settings::SettingsJson::default(),
+            defaults: lingxi_core::settings::SettingsJson {
+                provider_region: host_region,
+                ..Default::default()
+            },
         },
         lingxi_core::settings::FileLayerScope {
-            include_user: !delegated,
+            include_user: false,
             include_project: false,
             include_local: false,
         },
@@ -3812,7 +3836,7 @@ pub fn resolve_provider_region(
             },
             managed_layers: &managed_layers,
         },
-        Some(&cfg.lingxi_home.join("settings.json")),
+        None,
     )?;
     Ok(
         match effective.settings.provider_region.unwrap_or_default() {
